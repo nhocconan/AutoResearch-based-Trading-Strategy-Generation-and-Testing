@@ -1,35 +1,11 @@
 #!/usr/bin/env python3
-name = "1d_Aroon_Trend_Filtered_1wTrend"
-timeframe = "1d"
+name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def aroon_up(high, period):
-    n = len(high)
-    up = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        window = high[i - period + 1:i + 1]
-        if len(window) == 0:
-            up[i] = np.nan
-        else:
-            high_idx = np.argmax(window)
-            up[i] = ((period - 1 - high_idx) / (period - 1)) * 100
-    return up
-
-def aroon_down(low, period):
-    n = len(low)
-    down = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        window = low[i - period + 1:i + 1]
-        if len(window) == 0:
-            down[i] = np.nan
-        else:
-            low_idx = np.argmin(window)
-            down[i] = ((period - 1 - low_idx) / (period - 1)) * 100
-    return down
 
 def generate_signals(prices):
     n = len(prices)
@@ -39,33 +15,44 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Weekly trend filter: EMA34
-    df_1w = get_htf_data(prices, '1w')
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 12h trend filter: EMA50
+    df_12h = get_htf_data(prices, '12h')
+    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Aroon(25) on daily
-    aroon_up_val = aroon_up(high, 25)
-    aroon_down_val = aroon_down(low, 25)
+    # Daily volume filter: volume > 1.5x 20-period average
+    df_1d = get_htf_data(prices, '1d')
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Daily Camarilla levels (based on previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's Camarilla levels
+    range_1d = high_1d - low_1d
+    camarilla_h3 = close_1d + range_1d * 1.1 / 4
+    camarilla_l3 = close_1d - range_1d * 1.1 / 4
+    camarilla_h4 = close_1d + range_1d * 1.1 / 2
+    camarilla_l4 = close_1d - range_1d * 1.1 / 2
+    
+    # Align to 4h
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough data for Aroon
+    start_idx = 50  # need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if weekly trend data not ready
-        if np.isnan(ema34_1w_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Skip if Aroon data not ready
-        if np.isnan(aroon_up_val[i]) or np.isnan(aroon_down_val[i]):
+        # Skip if 12h trend or daily volume data not ready
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,30 +61,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Aroon Up > 70 and Aroon Down < 30 (strong uptrend) + weekly uptrend
-            if (aroon_up_val[i] > 70 and 
-                aroon_down_val[i] < 30 and
-                close[i] > ema34_1w_aligned[i]):
+            # Long conditions: price breaks above H3 with 12h uptrend and volume confirmation
+            if (high[i] > camarilla_h3_aligned[i] and 
+                close[i] > camarilla_h3_aligned[i] and
+                close[i] > ema50_12h_aligned[i] and  # 12h uptrend
+                volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: Aroon Down > 70 and Aroon Up < 30 (strong downtrend) + weekly downtrend
-            elif (aroon_down_val[i] > 70 and 
-                  aroon_up_val[i] < 30 and
-                  close[i] < ema34_1w_aligned[i]):
+            # Short conditions: price breaks below L3 with 12h downtrend and volume confirmation
+            elif (low[i] < camarilla_l3_aligned[i] and 
+                  close[i] < camarilla_l3_aligned[i] and
+                  close[i] < ema50_12h_aligned[i] and  # 12h downtrend
+                  volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when trend weakens: Aroon Down > 50 or weekly trend turns down
-            if (aroon_down_val[i] > 50 or 
-                close[i] < ema34_1w_aligned[i]):
+            # Exit long when price breaks below L4 or reverses against trend
+            if (low[i] < camarilla_l4_aligned[i] or 
+                close[i] < ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when trend weakens: Aroon Up > 50 or weekly trend turns up
-            if (aroon_up_val[i] > 50 or 
-                close[i] > ema34_1w_aligned[i]):
+            # Exit short when price breaks above H4 or reverses against trend
+            if (high[i] > camarilla_h4_aligned[i] or 
+                close[i] > ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
