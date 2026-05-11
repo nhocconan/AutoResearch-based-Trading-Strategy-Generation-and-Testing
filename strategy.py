@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_20_Volume_Spike_ADX_Trend_Filter_v1
-Hypothesis: Uses Donchian channel breakout (20-period) with volume spike confirmation and ADX trend filter (1-day).
-In trending markets (ADX>25), takes breakout signals; in ranging markets (ADX<20), avoids trades to reduce whipsaw.
-Volume spike ensures institutional participation. Designed for fewer, higher-quality trades to minimize fee drag.
+1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
+Hypothesis: Combines Camarilla pivot breakout on 1h with 4h trend filter (EMA50) and 1d volume spike confirmation.
+Uses 4h/1d for signal direction, 1h only for entry timing. Target: 15-35 trades/year to minimize fee drag.
+Works in bull markets via breakouts with trend, in bear markets via mean reversion at Camarilla levels during low volatility.
 """
 
-name = "4h_Donchian_20_Volume_Spike_ADX_Trend_Filter_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -19,110 +19,127 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # 1h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d ADX for trend filter ---
-    # True Range
-    tr1 = pd.Series(df_1d['high']).subtract(df_1d['low']).abs()
-    tr2 = pd.Series(df_1d['high']).subtract(df_1d['close'].shift(1)).abs()
-    tr3 = pd.Series(df_1d['low']).subtract(df_1d['close'].shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # --- 4h EMA50 for trend filter ---
+    ema_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean()
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h.values)
     
-    # Directional Movement
-    dm_plus = pd.Series(df_1d['high']).diff()
-    dm_minus = pd.Series(df_1d['low']).diff().abs()
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
+    # --- 1d volume spike detection ---
+    vol_ma_1d = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean()
+    vol_spike_1d = df_1d['volume'].values > (2.0 * vol_ma_1d.values)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # Wilder's smoothing (alpha = 1/14)
-    atr_1d = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_plus_smooth = dm_plus.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_minus_smooth = dm_minus.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    # --- Previous day Camarilla levels (using prior 1d OHLC) ---
+    # Shift to ensure we use only completed daily data
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr_1d
-    di_minus = 100 * dm_minus_smooth / atr_1d
+    # Calculate Camarilla levels
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # DX and ADX
-    dx = (abs(di_plus - di_minus) / (di_plus + di_minus)) * 100
-    adx_1d = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    adx_1d_values = adx_1d.values
-    
-    # Align ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_values)
-    
-    # --- Donchian Channel (20-period) ---
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # --- Volume Spike Detection ---
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
-    vol_spike = volume > (2.0 * vol_ma.values)  # Significant volume spike
+    # --- Session filter: 08-20 UTC ---
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or
-            np.isnan(adx_1d_aligned[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine market regime based on ADX
-        adx = adx_1d_aligned[i]
-        is_trending = adx > 25
+        # Session filter
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            # Outside session, flatten position
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Determine trend based on 4h EMA50
+        uptrend = close[i] > ema_4h_aligned[i]
+        downtrend = close[i] < ema_4h_aligned[i]
         
         # Breakout signals
-        long_breakout = (high[i] > highest_20[i]) and vol_spike[i]
-        short_breakout = (low[i] < lowest_20[i]) and vol_spike[i]
+        long_breakout = (high[i] > R1_aligned[i]) and vol_spike_1d_aligned[i]
+        short_breakout = (low[i] < S1_aligned[i]) and vol_spike_1d_aligned[i]
+        
+        # Mean reversion signals (only in low volume environments)
+        low_vol_env = not vol_spike_1d_aligned[i]  # No volume spike = low volatility
+        long_reversion = (low[i] <= S1_aligned[i]) and low_vol_env and uptrend
+        short_reversion = (high[i] >= R1_aligned[i]) and low_vol_env and downtrend
         
         if position == 0:
-            # Only take breakout signals in trending markets
-            if is_trending:
+            if uptrend:
+                # In uptrend, prioritize long breakouts and mean reversion at S1
                 if long_breakout:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
                     position = 1
-                elif short_breakout:
-                    signals[i] = -0.25
+                elif long_reversion:
+                    signals[i] = 0.20
+                    position = 1
+            elif downtrend:
+                # In downtrend, prioritize short breakouts and mean reversion at R1
+                if short_breakout:
+                    signals[i] = -0.20
+                    position = -1
+                elif short_reversion:
+                    signals[i] = -0.20
                     position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price touches opposite Donchian band or ADX drops below 20 (trend weakening)
-                exit_signal = (low[i] < lowest_20[i]) or (adx < 20)
+                # Exit long: price reaches R1 (profit target) or breaks S1 (stop)
+                exit_signal = (low[i] <= S1_aligned[i]) or (high[i] >= R1_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: price touches opposite Donchian band or ADX drops below 20
-                exit_signal = (high[i] > highest_20[i]) or (adx < 20)
+                # Exit short: price reaches S1 (profit target) or breaks R1 (stop)
+                exit_signal = (high[i] >= R1_aligned[i]) or (low[i] <= S1_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
