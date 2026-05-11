@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Trade Camarilla pivot level breaks on 12h with daily trend filter and volume confirmation. 
-Camarilla levels provide high-probability reversal/breakout zones. Only trade breaks in direction of 
-daily trend to avoid counter-trend whipsaws. Volume spike confirms institutional participation. 
-Works in bull/bear markets by following higher timeframe trend. Targets 15-25 trades/year.
+6h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike
+Hypothesis: Fade at Camarilla R3/S3 levels with 12h trend filter and volume confirmation. Works in bull/bear by fading overextended moves within the trend context. Uses 12h EMA50 for trend direction and volume spikes for confirmation. Targets 15-30 trades/year to minimize fee drag.
 """
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,68 +22,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily EMA34 Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # === Camarilla Levels (from previous day) ===
-    # Calculate from daily OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We'll use prior day's values to avoid look-ahead
-    daily_open = df_1d['open'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # Calculate Camarilla for each day
-    camarilla_r1 = np.zeros_like(daily_close)
-    camarilla_s1 = np.zeros_like(daily_close)
-    
-    for i in range(len(daily_close)):
-        if i == 0:
-            camarilla_r1[i] = np.nan
-            camarilla_s1[i] = np.nan
-        else:
-            prev_high = daily_high[i-1]
-            prev_low = daily_low[i-1]
-            prev_close = daily_close[i-1]
-            camarilla_r1[i] = prev_close + (prev_high - prev_low) * 1.1 / 12
-            camarilla_s1[i] = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align to 12h timeframe
-    camarilla_r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # === 12h EMA50 Trend Filter ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_12h_6h = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # === Volume Spike Filter ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 2.0  # 2x average volume for significance
+    volume_ok = volume > vol_ema20 * 1.5  # 1.5x average volume
+    
+    # === Camarilla Levels from 1d (using previous day's range) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels: R3, S3
+    # R3 = close + 1.1 * (high - low) / 6
+    # S3 = close - 1.1 * (high - low) / 6
+    camarilla_range = high_1d - low_1d
+    r3 = close_1d + 1.1 * camarilla_range / 6
+    s3 = close_1d - 1.1 * camarilla_range / 6
+    
+    # Align to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
     
     # === Signal Parameters ===
     position_size = 0.25
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need at least 2 days for prior day calculation)
-    start_idx = 2
+    # Start after warmup (covers EMA and Camarilla calculation)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema34_12h[i]) or np.isnan(camarilla_r1_12h[i]) or 
-            np.isnan(camarilla_s1_12h[i]) or np.isnan(volume_ok[i])):
-            signals[i] = 0.0
+        if (np.isnan(ema50_12h_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(volume_ok[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
         
-        # Long: Break above R1 with daily uptrend and volume spike
-        if (close[i] > camarilla_r1_12h[i] and 
-            close[i] > ema34_12h[i] and volume_ok[i]):
-            signals[i] = position_size
-        # Short: Break below S1 with daily downtrend and volume spike
-        elif (close[i] < camarilla_s1_12h[i] and 
-              close[i] < ema34_12h[i] and volume_ok[i]):
-            signals[i] = -position_size
+        if position == 0:
+            # Long: Price touches/bounces from S3 support + above 12h EMA50 + volume spike
+            if (close[i] <= s3_6h[i] * 1.001 and  # Allow small tolerance for touch
+                close[i] > ema50_12h_6h[i] and 
+                volume_ok[i]):
+                signals[i] = position_size
+                position = 1
+            # Short: Price touches/rejects from R3 resistance + below 12h EMA50 + volume spike
+            elif (close[i] >= r3_6h[i] * 0.999 and  # Allow small tolerance for touch
+                  close[i] < ema50_12h_6h[i] and 
+                  volume_ok[i]):
+                signals[i] = -position_size
+                position = -1
         else:
-            signals[i] = 0.0
+            # Exit: Price moves back through the opposite Camarilla level
+            if position == 1:
+                if close[i] >= r3_6h[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = position_size
+            elif position == -1:
+                if close[i] <= s3_6h[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -position_size
     
     return signals
