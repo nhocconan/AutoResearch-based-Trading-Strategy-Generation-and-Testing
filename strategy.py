@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,26 +17,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h price range for Camarilla levels
-    lookback = 1
-    prev_high = np.roll(high, lookback)
-    prev_low = np.roll(low, lookback)
-    prev_close = np.roll(close, lookback)
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels
-    range_ = prev_high - prev_low
-    R1 = prev_close + (range_ * 1.1 / 12)
-    S1 = prev_close - (range_ * 1.1 / 12)
-    R3 = prev_close + (range_ * 1.1 / 4)
-    S3 = prev_close - (range_ * 1.1 / 4)
-    
-    # 1d trend filter
+    # 1d trend filter: 50 EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    daily_uptrend = close > ema_20_1d_aligned
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    trend_up = close > ema_50_1d_aligned
+    trend_down = close < ema_50_1d_aligned
     
     # Volume filter
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,10 +38,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 1)  # ensure volume MA and previous bar data ready
+    start_idx = 20  # Donchian needs 20 periods
     
     for i in range(start_idx, n):
-        if np.isnan(daily_uptrend[i]) or np.isnan(volume_ma20[i]) or np.isnan(R1[i]) or np.isnan(S1[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or np.isnan(volume_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,24 +50,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with daily uptrend and volume
-            if close[i] > R1[i] and daily_uptrend[i] and volume_filter[i]:
+            # Long: break above upper Donchian + uptrend + volume
+            if close[i] > highest_high[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with daily downtrend and volume
-            elif close[i] < S1[i] and not daily_uptrend[i] and volume_filter[i]:
+            # Short: break below lower Donchian + downtrend + volume
+            elif close[i] < lowest_low[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 or daily trend flips
-            if close[i] < S1[i] or not daily_uptrend[i]:
+            # Exit long: close below lower Donchian or trend reversal
+            if close[i] < lowest_low[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 or daily trend flips
-            if close[i] > R1[i] or daily_uptrend[i]:
+            # Exit short: close above upper Donchian or trend reversal
+            if close[i] > highest_high[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
