@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,39 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for weekly trend filter (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1w = close_1w > ema34_1w
-    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
-    
-    # Get 1d data for Camarilla pivot levels
+    # Get 1d data for trend filter (EMA34) and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar (using previous day's OHLC)
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Camarilla R1 and S1 (most significant levels)
-    # R1 = Close + (High - Low) * 1.1 / 12
-    # S1 = Close - (High - Low) * 1.1 / 12
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate EMA34 on daily close
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_1d = close_1d > ema34_1d
+    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # Align Camarilla levels to 12h timeframe (using previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate Camarilla levels from previous day
+    # Camarilla: 
+    # H5 = (high_prev + low_prev + 2*close_prev) + 1.1*(high_prev - low_prev)/2
+    # H4 = (high_prev + low_prev + 2*close_prev) + 1.1*(high_prev - low_prev)/4
+    # H3 = (high_prev + low_prev + 2*close_prev) + 1.1*(high_prev - low_prev)/6
+    # L3 = (high_prev + low_prev + 2*close_prev) - 1.1*(high_prev - low_prev)/6
+    # L4 = (high_prev + low_prev + 2*close_prev) - 1.1*(high_prev - low_prev)/4
+    # L5 = (high_prev + low_prev + 2*close_prev) - 1.1*(high_prev - low_prev)/2
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    
+    # Set first day to avoid rollover issues
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    camarilla_base = (prev_high + prev_low + 2 * prev_close)
+    camarilla_range = prev_high - prev_low
+    
+    H5 = camarilla_base + 1.1 * camarilla_range / 2
+    H4 = camarilla_base + 1.1 * camarilla_range / 4
+    H3 = camarilla_base + 1.1 * camarilla_range / 6
+    L3 = camarilla_base - 1.1 * camarilla_range / 6
+    L4 = camarilla_base - 1.1 * camarilla_range / 4
+    L5 = camarilla_base - 1.1 * camarilla_range / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    H5_aligned = align_htf_to_ltf(prices, df_1d, H5)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    L5_aligned = align_htf_to_ltf(prices, df_1d, L5)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.8 * vol_ma20
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,8 +78,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(trend_up_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or 
+            np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,24 +88,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above Camarilla R1 + weekly uptrend + volume confirmation
-            if close[i] > camarilla_r1_aligned[i] and trend_up_1w_aligned[i] and volume_filter[i]:
+            # Long: Price breaks above H3 with daily uptrend and volume confirmation
+            if close[i] > H3_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Camarilla S1 + weekly downtrend + volume confirmation
-            elif close[i] < camarilla_s1_aligned[i] and not trend_up_1w_aligned[i] and volume_filter[i]:
+            # Short: Price breaks below L3 with daily downtrend and volume confirmation
+            elif close[i] < L3_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below Camarilla S1 OR weekly trend turns down
-            if close[i] < camarilla_s1_aligned[i] or not trend_up_1w_aligned[i]:
+            # Long exit: Price breaks below L3 or daily trend turns down
+            if close[i] < L3_aligned[i] or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price breaks above Camarilla R1 OR weekly trend turns up
-            if close[i] > camarilla_r1_aligned[i] or trend_up_1w_aligned[i]:
+            # Short exit: Price breaks above H3 or daily trend turns up
+            if close[i] > H3_aligned[i] or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
