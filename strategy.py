@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Controlled"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_TrendVolume_Stable"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,30 +17,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (HTF) - ONCE before loop
+    # 1d EMA34 for trend filter (HTF) - computed ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate daily high/low/close for Camarilla levels
+    # Daily high/low/close for Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: R3, S3
+    # Camarilla R3 and S3 levels
     hl_range = high_1d - low_1d
     r3 = close_1d + hl_range * 1.25
     s3 = close_1d - hl_range * 1.25
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: 50-period EMA for higher threshold
+    # Volume filter: 50-period EMA with higher threshold to reduce trades
     vol_ema50 = pd.Series(volume).ewm(span=50, min_periods=50, adjust=False).mean().values
-    volume_ok = volume > vol_ema50 * 2.5  # Further increased threshold to reduce trades
+    volume_ok = volume > vol_ema50 * 3.0  # Increased threshold for fewer, higher-quality trades
     
-    # Fixed position size to avoid churn
+    # Fixed position size to minimize churn
     position_size = 0.25
     
     signals = np.zeros(n)
