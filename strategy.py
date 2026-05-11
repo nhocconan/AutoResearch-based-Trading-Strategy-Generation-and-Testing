@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-1D_1W_Trend_Follow_with_Regime_Filter_v1
-Hypothesis: 1-day trend following with 1-week trend filter and volatility regime (ATR-based chop) filter.
-Trades only when both timeframes agree on direction AND market is not choppy (ATR ratio < threshold).
-Uses 20-period EMA for trend direction on both 1d and 1w. ATR ratio (current ATR / 20-period ATR avg) to filter chop.
-Targets 10-25 trades per year (40-100 over 4 years) to minimize fee drag.
-Works in bull/bear via trend following; avoids whipsaws via regime filter.
+4H_Camarilla_R1S1_Breakout_1dTrend_Volume
+Hypothesis: Price breaking Camarilla R1/S1 levels with daily trend and volume confirmation
+works in both bull and bear markets. Uses 4h timeframe with 1d trend filter to avoid
+counter-trend trades. Targets 20-40 trades/year for low friction.
 """
 
-name = "1D_1W_Trend_Follow_with_Regime_Filter_v1"
-timeframe = "1d"
+name = "4H_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,94 +19,81 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d and 1w data (HTF)
+    # Get 1d data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1d) < 30 or len(df_1w) < 10:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # 1d OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # --- 1d EMA(20) for trend ---
-    ema_1d = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean()
-    ema_1d_val = ema_1d.values
+    # --- Camarilla levels from previous day ---
+    # Calculate from previous day's OHLC (available at 4h bar close)
+    prev_close = df_1d['close'].shift(1).values  # Previous day close
+    prev_high = df_1d['high'].shift(1).values    # Previous day high
+    prev_low = df_1d['low'].shift(1).values      # Previous day low
     
-    # --- 1w EMA(20) for trend filter ---
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean()
-    ema_1w_val = ema_1w.values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_val)
+    # Camarilla R1, S1 levels
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # --- ATR-based regime filter (chop detection) ---
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean()
-    atr_val = atr.values
+    # Align Camarilla levels to 4h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # 20-period average ATR for regime
-    atr_ma = pd.Series(atr_val).rolling(window=20, min_periods=20).mean()
-    atr_ma_val = atr_ma.values
-    # ATR ratio: current ATR / average ATR (low = chop, high = trending)
-    atr_ratio = atr_val / (atr_ma_val + 1e-10)
+    # --- 1d Trend filter (EMA34) ---
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Regime: trending when ATR ratio > 0.8 (avoid chop when ratio too low)
-    trending_regime = atr_ratio > 0.8
+    # --- Volume confirmation (20-period average) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_spike = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if 1w EMA not available (alignment)
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if any data is NaN
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma.iloc[i])):
             if position != 0:
-                # Exit on trend break
-                if position == 1 and close[i] < ema_1d_val[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif position == -1 and close[i] > ema_1d_val[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25 if position == 1 else -0.25
+                # Hold position until exit signal
+                signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # 1d trend direction
-        bullish_1d = close[i] > ema_1d_val[i]
-        bearish_1d = close[i] < ema_1d_val[i]
+        # Entry conditions
+        long_breakout = close[i] > R1_aligned[i]  # Price breaks above R1
+        short_breakout = close[i] < S1_aligned[i]  # Price breaks below S1
         
-        # 1w trend filter (must align with 1d)
-        bullish_1w = ema_1w_aligned[i] > ema_1d_val[i]  # 1w EMA above 1d price = bullish
-        bearish_1w = ema_1w_aligned[i] < ema_1d_val[i]  # 1w EMA below 1d price = bearish
+        # Trend filter: only trade in direction of daily trend
+        long_filter = close[i] > ema34_aligned[i]   # Above daily EMA34
+        short_filter = close[i] < ema34_aligned[i]  # Below daily EMA34
         
-        # Entry: both timeframes agree AND trending regime
         if position == 0:
-            if bullish_1d and bullish_1w and trending_regime[i]:
+            if long_breakout and long_filter and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            elif bearish_1d and bearish_1w and trending_regime[i]:
+            elif short_breakout and short_filter and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: trend break on 1d OR regime turns choppy
+            # Exit conditions
             if position == 1:
-                if (not bullish_1d) or (not trending_regime[i]):
+                # Exit if price breaks below S1 (reversal) or volume dries up
+                if close[i] < S1_aligned[i] or not vol_spike[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if (not bearish_1d) or (not trending_regime[i]):
+                # Exit if price breaks above R1 (reversal) or volume dries up
+                if close[i] > R1_aligned[i] or not vol_spike[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
