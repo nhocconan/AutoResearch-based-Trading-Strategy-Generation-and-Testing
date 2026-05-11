@@ -1,84 +1,85 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Camarilla R1/S1 breakout on 12h timeframe with 1d trend filter and volume confirmation.
-Long when price breaks above R1 in uptrend (1d close > 1d EMA34), short when breaks below S1 in downtrend.
-Exits when price re-enters Camarilla H3/L3 range or trend reverses.
-Designed for low trade frequency (12-37/year) via strict breakout conditions and trend filter.
-Works in both bull and bear markets by following 1d trend direction.
+1h_4h_1d_SMC_OrderBlock_Breakout
+Hypothesis: Uses 1d order blocks (OB) from institutional supply/demand zones as primary trend filter.
+On 1h, enters long when price breaks above bullish OB with 4h bullish trend and volume spike.
+Enters short when price breaks below bearish OB with 4h bearish trend and volume spike.
+Exits when price returns to opposite OB or 4h trend flips.
+Designed for low trade frequency (15-35/year) by requiring confluence of 1d structure, 4h trend, and 1h breakout with volume.
+Works in bull/bear markets by following institutional order flow on higher timeframes.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "1h_4h_1d_SMC_OrderBlock_Breakout"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
+def find_order_blocks(high, low, close, lookback=20):
     """
-    Calculate Camarilla pivot levels for given high, low, close
-    Returns: (R4, R3, R2, R1, PP, S1, S2, S3, S4)
+    Find bullish and bearish order blocks.
+    Bullish OB: last down candle before a strong up move (close > previous high)
+    Bearish OB: last up candle before a strong down move (close < previous low)
+    Returns arrays of OB high and low levels (np.nan if no OB)
     """
-    typical = (high + low + close) / 3
-    range_ = high - low
+    n = len(close)
+    ob_high = np.full(n, np.nan)
+    ob_low = np.full(n, np.nan)
     
-    R1 = close + range_ * 1.1 / 12
-    R2 = close + range_ * 1.1 / 6
-    R3 = close + range_ * 1.1 / 4
-    R4 = close + range_ * 1.1 / 2
+    for i in range(2, n):
+        # Bullish OB: candle i-2 is down, i-1 is up, and close[i] > high[i-1]
+        if close[i-2] < open_[i-2] and close[i-1] > open_[i-1] and close[i] > high[i-1]:
+            ob_high[i] = high[i-2]
+            ob_low[i] = low[i-2]
+        # Bearish OB: candle i-2 is up, i-1 is down, and close[i] < low[i-1]
+        elif close[i-2] > open_[i-2] and close[i-1] < open_[i-1] and close[i] < low[i-1]:
+            ob_high[i] = high[i-2]
+            ob_low[i] = low[i-2]
+        # Propagate last valid OB forward
+        else:
+            if not np.isnan(ob_high[i-1]):
+                ob_high[i] = ob_high[i-1]
+                ob_low[i] = ob_low[i-1]
     
-    PP = (high + low + close) / 3
-    
-    S1 = close - range_ * 1.1 / 12
-    S2 = close - range_ * 1.1 / 6
-    S3 = close - range_ * 1.1 / 4
-    S4 = close - range_ * 1.1 / 2
-    
-    return R4, R3, R2, R1, PP, S1, S2, S3, S4
+    return ob_high, ob_low
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close = prices['close'].values
+    # Extract OHLCV
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Trend Filter ---
+    # --- 1d Order Blocks for Trend Filter ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA34 for trend
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d = np.where(close_1d > ema_34_1d, 1, -1)
+    ob_high_1d, ob_low_1d = find_order_blocks(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, df_1d['open'].values
+    )
     
-    # Align 1d trend to 12h
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Align 1d OB to 1h
+    ob_high_1d_1h = align_htf_to_ltf(prices, df_1d, ob_high_1d)
+    ob_low_1d_1h = align_htf_to_ltf(prices, df_1d, ob_low_1d)
     
-    # --- 12h Camarilla Levels ---
-    # Need previous day's HLC for today's Camarilla
-    # For 12h timeframe, we use prior 12h bar's HLC
-    R4, R3, R2, R1, PP, S1, S2, S3, S4 = calculate_camarilla(high, low, close)
+    # --- 4h Trend Filter (EMA34) ---
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
+        return np.zeros(n)
     
-    # Shift to get prior bar's levels (avoid look-ahead)
-    R1_prev = np.roll(R1, 1)
-    S1_prev = np.roll(S1, 1)
-    R3_prev = np.roll(R3, 1)
-    S3_prev = np.roll(S3, 1)
-    R1_prev[0] = np.nan
-    S1_prev[0] = np.nan
-    R3_prev[0] = np.nan
-    S3_prev[0] = np.nan
+    ema_34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_1h = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Volume Spike Detection (24-period average = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # --- Volume Spike (20-period) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
@@ -86,17 +87,16 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trend_1d_aligned[i]) or np.isnan(R1_prev[i]) or 
-            np.isnan(S1_prev[i]) or np.isnan(R3_prev[i]) or np.isnan(S3_prev[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ob_high_1d_1h[i]) or np.isnan(ob_low_1d_1h[i]) or
+            np.isnan(ema_34_4h_1h[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
@@ -104,41 +104,38 @@ def generate_signals(prices):
         # Volume confirmation threshold
         volume_spike = vol_ratio[i] > 1.8
         
-        # 1d trend direction
-        daily_trend = trend_1d_aligned[i]
-        
         if position == 0:
-            # Long: daily uptrend + price breaks above R1 + volume
-            if (daily_trend == 1 and 
-                close[i] > R1_prev[i] and 
-                close[i-1] <= R1_prev[i-1] and  # crossed above this bar
+            # Long: price above 1d bullish OB, 4h bullish trend, breaks above OB with volume
+            if (close[i] > ob_high_1d_1h[i] and  # above bullish OB
+                close[i-1] <= ob_high_1d_1h[i-1] and  # broke above this bar
+                ema_34_4h_1h[i] > ema_34_4h_1h[i-1] and  # 4h EMA rising
                 volume_spike):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: daily downtrend + price breaks below S1 + volume
-            elif (daily_trend == -1 and 
-                  close[i] < S1_prev[i] and 
-                  close[i-1] >= S1_prev[i-1] and  # crossed below this bar
+            # Short: price below 1d bearish OB, 4h bearish trend, breaks below OB with volume
+            elif (close[i] < ob_low_1d_1h[i] and  # below bearish OB
+                  close[i-1] >= ob_low_1d_1h[i-1] and  # broke below this bar
+                  ema_34_4h_1h[i] < ema_34_4h_1h[i-1] and  # 4h EMA falling
                   volume_spike):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: daily trend turns down OR price re-enters S3
-                if (trend_1d_aligned[i] == -1 or 
-                    close[i] < S3_prev[i]):
+                # Exit long: price returns to bearish OB or 4h trend turns bearish
+                if (close[i] < ob_low_1d_1h[i] or 
+                    ema_34_4h_1h[i] < ema_34_4h_1h[i-1]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: daily trend turns up OR price re-enters R3
-                if (trend_1d_aligned[i] == 1 or 
-                    close[i] > R3_prev[i]):
+                # Exit short: price returns to bullish OB or 4h trend turns bullish
+                if (close[i] > ob_high_1d_1h[i] or 
+                    ema_34_4h_1h[i] > ema_34_4h_1h[i-1]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
