@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Uses Camarilla pivot points from daily timeframe for S1/R1 levels with volume confirmation and 1-day ADX trend filter.
-Trades breakouts in trending markets and mean reversion at pivot levels in ranging markets.
-Target: 15-30 trades/year to minimize fee drag while capturing strong moves in both bull and bear markets.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+Hypothesis: Uses Camarilla R1/S1 breakouts with 1-day trend filter (ADX > 25) and volume spike confirmation.
+Works in bull markets via breakouts and bear markets via mean reversion at Camarilla levels during low volatility.
+Target: 25-40 trades/year to minimize fee drag while capturing strong moves.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,36 +19,33 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots and ADX trend filter
+    # Get 1d data for Camarilla levels and ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Camarilla Pivot Points (S1, R1) ---
-    # Calculate pivot point and levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate pivot and levels
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # --- 1d Camarilla Levels (based on previous day's range) ---
+    # Calculate using previous day's OHLC (Camarilla uses previous day)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
     
     # Camarilla levels
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
+    R1 = prev_close + (prev_range * 1.1 / 12)
+    S1 = prev_close - (prev_range * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # --- 1d ADX for trend filter (trending >25, ranging <20) ---
+    # --- 1d ADX for trend filter ---
     # Calculate True Range
     tr1 = pd.Series(df_1d['high']).subtract(df_1d['low']).abs()
     tr2 = pd.Series(df_1d['high']).subtract(df_1d['close'].shift(1)).abs()
@@ -75,7 +72,7 @@ def generate_signals(prices):
     adx_1d = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     adx_1d_values = adx_1d.values
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_values)
     
     # --- Volume Spike Detection ---
@@ -90,8 +87,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or
+        if (np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or
             np.isnan(adx_1d_aligned[i]) or
             np.isnan(vol_spike[i])):
             # Maintain position if valid, otherwise flat
@@ -109,12 +106,12 @@ def generate_signals(prices):
         is_ranging = adx < 20
         
         # Breakout signals at Camarilla levels
-        long_breakout = (high[i] > r1_1d_aligned[i]) and vol_spike[i]
-        short_breakout = (low[i] < s1_1d_aligned[i]) and vol_spike[i]
+        long_breakout = (high[i] > R1_aligned[i]) and vol_spike[i]
+        short_breakout = (low[i] < S1_aligned[i]) and vol_spike[i]
         
         # Mean reversion signals (only in ranging markets)
-        long_reversion = (close[i] < s1_1d_aligned[i]) and is_ranging
-        short_reversion = (close[i] > r1_1d_aligned[i]) and is_ranging
+        long_reversion = (close[i] < S1_aligned[i]) and is_ranging
+        short_reversion = (close[i] > R1_aligned[i]) and is_ranging
         
         if position == 0:
             if is_trending:
@@ -137,7 +134,7 @@ def generate_signals(prices):
             # Exit conditions
             if position == 1:
                 # Exit long: price touches opposite Camarilla level or ADX drops (trend weakening)
-                exit_signal = (low[i] < s1_1d_aligned[i]) or (adx < 20)
+                exit_signal = (low[i] < S1_aligned[i]) or (adx < 20)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
@@ -145,7 +142,7 @@ def generate_signals(prices):
                     signals[i] = 0.25
             elif position == -1:
                 # Exit short: price touches opposite Camarilla level or ADX drops
-                exit_signal = (high[i] > r1_1d_aligned[i]) or (adx < 20)
+                exit_signal = (high[i] > R1_aligned[i]) or (adx < 20)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
