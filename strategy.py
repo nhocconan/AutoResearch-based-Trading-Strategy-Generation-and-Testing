@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Donchian_Breakout_WeeklyPivot_Direction
-Hypothesis: For 6BTC/ETH, combine 6h Donchian(20) breakouts with weekly pivot direction (from 1w data) to filter breakouts. Only take long breakouts when weekly pivot is bullish (price > weekly pivot) and short breakouts when bearish (price < weekly pivot). Uses volume confirmation (volume > 1.5x 20-period average) to avoid false signals. Designed for 15-30 trades/year per symbol to avoid fee drag while capturing major trend moves. Works in bull markets via breakouts and in bear markets via short breakdowns aligned with weekly structure.
+12h_Supertrend_1dTrend_Filtered
+Hypothesis: Use Supertrend on 12h for trend direction, filtered by 1d ADX to avoid counter-trend trades. In strong trends (1d ADX > 25), follow 12h Supertrend. In weak trends (1d ADX < 25), reduce position size to avoid whipsaw. Uses volume confirmation (volume > 1.3x 20-period average) to filter false signals. Designed for 15-30 trades/year per symbol to minimize fee drift while capturing major trends. Works in both bull and bear markets by adapting to trend strength.
 """
 
-name = "6h_Donchian_Breakout_WeeklyPivot_Direction"
-timeframe = "6h"
+name = "12h_Supertrend_1dTrend_Filtered"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,93 +17,160 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for pivot and direction
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data for ADX filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 6h OHLCV
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    volume_6h = prices['volume'].values
+    # 12h OHLCV
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # --- Weekly Pivot (using prior week OHLC) ---
-    # Calculate from previous week's OHLC
-    prev_week_high = np.roll(df_1w['high'].values, 1)
-    prev_week_low = np.roll(df_1w['low'].values, 1)
-    prev_week_close = np.roll(df_1w['close'].values, 1)
-    # First bar: use current week's values (no look-ahead)
-    prev_week_high[0] = df_1w['high'].values[0]
-    prev_week_low[0] = df_1w['low'].values[0]
-    prev_week_close[0] = df_1w['close'].values[0]
+    # --- 1d ADX for trend strength filter (14 period) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    # Align weekly pivot to 6h
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # --- 6h Donchian Channels (20-period) ---
-    donchian_high = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = -np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # --- 6h Volume Average for confirmation ---
-    vol_avg_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    # Smoothed DM
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_12h_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # --- 12h Supertrend (ATR=10, multiplier=3.0) ---
+    # True Range for 12h
+    tr1_12h = np.abs(high - low)
+    tr2_12h = np.abs(high - np.roll(close, 1))
+    tr3_12h = np.abs(low - np.roll(close, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
+    atr_12h = pd.Series(tr_12h).rolling(window=10, min_periods=10).mean().values
+    
+    # Basic Upper and Lower Bands
+    basic_ub = (high + low) / 2 + 3.0 * atr_12h
+    basic_lb = (high + low) / 2 - 3.0 * atr_12h
+    
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(close)
+    final_lb = np.zeros_like(close)
+    
+    for i in range(len(close)):
+        if i == 0:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+        else:
+            if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
+                final_ub[i] = basic_ub[i]
+            else:
+                final_ub[i] = final_ub[i-1]
+                
+            if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
+                final_lb[i] = basic_lb[i]
+            else:
+                final_lb[i] = final_lb[i-1]
+    
+    # Supertrend direction
+    supertrend = np.zeros_like(close)
+    for i in range(len(close)):
+        if i == 0:
+            supertrend[i] = 1.0  # start long
+        else:
+            if close[i] > final_ub[i-1]:
+                supertrend[i] = 1.0
+            elif close[i] < final_lb[i-1]:
+                supertrend[i] = -1.0
+            else:
+                supertrend[i] = supertrend[i-1]
+    
+    supertrend_aligned = supertrend  # already on 12h timeframe
+    
+    # --- Volume confirmation ---
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 20  # for Donchian and volume averages
+    start_idx = 30  # for ADX and ATR
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_avg_6h[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
-                # Simple stoploss: 2.5x ATR estimate from 6h range
-                atr_est = np.abs(high_6h[i] - low_6h[i])
-                if position == 1 and close_6h[i] <= entry_price - 2.5 * atr_est:
+                # Simple trailing stop: reverse if Supertrend flips
+                if position == 1 and supertrend_aligned[i] == -1:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_6h[i] >= entry_price + 2.5 * atr_est:
+                elif position == -1 and supertrend_aligned[i] == 1:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_6h[i] > 1.5 * vol_avg_6h[i]
+        # Determine trend strength: ADX < 25 = weak, ADX > 25 = strong
+        is_strong_trend = adx_12h_aligned[i] > 25
+        is_weak_trend = adx_12h_aligned[i] < 25
+        
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume[i] > 1.3 * vol_avg[i]
         
         if position == 0:
-            # Look for breakout entries in direction of weekly pivot
+            # Look for entries based on Supertrend and trend strength
             if vol_confirm:
-                # Long breakout: price breaks above Donchian high AND above weekly pivot (bullish bias)
-                if close_6h[i] > donchian_high[i] and close_6h[i] > weekly_pivot_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close_6h[i]
-                # Short breakdown: price breaks below Donchian low AND below weekly pivot (bearish bias)
-                elif close_6h[i] < donchian_low[i] and close_6h[i] < weekly_pivot_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close_6h[i]
+                if supertrend_aligned[i] == 1:
+                    if is_strong_trend:
+                        signals[i] = 0.30  # full position in strong trend
+                        position = 1
+                    else:
+                        signals[i] = 0.15  # half position in weak trend
+                        position = 1
+                elif supertrend_aligned[i] == -1:
+                    if is_strong_trend:
+                        signals[i] = -0.30  # full position in strong trend
+                        position = -1
+                    else:
+                        signals[i] = -0.15  # half position in weak trend
+                        position = -1
         else:
-            # Manage existing position: trail with opposite Donchian band
+            # Manage existing position
             if position == 1:
-                # Long: exit if price breaks below Donchian low
-                if close_6h[i] < donchian_low[i]:
+                # Long position management
+                if supertrend_aligned[i] == -1:
+                    # Supertrend flipped to down - exit
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    # Still in uptrend - hold
+                    signals[i] = 0.30 if is_strong_trend else 0.15
             elif position == -1:
-                # Short: exit if price breaks above Donchian high
-                if close_6h[i] > donchian_high[i]:
+                # Short position management
+                if supertrend_aligned[i] == 1:
+                    # Supertrend flipped to up - exit
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    # Still in downtrend - hold
+                    signals[i] = -0.30 if is_strong_trend else -0.15
     
     return signals
