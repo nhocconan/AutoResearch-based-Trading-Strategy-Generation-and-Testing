@@ -1,11 +1,6 @@
-# 1d_RSI20_CamPivot_Breakout_1wTrend
-# Hypothesis: Daily RSI(20) extremes + weekly trend filter + Camarilla pivot breakout with volume confirmation
-# Works in bull (breaks above R3 in uptrend) and bear (breaks below S3 in downtrend)
-# Weekly trend avoids whipsaws, RSI prevents overextension, volume confirms breakout strength
-# Target: 15-25 trades/year, low frequency to minimize fee drag on 1d timeframe
-
-name = "1d_RSI20_CamPivot_Breakout_1wTrend"
-timeframe = "1d"
+#!/usr/bin/env python3
+name = "6h_VolumeWeighted_Keltner_Channel_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,64 +17,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Get daily data for Camarilla pivots (from previous daily bar)
+    # Get 1d data for trend filter (using 1d EMA50)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Previous day's range
-    range_1d = high_1d - low_1d
+    # Keltner Channel parameters
+    kc_mult = 2.0
+    kc_length = 20
     
-    # Calculate Camarilla R3 and S3 levels (stronger breakout levels)
-    camarilla_r3 = close_1d + (range_1d * 1.1 / 4)
-    camarilla_s3 = close_1d - (range_1d * 1.1 / 4)
+    # Calculate ATR for Keltner Channel
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=kc_length, min_periods=kc_length).mean().values
     
-    # Align Camarilla levels to daily timeframe (using previous day's values)
-    r3_1d = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_1d = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate EMA for Keltner Channel middle line
+    ema_middle = pd.Series(close).ewm(span=kc_length, min_periods=kc_length).mean().values
     
-    # Calculate daily RSI(20)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/20, min_periods=20).mean()
-    avg_loss = loss.ewm(alpha=1/20, min_periods=20).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Keltner Channel bounds
+    kc_upper = ema_middle + (kc_mult * atr)
+    kc_lower = ema_middle - (kc_mult * atr)
     
-    # Volume filter: current volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Volume-weighted price for confirmation
+    vwp = (close * volume) / np.where(volume != 0, volume, 1)
+    vwp_ma = pd.Series(vwp).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_1d[i]) or np.isnan(s3_1d[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vwp_ma[i]) or
+            np.isnan(close[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,28 +69,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) AND price breaks above R3 AND weekly uptrend AND volume surge
-            if (rsi_values[i] < 30 and close[i] > r3_1d[i] and 
-                close[i] > ema_1w_aligned[i] and volume_filter[i]):
+            # Long: price above upper KC AND above 1d EMA50 AND volume-weighted price rising
+            if close[i] > kc_upper[i] and close[i] > ema_1d_aligned[i] and vwp[i] > vwp_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) AND price breaks below S3 AND weekly downtrend AND volume surge
-            elif (rsi_values[i] > 70 and close[i] < s3_1d[i] and 
-                  close[i] < ema_1w_aligned[i] and volume_filter[i]):
+            # Short: price below lower KC AND below 1d EMA50 AND volume-weighted price falling
+            elif close[i] < kc_lower[i] and close[i] < ema_1d_aligned[i] and vwp[i] < vwp_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI > 70 (overbought) OR price falls below S3 OR weekly trend turns down
-            if (rsi_values[i] > 70 or close[i] < s3_1d[i] or 
-                close[i] < ema_1w_aligned[i]):
+            # Long exit: price below middle KC OR below 1d EMA50
+            if close[i] < ema_middle[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: RSI < 30 (oversold) OR price rises above R3 OR weekly trend turns up
-            if (rsi_values[i] < 30 or close[i] > r3_1d[i] or 
-                close[i] > ema_1w_aligned[i]):
+            # Short exit: price above middle KC OR above 1d EMA50
+            if close[i] > ema_middle[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
