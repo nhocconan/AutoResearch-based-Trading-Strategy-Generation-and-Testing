@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_With_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (using 1d EMA50)
+    # Get 1d data for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 50:
@@ -25,7 +25,7 @@ def generate_signals(prices):
     
     # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Get 1d data for Camarilla pivots (from previous 1d bar)
