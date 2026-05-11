@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_Volume_1dTrend
-Hypothesis: Breakouts above R1 or below S1 on 4h, confirmed by 1d trend (price > EMA50 for long, < EMA50 for short) and volume spike (>2x median). Exits when price returns to prior close or stoploss hit. Designed for fewer trades by requiring 1d trend alignment and volume confirmation, targeting 15-30 trades/year. Works in bull via uptrend breakouts, in bear via downtrend breakouts.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Refined
+Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 4h, filtered by 1d EMA50 trend and volume spike (2x median).
+Focus on tighter entries with stronger trend and volume confirmation to reduce trades and improve win rate.
+Works in bull via uptrend breaks, in bear via downtrend breaks. Volume confirms conviction. Target: 20-40 trades/year.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_Volume_1dTrend"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Refined"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Get 1d data for trend filter
@@ -33,11 +35,8 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # --- 4h Prior Close (for exit) ---
-    prior_close = np.roll(close_4h, 1)
-    prior_close[0] = close_4h[0]
-    
     # --- 4h Camarilla Levels (based on previous day) ---
+    # Calculate from previous 4h bar (shifted by 1 to avoid lookahead)
     prev_close = np.roll(close_4h, 1)
     prev_high = np.roll(high_4h, 1)
     prev_low = np.roll(low_4h, 1)
@@ -45,11 +44,12 @@ def generate_signals(prices):
     prev_high[0] = high_4h[0]
     prev_low[0] = low_4h[0]
     
+    # Camarilla R1 and S1 levels (tighter than R3/S3)
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # --- Volume Filter: spike above 2x median of last 20 periods ---
-    vol_median = pd.Series(volume_4h).rolling(window=20, min_periods=10).median().values
+    # --- Volume Filter: spike above 2x median of last 30 periods ---
+    vol_median = pd.Series(volume_4h).rolling(window=30, min_periods=15).median().values
     vol_threshold = vol_median * 2.0
     
     # --- ATR for stoploss (14-period) ---
@@ -57,7 +57,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_4h - np.roll(close_4h, 1))
     tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # first bar
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
@@ -65,7 +65,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 50  # for EMA50
+    start_idx = 60  # for EMA50 and volume median
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
@@ -109,8 +109,8 @@ def generate_signals(prices):
                 if close_4h[i] <= entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price returns to or below prior close
-                elif close_4h[i] <= prior_close[i]:
+                # Exit: price touches or crosses below S1
+                elif close_4h[i] <= camarilla_s1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -120,8 +120,8 @@ def generate_signals(prices):
                 if close_4h[i] >= entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price returns to or above prior close
-                elif close_4h[i] >= prior_close[i]:
+                # Exit: price touches or crosses above R1
+                elif close_4h[i] >= camarilla_r1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
