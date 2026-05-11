@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ChaikinMoneyFlow_1dTrend_Reversal"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,37 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE
+    # 1. Load 1d data ONCE for HTF indicators
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA34 for trend filter
+    # 2. 1d EMA34 for trend filter
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Chaikin Money Flow (CMF) on 6h: 20-period
-    mf_multiplier = ((close - low) - (high - close)) / (high - low)
-    mf_multiplier = np.where(high == low, 0, mf_multiplier)
-    mf_volume = mf_multiplier * volume
-    cmf = np.nancumsum(mf_volume) / np.nancumsum(volume)
-    cmf = pd.Series(cmf).rolling(window=20, min_periods=20).mean().values
+    # 3. Calculate daily high/low/close for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align CMF (no additional delay needed)
-    # Note: We align the CMF values to 6b timeframe
-    # But CMF is already calculated on 6h, so we can use directly
-    # Actually, we need to align nothing since it's LTF
+    # 4. Camarilla levels: R3, S3
+    hl_range = high_1d - low_1d
+    r3 = close_1d + hl_range * 1.25
+    s3 = close_1d - hl_range * 1.25
     
-    # Position sizing
+    # 5. Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 6. Volume filter: 20-period EMA for higher threshold
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 2.0
+    
+    # 7. Fixed position size to avoid churn
     position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for CMF (20)
-    start_idx = 20
+    # Start after warmup
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if EMA data invalid
-        if np.isnan(ema34_1d_aligned[i]):
+        # Skip if any required data is invalid
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -56,32 +63,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # CMF value at current bar
-        cmf_val = cmf[i]
-        
-        # Trend filter: price vs 1d EMA34
+        # Conditions
         price_above_ema1d = close[i] > ema34_1d_aligned[i]
         price_below_ema1d = close[i] < ema34_1d_aligned[i]
+        breakout_long = close[i] > r3_aligned[i]
+        breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: CMF turns positive (>0.1) AND price above 1d EMA (uptrend)
-            if cmf_val > 0.1 and price_above_ema1d:
+            # Long: Price breaks above R3 + above 1d EMA34 + volume spike
+            if breakout_long and price_above_ema1d and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: CMF turns negative (<-0.1) AND price below 1d EMA (downtrend)
-            elif cmf_val < -0.1 and price_below_ema1d:
+            # Short: Price breaks below S3 + below 1d EMA34 + volume spike
+            elif breakout_short and price_below_ema1d and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit: CMF crosses back towards zero (loss of momentum)
+            # Exit conditions - simplified to reduce churn
             if position == 1:
-                if cmf_val < 0.0:  # CMF crossed below zero
+                # Exit: Price crosses below S3 OR trend reverses
+                if close[i] < s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if cmf_val > 0.0:  # CMF crossed above zero
+                # Exit: Price crosses above R3 OR trend reverses
+                if close[i] > r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
