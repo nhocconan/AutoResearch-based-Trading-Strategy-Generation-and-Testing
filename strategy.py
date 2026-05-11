@@ -1,15 +1,12 @@
-#!/usr/bin/env python3
-"""
-12h_1D_Camarilla_R1S1_Breakout_Trend_Filter
-Hypothesis: For 12h timeframe, use daily Camarilla pivot levels (R1, S1) as key support/resistance. 
-Enter long when price breaks above R1 with volume confirmation and 1d trend filter (close > 1d EMA50). 
-Enter short when price breaks below S1 with volume confirmation and 1d trend filter (close < 1d EMA50).
-Exit when price returns to the daily pivot point (mean reversion) or on opposite breakout.
-Uses volume surge (>1.5x 20-period average) to filter false breakouts. Designed for low-frequency, high-conviction trades.
-"""
+# 4H_TRIX_VOLUME_RSI_Signal_v1
+# Hypothesis: TRIX (12-period) momentum combined with volume confirmation and RSI filter
+# provides reliable entries in both bull and bear markets. Uses 4h timeframe with 1d RSI
+# and volume spike for confirmation. TRIX crossovers signal momentum shifts, filtered
+# by volume > 1.5x average and RSI between 30-70 to avoid extremes. Targets 50-150
+# trades over 4 years with low frequency to minimize fee drag.
 
-name = "12h_1D_Camarilla_R1S1_Breakout_Trend_Filter"
-timeframe = "12h"
+name = "4H_TRIX_VOLUME_RSI_Signal_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,92 +18,85 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 1d data for RSI (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels from previous day's OHLC
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 4h OHLCV
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Handle first value
-    prev_high[0] = df_1d['high'].iloc[0]
-    prev_low[0] = df_1d['low'].iloc[0]
-    prev_close[0] = df_1d['close'].iloc[0]
+    # --- TRIX (12-period) on 4h ---
+    # Calculate EMA1, EMA2, EMA3 then % change
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = 100 * (ema3 / ema3.shift(1) - 1)
+    trix = trix.fillna(0).values
     
-    # Camarilla equations
-    range_ = prev_high - prev_low
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (range_ * 1.1 / 12)
-    s1 = pivot - (range_ * 1.1 / 12)
-    r2 = pivot + (range_ * 1.1 / 6)
-    s2 = pivot - (range_ * 1.1 / 6)
+    # --- 1d RSI (14-period) ---
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
     
-    # Align daily levels to 12h timeframe
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    # Align 1d RSI to 4h
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # 1d trend filter: EMA50
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume confirmation: 12h volume > 1.5x 20-period average
-    vol_ma_12h = pd.Series(prices['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_surge = prices['volume'].values > (1.5 * vol_ma_12h)
+    # --- Volume Spike (4h) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_spike = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = 50
+    # Start after warmup
+    start_idx = 40
     
     for i in range(start_idx, n):
-        # Skip if any critical values are NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(pivot_12h[i]) or np.isnan(ema50_12h[i]) or 
-            np.isnan(vol_ma_12h[i])):
+        # Skip if RSI is NaN
+        if np.isnan(rsi_1d_aligned[i]):
             if position != 0:
-                # Maintain position until exit signal
-                signals[i] = 0.25 if position == 1 else -0.25
+                # Simple trailing stop: exit if TRIX reverses
+                if position == 1 and trix[i] < trix[i-1]:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and trix[i] > trix[i-1]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
+        # Entry conditions
+        long_entry = (trix[i] > trix[i-1]) and vol_spike[i] and (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
+        short_entry = (trix[i] < trix[i-1]) and vol_spike[i] and (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
+        
         if position == 0:
-            # Look for breakout entries with trend and volume confirmation
-            # Long: price breaks above R1, above 1d EMA50, with volume surge
-            if (prices['close'].iloc[i] > r1_12h[i] and 
-                prices['close'].iloc[i] > ema50_12h[i] and 
-                vol_surge[i]):
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, below 1d EMA50, with volume surge
-            elif (prices['close'].iloc[i] < s1_12h[i] and 
-                  prices['close'].iloc[i] < ema50_12h[i] and 
-                  vol_surge[i]):
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Manage existing position
+            # Exit on TRIX reversal or RSI extreme
             if position == 1:
-                # Long: exit when price returns to pivot (mean reversion) or breaks below S1 (stop)
-                if prices['close'].iloc[i] <= pivot_12h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif prices['close'].iloc[i] < s1_12h[i]:
+                if (trix[i] < trix[i-1]) or (rsi_1d_aligned[i] >= 70) or (rsi_1d_aligned[i] <= 30):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short: exit when price returns to pivot (mean reversion) or breaks above R1 (stop)
-                if prices['close'].iloc[i] >= pivot_12h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif prices['close'].iloc[i] > r1_12h[i]:
+                if (trix[i] > trix[i-1]) or (rsi_1d_aligned[i] >= 70) or (rsi_1d_aligned[i] <= 30):
                     signals[i] = 0.0
                     position = 0
                 else:
