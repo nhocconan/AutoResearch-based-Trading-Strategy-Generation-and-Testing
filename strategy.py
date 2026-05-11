@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Chandelier_Exit_System_v1
-Hypothesis: Uses Chandelier Exit for trend following with volatility-based stops.
-In bull markets, captures trends with wide stops; in bear markets, avoids whipsaws
-by using ATR-based exits that adapt to volatility. Combines with 1-week trend filter
-to avoid counter-trend trades. Target: 20-50 trades over 4 years (5-12/year).
+6h_Camarilla_R3_S3_Fade_Backtest_v1
+Hypothesis: Fades price at Camarilla R3/S3 levels (strong intraday support/resistance)
+with confirmation from 1d trend (EMA34). In ranging markets, price reverses at these levels;
+in trending markets, we avoid false reversals by requiring counter-trend alignment.
+Uses volume spike to confirm institutional interest at the level.
+Target: 50-150 trades over 4 years (12-37/year) on 6h timeframe.
 """
 
-name = "4h_Chandelier_Exit_System_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Fade_Backtest_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,48 +21,50 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === 1W Data for Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # === 1D Data for Camarilla Calculation ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Chandelier Exit Components ===
-    # ATR(22) for volatility
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=22, adjust=False, min_periods=22).mean().values
+    # Calculate Camarilla levels for each day
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
+    rangec = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.1 * rangec / 2
+    camarilla_s3 = close_1d - 1.1 * rangec / 2
     
-    # 22-period highest high and lowest low
-    highest_high = pd.Series(high).rolling(window=22, min_periods=22).max().values
-    lowest_low = pd.Series(low).rolling(window=22, min_periods=22).min().values
+    # Align Camarilla levels to 6h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Chandelier Exit: Long exit = highest high - 3*ATR, Short exit = lowest low + 3*ATR
-    chandelier_long_exit = highest_high - 3.0 * atr
-    chandelier_short_exit = lowest_low + 3.0 * atr
+    # === 1D Trend Filter (EMA34) ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Spike Detection (20-period average) ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma20 * 2.0)  # Volume at least 2x average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 100
+    start_idx = max(100, 34)
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(chandelier_long_exit[i]) or 
-            np.isnan(chandelier_short_exit[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,24 +73,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above Chandelier long exit AND weekly uptrend
-            if close[i] > chandelier_long_exit[i] and ema50_1w_aligned[i] < close[i]:
+            # Long setup: price at or below S3 with volume spike in uptrend (mean reversion long)
+            if close[i] <= s3_aligned[i] and vol_spike[i] and ema34_1d_aligned[i] < close[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below Chandelier short exit AND weekly downtrend
-            elif close[i] < chandelier_short_exit[i] and ema50_1w_aligned[i] > close[i]:
+            # Short setup: price at or above R3 with volume spike in downtrend (mean reversion short)
+            elif close[i] >= r3_aligned[i] and vol_spike[i] and ema34_1d_aligned[i] > close[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below Chandelier long exit
-            if close[i] < chandelier_long_exit[i]:
+            # Long exit: price reaches midpoint (mean reversion target) or trend changes
+            midpoint = (s3_aligned[i] + r3_aligned[i]) / 2
+            if close[i] >= midpoint or ema34_1d_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price rises above Chandelier short exit
-            if close[i] > chandelier_short_exit[i]:
+            # Short exit: price reaches midpoint or trend changes
+            midpoint = (s3_aligned[i] + r3_aligned[i]) / 2
+            if close[i] <= midpoint or ema34_1d_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
