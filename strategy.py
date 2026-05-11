@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "1d_Donchian20_WeeklyTrend_VolumeSpike"
+name = "1d_WeeklyTrend_Donchian_Breakout_Volume_Spike"
 timeframe = "1d"
 leverage = 1.0
 
