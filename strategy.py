@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Bounce_TrendFilter
-Hypothesis: Camarilla pivot levels (R3/S3) from 1d act as strong support/resistance.
-- Long when: price touches S3 and closes back above it, 1d EMA34 uptrend, volume > 20-period average
-- Short when: price touches R3 and closes back below it, 1d EMA34 downtrend, volume > 20-period average
-- Exit when price reaches opposite Camarilla level (S1 for long, R1 for short) or trend reverses
-Works in both bull and bear: bounces off strong intraday levels with trend filter avoids counter-trend traps.
-Targets 15-30 trades/year (60-120 over 4 years) to minimize fee drag.
+6h_1d_VWAP_Mean_Reversion_With_Volume_Regime
+Hypothesis: Mean reversion to 1-day VWAP on 6b timeframe, filtered by 1-week trend and volume regime.
+- Long when: price < 1d VWAP - 0.5*ATR(6h), 1w EMA50 uptrend, volume > 20-period average
+- Short when: price > 1d VWAP + 0.5*ATR(6h), 1w EMA50 downtrend, volume > 20-period average
+- Exit when price crosses 1d VWAP or trend reverses
+VWAP acts as a dynamic fair value mean. In ranging markets, price reverts to VWAP.
+In trending markets, the 1-week EMA filter ensures we only take mean-reversion trades
+in the direction of the higher timeframe trend, avoiding counter-trend whipsaws.
+Volume confirmation ensures participation. Targets 20-40 trades/year (80-160 over 4 years).
 """
 
-name = "12h_1d_Camarilla_Pivot_Bounce_TrendFilter"
-timeframe = "12h"
+name = "6h_1d_VWAP_Mean_Reversion_With_Volume_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,93 +24,89 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend and Camarilla levels
+    # Get 1d data for VWAP and 1w data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 1 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close_12h = prices['close'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    volume_12h = prices['volume'].values
+    # 6h OHLCV
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    volume_6h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA34 ---
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # --- 1d VWAP: cumulative (typical price * volume) / cumulative volume ---
+    typical_price = (high_6h + low_6h + close_6h) / 3.0
+    pv = typical_price * volume_6h
+    cum_pv = np.cumsum(pv)
+    cum_vol = np.cumsum(volume_6h)
+    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
     
-    # --- Camarilla Levels from 1d OHLC ---
-    # Typical price = (H + L + C) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    typical_price_arr = typical_price.values
-    range_1d = df_1d['high'] - df_1d['low']
-    range_arr = range_1d.values
+    # --- 6h ATR for dynamic bands ---
+    tr1 = high_6h - low_6h
+    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
+    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first TR is just high-low
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla multipliers
-    R3 = typical_price_arr + 1.1 * range_arr * 1.1 / 2
-    R2 = typical_price_arr + 1.1 * range_arr * 1.1 / 4
-    R1 = typical_price_arr + 1.1 * range_arr * 1.1 / 6
-    S1 = typical_price_arr - 1.1 * range_arr * 1.1 / 6
-    S2 = typical_price_arr - 1.1 * range_arr * 1.1 / 4
-    S3 = typical_price_arr - 1.1 * range_arr * 1.1 / 2
+    # --- 1w Trend Filter: EMA50 ---
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Align Camarilla levels to 12h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # --- Volume Confirmation: 12h volume > 20-period average ---
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # --- Volume Confirmation: 6h volume > 20-period average ---
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 34  # for EMA34
+    # Start after warmup period
+    start_idx = 50  # for ATR and VWAP stability
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(vwap[i]) or np.isnan(atr[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        trend_up = close_12h[i] > ema34_1d_aligned[i]
-        trend_down = close_12h[i] < ema34_1d_aligned[i]
+        # Dynamic bands around VWAP
+        upper_band = vwap[i] + 0.5 * atr[i]
+        lower_band = vwap[i] - 0.5 * atr[i]
+        
+        # Determine 1w trend
+        trend_up = close_6h[i] > ema50_1w_aligned[i]
+        trend_down = close_6h[i] < ema50_1w_aligned[i]
         
         # Volume confirmation
-        vol_ok = volume_12h[i] > vol_ma_20[i]
+        vol_ok = volume_6h[i] > vol_ma_20[i]
         
         if position == 0:
-            # Look for bounces off S3/R3 with trend and volume
-            if (low_12h[i] <= S3_aligned[i] and close_12h[i] > S3_aligned[i] and 
-                trend_up and vol_ok):
-                # Bounce off S3: long
+            # Look for mean-reversion entries only in direction of 1w trend with volume
+            if close_6h[i] < lower_band and trend_up and vol_ok:
+                # Long: price below lower VWAP band + 1w uptrend + volume
                 signals[i] = 0.25
                 position = 1
-            elif (high_12h[i] >= R3_aligned[i] and close_12h[i] < R3_aligned[i] and 
-                  trend_down and vol_ok):
-                # Rejection at R3: short
+            elif close_6h[i] > upper_band and trend_down and vol_ok:
+                # Short: price above upper VWAP band + 1w downtrend + volume
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: reach S1 (target) or trend turns down
-                if close_12h[i] >= S1_aligned[i] or not trend_up:
+                # Exit long: price crosses above VWAP OR trend turns down
+                if close_6h[i] > vwap[i] or not trend_up:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: reach R1 (target) or trend turns up
-                if close_12h[i] <= R1_aligned[i] or not trend_down:
+                # Exit short: price crosses below VWAP OR trend turns up
+                if close_6h[i] < vwap[i] or not trend_down:
                     signals[i] = 0.0
                     position = 0
                 else:
