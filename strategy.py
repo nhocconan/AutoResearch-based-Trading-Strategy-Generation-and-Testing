@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume
-Hypothesis: Uses daily Camarilla pivot levels (R3/S3) with volume spike confirmation and 1-day EMA trend filter on 12h timeframe.
-Trades breakouts in trending markets (EMA34) and mean-reversion at pivot levels in ranging markets.
-Designed for low trade frequency (target: 20-40 trades/year) to avoid fee drag while capturing high-probability moves.
-Works in both bull and bear markets by adapting to trend (breakouts) and range (mean reversion) conditions.
+4h_Trix_Volume_Chop_12hTrend_v1
+Hypothesis: Uses TRIX (triple exponential average) momentum with volume spike confirmation and 12-hour EMA trend filter.
+Trades momentum breakouts in trending markets (12h EMA50) and avoids false signals in choppy conditions using Choppiness Index.
+Designed for low trade frequency (~25-35 trades/year) by requiring confluence of TRIX signal, volume spike, and trend alignment.
+Works in both bull and bear markets by adapting to trend direction via 12h EMA filter.
 """
 
-name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Trix_Volume_Chop_12hTrend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,58 +17,75 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots and EMA trend filter
+    # Get 12h data for trend filter and 1d data for Choppiness Index
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_12h) < 50 or len(df_1d) < 14:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d EMA34 for trend filter ---
-    close_1d = df_1d['close']
-    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # --- 12h EMA50 for trend filter ---
+    close_12h = df_12h['close']
+    ema_50_12h = close_12h.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # --- Daily Camarilla Pivot Levels (R3, S3) ---
-    # Based on previous day's OHLC
+    # --- TRIX (15-period) on 4h close ---
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = (ema3 / ema3.shift(1) - 1) * 100  # Percentage change
+    trix = trix.fillna(0).values
+    
+    # --- Volume Spike Detection (2.0x 20-period EMA) ---
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
+    vol_spike = volume > (2.0 * vol_ema.values)
+    
+    # --- Choppiness Index (14-period) on 1d data ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 4)  # R3
-    s3 = pivot - (range_1d * 1.1 / 4)  # S3
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Align to 12h (Camarilla levels are valid for the entire day)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # --- Volume Spike Detection (2.5x 20-period EMA) ---
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
-    vol_spike = volume > (2.5 * vol_ema.values)
+    # Sum of true ranges over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Choppiness Index = 100 * log10(tr_sum / (atr * 14)) / log10(14)
+    chop = 100 * np.log10(tr_sum / (atr * 14)) / np.log10(14)
+    chop = np.nan_to_num(chop, nan=50.0)  # Replace NaN with neutral value
+    
+    # Align Choppiness Index to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(trix[i]) or
+            np.isnan(vol_spike[i]) or
+            np.isnan(chop_aligned[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -78,71 +95,51 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        bars_since_entry += 1
+        # Determine trend based on price vs 12h EMA50
+        price_above_ema = close[i] > ema_50_12h_aligned[i]
+        price_below_ema = close[i] < ema_50_12h_aligned[i]
         
-        # Determine trend based on price vs EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
-        # Distance from EMA as percentage
-        ema_distance_pct = abs(close[i] - ema_34_1d_aligned[i]) / ema_34_1d_aligned[i] * 100
+        # TRIX signal: positive = bullish momentum, negative = bearish momentum
+        trix_bullish = trix[i] > 0.05  # Threshold to avoid noise
+        trix_bearish = trix[i] < -0.05
         
-        # Breakout signals (price crosses R3/S3 with volume spike and sufficient EMA separation)
-        # Requires price to be >1.5% away from EMA to avoid whipsaw
-        long_breakout = (high[i] > r3_aligned[i]) and vol_spike[i] and (ema_distance_pct > 1.5)
-        short_breakout = (low[i] < s3_aligned[i]) and vol_spike[i] and (ema_distance_pct > 1.5)
-        
-        # Mean reversion at pivot levels (price touches S3/R3 without breakout)
-        # Only in non-trending conditions (price near EMA within 0.5%)
-        near_ema = ema_distance_pct < 0.5
-        long_reversion = (low[i] <= s3_aligned[i]) and near_ema and not vol_spike[i]
-        short_reversion = (high[i] >= r3_aligned[i]) and near_ema and not vol_spike[i]
+        # Choppiness regime: < 38.2 = trending, > 61.8 = ranging
+        trending_regime = chop_aligned[i] < 38.2
+        ranging_regime = chop_aligned[i] > 61.8
         
         if position == 0:
-            # Enforce minimum 2-bar hold after entry (prevents immediate reversal)
-            if bars_since_entry < 2:
-                signals[i] = 0.0
-                continue
-                
-            if price_above_ema:
-                # Uptrend: favor long breakouts, avoid shorts
-                if long_breakout:
+            # In trending regime: follow TRIX momentum with volume confirmation
+            if trending_regime:
+                if price_above_ema and trix_bullish and vol_spike[i]:
                     signals[i] = 0.25
                     position = 1
-                    bars_since_entry = 0
-            elif price_below_ema:
-                # Downtrend: favor short breakouts, avoid longs
-                if short_breakout:
+                elif price_below_ema and trix_bearish and vol_spike[i]:
                     signals[i] = -0.25
                     position = -1
-                    bars_since_entry = 0
-            else:
-                # Near EMA: allow mean reversion at pivot levels
-                if long_reversion:
+            # In ranging regime: look for mean reversion at extreme TRIX values
+            elif ranging_regime:
+                if trix[i] < -0.2 and vol_spike[i]:  # Oversold
                     signals[i] = 0.25
                     position = 1
-                    bars_since_entry = 0
-                elif short_reversion:
+                elif trix[i] > 0.2 and vol_spike[i]:  # Overbought
                     signals[i] = -0.25
                     position = -1
-                    bars_since_entry = 0
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price touches S3 (support) or breaks below EMA
-                exit_signal = (low[i] <= s3_aligned[i]) or (close[i] < ema_34_1d_aligned[i])
+                # Exit long: TRIX turns negative or price breaks below 12h EMA
+                exit_signal = (trix[i] < 0) or (close[i] < ema_50_12h_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price touches R3 (resistance) or breaks above EMA
-                exit_signal = (high[i] >= r3_aligned[i]) or (close[i] > ema_34_1d_aligned[i])
+                # Exit short: TRIX turns positive or price breaks above 12h EMA
+                exit_signal = (trix[i] > 0) or (close[i] > ema_50_12h_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
-                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
