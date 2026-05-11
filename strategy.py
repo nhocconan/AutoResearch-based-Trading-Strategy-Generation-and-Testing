@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian20_VolumeSpike_Trend"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,43 +17,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h trend: close above/below 12h EMA50
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    trend_up = close > ema_12h_aligned
     
-    # 4h EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 1d volume spike filter: volume > 1.5x 20-day average
+    # 1d volume filter: volume > 2x 24-day average (to ensure strong moves)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 24:
         return np.zeros(n)
     vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    volume_filter = volume > 1.5 * vol_ma20_1d_aligned
+    vol_ma24_1d = pd.Series(vol_1d).rolling(window=24, min_periods=24).mean().values
+    vol_ma24_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma24_1d)
+    volume_filter = volume > 2.0 * vol_ma24_1d_aligned
     
-    # 1d ATR stop filter: ATR(14) > 0.02 * close (avoid choppy markets)
+    # Camarilla levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr1 = np.maximum(high_1d - low_1d,
-                     np.absolute(high_1d - np.roll(close_1d, 1)),
-                     np.absolute(low_1d - np.roll(close_1d, 1)))
-    tr1[0] = high_1d[0] - low_1d[0]
-    atr_14_1d = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    volatility_filter = atr_14_1d_aligned > 0.02 * close_1d
+    range_1d = high_1d - low_1d
+    # Camarilla R3, S3: close +/- 1.1/4 * range
+    r3 = close_1d + (1.1/4) * range_1d
+    s3 = close_1d - (1.1/4) * range_1d
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for all indicators
+    start_idx = 50  # Need enough data for EMA and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_50[i]) or
-            np.isnan(vol_ma20_1d_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma24_1d_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,24 +75,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Breakout above Donchian high + uptrend + volume + volatility
-            if close[i] > high_20[i] and close[i] > ema_50[i] and volume_filter[i] and volatility_filter[i]:
+            # Long: Close above R3 + 12h uptrend + volume filter
+            if close[i] > r3_aligned[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below Donchian low + downtrend + volume + volatility
-            elif close[i] < low_20[i] and close[i] < ema_50[i] and volume_filter[i] and volatility_filter[i]:
+            # Short: Close below S3 + 12h downtrend + volume filter
+            elif close[i] < s3_aligned[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Breakdown below Donchian low or trend down
-            if close[i] < low_20[i] or close[i] < ema_50[i]:
+            # Long exit: Close below S3 or 12h trend down
+            if close[i] < s3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Breakout above Donchian high or trend up
-            if close[i] > high_20[i] or close[i] > ema_50[i]:
+            # Short exit: Close above R3 or 12h trend up
+            if close[i] > r3_aligned[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
