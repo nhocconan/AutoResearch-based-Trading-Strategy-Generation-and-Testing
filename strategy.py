@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Equidistance_Reversion_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,37 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for equidistance channel and trend
+    # Get 4h data for trend (Camarilla pivot levels)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels on 4h
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
+    range_4h = high_4h - low_4h
+    r1_4h = close_4h + (range_4h * 1.1 / 12)
+    s1_4h = close_4h - (range_4h * 1.1 / 12)
+    
+    # Align 4h Camarilla levels to 1h
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA(20) as middle line
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Daily ATR(10) for channel width
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = close_1d[0]
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - prev_close_1d)
-    tr3 = np.abs(low_1d - prev_close_1d)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    # Equidistance channel: ±1.5 * ATR around EMA20
-    upper_eq = ema_20_1d + 1.5 * atr_10_1d
-    lower_eq = ema_20_1d - 1.5 * atr_10_1d
+    # 20-period average volume on 1d
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Align to 4h
-    upper_eq_aligned = align_htf_to_ltf(prices, df_1d, upper_eq)
-    lower_eq_aligned = align_htf_to_ltf(prices, df_1d, lower_eq)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    
-    # Volume filter: 20-period average on 4h
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
-    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,44 +57,65 @@ def generate_signals(prices):
     start_idx = 30
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(upper_eq_aligned[i]) or np.isnan(lower_eq_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(vol_ratio[i])):
+        # Skip if outside trading session
+        if not session_mask[i]:
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.0
+                position = 0
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume threshold - avoid low-volume false signals
-        volume_surge = vol_ratio[i] > 1.5
+        # Skip if any required data is NaN
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(vol_1d_aligned[i])):
+            if position == 1:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume filter: current 1h volume > 1.5x 1d average volume
+        volume_surge = volume[i] > (vol_1d_aligned[i] * 1.5)
         
         if position == 0:
-            # Long: Price breaks below lower equidistance channel with volume (mean reversion long)
-            # Short: Price breaks above upper equidistance channel with volume (mean reversion short)
-            if (close[i] < lower_eq_aligned[i] and volume_surge):
-                signals[i] = 0.25
+            # Long: Price breaks above R1 with volume surge
+            if close[i] > r1_4h_aligned[i] and volume_surge:
+                signals[i] = 0.20
                 position = 1
-            elif (close[i] > upper_eq_aligned[i] and volume_surge):
-                signals[i] = -0.25
+            # Short: Price breaks below S1 with volume surge
+            elif close[i] < s1_4h_aligned[i] and volume_surge:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit: price returns to EMA20 (equilibrium)
+            # Exit: price returns to pivot level
+            pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, 
+                                               (df_4h['high'].values + df_4h['low'].values + df_4h['close'].values) / 3.0)
+            if np.isnan(pivot_4h_aligned[i]):
+                pivot_4h_aligned_i = pivot_4h_aligned[i-1] if i > 0 else 0
+            else:
+                pivot_4h_aligned_i = pivot_4h_aligned[i]
+            
             if position == 1:
-                # Exit long: price returns to EMA20
-                if close[i] >= ema_20_aligned[i]:
+                # Exit long: price returns to pivot
+                if close[i] <= pivot_4h_aligned_i:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: price returns to EMA20
-                if close[i] <= ema_20_aligned[i]:
+                # Exit short: price returns to pivot
+                if close[i] >= pivot_4h_aligned_i:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
