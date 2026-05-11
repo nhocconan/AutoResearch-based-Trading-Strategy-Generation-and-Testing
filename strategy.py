@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Chaikin_Money_Flow_Zone_v1
-Hypothesis: Combines CMF (money flow) with Bollinger Band width to identify
-accumulation/distribution zones. In both bull and bear markets, extreme money
-flow coinciding with low volatility (squeeze) precedes powerful moves. Uses 1d
-trend filter to align with higher timeframe momentum.
-Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+Hypothesis: Combines Camarilla pivot levels (R1/S1 from 1d) with 12h EMA trend filter and volume confirmation.
+In bull markets, price breaks above R1 with upward trend; in bear markets, price breaks below S1 with downward trend.
+Volume confirmation filters false breakouts. Target: 20-50 trades per year on 4h timeframe.
 """
 
-name = "6h_Chaikin_Money_Flow_Zone_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,51 +24,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D Trend Filter ===
+    # === 1D Data for Camarilla Pivots ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # 1d EMA50 for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === Bollinger Band Width (20,2) on 6h ===
-    bb_length = 20
-    bb_mult = 2.0
+    # Calculate Camarilla levels for each day
+    R1 = np.zeros(len(close_1d))
+    S1 = np.zeros(len(close_1d))
+    for i in range(len(close_1d)):
+        if i == 0:
+            R1[i] = close_1d[i]
+            S1[i] = close_1d[i]
+        else:
+            R1[i] = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
+            S1[i] = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.1 / 12
     
-    # Basis (SMA)
-    basis = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
-    # Deviation
-    dev = bb_mult * pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
-    upper = basis + dev
-    lower = basis - dev
-    # BB Width as percentage of basis
-    bb_width = np.where(basis != 0, (upper - lower) / basis, 0)
+    # Align Camarilla levels to 4h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # === Chaikin Money Flow (20) ===
-    # Money Flow Multiplier
-    mfm = np.where((high - low) != 0, ((close - low) - (high - close)) / (high - low), 0)
-    # Money Flow Volume
-    mfv = mfm * volume
-    # CMF
-    cmf_length = 20
-    mfv_sum = pd.Series(mfv).rolling(window=cmf_length, min_periods=cmf_length).sum().values
-    volume_sum = pd.Series(volume).rolling(window=cmf_length, min_periods=cmf_length).sum().values
-    cmf = np.where(volume_sum != 0, mfv_sum / volume_sum, 0)
+    # === 12H Data for Trend Filter ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    # 12h EMA50 for trend
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # === Volume Filter ===
+    # 20-period volume average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(bb_length, cmf_length, 50)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(bb_width[i]) or 
-            np.isnan(cmf[i])):
+        if (np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,24 +82,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: CMF > 0.15 (strong buying pressure) + BB width < 0.05 (squeeze)
-            if cmf[i] > 0.15 and bb_width[i] < 0.05 and ema50_1d_aligned[i] < close[i]:
+            # Long: price breaks above R1 with upward trend and volume confirmation
+            if (close[i] > R1_aligned[i] and 
+                ema50_12h_aligned[i] > close[i] and  # Uptrend: price above EMA
+                volume[i] > vol_ma[i] * 1.5):       # Volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: CMF < -0.15 (strong selling pressure) + BB width < 0.05 (squeeze)
-            elif cmf[i] < -0.15 and bb_width[i] < 0.05 and ema50_1d_aligned[i] > close[i]:
+            # Short: price breaks below S1 with downward trend and volume confirmation
+            elif (close[i] < S1_aligned[i] and 
+                  ema50_12h_aligned[i] < close[i] and  # Downtrend: price below EMA
+                  volume[i] > vol_ma[i] * 1.5):        # Volume spike
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: CMF turns negative or BB width expands significantly
-            if cmf[i] < 0 or bb_width[i] > 0.15:
+            # Long exit: price breaks below S1 or trend turns down
+            if (close[i] < S1_aligned[i] or 
+                ema50_12h_aligned[i] < close[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: CMF turns positive or BB width expands significantly
-            if cmf[i] > 0 or bb_width[i] > 0.15:
+            # Short exit: price breaks above R1 or trend turns up
+            if (close[i] > R1_aligned[i] or 
+                ema50_12h_aligned[i] > close[i]):
                 signals[i] = 0.0
                 position = 0
             else:
