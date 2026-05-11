@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_Volume_Signal_v1
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction.
-In ranging markets, KAMA stays flat, reducing false signals. Combined with
-volume confirmation (2x average) and 1d ADX trend filter (>25), this strategy
-captures strong trends while avoiding whipsaws. Targets 12-37 trades/year
-on 12h timeframe with low frequency to minimize fee drag. Works in both bull
-and bear markets by only trading when trend is strong (ADX>25).
+4H_Camarilla_R3_S3_Breakout_1dTrend_EMA34_Volume
+Hypothesis: Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+This strategy targets breakouts from key daily pivot levels (R3/S3) in the direction
+of the daily trend, filtered by volume spikes to avoid false breakouts. Works in both
+bull and bear markets by only taking breakouts aligned with the higher timeframe trend.
+Designed for low frequency (20-50 trades/year) to minimize fee drag.
 """
 
-name = "12h_KAMA_Trend_Volume_Signal_v1"
-timeframe = "12h"
+name = "4H_Camarilla_R3_S3_Breakout_1dTrend_EMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,76 +21,48 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for ADX (HTF)
+    # Get 1d data for Camarilla calculation and EMA trend (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- KAMA (10-period ER, 2/30 SC) on 12h ---
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
-    volatility = np.sum(np.abs(np.diff(close, k=1, prepend=0)), axis=0)
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing Constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # --- 1d EMA34 for trend filter ---
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # --- 1d ADX (14-period) ---
+    # --- Calculate Camarilla levels from previous 1d bar ---
+    # Camarilla uses previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # first day
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Previous day values (shifted by 1)
+    phigh = np.roll(high_1d, 1)
+    plow = np.roll(low_1d, 1)
+    pclose = np.roll(close_1d, 1)
+    # First day has no previous, set to same day values
+    phigh[0] = high_1d[0]
+    plow[0] = low_1d[0]
+    pclose[0] = close_1d[0]
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Camarilla calculations
+    R3 = pclose + (phigh - plow) * 1.1 / 4
+    S3 = pclose - (phigh - plow) * 1.1 / 4
     
-    # Smoothed values
-    def smooth(val, period):
-        s = np.zeros_like(val)
-        s[period-1] = np.sum(val[:period])
-        for i in range(period, len(val)):
-            s[i] = s[i-1] - (s[i-1] / period) + val[i]
-        return s
+    # Align Camarilla levels to 4h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    atr = smooth(tr, 14)
-    dm_plus_smooth = smooth(dm_plus, 14)
-    dm_minus_smooth = smooth(dm_minus, 14)
-    
-    # DI and DX
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smooth(dx, 14)
-    
-    # Align 1d ADX to 12h
-    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # --- Volume Spike (12h) ---
+    # --- Volume Spike (4h) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (2.0 * vol_ma.values)
+    vol_spike = volume > (2.0 * vol_ma.values)  # Strong volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -100,23 +71,22 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if ADX is NaN
-        if np.isnan(adx_12h[i]):
-            if position != 0:
-                # Simple trailing: exit if price crosses KAMA
-                if position == 1 and close[i] < kama[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif position == -1 and close[i] > kama[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25 if position == 1 else -0.25
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i])):
+            # Maintain position if valid, otherwise flat
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
             continue
         
-        # Entry conditions: KAMA trend + volume spike + strong trend (ADX>25)
-        long_entry = (close[i] > kama[i]) and vol_spike[i] and (adx_12h[i] > 25)
-        short_entry = (close[i] < kama[i]) and vol_spike[i] and (adx_12h[i] > 25)
+        # Entry conditions: Breakout of R3/S3 with volume and trend alignment
+        long_entry = (close[i] > R3_aligned[i]) and vol_spike[i] and (close[i] > ema_34_1d_aligned[i])
+        short_entry = (close[i] < S3_aligned[i]) and vol_spike[i] and (close[i] < ema_34_1d_aligned[i])
         
         if position == 0:
             if long_entry:
@@ -125,16 +95,20 @@ def generate_signals(prices):
             elif short_entry:
                 signals[i] = -0.25
                 position = -1
+            else:
+                signals[i] = 0.0
         else:
-            # Exit on KAMA cross or ADX weakening
+            # Exit conditions: Opposite breakout or trend reversal
             if position == 1:
-                if (close[i] < kama[i]) or (adx_12h[i] < 20):
+                # Exit if price breaks below S3 or trend turns down
+                if (close[i] < S3_aligned[i]) or (close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if (close[i] > kama[i]) or (adx_12h[i] < 20):
+                # Exit if price breaks above R3 or trend turns up
+                if (close[i] > R3_aligned[i]) or (close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
