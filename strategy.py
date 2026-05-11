@@ -1,6 +1,12 @@
+#%%
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+# 1D_Weekly_Trend_Follow_v1: Trend-following strategy using weekly higher timeframe trend (1w) and daily breakouts with volume confirmation.
+# Hypothesis: In trending markets (both bull and bear), price tends to continue in the direction of the weekly trend. 
+# Breakouts above/below prior day's high/low with volume confirmation capture momentum. Works in bull (up-trends) and bear (down-trends) by following weekly trend.
+# Target: 20-50 trades per year to minimize fee drag. Uses discrete position sizing (0.25) to reduce churn.
+
+name = "1D_Weekly_Trend_Follow_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:  # Need sufficient data for weekly trend
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,32 +23,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla levels and trend
+    # Get weekly data for trend filter (primary HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Get daily data for entry signals
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's values (avoid look-ahead)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # Weekly EMA34 for trend (responsive but smooth)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Camarilla R1 and S1 levels from previous day
-    r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # Daily high/low for breakout levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Previous day's high/low (avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_high[0] = high_1d[0]  # First day uses same day's high
+    prev_low[0] = low_1d[0]    # First day uses same day's low
     
-    # 1D EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align daily levels to 1d timeframe (no shift needed as same timeframe)
+    prev_high_aligned = prev_high  # Already aligned to daily
+    prev_low_aligned = prev_low    # Already aligned to daily
     
-    # Volume filter: 20-period average on 4h
+    # Volume filter: 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -55,8 +66,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(prev_high_aligned[i]) or 
+            np.isnan(prev_low_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -69,33 +82,35 @@ def generate_signals(prices):
         volume_surge = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: Price breaks above R1 with volume and above daily EMA34 (bullish bias)
-            if (close[i] > r1_aligned[i] and 
+            # Long: Price breaks above prior day's high with volume AND weekly trend is up
+            if (close[i] > prev_high_aligned[i] and 
                 volume_surge and 
-                close[i] > ema_34_aligned[i]):
+                close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume and below daily EMA34 (bearish bias)
-            elif (close[i] < s1_aligned[i] and 
+            # Short: Price breaks below prior day's low with volume AND weekly trend is down
+            elif (close[i] < prev_low_aligned[i] and 
                   volume_surge and 
-                  close[i] < ema_34_aligned[i]):
+                  close[i] < ema_34_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to opposite Camarilla level or trend fails
+            # Exit: price returns to prior day's opposite level or weekly trend fails
             if position == 1:
-                # Exit long: price returns to S1 or trend turns bearish
-                if (close[i] < s1_aligned[i]) or (close[i] < ema_34_aligned[i]):
+                # Exit long: price returns to prior day's low or weekly trend turns down
+                if (close[i] < prev_low_aligned[i]) or (close[i] < ema_34_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to R1 or trend turns bullish
-                if (close[i] > r1_aligned[i]) or (close[i] > ema_34_aligned[i]):
+                # Exit short: price returns to prior day's high or weekly trend turns up
+                if (close[i] > prev_high_aligned[i]) or (close[i] > ema_34_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = -0.25
     
     return signals
+
+#%%
