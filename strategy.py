@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_RCI_Reversal_1dTrend
-# Hypothesis: Combines 4h Relative Strength Index (RSI) with 1d trend structure and volume confirmation.
-# Long when: 1) daily structure is bullish (HH and HL), 2) RSI(14) crosses above 30 from below, 3) volume > 1.5x 20-period average.
-# Short when: 1) daily structure is bearish (LH and LL), 2) RSI(14) crosses below 70 from above, 3) volume > 1.5x 20-period average.
-# Exits when RSI returns to 50 or structure breaks.
-# Works in bull markets by buying pullbacks in uptrends and in bear markets by selling rallies in downtrends.
-# RSI provides mean-reversion signals within the trend, reducing false breakouts. 4h timeframe limits trades to avoid fee drag.
+# 12h_RSI_Trend_Filter
+# Hypothesis: Uses 12h RSI with 1d trend filter for mean reversion in ranging markets.
+# Long when: 1) 1d trend is bullish (price > EMA50), 2) 12h RSI < 30 (oversold), 3) Volume > 1.2x 20-period average.
+# Short when: 1) 1d trend is bearish (price < EMA50), 2) 12h RSI > 70 (overbought), 3) Volume > 1.2x 20-period average.
+# Exit when RSI returns to neutral (40-60) or trend flips.
+# Works in bull markets by buying dips in uptrends and in bear markets by selling rallies in downtrends.
+# RSI provides mean-reversion signals, trend filter avoids counter-trend trades, volume confirms momentum.
 
-name = "4h_RCI_Reversal_1dTrend"
-timeframe = "4h"
+name = "12h_RSI_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,53 +20,39 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for structure (HH, HL, LH, LL)
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d structure: HH/HL for uptrend, LH/LL for downtrend ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    # Higher High: today's high > yesterday's high
-    hh = high_1d > np.roll(high_1d, 1)
-    # Higher Low: today's low > yesterday's low
-    hl = low_1d > np.roll(low_1d, 1)
-    # Lower High: today's high < yesterday's high
-    lh = high_1d < np.roll(high_1d, 1)
-    # Lower Low: today's low < yesterday's low
-    ll = low_1d < np.roll(low_1d, 1)
-    # Uptrend: HH and HL
-    uptrend = hh & hl
-    # Downtrend: LH and LL
-    downtrend = lh & ll
-    # First bar: no previous day, set to False
-    uptrend[0] = False
-    downtrend[0] = False
+    # --- 1d EMA50 for trend filter ---
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # --- 4h RSI(14) ---
+    # --- 12h RSI(14) ---
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
+    gain_series = pd.Series(gain)
+    loss_series = pd.Series(loss)
+    avg_gain = gain_series.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = loss_series.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 50.0), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
     
-    # --- 4h volume confirmation (volume > 20-period average) ---
+    # --- 12h volume confirmation (volume > 20-period average) ---
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align all 1d indicators to 4h timeframe
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend)
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend)
+    # Align 1d EMA50 to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,47 +63,40 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(rsi[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(uptrend_aligned[i]) or
-            np.isnan(downtrend_aligned[i])):
+            np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Structure from 1d
-        is_uptrend = uptrend_aligned[i]
-        is_downtrend = downtrend_aligned[i]
+        # Trend from 1d EMA50
+        is_uptrend = close[i] > ema50_1d_aligned[i]
+        is_downtrend = close[i] < ema50_1d_aligned[i]
         
         # Volume spike condition
-        vol_spike = volume[i] > vol_ma[i] * 1.5  # 50% above average
-        
-        # RSI conditions
-        rsi_above_30 = rsi[i] > 30
-        rsi_below_70 = rsi[i] < 70
-        rsi_crossed_up_30 = (rsi[i] > 30) & (rsi[i-1] <= 30) if i > 0 else False
-        rsi_crossed_down_70 = (rsi[i] < 70) & (rsi[i-1] >= 70) if i > 0 else False
+        vol_spike = volume[i] > vol_ma[i] * 1.2  # 20% above average
         
         if position == 0:
-            if is_uptrend and vol_spike and rsi_crossed_up_30:
-                # Long: daily uptrend + volume spike + RSI crosses above 30
+            if is_uptrend and rsi[i] < 30 and vol_spike:
+                # Long: uptrend + oversold RSI + volume spike
                 signals[i] = 0.25
                 position = 1
-            elif is_downtrend and vol_spike and rsi_crossed_down_70:
-                # Short: daily downtrend + volume spike + RSI crosses below 70
+            elif is_downtrend and rsi[i] > 70 and vol_spike:
+                # Short: downtrend + overbought RSI + volume spike
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: RSI returns to 50 OR structure breaks down
-                if rsi[i] >= 50 or not is_uptrend:
+                # Exit long: RSI returns to neutral OR trend breaks down
+                if rsi[i] > 40 or not is_uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: RSI returns to 50 OR structure breaks up
-                if rsi[i] <= 50 or not is_downtrend:
+                # Exit short: RSI returns to neutral OR trend breaks up
+                if rsi[i] < 60 or not is_downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
