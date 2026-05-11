@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Camarilla_Squeeze_Breakout"
-timeframe = "1h"
+name = "6h_1w_1d_Floodgate_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,85 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for direction and regime
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly and daily data
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    if len(df_1w) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h Close for trend filter
-    close_4h = df_4h['close'].values
-    # 4h EMA20 for trend
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_4h = close_4h > ema20_4h
+    # Weekly EMA200 for long-term trend
+    weekly_close = df_1w['close'].values
+    ema200_w = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    weekly_trend = weekly_close > ema200_w
     
-    # 1d Bollinger Bands for squeeze detection (20, 2.0)
-    close_1d = df_1d['close'].values
-    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20_1d + 2 * std20_1d
-    lower_bb = sma20_1d - 2 * std20_1d
-    bb_width = (upper_bb - lower_bb) / sma20_1d
-    # Squeeze: BB width below 20-period percentile 30%
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0, raw=False
-    ).values
-    squeeze = bb_width_percentile < 0.3
+    # Daily ADX(14) for trend strength
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # 1h Camarilla levels (based on prior 1h bar)
-    # We'll calculate these in the loop using prior bar data
+    # True Range
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align higher timeframe signals to 1h
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    # Directional Movement
+    dm_plus = np.where((daily_high - np.concatenate([[daily_high[0]], daily_high[:-1]])) > 
+                       (np.concatenate([[daily_low[0]], daily_low[:-1]]) - daily_low), 
+                       np.maximum(daily_high - np.concatenate([[daily_high[0]], daily_high[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[daily_low[0]], daily_low[:-1]]) - daily_low) > 
+                        (daily_high - np.concatenate([[daily_high[0]], daily_high[:-1]])), 
+                        np.maximum(np.concatenate([[daily_low[0]], daily_low[:-1]]) - daily_low, 0), 0)
     
-    # Pre-calculate volume average for confirmation
-    vol_ma20 = np.zeros(n)
+    # Smoothed values
+    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / (tr14 + 1e-10)
+    di_minus = 100 * dm_minus_14 / (tr14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # 60-period volume average for confirmation
+    vol_ma60 = np.zeros(n)
     for i in range(n):
-        if i < 20:
-            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        if i < 60:
+            vol_ma60[i] = np.mean(volume[:i+1]) if i > 0 else 0
         else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+            vol_ma60[i] = np.mean(volume[i-59:i+1])
+    
+    # Align weekly trend and daily ADX to 6h
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = max(100, 60)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(trend_4h_aligned[i]) or 
-            np.isnan(squeeze_aligned[i]) or
-            np.isnan(vol_ma20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Calculate Camarilla levels for current 1h bar using prior bar
-        if i >= 1:
-            # Use prior bar's OHLC for Camarilla calculation
-            prev_high = high[i-1]
-            prev_low = low[i-1]
-            prev_close = close[i-1]
-            range_ = prev_high - prev_low
-            
-            if range_ > 0:
-                # Camarilla levels
-                camarilla_h5 = prev_close + 1.1 * range_ / 12  # Resistance 5
-                camarilla_h4 = prev_close + 1.1 * range_ / 6   # Resistance 4
-                camarilla_h3 = prev_close + 1.1 * range_ / 4   # Resistance 3
-                camarilla_l3 = prev_close - 1.1 * range_ / 4   # Support 3
-                camarilla_l4 = prev_close - 1.1 * range_ / 6   # Support 4
-                camarilla_l5 = prev_close - 1.1 * range_ / 12  # Support 5
-            else:
-                camarilla_h5 = camarilla_h4 = camarilla_h3 = prev_close
-                camarilla_l3 = camarilla_l4 = camarilla_l5 = prev_close
-        else:
-            # Not enough data, skip
+        if (np.isnan(weekly_trend_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma60[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -104,33 +91,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: 4h uptrend + 1d squeeze + price breaks above H4 with volume
-            if (trend_4h_aligned[i] and 
-                squeeze_aligned[i] and 
-                close[i] > camarilla_h4 and 
-                volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = 0.20
+            # Long: weekly uptrend + ADX > 25 + volume confirmation
+            if (weekly_trend_aligned[i] and 
+                adx_aligned[i] > 25 and 
+                volume[i] > 1.3 * vol_ma60[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + 1d squeeze + price breaks below L4 with volume
-            elif (not trend_4h_aligned[i] and 
-                  squeeze_aligned[i] and 
-                  close[i] < camarilla_l4 and 
-                  volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = -0.20
+            # Short: weekly downtrend + ADX > 25 + volume confirmation
+            elif (not weekly_trend_aligned[i] and 
+                  adx_aligned[i] > 25 and 
+                  volume[i] > 1.3 * vol_ma60[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks down or price reaches H5 (take profit)
-            if (not trend_4h_aligned[i] or close[i] >= camarilla_h5):
+            # Long exit: weekly trend changes or ADX < 20
+            if (not weekly_trend_aligned[i] or adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks up or price reaches L5 (take profit)
-            if (trend_4h_aligned[i] or close[i] <= camarilla_l5):
+            # Short exit: weekly trend changes or ADX < 20
+            if (weekly_trend_aligned[i] or adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
