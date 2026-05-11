@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v1
-Hypothesis: Uses daily Camarilla pivot levels (R1/S1) with volume spike confirmation and 1-day EMA trend filter.
-Trades breakouts in trending markets (EMA34) and mean-reversion at pivot levels in ranging markets.
-Designed for low trade frequency (<30/year) to avoid fee drag while capturing high-probability moves.
-Target timeframe: 12h for lower turnover and higher win rate in both bull and bear markets.
+1h_Camarilla_R1_S1_Breakout_4hTrend_1dVol
+Hypothesis: Use 4h trend (EMA50) and 1d volume spike for signal direction, 1h for entry timing at Camarilla R1/S1 levels.
+Breakouts only in direction of 4h trend with 1d volume confirmation. Avoids counter-trend trades to reduce whipsaw.
+Designed for low trade frequency (15-30/year) to avoid fee drag while capturing high-probability momentum moves.
+Works in bull markets via trend-following breakouts and in bear markets via short breakdowns with volume confirmation.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v1"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVol"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -20,21 +20,26 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots and EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # Get 1d data for Camarilla pivots and volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # 1h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d EMA34 for trend filter ---
-    close_1d = df_1d['close']
-    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # --- 4h EMA50 for trend filter ---
+    close_4h = df_4h['close']
+    ema_50_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # --- Daily Camarilla Pivot Levels (R1, S1) ---
     # Based on previous day's OHLC
@@ -48,85 +53,73 @@ def generate_signals(prices):
     r1 = pivot + (range_1d * 1.1 / 12)  # R1
     s1 = pivot - (range_1d * 1.1 / 12)  # S1
     
-    # Align to 12h (Camarilla levels are valid for the entire day)
+    # Align to 1h (Camarilla levels are valid for the entire day)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # --- Volume Spike Detection (2x 20-period EMA) ---
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
-    vol_spike = volume > (2.0 * vol_ema.values)
+    # --- 1d Volume Spike (2x 20-period EMA) ---
+    vol_ema_1d = df_1d['volume'].ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike_1d = df_1d['volume'].values > (2.0 * vol_ema_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or 
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
-            np.isnan(vol_spike[i])):
+            np.isnan(vol_spike_1d_aligned[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine trend based on price vs EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Determine 4h trend based on price vs EMA50
+        price_above_ema = close[i] > ema_50_4h_aligned[i]
+        price_below_ema = close[i] < ema_50_4h_aligned[i]
         
-        # Breakout signals (price crosses R1/S1 with volume spike)
-        long_breakout = (high[i] > r1_aligned[i]) and vol_spike[i]
-        short_breakout = (low[i] < s1_aligned[i]) and vol_spike[i]
-        
-        # Mean reversion at pivot levels (price touches S1/R1 without breakout)
-        # Only in non-trending conditions (price near EMA)
-        near_ema = abs(close[i] - ema_34_1d_aligned[i]) < (0.01 * ema_34_1d_aligned[i])  # Within 1% of EMA
-        long_reversion = (low[i] <= s1_aligned[i]) and near_ema and not vol_spike[i]
-        short_reversion = (high[i] >= r1_aligned[i]) and near_ema and not vol_spike[i]
+        # Breakout signals (price crosses R1/S1 with 1d volume spike)
+        long_breakout = (high[i] > r1_aligned[i]) and vol_spike_1d_aligned[i]
+        short_breakout = (low[i] < s1_aligned[i]) and vol_spike_1d_aligned[i]
         
         if position == 0:
             if price_above_ema:
-                # Uptrend: favor long breakouts, avoid shorts
+                # Uptrend: only long breakouts
                 if long_breakout:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
                     position = 1
             elif price_below_ema:
-                # Downtrend: favor short breakouts, avoid longs
+                # Downtrend: only short breakouts
                 if short_breakout:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
                     position = -1
-            else:
-                # Near EMA: allow mean reversion at pivot levels
-                if long_reversion:
-                    signals[i] = 0.25
-                    position = 1
-                elif short_reversion:
-                    signals[i] = -0.25
-                    position = -1
+            # No counter-trend trades to reduce whipsaw
         else:
-            # Exit conditions
+            # Exit conditions: reverse signal or trend change
             if position == 1:
-                # Exit long: price touches S1 (support) or breaks below EMA
-                exit_signal = (low[i] <= s1_aligned[i]) or (close[i] < ema_34_1d_aligned[i])
+                # Exit long: short breakdown or trend turns down
+                exit_signal = short_breakout or (close[i] < ema_50_4h_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: price touches R1 (resistance) or breaks above EMA
-                exit_signal = (high[i] >= r1_aligned[i]) or (close[i] > ema_34_1d_aligned[i])
+                # Exit short: long breakout or trend turns up
+                exit_signal = long_breakout or (close[i] > ema_50_4h_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
