@@ -1,7 +1,10 @@
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v5
-# Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 4h, filtered by 1d EMA34 trend and volume spike (2x median). Uses tighter R1/S1 levels for fewer, higher-quality trades. Trend filter from daily timeframe ensures alignment with longer-term momentum. Volume confirms conviction. Designed to work in bull (uptrend breaks) and bear (downtrend breaks). Target: 20-50 trades/year to avoid fee drag.
+#!/usr/bin/env python3
+"""
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Specific
+Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 4h, filtered by 1d EMA34 trend and volume spike (2x median). Uses tighter R1/S1 levels for fewer, higher-quality trades. Trend filter from daily timeframe ensures alignment with longer-term momentum. Volume confirms conviction. Designed to work in bull (uptrend breaks) and bear (downtrend breaks). Target: 20-50 trades/year to avoid fee drag.
+"""
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v5"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Specific"
 timeframe = "4h"
 leverage = 1.0
 
