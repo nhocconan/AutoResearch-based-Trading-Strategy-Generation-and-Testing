@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
-Hypothesis: Combines Camarilla pivot breakout on 1h with 4h trend filter (EMA50) and 1d volume spike confirmation.
-Uses 4h/1d for signal direction, 1h only for entry timing. Target: 15-35 trades/year to minimize fee drag.
-Works in bull markets via breakouts with trend, in bear markets via mean reversion at Camarilla levels during low volatility.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses daily Camarilla pivot levels (R1, S1) with 1-day EMA34 trend filter and volume spike confirmation.
+Works in bull markets via breakouts above R1 and bear markets via breakdowns below S1. Volume spike filters false breakouts.
+Target: 15-25 trades/year to minimize fee drag while capturing strong directional moves.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,130 +16,95 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for volume filter
+    # Get 1d data for Camarilla pivots and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1h OHLCV
+    # 12h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h EMA50 for trend filter ---
-    ema_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean()
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h.values)
+    # --- 1d Camarilla Pivot Levels (R1, S1) ---
+    # Calculate pivot point and ranges
+    pp = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_hl = df_1d['high'] - df_1d['low']
     
-    # --- 1d volume spike detection ---
-    vol_ma_1d = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean()
-    vol_spike_1d = df_1d['volume'].values > (2.0 * vol_ma_1d.values)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Camarilla R1 and S1
+    r1 = pp + (range_hl * 1.1 / 12)
+    s1 = pp - (range_hl * 1.1 / 12)
     
-    # --- Previous day Camarilla levels (using prior 1d OHLC) ---
-    # Shift to ensure we use only completed daily data
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
-    # Calculate Camarilla levels
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # --- 1d EMA34 for trend filter ---
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean()
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34.values)
     
-    # --- Session filter: 08-20 UTC ---
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # --- Volume Spike Detection (20-period EMA) ---
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
+    vol_spike = volume > (2.0 * vol_ma.values)  # Significant volume spike
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or
-            np.isnan(S1_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or
+            np.isnan(vol_spike[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Session filter
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Determine market trend based on price vs EMA34
+        is_uptrend = close[i] > ema_34_aligned[i]
+        is_downtrend = close[i] < ema_34_aligned[i]
         
-        if not in_session:
-            # Outside session, flatten position
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Determine trend based on 4h EMA50
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
-        
-        # Breakout signals
-        long_breakout = (high[i] > R1_aligned[i]) and vol_spike_1d_aligned[i]
-        short_breakout = (low[i] < S1_aligned[i]) and vol_spike_1d_aligned[i]
-        
-        # Mean reversion signals (only in low volume environments)
-        low_vol_env = not vol_spike_1d_aligned[i]  # No volume spike = low volatility
-        long_reversion = (low[i] <= S1_aligned[i]) and low_vol_env and uptrend
-        short_reversion = (high[i] >= R1_aligned[i]) and low_vol_env and downtrend
+        # Breakout signals with volume confirmation
+        long_breakout = (high[i] > r1_aligned[i]) and vol_spike[i]
+        short_breakout = (low[i] < s1_aligned[i]) and vol_spike[i]
         
         if position == 0:
-            if uptrend:
-                # In uptrend, prioritize long breakouts and mean reversion at S1
-                if long_breakout:
-                    signals[i] = 0.20
-                    position = 1
-                elif long_reversion:
-                    signals[i] = 0.20
-                    position = 1
-            elif downtrend:
-                # In downtrend, prioritize short breakouts and mean reversion at R1
-                if short_breakout:
-                    signals[i] = -0.20
-                    position = -1
-                elif short_reversion:
-                    signals[i] = -0.20
-                    position = -1
+            # Only take long breaks in uptrend, short breaks in downtrend
+            if is_uptrend and long_breakout:
+                signals[i] = 0.25
+                position = 1
+            elif is_downtrend and short_breakout:
+                signals[i] = -0.25
+                position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price reaches R1 (profit target) or breaks S1 (stop)
-                exit_signal = (low[i] <= S1_aligned[i]) or (high[i] >= R1_aligned[i])
+                # Exit long: price touches S1 (opposite level) or trend changes
+                exit_signal = (low[i] < s1_aligned[i]) or (not is_uptrend)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Exit short: price reaches S1 (profit target) or breaks R1 (stop)
-                exit_signal = (high[i] >= R1_aligned[i]) or (low[i] <= S1_aligned[i])
+                # Exit short: price touches R1 (opposite level) or trend changes
+                exit_signal = (high[i] > r1_aligned[i]) or (not is_downtrend)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
