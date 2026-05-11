@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_1w_Donchian_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_12h_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,26 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up_1w = close_1w > ema50_1w
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_12h = close_12h > ema50_12h
     
-    # Daily Donchian(20) breakout levels
-    donchian_high = np.zeros(n)
-    donchian_low = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            donchian_high[i] = np.max(high[:i+1])
-            donchian_low[i] = np.min(low[:i+1])
+    # Get 1d data for Camarilla levels (R3, S3)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels (R3, S3) from previous day
+    R3 = np.zeros(len(high_1d))
+    S3 = np.zeros(len(high_1d))
+    
+    for i in range(len(high_1d)):
+        if i < 1:
+            R3[i] = np.nan
+            S3[i] = np.nan
         else:
-            donchian_high[i] = np.max(high[i-19:i+1])
-            donchian_low[i] = np.min(low[i-19:i+1])
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
+            prev_close = close_1d[i-1]
+            range_val = prev_high - prev_low
+            R3[i] = prev_close + range_val * 1.1 / 4
+            S3[i] = prev_close - range_val * 1.1 / 4
+    
+    # Align indicators to 6h timeframe
+    R3_12h_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_12h_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    trend_up_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_up_12h)
     
     # Volume moving average (20-period) for confirmation
     vol_ma20 = np.zeros(n)
@@ -46,17 +64,17 @@ def generate_signals(prices):
         else:
             vol_ma20[i] = np.mean(volume[i-19:i+1])
     
-    # Align weekly trend to daily
-    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = max(20, 20)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if np.isnan(trend_up_1w_aligned[i]) or np.isnan(vol_ma20[i]):
+        if (np.isnan(R3_12h_aligned[i]) or 
+            np.isnan(S3_12h_aligned[i]) or
+            np.isnan(trend_up_12h_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,28 +83,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + weekly uptrend + volume confirmation
-            if (close[i] > donchian_high[i] and 
-                trend_up_1w_aligned[i] and 
+            # Long: price breaks above R3 + uptrend + volume confirmation
+            if (close[i] > R3_12h_aligned[i] and 
+                trend_up_12h_aligned[i] and 
                 volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + weekly downtrend + volume confirmation
-            elif (close[i] < donchian_low[i] and 
-                  not trend_up_1w_aligned[i] and 
+            # Short: price breaks below S3 + downtrend + volume confirmation
+            elif (close[i] < S3_12h_aligned[i] and 
+                  not trend_up_12h_aligned[i] and 
                   volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian low or trend changes
-            if (close[i] < donchian_low[i] or not trend_up_1w_aligned[i]):
+            # Long exit: price breaks below S3 or trend changes
+            if (close[i] < S3_12h_aligned[i] or not trend_up_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian high or trend changes
-            if (close[i] > donchian_high[i] or trend_up_1w_aligned[i]):
+            # Short exit: price breaks above R3 or trend changes
+            if (close[i] > R3_12h_aligned[i] or trend_up_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
