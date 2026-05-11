@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
-"""
-1d_Weekly_Trend_Daily_Retracement
-Hypothesis: In strong weekly uptrend (price above weekly EMA200), buy daily retracements to daily EMA50.
-In strong weekly downtrend (price below weekly EMA200), sell short on daily bounces to daily EMA50.
-Uses weekly trend filter with daily mean reversion for low-frequency, high-conviction trades.
-Designed for <25 trades/year to minimize fee drift and work in both bull/bear markets.
-"""
+# 12h_1w_HighLow_Filter
+# Hypothesis: Uses 1-week high and low as key support/resistance levels on 12h timeframe.
+# Long when price crosses above 1w high with 12h above 12-period EMA (uptrend).
+# Short when price crosses below 1w low with 12h below 12-period EMA (downtrend).
+# Weekly levels act as strong institutional levels; EMA filter avoids counter-trend trades.
+# Designed for low trade frequency (12-37/year) to minimize fee drag on 12h chart.
 
-name = "1d_Weekly_Trend_Daily_Retracement"
-timeframe = "1d"
+name = "12h_1w_HighLow_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,47 +15,44 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # === WEEKLY DATA FOR TREND FILTER ===
+    # === 1W Data for Weekly High/Low and Trend Filter ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Weekly EMA200 for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Previous week's high and low
+    ph_1w = high_1w  # previous week high
+    pl_1w = low_1w   # previous week low
     
-    # === DAILY INDICATORS ===
-    # Daily EMA50 for entry
-    ema50_d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1w EMA12 for trend (using weekly close)
+    ema12_1w = pd.Series(close_1w).ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    # Daily RSI(14) for overbought/oversold in counter-trend entries
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    # Align weekly data to 12h timeframe
+    ph_aligned = align_htf_to_ltf(prices, df_1w, ph_1w)
+    pl_aligned = align_htf_to_ltf(prices, df_1w, pl_1w)
+    ema12_aligned = align_htf_to_ltf(prices, df_1w, ema12_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers weekly EMA200)
-    start_idx = 200
+    # Start after warmup (covers 1w EMA12)
+    start_idx = 12
     
     for i in range(start_idx, n):
-        # Skip if weekly trend data is invalid
-        if np.isnan(ema200_1w_aligned[i]):
+        # Skip if any required data is invalid
+        if (np.isnan(ph_aligned[i]) or np.isnan(pl_aligned[i]) or 
+            np.isnan(ema12_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,32 +61,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Weekly uptrend: price above weekly EMA200
-            if close[i] > ema200_1w_aligned[i]:
-                # Long on daily retracement: price near daily EMA50 with RSI not overbought
-                if (abs(close[i] - ema50_d[i]) / ema50_d[i] < 0.02 and  # within 2% of EMA50
-                    rsi[i] < 60):  # not overbought
-                    signals[i] = 0.25
-                    position = 1
-            # Weekly downtrend: price below weekly EMA200
-            elif close[i] < ema200_1w_aligned[i]:
-                # Short on daily bounce: price near daily EMA50 with RSI not oversold
-                if (abs(close[i] - ema50_d[i]) / ema50_d[i] < 0.02 and  # within 2% of EMA50
-                    rsi[i] > 40):  # not oversold
-                    signals[i] = -0.25
-                    position = -1
+            # Long: close above previous week's high with uptrend (price > weekly EMA)
+            if (close[i] > ph_aligned[i] and 
+                close[i] > ema12_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: close below previous week's low with downtrend (price < weekly EMA)
+            elif (close[i] < pl_aligned[i] and 
+                  close[i] < ema12_aligned[i]):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: weekly trend turns down OR RSI overbought
-            if (close[i] < ema200_1w_aligned[i] or 
-                rsi[i] > 70):
+            # Long exit: close below previous week's low (trend invalidation)
+            if close[i] < pl_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: weekly trend turns up OR RSI oversold
-            if (close[i] > ema200_1w_aligned[i] or 
-                rsi[i] < 30):
+            # Short exit: close above previous week's high (trend invalidation)
+            if close[i] > ph_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
