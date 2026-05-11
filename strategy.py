@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_1d_CCI_Reversal_TrendFilter
-# Hypothesis: 4h price reverses from 1-day CCI extremes with trend filter.
-# Long when: CCI(20) < -100 AND 1d EMA50 rising AND volume > 1.3x 20-bar avg.
-# Short when: CCI(20) > 100 AND 1d EMA50 falling AND volume > 1.3x 20-bar avg.
-# Exit when CCI crosses back above -50 (long) or below 50 (short) OR trend reverses.
-# CCI captures overextended moves; EMA50 filters counter-trend in bear markets.
-# Works in bull by buying dips in uptrend; works in bear by selling rallies in downtrend.
-# Target: 20-30 trades/year (80-120 total over 4 years) to avoid fee drag.
+# 4h_1h_VWAP_Reversion_TrendFilter
+# Hypothesis: 4h price reverts to 1-hour VWAP (institutional fair value) with 1h EMA20 trend filter.
+# Long when: price < 1h VWAP - 0.5*ATR(14) AND 1h EMA20 rising AND volume > 1.5x 20-bar avg.
+# Short when: price > 1h VWAP + 0.5*ATR(14) AND 1h EMA20 falling AND volume > 1.5x 20-bar avg.
+# Exit when price crosses 1h VWAP or 1h EMA20 trend reverses.
+# VWAP acts as a mean-reversion anchor; EMA20 filters counter-trend moves in bear markets.
+# Works in bull by buying dips to VWAP in uptrend; works in bear by selling rallies to VWAP in downtrend.
+# Target: 20-40 trades/year (80-160 total over 4 years) to avoid fee drag.
 
-name = "4h_1d_CCI_Reversal_TrendFilter"
+name = "4h_1h_VWAP_Reversion_TrendFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,9 +21,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for CCI and EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1h data for VWAP and EMA20
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
         return np.zeros(n)
     
     # 4h OHLCV
@@ -32,92 +32,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d CCI(20) ---
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    sma_tp = np.full(len(typical_price), np.nan)
-    mad = np.full(len(typical_price), np.nan)
-    for i in range(20, len(typical_price)):
-        sma_tp[i] = np.mean(typical_price[i-20:i])
-        mad[i] = np.mean(np.abs(typical_price[i-20:i] - sma_tp[i]))
-    cci = np.full(len(typical_price), np.nan)
-    for i in range(20, len(typical_price)):
-        if mad[i] != 0:
-            cci[i] = (typical_price[i] - sma_tp[i]) / (0.015 * mad[i])
-        else:
-            cci[i] = 0.0
+    # --- 1h VWAP (typical price * volume cumulative) ---
+    typical_price_1h = (df_1h['high'] + df_1h['low'] + df_1h['close']) / 3
+    vp_1h = typical_price_1h * df_1h['volume']
+    cum_vp_1h = np.cumsum(vp_1h)
+    cum_vol_1h = np.cumsum(df_1h['volume'])
+    vwap_1h = np.where(cum_vol_1h != 0, cum_vp_1h / cum_vol_1h, np.nan)
     
-    # --- 1d EMA50 trend ---
-    close_1d = df_1d['close'].values
-    ema_1d = np.full(len(close_1d), np.nan)
-    for i in range(len(close_1d)):
-        if i < 50:
-            ema_1d[i] = np.nan
-        elif i == 50:
-            ema_1d[i] = np.mean(close_1d[0:50])
+    # --- 1h EMA20 trend ---
+    close_1h = df_1h['close'].values
+    ema_1h = np.full(len(close_1h), np.nan)
+    for i in range(len(close_1h)):
+        if i < 20:
+            ema_1h[i] = np.nan
+        elif i == 20:
+            ema_1h[i] = np.mean(close_1h[0:20])
         else:
-            ema_1d[i] = (close_1d[i] * 2 / (50 + 1)) + (ema_1d[i-1] * (49 / (50 + 1)))
+            ema_1h[i] = (close_1h[i] * 2 / (20 + 1)) + (ema_1h[i-1] * (19 / (20 + 1)))
     
     # EMA slope
-    ema_slope_1d = np.full(len(close_1d), np.nan)
-    for i in range(51, len(close_1d)):
-        ema_slope_1d[i] = ema_1d[i] - ema_1d[i-1]
+    ema_slope_1h = np.full(len(close_1h), np.nan)
+    for i in range(21, len(close_1h)):
+        ema_slope_1h[i] = ema_1h[i] - ema_1h[i-1]
+    
+    # --- 4h ATR(14) for volatility scaling ---
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            atr[i] = np.mean(tr[0:14])
+        else:
+            atr[i] = (tr[i] * 1 / 14) + (atr[i-1] * 13 / 14)
     
     # --- 4h volume MA(20) ---
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1d indicators to 4h
-    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    ema_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_slope_1d)
+    # Align 1h indicators to 4h
+    vwap_1h_aligned = align_htf_to_ltf(prices, df_1h, vwap_1h)
+    ema_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_1h)
+    ema_slope_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_slope_1h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max(CCI needs 20, EMA50 needs 50, vol MA needs 20)
-    start_idx = max(20, 50, 20)
+    # Warmup: max(1h VWAP needs 1 bar, EMA20, ATR14, vol MA20)
+    start_idx = max(20, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(cci_aligned[i]) or
-            np.isnan(ema_1d_aligned[i]) or
-            np.isnan(ema_slope_1d_aligned[i]) or
+        if (np.isnan(vwap_1h_aligned[i]) or
+            np.isnan(ema_1h_aligned[i]) or
+            np.isnan(ema_slope_1h_aligned[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # CCI extremes
-        cci_overbought = cci_aligned[i] > 100
-        cci_oversold = cci_aligned[i] < -100
-        cci_exit_long = cci_aligned[i] > -50
-        cci_exit_short = cci_aligned[i] < 50
+        # VWAP reversion conditions with volatility band
+        vwap_upper = vwap_1h_aligned[i] + 0.5 * atr[i]
+        vwap_lower = vwap_1h_aligned[i] - 0.5 * atr[i]
+        
+        price_below_vwap = close[i] < vwap_lower
+        price_above_vwap = close[i] > vwap_upper
         
         # Volume confirmation
-        vol_spike = volume[i] > vol_ma[i] * 1.3
+        vol_spike = volume[i] > vol_ma[i] * 1.5
         
         if position == 0:
-            if cci_oversold and ema_slope_1d_aligned[i] > 0 and vol_spike:
-                # Long: oversold in uptrend
+            if price_below_vwap and ema_slope_1h_aligned[i] > 0 and vol_spike:
+                # Long: pullback to VWAP support in uptrend
                 signals[i] = 0.25
                 position = 1
-            elif cci_overbought and ema_slope_1d_aligned[i] < 0 and vol_spike:
-                # Short: overbought in downtrend
+            elif price_above_vwap and ema_slope_1h_aligned[i] < 0 and vol_spike:
+                # Short: rally to VWAP resistance in downtrend
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: CCI crosses above -50 OR trend turns down
-                if cci_exit_long or ema_slope_1d_aligned[i] < 0:
+                # Exit long: price crosses VWAP OR EMA20 trend turns down
+                if close[i] > vwap_1h_aligned[i] or ema_slope_1h_aligned[i] < 0:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: CCI crosses below 50 OR trend turns up
-                if cci_exit_short or ema_slope_1d_aligned[i] > 0:
+                # Exit short: price crosses VWAP OR EMA20 trend turns up
+                if close[i] < vwap_1h_aligned[i] or ema_slope_1h_aligned[i] > 0:
                     signals[i] = 0.0
                     position = 0
                 else:
