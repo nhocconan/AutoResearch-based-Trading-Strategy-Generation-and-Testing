@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_HTF_Structure_Aligned_Trend
-Hypothesis: Uses weekly structure (higher highs/lows) as trend filter and daily price action for entry timing on 6h timeframe.
-Designed to capture medium-term trends while avoiding counter-trend trades in choppy markets. 
-Weekly structure provides robust trend identification, while daily price action offers precise entries.
-Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
-Should work in both bull (follow structure) and bear (respect structure reversals) markets.
+6h_Keltner_Breakout_Volume_Regime_v1
+Hypothesis: Keltner Channel breakouts (ATR-based) with volume confirmation and volatility regime filter.
+Uses 12h trend filter to avoid counter-trend trades. Designed for low frequency (15-30 trades/year) to work in both bull (breakouts) and bear (mean reversion near mean) markets.
+Keltner Channels adapt to volatility, providing dynamic support/resistance. In high volatility regimes, breakouts are more reliable. In low volatility, we fade extremes toward the EMA middle.
 """
 
-name = "6h_HTF_Structure_Aligned_Trend"
+name = "6h_Keltner_Breakout_Volume_Regime_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -18,17 +16,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for structure
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 4:
-        return np.zeros(n)
-    
-    # Get daily data for entry timing
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
     # 6h OHLCV
@@ -37,58 +30,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- Weekly Structure: Higher Highs/Higher Lows (uptrend) or Lower Lows/Lower Highs (downtrend) ---
-    # Calculate weekly swing points
-    whigh = df_1w['high'].values
-    wlow = df_1w['low'].values
+    # --- 12h EMA50 for trend filter ---
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Weekly pivot highs and lows (3-bar structure)
-    whigh_idx = np.argmax(whigh) if len(whigh) >= 3 else 0
-    wlow_idx = np.argmin(wlow) if len(wlow) >= 3 else 0
+    # --- Keltner Channel (20, 2.0) ---
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(high - low).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_20 + (2.0 * atr)
+    lower_keltner = ema_20 - (2.0 * atr)
     
-    # Simplified: use weekly close vs previous weekly close for trend
-    wclose = df_1w['close'].values
-    wtrend = np.where(wclose >= np.roll(wclose, 1), 1, -1)  # 1=uptrend, -1=downtrend
-    wtrend[0] = 1  # Initialize
+    # --- Volume spike (20-period average) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_ma)  # Volume confirmation
     
-    # Align weekly trend to 6h
-    wtrend_aligned = align_htf_to_ltf(prices, df_1w, wtrend.astype(float))
-    
-    # --- Daily Price Action: Engulfing candles for entry ---
-    do = df_1d['open'].values
-    dh = df_1d['high'].values
-    dl = df_1d['low'].values
-    dc = df_1d['close'].values
-    
-    # Bullish engulfing: current green candle engulfs previous red candle
-    bull_eng = (dc > do) & (dc[:-1] < do[:-1]) & (dc >= do[:-1]) & (do <= dc[:-1])
-    # Bearish engulfing: current red candle engulfs previous green candle
-    bear_eng = (dc < do) & (dc[:-1] > do[:-1]) & (dc <= do[:-1]) & (do >= dc[:-1])
-    
-    # Pad arrays to match daily length
-    bull_eng = np.concatenate([[False], bull_eng])
-    bear_eng = np.concatenate([[False], bear_eng])
-    
-    # Align engulfing signals to 6h
-    bull_eng_aligned = align_htf_to_ltf(prices, df_1d, bull_eng.astype(float))
-    bear_eng_aligned = align_htf_to_ltf(prices, df_1d, bear_eng.astype(float))
-    
-    # --- Volume confirmation on 6h ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (1.5 * vol_ma.values)
+    # --- Volatility regime: ATR ratio (current vs 50-period average) ---
+    atr_50 = pd.Series(high - low).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr_ratio = atr / atr_50  # >1 = high volatility, <1 = low volatility
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(wtrend_aligned[i]) or 
-            np.isnan(bull_eng_aligned[i]) or
-            np.isnan(bear_eng_aligned[i]) or
-            np.isnan(vol_ma.values[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(ema_20[i]) or
+            np.isnan(upper_keltner[i]) or
+            np.isnan(lower_keltner[i]) or
+            np.isnan(vol_spike[i]) or
+            np.isnan(atr_ratio[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -98,32 +71,59 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Entry logic: follow weekly structure with daily price action confirmation
+        # Determine volatility regime
+        high_vol = atr_ratio[i] > 1.2  # High volatility regime
+        low_vol = atr_ratio[i] < 0.8   # Low volatility regime
+        
+        # Breakout signals with volume confirmation
+        breakout_long = (close[i] > upper_keltner[i-1]) and vol_spike[i]
+        breakout_short = (close[i] < lower_keltner[i-1]) and vol_spike[i]
+        
+        # Mean reversion signals (fade extremes toward EMA middle)
+        mean_revert_long = (close[i] < lower_keltner[i]) and (close[i] > ema_20[i])
+        mean_revert_short = (close[i] > upper_keltner[i]) and (close[i] < ema_20[i])
+        
         if position == 0:
-            # Long: weekly uptrend + daily bullish engulfing + volume spike
-            if (wtrend_aligned[i] > 0 and 
-                bull_eng_aligned[i] > 0.5 and 
-                vol_spike[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: weekly downtrend + daily bearish engulfing + volume spike
-            elif (wtrend_aligned[i] < 0 and 
-                  bear_eng_aligned[i] > 0.5 and 
-                  vol_spike[i]):
-                signals[i] = -0.25
-                position = -1
+            if high_vol:
+                # High volatility: trade breakouts in trend direction
+                if breakout_long and close[i] > ema_50_12h_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif breakout_short and close[i] < ema_50_12h_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            elif low_vol:
+                # Low volatility: fade extremes toward mean
+                if mean_revert_long:
+                    signals[i] = 0.25
+                    position = 1
+                elif mean_revert_short:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
+                # Neutral volatility: no trade
                 signals[i] = 0.0
         else:
-            # Exit: weekly structure reversal
-            if position == 1 and wtrend_aligned[i] < 0:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1 and wtrend_aligned[i] > 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+            # Exit conditions
+            if position == 1:
+                # Exit long: price crosses below EMA middle or opposite breakout
+                exit_signal = (close[i] < ema_20[i]) or breakout_short
+                if exit_signal:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Exit short: price crosses above EMA middle or opposite breakout
+                exit_signal = (close[i] > ema_20[i]) or breakout_long
+                if exit_signal:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
