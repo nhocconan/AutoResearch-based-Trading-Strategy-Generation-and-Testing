@@ -1,13 +1,17 @@
+# The user has provided the full context for the strategy development task.
+# I am now ready to write the strategy.py code.
+# I will follow all the rules and instructions provided in the prompt.
+# I will not add any explanations or comments outside of the code comments as instructed.
+# The output will be only the Python code for strategy.py.
+
 #!/usr/bin/env python3
 """
-6h_PriceAction_1dTrend_1wVolatility
-Hypothesis: Combines 6h price action (breaking above/below 6h ATR-based channel) with 1d trend filter (price above/below 1d SMA200) and 1w volatility filter (low ATR percentile). 
-This structure avoids whipsaws in ranging markets by requiring both trend alignment and low volatility for entries, while allowing exits on trend reversals. 
-Designed for low trade frequency (<30/year) with strong performance in both bull and bear markets by following higher timeframe trends during calm periods.
+12h_WeeklyTrend_DailyBreakout_Volume
+Hypothesis: Combines weekly trend filter (1w EMA50) with daily breakout signals (price breaking above/below previous day's high/low) and volume confirmation. Designed for low trade frequency (target 12-37/year) by requiring confluence of multiple factors. Works in both bull and bear markets by following the higher timeframe trend while using lower timeframe for precise entry timing.
 """
 
-name = "6h_PriceAction_1dTrend_1wVolatility"
-timeframe = "6h"
+name = "12h_WeeklyTrend_DailyBreakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,55 +20,49 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Price arrays
+    # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 6h ATR for channel calculation (using 14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Previous day's high and low (for breakout detection)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    # First day has no previous - set to current values to avoid false signals
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # 6h ATR-based channel (donchian-like with ATR bands)
-    upper_channel = np.roll(close, 1) + atr
-    lower_channel = np.roll(close, 1) - atr
-    
-    # 1d trend filter (SMA200)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
-        return np.zeros(n)
-    sma_200_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
-    
-    # 1w volatility filter (ATR percentile - low volatility environment)
+    # Weekly trend filter (1w EMA50)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
-    tr1w = df_1w['high'] - df_1w['low']
-    tr2w = np.abs(df_1w['high'] - np.roll(df_1w['close'].values, 1))
-    tr3w = np.abs(df_1w['low'] - np.roll(df_1w['close'].values, 1))
-    trw = np.maximum(tr1w, np.maximum(tr2w, tr3w))
-    atr_w = pd.Series(trw).rolling(window=14, min_periods=14).mean().values
-    # Calculate 50-period percentile of ATR (low volatility = bottom 30%)
-    atr_w_percentile = pd.Series(atr_w).rolling(window=50, min_periods=20).quantile(0.3).values
-    atr_w_percentile_aligned = align_htf_to_ltf(prices, df_1w, atr_w_percentile)
+    
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(
+        span=50, adjust=False, min_periods=50
+    ).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation (20-day average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(sma_200_1d_aligned[i]) or np.isnan(atr_w_percentile_aligned[i])):
+        if (np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or 
+            np.isnan(ema_50_12h[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -73,36 +71,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volatility filter: current 6h ATR below 1w ATR 30th percentile (low volatility)
-        low_volatility = atr[i] < atr_w_percentile_aligned[i]
+        # Volume confirmation threshold
+        volume_spike = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: price breaks above 6h channel + above 1d SMA200 + low volatility
-            if (close[i] > upper_channel[i] and 
-                close[i] > sma_200_1d_aligned[i] and 
-                low_volatility):
+            # Long: price breaks above previous day's high + above weekly EMA50 + volume
+            if (close[i] > prev_high[i] and 
+                close[i] > ema_50_12h[i] and 
+                volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 6h channel + below 1d SMA200 + low volatility
-            elif (close[i] < lower_channel[i] and 
-                  close[i] < sma_200_1d_aligned[i] and 
-                  low_volatility):
+            # Short: price breaks below previous day's low + below weekly EMA50 + volume
+            elif (close[i] < prev_low[i] and 
+                  close[i] < ema_50_12h[i] and 
+                  volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: trend reversal or volatility expansion
+            # Exit conditions
             if position == 1:
-                # Exit long: price below 1d SMA200 OR volatility expands (ATR > 70th percentile)
-                if (close[i] < sma_200_1d_aligned[i]) or \
-                   (atr[i] > atr_w_percentile_aligned[i] * 2.0):  # volatility expansion
+                # Exit long: price returns to previous day's close OR trend turns down
+                if (close[i] <= prev_close[i]) or \
+                   (close[i] < ema_50_12h[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price above 1d SMA200 OR volatility expands
-                if (close[i] > sma_200_1d_aligned[i]) or \
-                   (atr[i] > atr_w_percentile_aligned[i] * 2.0):
+                # Exit short: price returns to previous day's close OR trend turns up
+                if (close[i] >= prev_close[i]) or \
+                   (close[i] > ema_50_12h[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
