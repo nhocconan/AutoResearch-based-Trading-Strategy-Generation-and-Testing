@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,32 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for trend and breakout levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    pivot = (high_prev + low_prev + close_prev) / 3
-    range_val = high_prev - low_prev
+    # Calculate upper and lower bands
+    upper_donchian = np.full_like(high_12h, np.nan)
+    lower_donchian = np.full_like(low_12h, np.nan)
     
-    # R3 and S3 levels
-    R3 = close_prev + range_val * 1.1 / 2
-    S3 = close_prev - range_val * 1.1 / 2
+    for i in range(20, len(high_12h)):
+        upper_donchian[i] = np.max(high_12h[i-20:i])
+        lower_donchian[i] = np.min(low_12h[i-20:i])
     
-    # Align Camarilla levels to 12h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align to 4h
+    upper_donchian_aligned = align_htf_to_ltf(prices, df_12h, upper_donchian)
+    lower_donchian_aligned = align_htf_to_ltf(prices, df_12h, lower_donchian)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume filter: 20-period average on 12h
+    # Volume filter: 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -51,12 +52,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_donchian_aligned[i]) or np.isnan(lower_donchian_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -69,30 +70,30 @@ def generate_signals(prices):
         volume_surge = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: Price breaks above R3 with volume and uptrend
-            if (close[i] > R3_aligned[i] and 
+            # Long: Price breaks above upper Donchian with volume and above EMA50 trend
+            if (close[i] > upper_donchian_aligned[i] and 
                 volume_surge and 
-                close[i] > ema_34_aligned[i]):
+                close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 with volume and downtrend
-            elif (close[i] < S3_aligned[i] and 
+            # Short: Price breaks below lower Donchian with volume and below EMA50 trend
+            elif (close[i] < lower_donchian_aligned[i] and 
                   volume_surge and 
-                  close[i] < ema_34_aligned[i]):
+                  close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to EMA34 or opposite level touch
+            # Exit: price returns to opposite Donchian band
             if position == 1:
-                # Exit long: price returns to EMA34 or touches S3
-                if (close[i] < ema_34_aligned[i]) or (close[i] < S3_aligned[i]):
+                # Exit long: price touches or goes below lower band
+                if close[i] <= lower_donchian_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to EMA34 or touches R3
-                if (close[i] > ema_34_aligned[i]) or (close[i] > R3_aligned[i]):
+                # Exit short: price touches or goes above upper band
+                if close[i] >= upper_donchian_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
