@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-name = "6h_LiquiditySweep_1dTrend_Reversal"
-timeframe = "6h"
+name = "1d_Donchian20_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,39 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and liquidity sweep detection
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # 1d Donchian channels (20-period)
+    lookback = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    for i in range(lookback, n):
+        upper[i] = np.max(high[i-lookback:i])
+        lower[i] = np.min(low[i-lookback:i])
+    
+    # Weekly trend filter using 1w EMA(50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    weekly_up = close_1w > ema_50_1w
+    weekly_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_up)
     
-    # 1d EMA34 for trend
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_ltf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # 1d high/low for liquidity sweep levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    high_1d_aligned = align_ltf_to_ltf(prices, df_1d, high_1d)
-    low_1d_aligned = align_ltf_to_ltf(prices, df_1d, low_1d)
-    
-    # 6h ATR for stop and filtering
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = max(lookback, 50)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(high_1d_aligned[i]) or
-            np.isnan(low_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(weekly_up_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,32 +57,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price sweeps below 1d low (liquidity grab) then closes back above it
-            # AND 1d trend is up (price > EMA34)
-            if low[i] < low_1d_aligned[i] and close[i] > low_1d_aligned[i] and close[i] > ema_34_1d_aligned[i]:
+            # Long: Price breaks above upper Donchian + weekly uptrend + volume confirmation
+            if close[i] > upper[i] and weekly_up_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price sweeps above 1d high then closes back below it
-            # AND 1d trend is down (price < EMA34)
-            elif high[i] > high_1d_aligned[i] and close[i] < high_1d_aligned[i] and close[i] < ema_34_1d_aligned[i]:
+            # Short: Price breaks below lower Donchian + weekly downtrend + volume confirmation
+            elif close[i] < lower[i] and not weekly_up_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below 1d low OR trend changes
-            if low[i] < low_1d_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: Price breaks below lower Donchian
+            if close[i] < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price breaks above 1d high OR trend changes
-            if high[i] > high_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: Price breaks above upper Donchian
+            if close[i] > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-# Note: Corrected import from mtf_data (align_ltf_to_ltf doesn't exist, should be align_htf_to_ltf)
-# Fixing the import and function call:
