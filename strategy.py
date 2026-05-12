@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,13 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Load weekly data for trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Load 1d data for Camarilla pivot levels (from previous day)
+    # Load daily data for Camarilla pivot levels (from previous day)
+    df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -52,7 +53,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
             np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
             np.isnan(vol_filter[i]) or np.isnan(vol_regime[i])):
             if position != 0:
@@ -63,27 +64,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R3 + above 1d EMA34 + volume filter + vol regime
-            if high[i] > r3_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i] and vol_regime[i]:
-                signals[i] = 0.30
+            # Long: breakout above R3 + above 1w EMA34 + volume filter + vol regime
+            if high[i] > r3_1d_aligned[i] and close[i] > ema_34_1w_aligned[i] and vol_filter[i] and vol_regime[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: breakdown below S3 + below 1d EMA34 + volume filter + vol regime
-            elif low[i] < s3_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i] and vol_regime[i]:
-                signals[i] = -0.30
+            # Short: breakdown below S3 + below 1w EMA34 + volume filter + vol regime
+            elif low[i] < s3_1d_aligned[i] and close[i] < ema_34_1w_aligned[i] and vol_filter[i] and vol_regime[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: breakdown below S3 or below 1d EMA34
-            if low[i] < s3_1d_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: breakdown below S3 or below 1w EMA34
+            if low[i] < s3_1d_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: breakout above R3 or above 1d EMA34
-            if high[i] > r3_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: breakout above R3 or above 1w EMA34
+            if high[i] > r3_1d_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
