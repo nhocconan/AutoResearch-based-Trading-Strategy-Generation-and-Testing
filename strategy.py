@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R1/S1 breakout from daily levels with 1d EMA trend filter and volume spike confirmation on 12h timeframe.
-# Uses Camarilla pivot levels (R1, S1) calculated from prior day's OHLC. Long when price breaks above R1 with uptrend (price > EMA34) and volume spike.
-# Short when price breaks below S1 with downtrend (price < EMA34) and volume spike. Designed for low trade frequency (12-37/year) to avoid fee drag.
-# Works in bull/bear markets by following daily EMA trend direction. Exit on opposite Camarilla level touch (S1 for long exit, R1 for short exit).
+# 6h_Keltner_Channel_Breakout_ADX20_Filter
+# Hypothesis: Keltner Channel breakout on 6h with ADX(14)>20 trend filter. 
+# Uses ATR-based channel (EMA20 ± 2*ATR) to capture breakouts with trend confirmation.
+# Long when price breaks above upper Keltner with ADX>20, short when breaks below lower Keltner with ADX>20.
+# Exit when price crosses EMA20 (middle line) to avoid whipsaws. 
+# Designed for low trade frequency (12-37/year) by requiring both breakout and trend strength.
+# Works in bull/bear markets by following trend direction via ADX filter.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_Keltner_Channel_Breakout_ADX20_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -23,43 +25,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla levels and EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Calculate EMA20 (middle line) and ATR(10) for Keltner Channel
+    close_series = pd.Series(close)
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # True Range calculation
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]  # First bar
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # ATR(10)
+    tr_series = pd.Series(tr)
+    atr10 = tr_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Keltner Channels
+    upper_keltner = ema20 + 2 * atr10
+    lower_keltner = ema20 - 2 * atr10
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-
-    # Calculate Camarilla levels for each day: based on prior day's OHLC
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    # We use prior day's values to avoid look-ahead
-    rng_1d = high_1d - low_1d
-    camarilla_r1 = close_1d + 1.1 * rng_1d / 12
-    camarilla_s1 = close_1d - 1.1 * rng_1d / 12
-
-    # Align Camarilla levels to 12h timeframe (use prior day's levels for current day)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-
-    # Get 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # Calculate volume spike threshold (2.0x 20-period SMA on 12h)
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0
+    # Calculate ADX(14) for trend strength filter
+    # +DM and -DM
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed +DM, -DM, and TR
+    plus_dm_series = pd.Series(plus_dm)
+    minus_dm_series = pd.Series(minus_dm)
+    tr_series = pd.Series(tr)
+    
+    atr_14 = tr_series.ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = plus_dm_series.ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = minus_dm_series.ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # DI+ and DI-
+    plus_di = 100 * plus_dm_14 / atr_14
+    minus_di = 100 * minus_dm_14 / atr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx_series = pd.Series(dx)
+    adx = dx_series.ewm(span=14, adjust=False, min_periods=14).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(ema20[i]) or np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +89,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above R1 with uptrend and volume spike
-            if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume[i] > volume_sma20[i]):
+            # LONG: price breaks above upper Keltner with ADX > 20
+            if close[i] > upper_keltner[i] and adx[i] > 20:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1 with downtrend and volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > volume_sma20[i]):
+            # SHORT: price breaks below lower Keltner with ADX > 20
+            elif close[i] < lower_keltner[i] and adx[i] > 20:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price touches or crosses below S1 (opposite level)
-            if close[i] < camarilla_s1_aligned[i]:
+            # EXIT LONG: price crosses below EMA20 (middle line)
+            if close[i] < ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price touches or crosses above R1 (opposite level)
-            if close[i] > camarilla_r1_aligned[i]:
+            # EXIT SHORT: price crosses above EMA20 (middle line)
+            if close[i] > ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
