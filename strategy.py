@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1w_1d_Momentum_Structure_Breakout
-# Hypothesis: Combines 1-week trend (EMA34), 1-day momentum (RSI), and 12-hour breakout structure.
-# Uses weekly EMA for trend direction, daily RSI for momentum filter, and breaks of 12h swing highs/lows
-# for entry timing. Volume confirmation (>1.5x 20-period average) filters for institutional participation.
-# Designed for low trade frequency (<200 total 12h trades) to minimize fee drag.
-# Works in bull/bear markets by following weekly trend while using daily momentum and 12h structure.
+# 4h_1d_Three_Point_Trend_Breakout
+# Hypothesis: Uses 1d 3-point trend structure (higher highs/lows or lower highs/lows) to determine trend direction,
+# and enters on 4h breakouts of swing points in the direction of the 1d trend. Volume confirmation (>1.5x 20-period average)
+# filters for institutional participation. Designed for low trade frequency (<150 total 4h trades) to minimize fee drag.
+# Works in bull/bear markets by following the 1d structure while using 4h breaks for precise entries.
 
-name = "12h_1w_1d_Momentum_Structure_Breakout"
-timeframe = "12h"
+name = "4h_1d_Three_Point_Trend_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,67 +23,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-period average (on 12h timeframe)
+    # Volume spike: >1.5x 20-period average (on 4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Weekly data for trend direction (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Daily data for momentum (RSI14)
+    # Daily data for 3-point trend structure
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # 12h swing points for entry/exit structure
-    swing_high_12h = np.zeros(len(high), dtype=bool)
-    swing_low_12h = np.zeros(len(low), dtype=bool)
+    # Calculate 3-point trend: Higher Highs (HH) and Higher Lows (HL) for uptrend,
+    # Lower Highs (LH) and Lower Lows (LL) for downtrend
+    # We'll track consecutive HH/HL or LH/LL to establish trend
+    hh_hl = np.zeros(len(high_1d), dtype=bool)  # Higher High and Higher Low
+    lh_ll = np.zeros(len(high_1d), dtype=bool)  # Lower High and Lower Low
+    
+    for i in range(2, len(high_1d)):
+        # Higher High: current high > previous high
+        # Higher Low: current low > previous low
+        hh = high_1d[i] > high_1d[i-1]
+        hl = low_1d[i] > low_1d[i-1]
+        hh_hl[i] = hh and hl
+        
+        # Lower High: current high < previous high
+        # Lower Low: current low < previous low
+        lh = high_1d[i] < high_1d[i-1]
+        ll = low_1d[i] < low_1d[i-1]
+        lh_ll[i] = lh and ll
+    
+    # Determine trend state: need 2 consecutive HH/HL for uptrend, 2 consecutive LH/LL for downtrend
+    uptrend = np.zeros(len(high_1d), dtype=bool)
+    downtrend = np.zeros(len(high_1d), dtype=bool)
+    
+    uptrend_count = 0
+    downtrend_count = 0
+    
+    for i in range(len(high_1d)):
+        if hh_hl[i]:
+            uptrend_count += 1
+            downtrend_count = 0
+        elif lh_ll[i]:
+            downtrend_count += 1
+            uptrend_count = 0
+        else:
+            uptrend_count = 0
+            downtrend_count = 0
+        
+        uptrend[i] = uptrend_count >= 2
+        downtrend[i] = downtrend_count >= 2
+    
+    # Align 1d trend to 4h timeframe
+    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend)
+    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend)
+    
+    # 4h swing points for entry/exit
+    swing_high_4h = np.zeros(len(high), dtype=bool)
+    swing_low_4h = np.zeros(len(low), dtype=bool)
     
     for i in range(1, len(high)-1):
         if high[i] > high[i-1] and high[i] > high[i+1]:
-            swing_high_12h[i] = True
+            swing_high_4h[i] = True
         if low[i] < low[i-1] and low[i] < low[i+1]:
-            swing_low_12h[i] = True
+            swing_low_4h[i] = True
     
-    # Calculate 12h swing high and low levels
-    last_swing_high_12h = np.full(len(high), np.nan)
-    last_swing_low_12h = np.full(len(low), np.nan)
+    # Calculate 4h swing high and low levels
+    last_swing_high_4h = np.full(len(high), np.nan)
+    last_swing_low_4h = np.full(len(low), np.nan)
     
-    last_high_12h = np.nan
-    last_low_12h = np.nan
+    last_high_4h = np.nan
+    last_low_4h = np.nan
     
     for i in range(len(high)):
-        if swing_high_12h[i]:
-            last_high_12h = high[i]
-        if swing_low_12h[i]:
-            last_low_12h = low[i]
-        last_swing_high_12h[i] = last_high_12h
-        last_swing_low_12h[i] = last_low_12h
+        if swing_high_4h[i]:
+            last_high_4h = high[i]
+        if swing_low_4h[i]:
+            last_low_4h = low[i]
+        last_swing_high_4h[i] = last_high_4h
+        last_swing_low_4h[i] = last_low_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(rsi_14_1d_aligned[i]) or
-            np.isnan(last_swing_high_12h[i]) or
-            np.isnan(last_swing_low_12h[i])):
+        if (np.isnan(uptrend_aligned[i]) or
+            np.isnan(downtrend_aligned[i]) or
+            np.isnan(last_swing_high_4h[i]) or
+            np.isnan(last_swing_low_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,34 +121,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Weekly uptrend + Daily momentum + 12h breakout above swing high + volume spike
-            if (close[i] > ema_34_1w_aligned[i] and  # Weekly uptrend
-                rsi_14_1d_aligned[i] > 50 and       # Daily bullish momentum
-                close[i] > last_swing_high_12h[i] and  # Break above 12h swing high
+            # LONG: Uptrend on 1d + price breaks above 4h swing high + volume spike
+            if (uptrend_aligned[i] and 
+                close[i] > last_swing_high_4h[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Weekly downtrend + Daily momentum + 12h breakdown below swing low + volume spike
-            elif (close[i] < ema_34_1w_aligned[i] and  # Weekly downtrend
-                  rsi_14_1d_aligned[i] < 50 and       # Daily bearish momentum
-                  close[i] < last_swing_low_12h[i] and  # Break below 12h swing low
+            # SHORT: Downtrend on 1d + price breaks below 4h swing low + volume spike
+            elif (downtrend_aligned[i] and 
+                  close[i] < last_swing_low_4h[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Weekly trend turns bearish OR price breaks below 12h swing low
-            if (close[i] < ema_34_1w_aligned[i]) or \
-               (close[i] < last_swing_low_12h[i]):
+            # EXIT LONG: Price breaks below 4h swing low OR 1d trend turns down
+            if (close[i] < last_swing_low_4h[i]) or \
+               downtrend_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Weekly trend turns bullish OR price breaks above 12h swing high
-            if (close[i] > ema_34_1w_aligned[i]) or \
-               (close[i] > last_swing_high_12h[i]):
+            # EXIT SHORT: Price breaks above 4h swing high OR 1d trend turns up
+            if (close[i] > last_swing_high_4h[i]) or \
+               uptrend_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
