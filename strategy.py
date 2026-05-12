@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Camarilla_R3_S3_Breakout_TrendVol_v1_optimized
-Optimized version: Reduced trade frequency with stricter volume confirmation (3.0x volume)
-and added ADX filter to avoid whipsaws in ranging markets. Uses 4h timeframe with 1d for
-Camarilla levels and 1w for trend filter. Focuses on high-probability breakouts in both
-bull and bear markets by requiring strong volume and trend alignment.
+12h_1d_Camarilla_R3_S3_Breakout_TrendVol_v1
+Hypothesis: 12-hour breakouts from Camarilla R3/S3 levels (based on 1-day price action) with 1-day trend filter and volume spike confirmation.
+Targets 12h timeframe to limit trade frequency (12-37 trades/year) while using proven 1d Camarilla levels and 1d trend filter.
+Only takes long when price breaks above R3 with volume spike and 1d uptrend, short when breaks below S3 with volume spike and 1d downtrend.
+Designed to work in both bull and bear markets via trend filter and volume confirmation to avoid false breakouts.
+Focuses on stronger breakout levels (R3/S3) for higher quality signals.
 """
 
-name = "4h_1d_1w_Camarilla_R3_S3_Breakout_TrendVol_v1_optimized"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R3_S3_Breakout_TrendVol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,42 +26,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >3.0x 20-period average (stricter to reduce trades)
+    # Volume spike: >2.0x 20-period average (on 12h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (3.0 * vol_ma)
-    
-    # ADX filter for trend strength (14-period)
-    # Calculate +DM, -DM, TR
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    
-    # Smooth with Wilder's smoothing (equivalent to alpha=1/14)
-    def wilder_smooth(arr, period):
-        result = np.zeros_like(arr)
-        result[period-1] = np.nansum(arr[:period])  # First value is simple average
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    # Pad arrays to match original length
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Calculate smoothed values
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilder_smooth(dx, 14)
-    
-    # ADX > 25 indicates strong trend
-    adx_strong = adx > 25
+    volume_spike = volume > (2.0 * vol_ma)
     
     # 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
@@ -77,18 +45,13 @@ def generate_signals(prices):
     R3 = prev_close + 1.1 * range_ / 4
     S3 = prev_close - 1.1 * range_ / 4
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d data for trend filter (EMA34)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -96,8 +59,7 @@ def generate_signals(prices):
     for i in range(20, n):
         if (np.isnan(R3_aligned[i]) or
             np.isnan(S3_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(adx_strong[i])):
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -106,34 +68,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 + volume spike + price above 1w EMA34 + strong trend (ADX>25)
+            # LONG: Price breaks above R3 + volume spike + price above 1d EMA34
             if (close[i] > R3_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > ema_34_1w_aligned[i] and
-                adx_strong[i]):
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + volume spike + price below 1w EMA34 + strong trend (ADX>25)
+            # SHORT: Price breaks below S3 + volume spike + price below 1d EMA34
             elif (close[i] < S3_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < ema_34_1w_aligned[i] and
-                  adx_strong[i]):
+                  close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters between S3 and R3 OR closes below 1w EMA34
+            # EXIT LONG: Price re-enters between S3 and R3 OR closes below 1d EMA34
             if (close[i] > S3_aligned[i] and close[i] < R3_aligned[i]) or \
-               close[i] < ema_34_1w_aligned[i]:
+               close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters between S3 and R3 OR closes above 1w EMA34
+            # EXIT SHORT: Price re-enters between S3 and R3 OR closes above 1d EMA34
             if (close[i] > S3_aligned[i] and close[i] < R3_aligned[i]) or \
-               close[i] > ema_34_1w_aligned[i]:
+               close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
