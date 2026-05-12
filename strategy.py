@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_VolumeWeighted_Camarilla_R1S1_Breakout
-Hypothesis: Combines volume-weighted price action with tighter confirmation
-to reduce false breakouts. Uses volume-weighted average price (VWAP) over
-the last 20 periods as dynamic filter, requiring price to be above/below
-VWAP by a margin proportional to ATR. This adds confluence without
-excessive conditions, targeting 25-35 trades/year per symbol. Designed
-to work in both trending and ranging markets by adapting to volatility.
+1d_KAMA_Trend_Filtered_By_Volume_and_1wTrend
+Hypothesis: 1-day Kaufman Adaptive Moving Average (KAMA) with volume confirmation
+and weekly trend filter captures medium-term trends while avoiding whipsaws.
+KAMA adapts to market noise, reducing false signals in ranging markets.
+Volume ensures conviction, and weekly trend alignment improves win rate.
+Target: 15-25 trades/year per symbol, suitable for 1d timeframe.
 """
 
-name = "4h_VolumeWeighted_Camarilla_R1S1_Breakout"
-timeframe = "4h"
+name = "1d_KAMA_Trend_Filtered_By_Volume_and_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,52 +21,53 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for dynamic threshold
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # KAMA parameters
+    er_length = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
     
-    # Volume-weighted average price (VWAP) over 20 periods
-    vwap_num = np.zeros(n)
-    vwap_den = np.zeros(n)
-    for i in range(n):
-        start = max(0, i - 19)
-        vwap_num[i] = np.sum(close[start:i+1] * volume[start:i+1])
-        vwap_den[i] = np.sum(volume[start:i+1])
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(close, np.nan), where=vwap_den!=0)
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_length))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change.shape) > 0 else np.sum(np.abs(np.diff(close)))
+    # Handle 1D case properly
+    volatility = np.array([np.sum(np.abs(np.diff(close[i:i+er_length]))) for i in range(len(change))])
+    er = np.where(volatility != 0, change / volatility, 0)
     
-    # Daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close, np.nan, dtype=np.float64)
+    kama[er_length] = close[er_length]
+    for i in range(er_length + 1, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Volume confirmation: >1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * vol_ma)
+    
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels
-    camarilla_r1 = close_1d + ((high_1d - low_1d) * 1.1 / 12)
-    camarilla_s1 = close_1d - ((high_1d - low_1d) * 1.1 / 12)
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vwap[i]) or
-            np.isnan(atr[i])):
+    for i in range(50, n):  # Start after KAMA warmup
+        if (np.isnan(kama[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,30 +76,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 AND is above VWAP by at least 0.5*ATR
-            if (close[i] > camarilla_r1_aligned[i] and
-                close[i] > vwap[i] + 0.5 * atr[i]):
+            # LONG: Price above KAMA + weekly uptrend + volume confirmation
+            if (close[i] > kama[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_confirmed[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 AND is below VWAP by at least 0.5*ATR
-            elif (close[i] < camarilla_s1_aligned[i] and
-                  close[i] < vwap[i] - 0.5 * atr[i]):
+            # SHORT: Price below KAMA + weekly downtrend + volume confirmation
+            elif (close[i] < kama[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_confirmed[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 OR falls below VWAP
-            if (close[i] < camarilla_s1_aligned[i]) or \
-               (close[i] < vwap[i]):
+            # EXIT LONG: Price below KAMA or weekly downtrend
+            if (close[i] < kama[i]) or \
+               (close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 OR rises above VWAP
-            if (close[i] > camarilla_r1_aligned[i]) or \
-               (close[i] > vwap[i]):
+            # EXIT SHORT: Price above KAMA or weekly uptrend
+            if (close[i] > kama[i]) or \
+               (close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
