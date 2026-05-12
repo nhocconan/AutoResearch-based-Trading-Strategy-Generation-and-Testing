@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_RSI_Chop"
-timeframe = "1d"
+name = "6h_Keltner_Breakout_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,75 +17,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_length = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Keltner Channel: EMA(20) ± 2*ATR(10)
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    upper_keltner = ema20 + 2 * atr10
+    lower_keltner = ema20 - 2 * atr10
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else np.abs(np.diff(close)).cumsum()
-    # Correct volatility calculation: sum of absolute changes over er_length period
-    volatility = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=er_length, min_periods=1).sum().values
-    change_sum = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=er_length, min_periods=1).sum().values
-    er = np.where(volatility != 0, change_sum / volatility, 0)
+    # 12h EMA(50) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Chopiness Index (14)
-    def true_range(h, l, c_prev):
-        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
-    
-    tr = true_range(high, low, np.roll(close, 1))
-    tr[0] = high[0] - low[0]  # first tr
-    
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    chop = np.where(atr14 != 0, 100 * np.log10((max_high - min_low) / (atr14 * 14)) / np.log10(14), 50)
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
+        # Skip if data not ready
+        if np.isnan(ema50_12h_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # Long: KAMA rising, RSI < 50, Chop > 61.8 (range)
-            if kama[i] > kama[i-1] and rsi[i] < 50 and chop[i] > 61.8:
+            # Long: price breaks above upper Keltner + 12h trend up + volume spike
+            if (close[i] > upper_keltner[i] and 
+                close[i] > ema50_12h_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling, RSI > 50, Chop > 61.8 (range)
-            elif kama[i] < kama[i-1] and rsi[i] > 50 and chop[i] > 61.8:
+            # Short: price breaks below lower Keltner + 12h trend down + volume spike
+            elif (close[i] < lower_keltner[i] and 
+                  close[i] < ema50_12h_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA falling or Chop < 38.2 (trend) or RSI > 70
-            if kama[i] < kama[i-1] or chop[i] < 38.2 or rsi[i] > 70:
+            # Exit long: price closes below EMA20 (middle of Keltner)
+            if close[i] < ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA rising or Chop < 38.2 (trend) or RSI < 30
-            if kama[i] > kama[i-1] or chop[i] < 38.2 or rsi[i] < 30:
+            # Exit short: price closes above EMA20 (middle of Keltner)
+            if close[i] > ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
