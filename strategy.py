@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Volume_Ratio_Breakout_1dTrend_Exit"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wEMA50_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,32 +17,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== 1d Trend Filter (HTF) =====
+    # ===== 1w Trend Filter (HTF) =====
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # 1w EMA(50) for trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # ===== 1d Camarilla Pivot Levels (HTF) =====
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]  # first day uses same close
     
-    # 1d EMA(50) for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
+    range_1d = high_1d - low_1d
     
-    # ===== 6h Volume Ratio (20-period) =====
+    # Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    r1 = close_1d_prev + range_1d * 1.1 / 12
+    s1 = close_1d_prev - range_1d * 1.1 / 12
+    
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # ===== Volume Spike Filter =====
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_avg
-    
-    # ===== 6h Donchian Channel (20-period) =====
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    vol_spike = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(high_max[i]) or np.isnan(low_min[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -51,28 +64,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high + volume spike + above 1d EMA50
-            if (close[i] > high_max[i] and
-                vol_ratio[i] > 2.0 and
-                close[i] > ema50_1d_aligned[i]):
+            # Long: Close crosses above R1 + above 1w EMA50 + volume spike
+            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and
+                close[i] > ema50_1w_aligned[i] and
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + volume spike + below 1d EMA50
-            elif (close[i] < low_min[i] and
-                  vol_ratio[i] > 2.0 and
-                  close[i] < ema50_1d_aligned[i]):
+            # Short: Close crosses below S1 + below 1w EMA50 + volume spike
+            elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and
+                  close[i] < ema50_1w_aligned[i] and
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below 1d EMA50
-            if close[i] < ema50_1d_aligned[i]:
+            # Exit long: Close crosses below S1 OR below 1w EMA50
+            if close[i] < s1_aligned[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above 1d EMA50
-            if close[i] > ema50_1d_aligned[i]:
+            # Exit short: Close crosses above R1 OR above 1w EMA50
+            if close[i] > r1_aligned[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
