@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume_Signal_v2"
-timeframe = "4h"
+#/usr/bin/env python3
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,14 +17,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data once for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Load 1d data once for daily Camarilla pivots
+    # Load 1d data once for trend filter
     df_1d = get_htf_data(prices, '1d')
+    
+    # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Load 1d data once for daily Camarilla pivots (use previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_vals = df_1d['close'].values
@@ -34,7 +35,7 @@ def generate_signals(prices):
     r3 = close_1d_vals + (high_1d - low_1d) * 1.1 / 4
     s3 = close_1d_vals - (high_1d - low_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 4h (wait for daily close)
+    # Align Camarilla levels to 12h (wait for daily close)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -50,7 +51,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,12 +60,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + above 12h EMA50 + volume spike
-            if (close[i] > r3_aligned[i] and close[i] > ema_50_12h_aligned[i] and vol_spike[i]):
+            # Long: price breaks above R3 + above 1d EMA34 + volume spike
+            if (close[i] > r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + below 12h EMA50 + volume spike
-            elif (close[i] < s3_aligned[i] and close[i] < ema_50_12h_aligned[i] and vol_spike[i]):
+            # Short: price breaks below S3 + below 1d EMA34 + volume spike
+            elif (close[i] < s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
