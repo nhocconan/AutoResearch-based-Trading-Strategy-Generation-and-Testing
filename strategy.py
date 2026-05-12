@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Use Camarilla R1/S1 breakouts on 12h with 1d trend filter (price > 1d EMA50 for long, < for short) and volume confirmation (>2x 20-period average). Trades only when price breaks R1 (long) or S1 (short) with trend alignment and volume spike. Targets 15-30 trades/year to minimize fee drift and capture breakouts in both bull/bear markets via trend filter.
+# 4h_ETF_Momentum_With_Volume_Filter
+# Hypothesis: Combines ETF (Ehlers Trend Follower) for trend direction on 4h with volume confirmation (>1.5x 20-bar average) and 1d trend filter (price > 1d EMA50 for longs, < for shorts). ETF reduces lag vs traditional moving averages while maintaining smoothness. Volume filter ensures momentum is supported by participation. Targets 25-40 trades/year to avoid fee drag, works in bull/bear via 1d trend filter.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_ETF_Momentum_With_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,47 +20,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Camarilla levels for R1 and S1 using previous day's range
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    # First day: use current day's values
-    prev_close[0] = close_1d[0]
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-
-    daily_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * daily_range / 12
-    s1 = prev_close - 1.1 * daily_range / 12
-
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # ETF (Ehlers Trend Follower) - reduces lag while smoothing
+    # Alpha = 1 / (1 + sqrt(2)) for critical damping
+    alpha = 1.0 / (1.0 + np.sqrt(2.0))
+    etf = np.zeros(n)
+    etf[0] = close[0]
+    for i in range(1, n):
+        etf[i] = alpha * close[i] + (1 - alpha) * etf[i-1]
 
     # 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume confirmation: volume > 2x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(1, n):  # Start from 1 to have previous day's data
+    for i in range(1, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(etf[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,30 +56,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above R1 + price > 1d EMA50 + volume spike
-            if (close[i] > r1_aligned[i] and 
+            # LONG: price > ETF (bullish) + price > 1d EMA50 + volume confirmation
+            if (close[i] > etf[i] and 
                 close[i] > ema50_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 2.0):
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1 + price < 1d EMA50 + volume spike
-            elif (close[i] < s1_aligned[i] and 
+            # SHORT: price < ETF (bearish) + price < 1d EMA50 + volume confirmation
+            elif (close[i] < etf[i] and 
                   close[i] < ema50_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 2.0):
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below S1 (reversal signal)
-            if close[i] < s1_aligned[i]:
+            # EXIT LONG: price crosses below ETF
+            if close[i] < etf[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above R1 (reversal signal)
-            if close[i] > r1_aligned[i]:
+            # EXIT SHORT: price crosses above ETF
+            if close[i] > etf[i]:
                 signals[i] = 0.0
                 position = 0
             else:
