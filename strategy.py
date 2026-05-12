@@ -1,10 +1,11 @@
-# [12h_Camarilla_R1_S1_Breakout_1wTrend_Volume] - 12h Camarilla pivot breakout with 1w trend filter and volume confirmation
-# Hypothesis: Price breaking above/below Camarilla R1/S1 levels on 12h timeframe, filtered by 1w trend (price above/below 200 EMA),
-# and confirmed by volume spikes. Works in bull markets via long entries in uptrends, and in bear markets via short entries in downtrends.
-# Volume spike ensures institutional participation. Target: 12-37 trades/year (50-150 total over 4 years).
+#!/usr/bin/env python3
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Breakouts from Camarilla R1/S1 levels on 4h timeframe, filtered by 1d EMA50 trend direction and confirmed by volume spikes (2x 12-bar average).
+# In bull markets, long entries occur when price breaks above R1 in an uptrend; in bear markets, short entries occur when price breaks below S1 in a downtrend.
+# Volume spike ensures institutional participation. Uses tight entry conditions to limit trades (~20-50/year) and avoid fee drag.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -21,39 +22,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
 
-    # Calculate 1w EMA200 trend filter
-    close_1w = df_1w['close'].values
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Calculate 12h Camarilla pivot levels from previous day
-    # Camarilla uses previous day's OHLC
-    prev_day_high = df_1d['high'].values
-    prev_day_low = df_1d['low'].values
-    prev_day_close = df_1d['close'].values
-    pivot = (prev_day_high + prev_day_low + prev_day_close) / 3
-    range_hl = prev_day_high - prev_day_low
-    r1 = pivot + (range_hl * 1.1 / 12)
-    s1 = pivot - (range_hl * 1.1 / 12)
-    
-    # Align Camarilla levels to 12h timeframe
+    # Previous day's high, low, close for Camarilla levels
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+
+    # Calculate Camarilla levels for today (based on previous day)
+    # R1 = close + (high - low) * 1.12 / 12
+    # S1 = close - (high - low) * 1.12 / 12
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.12 / 12
+    s1 = prev_close - camarilla_range * 1.12 / 12
+
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Volume spike: current > 2.0x average of last 24 bars (12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume spike: current > 2.0x average of last 12 bars (2 days on 4h)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(200, n):  # Start after EMA200 warmup
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -63,15 +64,15 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + 1w uptrend + volume spike
+            # LONG: Price breaks above R1 + 1d EMA50 uptrend + volume spike
             if (close[i] > r1_aligned[i] and 
-                close[i] > ema_200_1w_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + 1w downtrend + volume spike
+            # SHORT: Price breaks below S1 + 1d EMA50 downtrend + volume spike
             elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_200_1w_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -79,14 +80,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # EXIT LONG: Price breaks below S1 or trend breaks
-            if close[i] < s1_aligned[i] or close[i] < ema_200_1w_aligned[i]:
+            if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Price breaks above R1 or trend breaks
-            if close[i] > r1_aligned[i] or close[i] > ema_200_1w_aligned[i]:
+            if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
