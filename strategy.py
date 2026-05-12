@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1d_TRIX_WeeklyTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,44 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h trend: EMA50
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    trend_up = close_12h > ema_50_12h
-    trend_down = close_12h < ema_50_12h
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
+    # TRIX (15-period triple EMA rate of change)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False).mean()
+    ema2 = ema1.ewm(span=15, adjust=False).mean()
+    ema3 = ema2.ewm(span=15, adjust=False).mean()
+    trix = 100 * (ema3.diff() / ema3.shift(1))
+    trix = trix.fillna(0).values
     
-    # 1d Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False).mean().values
     
-    pivot_1d = (high_1d + low_w + close_1d) / 3.0
-    r1_1d = 1.0/12 * (high_1d - low_1d) + close_1d
-    s1_1d = close_1d - 1.0/12 * (high_1d - low_1d)
-    r2_1d = 1.0/6 * (high_1d - low_1d) + close_1d
-    s2_1d = close_1d - 1.0/6 * (high_1d - low_1d)
+    # Weekly trend filter (from 1w)
+    df_1w = get_htf_data(prices, '1w')
+    close_w = df_1w['close'].values
+    ema13_w = pd.Series(close_w).ewm(span=13, adjust=False).mean().values
+    ema34_w = pd.Series(close_w).ewm(span=34, adjust=False).mean().values
+    weekly_trend_up = ema13_w > ema34_w
+    weekly_trend_down = ema13_w < ema34_w
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
+    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
     
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # 4h volume spike: volume > 1.5 * avg(20)
+    # Volume filter: current volume > 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.5 * vol_ma
+    volume_filter = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure EMA50 has enough data
-    
-    for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]):
+    for i in range(20, n):  # start after warmup
+        if np.isnan(trix[i]) or np.isnan(trix_signal[i]) or np.isnan(weekly_trend_up_aligned[i]) or np.isnan(weekly_trend_down_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +54,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: 12h trend up + price breaks above R1 + volume spike
-            if (trend_up_aligned[i] and 
-                close[i] > r1_1d_aligned[i] and 
-                vol_spike[i]):
+            # Long: TRIX crosses above signal + weekly uptrend + volume filter
+            if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] and weekly_trend_up_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: 12h trend down + price breaks below S1 + volume spike
-            elif (trend_down_aligned[i] and 
-                  close[i] < s1_1d_aligned[i] and 
-                  vol_spike[i]):
+            # Short: TRIX crosses below signal + weekly downtrend + volume filter
+            elif trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] and weekly_trend_down_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below pivot OR trend changes
-            if close[i] < pivot_1d_aligned[i] or not trend_up_aligned[i]:
+            # Exit long: TRIX crosses below signal OR weekly trend changes
+            if trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] or not weekly_trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above pivot OR trend changes
-            if close[i] > pivot_1d_aligned[i] or not trend_down_aligned[i]:
+            # Exit short: TRIX crosses above signal OR weekly trend changes
+            if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] or not weekly_trend_down_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
