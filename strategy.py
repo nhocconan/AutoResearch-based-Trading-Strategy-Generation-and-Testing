@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 6h_1D_1W_Camarilla_R3S3_Breakout_Trend
-# Hypothesis: Breakout above Camarilla R3 or below S3 with 1d trend filter (EMA34) and volume confirmation.
-# Uses weekly pivot to filter direction: only take long if weekly pivot shows uptrend, short if downtrend.
-# Targets 15-30 trades/year on 6f timeframe with strict entry conditions to avoid overtrading.
-# Works in both bull and bear markets by requiring trend alignment and volume confirmation.
 
-name = "6h_1D_1W_Camarilla_R3S3_Breakout_Trend"
-timeframe = "6h"
+# 4h_1D_Camarilla_Pivot_Breakout
+# Hypothesis: Breakout above/below Camarilla pivot levels (R3/S3) derived from daily high/low/close, 
+# with 1-day EMA34 trend filter and volume confirmation. Camarilla levels provide precise intraday 
+# support/resistance derived from previous day's range, effective in both trending and ranging markets. 
+# Volume confirmation filters out false breakouts. Targets 20-30 trades/year.
+
+name = "4h_1D_Camarilla_Pivot_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,14 +24,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 1d data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
 
     # Calculate 1d EMA for trend filter
@@ -38,24 +34,17 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Calculate 1w EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-
-    # Calculate Camarilla levels from previous 1d candle
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
-    # We only need R3 and S3 for breakout
+    # Calculate Camarilla pivot levels from previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    range_1d = high_1d - low_1d
+    close_1d_prev = df_1d['close'].values
+    pivot = (high_1d_prev + low_1d_prev + close_1d_prev) / 3
+    range_1d = high_1d_prev - low_1d_prev
 
-    # Calculate R3 and S3 for each 1d bar
-    r3 = close_1d + 1.1 * range_1d
-    s3 = close_1d - 1.1 * range_1d
+    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
+    r3 = close_1d_prev + (range_1d * 1.1 / 4)
+    s3 = close_1d_prev - (range_1d * 1.1 / 4)
 
-    # Align Camarilla levels to 6h timeframe (using previous day's values)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
 
@@ -66,11 +55,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after warmup for volume MA
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,9 +66,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filters: price above/below EMA on 1d and 1w
-        bullish_trend = close[i] > ema_1d_aligned[i] and close[i] > ema_1w_aligned[i]
-        bearish_trend = close[i] < ema_1d_aligned[i] and close[i] < ema_1w_aligned[i]
+        # Trend filter: price above/below 34-period EMA on 1d
+        bullish_trend = close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_1d_aligned[i]
 
         if position == 0:
             # LONG: Price breaks above R3 with bullish trend and volume confirmation
