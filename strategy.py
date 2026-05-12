@@ -1,12 +1,15 @@
-# 6h_PivotBreakout_WeeklyTrend_VolumeFilter
-# Hypothesis: On 6h timeframe, use weekly pivot points from previous week as key support/resistance.
-# Enter long when price breaks above weekly R1 with volume > 2x average and weekly trend up (price > weekly EMA50).
-# Enter short when price breaks below weekly S1 with volume > 2x average and weekly trend down (price < weekly EMA50).
-# Weekly trend filter reduces false breakouts in ranging markets. Targets 20-50 trades per year to minimize fee drag.
-# Works in bull markets via breakout continuation and in bear markets via short breakdowns.
+#!/usr/bin/env python3
+"""
+4h_VWAP_Reversion_with_1dTrend_Filter
+Hypothesis: Mean-reversion to VWAP on 4h with trend filter from 1d EMA34.
+Long when price crosses below VWAP (oversold) and 1d EMA34 trending up.
+Short when price crosses above VWAP (overbought) and 1d EMA34 trending down.
+Uses VWAP deviation with Bollinger Bands (20,2) to avoid whipsaws.
+Targets 20-40 trades/year to minimize fee drag and work in both bull/bear markets.
+"""
 
-name = "6h_PivotBreakout_WeeklyTrend_VolumeFilter"
-timeframe = "6h"
+name = "4h_VWAP_Reversion_with_1dTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,54 +18,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    typical_price = (high + low + close) / 3
 
-    # Get weekly data for pivot points and trend filter
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate weekly pivot points (standard floor trader's method)
-    # PP = (H + L + C) / 3
-    # R1 = (2 * PP) - L
-    # S1 = (2 * PP) - H
-    pp = (high_w + low_w + close_w) / 3
-    weekly_r1 = (2 * pp) - low_w
-    weekly_s1 = (2 * pp) - high_w
+    # Calculate VWAP (cumulative typical price * volume / cumulative volume)
+    tpv = typical_price * volume
+    cum_tpv = np.nancumsum(tpv)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_tpv, cum_vol, out=np.zeros_like(cum_tpv), where=cum_vol!=0)
 
-    # Use previous week's levels (shift by 1)
-    weekly_r1_prev = np.roll(weekly_r1, 1)
-    weekly_s1_prev = np.roll(weekly_s1, 1)
-    weekly_r1_prev[0] = np.nan
-    weekly_s1_prev[0] = np.nan
+    # VWAP deviation bands (20-period, 2 std dev)
+    vwap_dev = typical_price - vwap
+    vwap_ma = pd.Series(vwap_dev).rolling(window=20, min_periods=20).mean().values
+    vwap_std = pd.Series(vwap_dev).rolling(window=20, min_periods=20).std().values
+    upper_band = vwap + vwap_ma + 2 * vwap_std
+    lower_band = vwap + vwap_ma - 2 * vwap_std
 
-    # Align weekly pivot levels to 6h timeframe
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_w, weekly_r1_prev)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_w, weekly_s1_prev)
-
-    # Weekly EMA50 for trend filter
-    ema50_w = pd.Series(close_w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
-
-    # Volume confirmation: volume > 2x 24-period average (approx 12 hours on 6h chart)
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(ema50_w_aligned[i]) or np.isnan(vol_avg_24[i])):
+        if (np.isnan(vwap[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,30 +65,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above weekly R1 + weekly uptrend + volume spike
-            if (close[i] > weekly_r1_aligned[i] and 
-                close[i] > ema50_w_aligned[i] and 
-                volume[i] > vol_avg_24[i] * 2.0):
+            # LONG: Price touches lower band AND 1d uptrend
+            if close[i] <= lower_band[i] and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly S1 + weekly downtrend + volume spike
-            elif (close[i] < weekly_s1_aligned[i] and 
-                  close[i] < ema50_w_aligned[i] and 
-                  volume[i] > vol_avg_24[i] * 2.0):
+            # SHORT: Price touches upper band AND 1d downtrend
+            elif close[i] >= upper_band[i] and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below weekly S1 OR trend turns down
-            if close[i] < weekly_s1_aligned[i] or close[i] < ema50_w_aligned[i]:
+            # EXIT LONG: Price crosses above VWAP OR trend turns down
+            if close[i] >= vwap[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above weekly R1 OR trend turns up
-            if close[i] > weekly_r1_aligned[i] or close[i] > ema50_w_aligned[i]:
+            # EXIT SHORT: Price crosses below VWAP OR trend turns up
+            if close[i] <= vwap[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
