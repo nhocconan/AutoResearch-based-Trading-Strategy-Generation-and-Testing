@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Williams_Alligator_1DTrend
-# Hypothesis: Williams Alligator (Jaw: SMA13, Teeth: SMA8, Lips: SMA5) crossover signals direction. 
-# Long when Lips cross above Teeth AND price above 1-day EMA50 trend; short when Lips cross below Teeth AND price below EMA50.
-# Uses volume confirmation (volume > 1.5x 20-period average) to filter false signals.
-# Designed for 20-35 trades/year with clear trend and volume to avoid false signals.
-# Works in bull via trend continuation and bear via reversals at extremes.
+# 12h_Camarilla_Pivot_Volume_Trend
+# Hypothesis: On 12h timeframe, use daily Camarilla pivot levels (S3/S4 for shorts, R3/R4 for longs) as entry triggers.
+# Enter long when price breaks above R4 with volume confirmation and 1-week EMA50 uptrend.
+# Enter short when price breaks below S4 with volume confirmation and 1-week EMA50 downtrend.
+# Exit when price returns to the mean (Pivot point) or reverses at opposite Camarilla level.
+# Uses weekly trend filter to avoid counter-trend trades, targeting 15-25 trades/year for low friction.
+# Works in bull via R4 breakouts and in bear via S4 breakdowns with trend alignment.
 
-name = "4h_Williams_Alligator_1DTrend"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,22 +25,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1D data for trend filter
+    # Load daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous day's OHLC
+    # Formula: R4 = C + (H-L) * 1.5, R3 = C + (H-L) * 1.25, R2 = C + (H-L) * 1.166, R1 = C + (H-L) * 1.083
+    #          S1 = C - (H-L) * 1.083, S2 = C - (H-L) * 1.166, S3 = C - (H-L) * 1.25, S4 = C - (H-L) * 1.5
+    # where C = (H+L+C)/3 (typical price)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Calculate 1D EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Typical price (Pivot point)
+    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+    daily_range = daily_high - daily_low
     
-    # Calculate Williams Alligator components (SMA based)
-    # Jaw: SMA13, Teeth: SMA8, Lips: SMA5
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # Camarilla levels
+    r4 = daily_pivot + daily_range * 1.5
+    r3 = daily_pivot + daily_range * 1.25
+    s3 = daily_pivot - daily_range * 1.25
+    s4 = daily_pivot - daily_range * 1.5
+    
+    # Align daily levels to 12h timeframe (with 1-bar delay for completed daily bar)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    weekly_close = df_1w['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,8 +75,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(weekly_ema50_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,33 +86,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        ema50_val = ema50_1d_aligned[i]
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        r4_val = r4_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        s4_val = s4_aligned[i]
+        pivot_val = pivot_aligned[i]
+        weekly_trend = weekly_ema50_aligned[i]
         vol_confirm = volume_confirm[i]
         
         if position == 0:
-            # LONG: Lips cross above Teeth AND price above 1D EMA50 trend, with volume confirmation
-            if lips_val > teeth_val and lips[i-1] <= teeth[i-1] and close[i] > ema50_val and vol_confirm:
+            # LONG: Price breaks above R4 with volume confirmation and weekly uptrend
+            if close[i] > r4_val and close[i] > weekly_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Lips cross below Teeth AND price below 1D EMA50 trend, with volume confirmation
-            elif lips_val < teeth_val and lips[i-1] >= teeth[i-1] and close[i] < ema50_val and vol_confirm:
+            # SHORT: Price breaks below S4 with volume confirmation and weekly downtrend
+            elif close[i] < s4_val and close[i] < weekly_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Lips cross below Teeth OR price breaks below 1D EMA50
-            if lips_val < teeth_val or close[i] < ema50_val:
+            # EXIT LONG: Price returns to pivot or breaks below R3 (taking profits)
+            if close[i] <= pivot_val or close[i] < r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Lips cross above Teeth OR price breaks above 1D EMA50
-            if lips_val > teeth_val or close[i] > ema50_val:
+            # EXIT SHORT: Price returns to pivot or breaks above S3 (taking profits)
+            if close[i] >= pivot_val or close[i] > s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
