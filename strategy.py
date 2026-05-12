@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 1d_Donchian20_1wTrend_Volume
-# Hypothesis: Trade daily Donchian(20) breakouts aligned with weekly EMA50 trend and volume confirmation.
-# Weekly EMA50 filters trend direction to avoid counter-trend trades. Volume confirms breakout momentum.
-# Designed for low frequency (7-25 trades/year) to survive both bull and bear markets by following higher timeframe structure.
+# 12h_RSI_Pullback_WeeklyTrend_Volume
+# Hypothesis: In 12h timeframe, enter long when RSI(14) pulls back to 40-50 during weekly uptrend with volume confirmation, short when RSI pulls back to 50-60 during weekly downtrend. Uses weekly trend filter to avoid counter-trend trades, targeting 20-40 trades/year for low friction in both bull and bear markets.
 
-name = "1d_Donchian20_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_RSI_Pullback_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,15 +12,15 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Weekly EMA50 for trend filter ===
+    # === Weekly trend filter: EMA50 on weekly close ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -31,23 +29,27 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === Daily Donchian(20) channels ===
-    # Calculate from daily OHLC
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === RSI(14) on 12h close ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # === Volume confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Volume confirmation: 24-period average ===
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,36 +57,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA50
+        # Trend filter: weekly EMA50 direction
         trend_up = close[i] > ema_50_1w_aligned[i]
         trend_down = close[i] < ema_50_1w_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
+        # RSI pullback zones
+        rsi_long_zone = (rsi[i] >= 40) & (rsi[i] <= 50)
+        rsi_short_zone = (rsi[i] >= 50) & (rsi[i] <= 60)
         
         # Volume filter: above average
-        vol_ok = volume[i] > vol_ma_20[i]
+        vol_ok = volume[i] > vol_ma_24[i]
         
         if position == 0:
-            # LONG: breakout above Donchian high, uptrend, volume confirmation
-            if breakout_up and trend_up and vol_ok:
+            # LONG: RSI pullback to 40-50 in weekly uptrend with volume
+            if rsi_long_zone and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakout below Donchian low, downtrend, volume confirmation
-            elif breakout_down and trend_down and vol_ok:
+            # SHORT: RSI pullback to 50-60 in weekly downtrend with volume
+            elif rsi_short_zone and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: breakdown below Donchian low or trend reversal
-            if breakout_down or not trend_up:
+            # EXIT LONG: RSI > 55 or trend reversal
+            if rsi[i] > 55 or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: breakout above Donchian high or trend reversal
-            if breakout_up or not trend_down:
+            # EXIT SHORT: RSI < 45 or trend reversal
+            if rsi[i] < 45 or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
