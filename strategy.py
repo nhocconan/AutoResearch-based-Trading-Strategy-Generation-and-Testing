@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_1d_1w_Camarilla_R3_S3_Breakout_TrendVol_v1
-Hypothesis: 12-hour breakouts from Camarilla R3/S3 levels (based on 1-day price action) with 1-week trend filter and volume spike confirmation.
-Targets 12h timeframe to reduce trade frequency while using proven 1d Camarilla levels and 1w trend filter.
-Only takes long when price breaks above R3 with volume spike and 1w uptrend, short when breaks below S3 with volume spike and 1w downtrend.
-Designed to work in both bull and bear markets via trend filter and volume confirmation to avoid false breakouts.
-Focuses on stronger breakout levels (R3/S3) for higher quality signals.
+4h_12h_KAMA_Slope_Change_With_Volume_and_Trend
+Hypothesis: Detect trend changes via KAMA slope turning points on 4h timeframe, 
+filtered by 12h trend direction and volume spike confirmation. 
+KAMA adapts to market noise, reducing whipsaws in sideways markets. 
+Only take longs when KAMA slope turns up (bullish acceleration) with 12h uptrend and volume spike, 
+shorts when slope turns down (bearish acceleration) with 12h downtrend and volume spike.
+Exit when KAMA slope reverses or volume drops. Designed for fewer, higher-quality trades.
 """
 
-name = "12h_1d_1w_Camarilla_R3_S3_Breakout_TrendVol_v1"
-timeframe = "12h"
+name = "4h_12h_KAMA_Slope_Change_With_Volume_and_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,53 +19,68 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 30:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >2.0x 20-period average (on 12h timeframe)
+    # KAMA parameters
+    er_len = 10
+    fast_sc = 2
+    slow_sc = 30
+    
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, prepend=close[0]))
+    dir = np.abs(np.diff(close, prepend=close[0]))
+    for i in range(1, len(change)):
+        dir[i] = np.abs(close[i] - close[i-er_len]) if i >= er_len else 0
+    er = np.where(dir != 0, change / dir, 0)
+    er = np.where(er > 1, 1, er)
+    
+    # Smoothing constants
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # KAMA slope (first derivative)
+    kama_slope = np.diff(kama, prepend=0)
+    
+    # Slope change detection: positive to negative or negative to positive
+    # Bullish slope change: slope crosses above zero after being negative
+    # Bearish slope change: slope crosses below zero after being positive
+    bullish_slope_change = (kama_slope > 0) & (np.roll(kama_slope, 1) <= 0)
+    bearish_slope_change = (kama_slope < 0) & (np.roll(kama_slope, 1) >= 0)
+    # Avoid first element
+    bullish_slope_change[0] = False
+    bearish_slope_change[0] = False
+    
+    # Volume spike: >1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
     
-    # 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Avoid look-ahead: only use previous day's data
-    range_ = prev_high - prev_low
-    R3 = prev_close + 1.1 * range_ / 4
-    S3 = prev_close - 1.1 * range_ / 4
-    
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        if (np.isnan(R3_aligned[i]) or
-            np.isnan(S3_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(kama[i]) or
+            np.isnan(kama_slope[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,32 +89,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 + volume spike + price above 1w EMA34
-            if (close[i] > R3_aligned[i] and 
+            # LONG: Bullish KAMA slope change + volume spike + price above 12h EMA50
+            if (bullish_slope_change[i] and 
                 volume_spike[i] and 
-                close[i] > ema_34_1w_aligned[i]):
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + volume spike + price below 1w EMA34
-            elif (close[i] < S3_aligned[i] and 
+            # SHORT: Bearish KAMA slope change + volume spike + price below 12h EMA50
+            elif (bearish_slope_change[i] and 
                   volume_spike[i] and 
-                  close[i] < ema_34_1w_aligned[i]):
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters between S3 and R3 OR closes below 1w EMA34
-            if (close[i] > S3_aligned[i] and close[i] < R3_aligned[i]) or \
-               close[i] < ema_34_1w_aligned[i]:
+            # EXIT LONG: Bearish slope change OR price drops below 12h EMA50
+            if bearish_slope_change[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters between S3 and R3 OR closes above 1w EMA34
-            if (close[i] > S3_aligned[i] and close[i] < R3_aligned[i]) or \
-               close[i] > ema_34_1w_aligned[i]:
+            # EXIT SHORT: Bullish slope change OR price rises above 12h EMA50
+            if bullish_slope_change[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
