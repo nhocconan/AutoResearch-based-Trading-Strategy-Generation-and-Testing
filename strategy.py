@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     open_ = prices['open'].values
@@ -18,35 +18,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA34 on 1d close (must wait for 1d candle close)
+    # Daily trend filter: EMA34 on 1d close
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Daily range for Camarilla levels (H-L of previous 1d)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    daily_range = high_1d - low_1d
-    camarilla_R1 = low_1d + daily_range * 1.1 / 12  # Resistance 1
-    camarilla_S1 = high_1d - daily_range * 1.1 / 12  # Support 1
+    # Weekly Camarilla pivot levels (levels R3 and S3)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    # Calculate Camarilla levels for weekly
+    camarilla_width = (high_1w - low_1w) * 1.1 / 8
+    r3 = close_1w + camarilla_width * 3
+    s3 = close_1w - camarilla_width * 3
     
-    # Volume expansion: current volume > 2.0 * 20-period average
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3, additional_delay_bars=0)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3, additional_delay_bars=0)
+    
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_expansion = volume > (2.0 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # ensure EMA34 has enough data
+    start_idx = max(34, 20)  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if EMA data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Skip if Camarilla data not ready
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,12 +67,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 + above daily EMA34 + volume expansion
-            if (close[i] > camarilla_R1_aligned[i]) and (close[i] > ema34_1d_aligned[i]) and vol_expansion[i]:
+            # Long: price breaks above weekly R3 + above daily EMA34 + volume expansion
+            if (close[i] > r3_aligned[i]) and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1 + below daily EMA34 + volume expansion
-            elif (close[i] < camarilla_S1_aligned[i]) and (close[i] < ema34_1d_aligned[i]) and vol_expansion[i]:
+            # Short: price breaks below weekly S3 + below daily EMA34 + volume expansion
+            elif (close[i] < s3_aligned[i]) and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
