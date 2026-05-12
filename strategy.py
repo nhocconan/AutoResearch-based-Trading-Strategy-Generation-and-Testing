@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 1D_Donchian_Breakout_1W_Trend_Volume
-# Hypothesis: Daily Donchian(20) breakout with weekly trend filter (EMA34) and volume confirmation.
-# Long when price breaks above 20-day high with weekly uptrend (price > weekly EMA34) and volume spike.
-# Short when price breaks below 20-day low with weekly downtrend (price < weekly EMA34) and volume spike.
-# Designed for low trade frequency (<25/year) and works in both bull and bear markets by following weekly trend.
-# Exit on opposite Donchian breakout or trend reversal.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot R3/S3 breakout on 12h with daily EMA34 trend filter and volume spike confirmation.
+# Works in bull markets by buying R3 breakouts in uptrend, in bear markets by selling S3 breakdowns in downtrend.
+# Uses volume spike to avoid false breakouts. Targets low trade frequency for 12h timeframe.
 
-name = "1D_Donchian_Breakout_1W_Trend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,46 +17,52 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Donchian channels
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+
+    # Calculate Camarilla levels for each 12h bar
+    # R4 = close + (high - low) * 1.1/2, R3 = close + (high - low) * 1.1/4, etc.
+    # S3 = close - (high - low) * 1.1/4, S4 = close - (high - low) * 1.1/2
+    hl_range = high_12h - low_12h
+    r3_12h = close_12h + hl_range * 1.1 / 4
+    s3_12h = close_12h - hl_range * 1.1 / 4
+
+    # Align Camarilla levels to 12h timeframe (no additional delay needed)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-
-    # Calculate Donchian channels (20-period)
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
     # Calculate volume spike threshold (2.0x 20-period SMA)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0
+    volume_spike = volume > volume_sma20 * 2.0
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,32 +71,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Donchian high in weekly uptrend with volume spike
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema34_1w_aligned[i] and 
-                volume[i] > volume_sma20[i]):
+            # LONG: Close breaks above R3 in uptrend with volume spike
+            if (close[i] > r3_12h_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low in weekly downtrend with volume spike
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema34_1w_aligned[i] and 
-                  volume[i] > volume_sma20[i]):
+            # SHORT: Close breaks below S3 in downtrend with volume spike
+            elif (close[i] < s3_12h_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low or weekly trend turns down
-            if (close[i] < donchian_low[i] or 
-                close[i] < ema34_1w_aligned[i]):
+            # EXIT LONG: Close falls below S3 (reversal signal)
+            if close[i] < s3_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high or weekly trend turns up
-            if (close[i] > donchian_high[i] or 
-                close[i] > ema34_1w_aligned[i]):
+            # EXIT SHORT: Close rises above R3 (reversal signal)
+            if close[i] > r3_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
