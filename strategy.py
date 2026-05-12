@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Keltner_Channel_Breakout_Trend_Filter
-Hypothesis: Keltner Channel breakouts with 1d EMA50 trend filter and volume confirmation capture momentum in both bull and bear markets.
-Breakouts above upper band + uptrend = long; breakdowns below lower band + downtrend = short.
-Uses ATR-based bands to adapt to volatility, reducing whipsaws in choppy markets.
+1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolatilityFilter
+Hypothesis: Camarilla pivot point breakouts at R1/S1 levels with 4h trend filter and 1d volatility filter capture institutional order flow in both bull and bear markets.
+Breakouts above R1 + 4h uptrend + low volatility = long; breakdowns below S1 + 4h downtrend + low volatility = short.
+Uses Camarilla levels derived from previous day's OHLC for institutional reference points.
 Target: 20-40 trades/year per symbol with disciplined risk management.
 """
 
-name = "6h_Keltner_Channel_Breakout_Trend_Filter"
-timeframe = "6h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolatilityFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -25,38 +25,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter (call once before loop)
+    # Get 1d data for Camarilla calculation and volatility filter (call once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # 1d EMA50 for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Calculate ATR for Keltner Channel (20-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla levels (R1, S1) from previous day's OHLC
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d + 1.1 * camarilla_range / 12
+    s1 = close_1d - 1.1 * camarilla_range / 12
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # EMA20 for Keltner middle line
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Get 4h data for trend filter (call once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    close_4h = df_4h['close'].values
+    # 4h EMA50 for trend
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
 
-    # Keltner Channel bounds
-    keltner_upper = ema20 + 2 * atr
-    keltner_lower = ema20 - 2 * atr
-
-    # Volume confirmation: volume > 2x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d volatility filter: ATR(14) < 20-period average ATR (low volatility regime)
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d[0] = tr1_1d[0]  # first period
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma_20_1d = pd.Series(tr_1d).rolling(window=20, min_periods=20).mean().values
+    volatility_filter = atr_14_1d < atr_ma_20_1d  # True when volatility is below average
+    volatility_filter_aligned = align_htf_to_ltf(prices, df_1d, volatility_filter)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
+    for i in range(1, n):  # Start from 1 to align with previous day's levels
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or np.isnan(volatility_filter_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,29 +75,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above Keltner Upper + 1d uptrend + volume spike
-            if close[i] > keltner_upper[i] and close[i] > ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
-                signals[i] = 0.30
+            # LONG: Close breaks above R1 + 4h uptrend + low volatility
+            if close[i] > r1_aligned[i] and close[i] > ema50_4h_aligned[i] and volatility_filter_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Close breaks below Keltner Lower + 1d downtrend + volume spike
-            elif close[i] < keltner_lower[i] and close[i] < ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
-                signals[i] = -0.30
+            # SHORT: Close breaks below S1 + 4h downtrend + low volatility
+            elif close[i] < s1_aligned[i] and close[i] < ema50_4h_aligned[i] and volatility_filter_aligned[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below EMA20 (middle line) or 1d trend turns down
-            if close[i] < ema20[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close crosses below S1 or 4h trend turns down
+            if close[i] < s1_aligned[i] or close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Close crosses above EMA20 (middle line) or 1d trend turns up
-            if close[i] > ema20[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close crosses above R1 or 4h trend turns up
+            if close[i] > r1_aligned[i] or close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
 
     return signals
