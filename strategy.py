@@ -1,6 +1,12 @@
+# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Strategy: 12h timeframe using Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation
+# Hypothesis: Price breaking above/below Camarilla R1/S1 levels on 12h chart indicates breakout when aligned with 1d trend and volume spike. 
+# Works in bull (breakouts with trend) and bear (mean reversion off extremes) due to trend filter.
+# Target: 50-150 trades over 4 years (12-37/year) to avoid fee drag.
+
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dATR_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once for Camarilla pivots and ATR
+    # Load 1d data once for Camarilla pivots, EMA trend, and ATR
     df_1d = get_htf_data(prices, '1d')
     
     # Daily OHLC for Camarilla R1 and S1 (previous day)
@@ -30,15 +36,20 @@ def generate_signals(prices):
     r1 = close_1d_vals + (high_1d - low_1d) * 1.1 / 2
     s1 = close_1d_vals - (high_1d - low_1d) * 1.1 / 2
     
-    # Daily ATR(14) for volatility filter
+    # Daily EMA(34) for trend filter
+    close_1d_series = pd.Series(close_1d_vals)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Daily ATR(14) for volatility filter (ensure volatility present)
     tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d_vals[:-1]))
     tr2 = np.abs(low_1d[1:] - close_1d_vals[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels and ATR to 4h (wait for daily close)
+    # Align Camarilla levels, EMA, and ATR to 12h (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Volume spike: current volume > 2.0x 20-period average
@@ -53,7 +64,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(atr_1d_aligned[i])):
+            np.isnan(ema_34_aligned[i]) or np.isnan(atr_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,31 +73,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + volatility filter + volume spike
+            # Long: price breaks above R1 + uptrend (price > EMA34) + volatility + volume spike
             if (close[i] > r1_aligned[i] and 
-                atr_1d_aligned[i] > 0 and  # volatility present
+                close[i] > ema_34_aligned[i] and 
+                atr_1d_aligned[i] > 0 and 
                 vol_spike[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volatility filter + volume spike
+            # Short: price breaks below S1 + downtrend (price < EMA34) + volatility + volume spike
             elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and 
                   atr_1d_aligned[i] > 0 and 
                   vol_spike[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S1
+            # Exit long: price closes below S1 (mean reversion)
             if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above R1
+            # Exit short: price closes above R1 (mean reversion)
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
