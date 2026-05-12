@@ -1,42 +1,64 @@
-#158401
-# 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-# Hypothesis: Camarilla pivot levels (R1/S1) from 12h act as dynamic support/resistance.
-# Breakout above R1 with 12h EMA50 uptrend and volume confirmation triggers long.
-# Breakdown below S1 with 12h EMA50 downtrend and volume confirmation triggers short.
-# Uses 4h timeframe for execution, 12h for trend/volume filters. Target: 20-50 trades/year.
-# Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets.
+#!/usr/bin/env python3
+# 12h_Price_Channel_Breakout_Volume_Regime
+# Hypothesis: Use 12h Donchian channel breakout with volume confirmation and 1d Choppiness regime filter.
+# Long when price breaks above upper Donchian (20) with volume spike and chop < 61.8 (trending).
+# Short when price breaks below lower Donchian (20) with volume spike and chop < 61.8.
+# Exit on opposite breakout or when chop > 61.8 (range) to avoid whipsaws.
+# Designed for low frequency (15-30 trades/year) to avoid fee drag. Works in bull/bear via trend filter.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "12h_Price_Channel_Breakout_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """
-    Calculate Camarilla pivot levels for given high, low, close arrays.
-    Returns R1, R2, R3, R4, S1, S2, S3, S4 arrays.
-    """
+def donchian_channels(high, low, lookback=20):
+    """Calculate Donchian channels: upper = max(high, lookback), lower = min(low, lookback)."""
     n = len(high)
-    pivot = (high + low + close) / 3
-    range_hl = high - low
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    R1 = close + range_hl * 1.1 / 12
-    R2 = close + range_hl * 1.1 / 6
-    R3 = close + range_hl * 1.1 / 4
-    R4 = close + range_hl * 1.1 / 2
-    S1 = close - range_hl * 1.1 / 12
-    S2 = close - range_hl * 1.1 / 6
-    S3 = close - range_hl * 1.1 / 4
-    S4 = close - range_hl * 1.1 / 2
+    for i in range(n):
+        if i >= lookback - 1:
+            upper[i] = np.max(high[i - lookback + 1:i + 1])
+            lower[i] = np.min(low[i - lookback + 1:i + 1])
     
-    return R1, R2, R3, R4, S1, S2, S3, S4
+    return upper, lower
+
+def choppiness_index(high, low, close, period=14):
+    """Calculate Choppiness Index: higher = ranging, lower = trending."""
+    n = len(high)
+    chop = np.full(n, np.nan)
+    
+    if n < period:
+        return chop
+    
+    atr = np.zeros(n)
+    for i in range(n):
+        if i == 0:
+            tr = high[i] - low[i]
+        else:
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        if i < period:
+            atr[i] = np.mean(atr[:i+1]) if i > 0 else tr
+        else:
+            atr[i] = (atr[i-1] * (period-1) + tr) / period
+    
+    for i in range(period-1, n):
+        hh = np.max(high[i-period+1:i+1])
+        ll = np.min(low[i-period+1:i+1])
+        if hh == ll:
+            chop[i] = 50.0
+        else:
+            chop[i] = 100 * np.log10(np.sum(atr[i-period+1:i+1]) / np.log(period) / (hh - ll))
+    
+    return chop
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -44,42 +66,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot, EMA trend, and volume average
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get daily data for Choppiness Index filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels on 12h
-    R1_12h, R2_12h, R3_12h, R4_12h, S1_12h, S2_12h, S3_12h, S4_12h = calculate_camarilla(high_12h, low_12h, close_12h)
+    # Calculate 12h Donchian channels (20-period)
+    upper, lower = donchian_channels(high, low, 20)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema_50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate average volume (20-period) for spike detection
+    vol_ma = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+        else:
+            vol_ma[i] = np.mean(volume[i-19:i+1])
     
-    # Calculate 12h volume average (20-period) for volume filter
-    volume_12h_series = pd.Series(volume_12h)
-    vol_avg_20_12h = volume_12h_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Align 12h indicators to 4h timeframe
-    R1_12h_aligned = align_htf_to_ltf(prices, df_12h, R1_12h)
-    S1_12h_aligned = align_htf_to_ltf(prices, df_12h, S1_12h)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    vol_avg_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_20_12h)
+    # Calculate 1d Choppiness Index
+    chop_1d = choppiness_index(high_1d, low_1d, close_1d, 14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50 and volume average to be ready
+    start_idx = 20  # Ensure Donchian and volume MA are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(R1_12h_aligned[i]) or np.isnan(S1_12h_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_20_12h_aligned[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(chop_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,38 +106,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume filter: current 4h volume > 1.5x 12h volume average
-        volume_filter = volume[i] > 1.5 * vol_avg_20_12h_aligned[i]
+        # Volume spike: current volume > 1.5 * 20-period average
+        volume_spike = volume[i] > 1.5 * vol_ma[i]
         
-        # Trend filter: 12h EMA50 direction
-        if i > start_idx:
-            ema_50_prev = ema_50_12h_aligned[i-1]
-            ema_50_curr = ema_50_12h_aligned[i]
-            trend_up = ema_50_curr > ema_50_prev
-            trend_down = ema_50_curr < ema_50_prev
-        else:
-            trend_up = True
-            trend_down = False
+        # Trending regime: Choppiness Index < 61.8
+        trending_regime = chop_1d_aligned[i] < 61.8
         
         if position == 0:
-            # LONG: Break above R1 with uptrend and volume confirmation
-            if close[i] > R1_12h_aligned[i] and trend_up and volume_filter:
+            # LONG: Price breaks above upper Donchian + volume spike + trending regime
+            if close[i] > upper[i] and volume_spike and trending_regime:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 with downtrend and volume confirmation
-            elif close[i] < S1_12h_aligned[i] and trend_down and volume_filter:
+            # SHORT: Price breaks below lower Donchian + volume spike + trending regime
+            elif close[i] < lower[i] and volume_spike and trending_regime:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Close below R1 or trend turns down
-            if close[i] < R1_12h_aligned[i] or not trend_up:
+            # EXIT LONG: Price breaks below lower Donchian OR chop > 61.8 (range)
+            if close[i] < lower[i] or chop_1d_aligned[i] >= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above S1 or trend turns up
-            if close[i] > S1_12h_aligned[i] or not trend_down:
+            # EXIT SHORT: Price breaks above upper Donchian OR chop > 61.8 (range)
+            if close[i] > upper[i] or chop_1d_aligned[i] >= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
