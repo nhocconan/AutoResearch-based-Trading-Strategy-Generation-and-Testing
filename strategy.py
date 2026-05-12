@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian20_Breakout_VolumeSpike_ADXTrend"
-timeframe = "4h"
+name = "1d_WeeklyKAMA_Trend_12hRSI_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,60 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20-period) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 1w KAMA trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # === 1d ADX Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Efficiency Ratio (ER) and Smoothing Constant (SC)
+    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
+    volatility = np.abs(np.diff(close_1w))
+    er = np.zeros_like(close_1w)
+    sc = np.zeros_like(close_1w)
+    kama = np.zeros_like(close_1w)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    for i in range(10, len(close_1w)):
+        if i >= 10:
+            change_sum = np.sum(change[i-9:i+1])
+            volatility_sum = np.sum(volatility[i-9:i+1])
+            if volatility_sum > 0:
+                er[i] = change_sum / volatility_sum
+            else:
+                er[i] = 0
+            sc[i] = (er[i] * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+            if i == 10:
+                kama[i] = close_1w[i]
+            else:
+                kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
+        else:
+            kama[i] = close_1w[i]
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    kama_trend = kama > np.roll(kama, 1)
+    kama_trend[0] = False
     
-    # Smooth TR, DM+ and DM- (Wilder's smoothing = EMA with alpha=1/period)
-    atr = np.zeros_like(tr)
-    dm_plus_smooth = np.zeros_like(dm_plus)
-    dm_minus_smooth = np.zeros_like(dm_minus)
-    atr[0] = tr[0]
-    dm_plus_smooth[0] = dm_plus[0]
-    dm_minus_smooth[0] = dm_minus[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-        dm_plus_smooth[i] = (dm_plus_smooth[i-1] * 13 + dm_plus[i]) / 14
-        dm_minus_smooth[i] = (dm_minus_smooth[i-1] * 13 + dm_minus[i]) / 14
+    kama_trend_aligned = align_htf_to_ltf(prices, df_1w, kama_trend.astype(float))
     
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    # === 12h RSI filter for entry timing ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = np.zeros_like(dx)
-    adx[0] = dx[0]
-    for i in range(1, len(dx)):
-        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    delta = np.diff(close_12h, prepend=close_12h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    avg_gain = np.zeros_like(close_12h)
+    avg_loss = np.zeros_like(close_12h)
+    rs = np.zeros_like(close_12h)
+    rsi = np.zeros_like(close_12h)
     
-    # === 1d Volume Spike Filter ===
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    for i in range(14, len(close_12h)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+        
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100
+    
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,10 +85,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
-            np.isnan(adx_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(kama_trend_aligned[i]) or 
+            np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,28 +95,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high + ADX > 25 + volume spike
-            if (close[i] > donchian_high[i] and
-                adx_aligned[i] > 25 and
-                vol_spike_1d_aligned[i] > 0.5):
+            # Long: Weekly KAMA uptrend + 12h RSI < 40 (pullback in uptrend)
+            if kama_trend_aligned[i] > 0.5 and rsi_aligned[i] < 40:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + ADX > 25 + volume spike
-            elif (close[i] < donchian_low[i] and
-                  adx_aligned[i] > 25 and
-                  vol_spike_1d_aligned[i] > 0.5):
+            # Short: Weekly KAMA downtrend + 12h RSI > 60 (bounce in downtrend)
+            elif kama_trend_aligned[i] < 0.5 and rsi_aligned[i] > 60:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit long: Weekly KAMA downtrend or 12h RSI > 70 (overbought)
+            if kama_trend_aligned[i] < 0.5 or rsi_aligned[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit short: Weekly KAMA uptrend or 12h RSI < 30 (oversold)
+            if kama_trend_aligned[i] > 0.5 or rsi_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
