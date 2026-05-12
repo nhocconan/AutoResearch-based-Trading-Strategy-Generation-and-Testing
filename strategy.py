@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4H_CAMARILLA_R3_S3_BREAKOUT_1DVOLUMESPIKE
-Hypothesis: Camarilla pivot levels (R3/S3) derived from daily OHLC act as strong support/resistance.
-A breakout above R3 or below S3 with volume confirmation (>1.5x 20-bar average) indicates momentum.
-Use 1d EMA34 as trend filter to avoid counter-trend trades. Designed for ~25-35 trades/year on 4h
-to minimize fee drag while capturing institutional breakout moves in both bull and bear markets.
+1D_KAMA_TREND_WITH_VOLUME_CONFIRMATION
+Hypothesis: KAMA adapts to market noise, providing a smooth trend line that avoids whipsaws in ranging markets.
+Price crossing above/below KAMA with volume confirmation (>1.5x 20-bar average) captures institutional momentum.
+Weekly trend filter (price above/below weekly EMA20) ensures alignment with higher timeframe trend.
+Designed for ~10-20 trades/year on 1d to minimize fee drag while capturing strong trending moves in both bull and bear markets.
 """
-name = "4H_CAMARILLA_R3_S3_BREAKOUT_1DVOLUMESPIKE"
-timeframe = "4h"
+name = "1D_KAMA_TREND_WITH_VOLUME_CONFIRMATION"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,45 +19,53 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # KAMA parameters
+    er_length = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period sum of absolute changes
+    # Handle first 10 values where diff(10) is not available
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Calculate Smoothing Constant (SC)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
     # Volume spike: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior day's OHLC
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    rang = prev_high - prev_low
-    R3 = prev_close + rang * 1.1 / 2
-    S3 = prev_close - rang * 1.1 / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly EMA20 for trend filter
+    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after warmup for EMA34
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+    for i in range(20, n):  # Start after warmup for EMA20
+        if (np.isnan(kama[i]) or 
+            np.isnan(ema20_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,30 +74,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above R3 + volume spike + above 1d EMA34 (uptrend)
-            if (close[i] > R3_aligned[i] and 
+            # LONG: Price crosses above KAMA + volume scan + above weekly EMA20 (uptrend)
+            if (close[i] > kama[i] and close[i-1] <= kama[i-1] and 
                 volume_spike[i] and 
-                close[i] > ema34_1d_aligned[i]):
+                close[i] > ema20_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S3 + volume spike + below 1d EMA34 (downtrend)
-            elif (close[i] < S3_aligned[i] and 
+            # SHORT: Price crosses below KAMA + volume scan + below weekly EMA20 (downtrend)
+            elif (close[i] < kama[i] and close[i-1] >= kama[i-1] and 
                   volume_spike[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+                  close[i] < ema20_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters Camarilla interior (between S3 and R3) OR trend reversal
-            if (close[i] < R3_aligned[i] and close[i] > S3_aligned[i]) or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price crosses below KAMA
+            if close[i] < kama[i] and close[i-1] >= kama[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters Camarilla interior OR trend reversal
-            if (close[i] < R3_aligned[i] and close[i] > S3_aligned[i]) or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price crosses above KAMA
+            if close[i] > kama[i] and close[i-1] <= kama[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
