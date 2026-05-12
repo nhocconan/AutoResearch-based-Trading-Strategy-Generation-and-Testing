@@ -1,11 +1,12 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_VWAP_Range_Reversal_1wTrend
-Hypothesis: Price reverting to 1w VWAP from daily extremes works in both bull and bear markets. Uses 1w VWAP as dynamic mean, with 1d high/low as reversal zones. Trend filter ensures we only take reversals in direction of weekly trend, avoiding counter-trend whipsaws. Low-frequency signals reduce fee drag.
+12h_Donchian_20_Breakout_1dTrend_VolumeSpike
+Hypothesis: Price breaking above/below Donchian(20) channels on 12h timeframe with 1d EMA trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. Works in both bull and bear by following 1d trend direction. Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
 """
 
-name = "1d_VWAP_Range_Reversal_1wTrend"
-timeframe = "1d"
+name = "12h_Donchian_20_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,32 +23,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
 
-    # Calculate 1w VWAP
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    vwap_numerator = (typical_price * df_1w['volume']).cumsum()
-    vwap_denominator = df_1w['volume'].cumsum()
-    vwap = vwap_numerator / vwap_denominator
-    vwap = vwap.replace([np.inf, -np.inf], np.nan).ffill().bfill().values
+    # Calculate Donchian(20) channels from 12h data
+    high_rolling = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_rolling = pd.Series(low).rolling(window=20, min_periods=20).min().values
 
-    # Align 1w VWAP to daily
-    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
+    # Get 1d EMA34 trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # 1d high/low for reversal zones
-    daily_high = high
-    daily_low = low
-
-    # 1w trend: EMA50
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Volume spike: >1.5x 20-period average (12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        if (np.isnan(vwap_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+    for i in range(20, n):  # Start after Donchian warmup
+        if (np.isnan(high_rolling[i]) or np.isnan(low_rolling[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,30 +53,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price at daily low + below VWAP + weekly uptrend
-            if (low[i] <= daily_low[i] and 
-                close[i] < vwap_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i]):
+            # LONG: Price breaks above Donchian upper + 1d EMA34 uptrend + volume spike
+            if (close[i] > high_rolling[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at daily high + above VWAP + weekly downtrend
-            elif (high[i] >= daily_high[i] and 
-                  close[i] > vwap_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # SHORT: Price breaks below Donchian lower + 1d EMA34 downtrend + volume spike
+            elif (close[i] < low_rolling[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above VWAP
-            if close[i] > vwap_aligned[i]:
+            # EXIT LONG: Price closes below Donchian lower (reversal level)
+            if close[i] < low_rolling[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below VWAP
-            if close[i] < vwap_aligned[i]:
+            # EXIT SHORT: Price closes above Donchian upper (reversal level)
+            if close[i] > high_rolling[i]:
                 signals[i] = 0.0
                 position = 0
             else:
