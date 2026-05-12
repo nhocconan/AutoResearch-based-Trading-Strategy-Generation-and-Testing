@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ChaikinMoneyFlow_Trend_1dVWAP_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S4_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,39 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D DATA FOR VWAP FILTER ===
+    # === 1D DATA FOR EMA34 TREND FILTER ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # === VWAP CALCULATION (1d) ===
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
-    vwap_denominator = np.cumsum(volume_1d)
-    vwap_1d = vwap_numerator / vwap_denominator
+    # === CALCULATE EMA34 FOR TREND FILTER ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # === CHAIKIN MONEY FLOW (20-period on 6h) ===
-    mfm = ((close - low) - (high - close)) / (high - low)
-    mfm = np.where(high == low, 0, mfm)  # avoid division by zero
-    mfv = mfm * volume
-    cmf = pd.Series(mfv).rolling(window=20, min_periods=20).sum() / \
-          pd.Series(volume).rolling(window=20, min_periods=20).sum()
-    cmf_values = cmf.values
+    # === CALCULATE CAMARILLA LEVELS (R3, S4) FROM PREVIOUS DAY ===
+    rng = high_1d - low_1d
+    R3 = close_1d + rng * 1.1 / 4
+    S4 = close_1d - rng * 1.1 / 4
     
-    # === ALIGN 1D VWAP TO 6H TIMEFRAME ===
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # ALIGN TO 12H TIMEFRAME (PREVIOUS DAY'S LEVELS AVAILABLE AT OPEN)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
+    S4_12h = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # === VOLUME SPIKE DETECTION (20-PERIOD) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(cmf_values[i]) or 
-            np.isnan(vwap_1d_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(R3_12h[i]) or
+            np.isnan(S4_12h[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,28 +59,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: CMF > 0.1 + PRICE ABOVE VWAP
-            if (cmf_values[i] > 0.1 and 
-                close[i] > vwap_1d_aligned[i]):
+            # LONG: PRICE BREAKS ABOVE R3 + ABOVE 1D EMA34 + VOLUME SPIKE
+            if (close[i] > R3_12h[i] and 
+                close[i] > ema34_1d_aligned[i] and
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: CMF < -0.1 + PRICE BELOW VWAP
-            elif (cmf_values[i] < -0.1 and 
-                  close[i] < vwap_1d_aligned[i]):
+            # SHORT: PRICE BREAKS BELOW S4 + BELOW 1D EMA34 + VOLUME SPIKE
+            elif (close[i] < S4_12h[i] and 
+                  close[i] < ema34_1d_aligned[i] and
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: CMF < 0 OR PRICE BELOW VWAP
-            if (cmf_values[i] < 0 or 
-                close[i] < vwap_1d_aligned[i]):
+            # EXIT LONG: PRICE BREAKS BELOW S4 (REVERSAL) OR BELOW 1D EMA34
+            if close[i] < S4_12h[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: CMF > 0 OR PRICE ABOVE VWAP
-            if (cmf_values[i] > 0 or 
-                close[i] > vwap_1d_aligned[i]):
+            # EXIT SHORT: PRICE BREAKS ABOVE R3 (REVERSAL) OR ABOVE 1D EMA34
+            if close[i] > R3_12h[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
