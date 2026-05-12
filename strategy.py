@@ -1,35 +1,16 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3S3_Breakout_1dTrend_VolumeS
-# Hypothesis: Use Camarilla pivot levels on 12h for precise entry/exit, filtered by 1d EMA trend and volume confirmation.
-# Long when price breaks above R3 with volume spike and 1d EMA up, short when breaks below S3 with volume spike and 1d EMA down.
-# Designed for low frequency (12-37 trades/year) to avoid fee drift. Works in both bull and bear via trend filter.
-# Uses Camarilla levels (R3/S3) as strong support/resistance, with volume confirmation to avoid false breakouts.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Trade Camarilla pivot level breakouts (R1/S1) on 4h with 1d EMA trend filter and volume confirmation.
+# Long when price breaks above R1, above 1d EMA34, and volume > 1.5x average. Short when price breaks below S1, below 1d EMA34, and volume > 1.5x average.
+# Exit on opposite breakout or trend failure. Designed for 20-50 trades/year to minimize fee drag.
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_camarilla(high, low, close):
-    """
-    Calculate Camarilla pivot levels for given high, low, close arrays.
-    Returns R3, R2, R1, PP, S1, S2, S3 arrays.
-    """
-    typical = (high + low + close) / 3
-    range_ = high - low
-    
-    R3 = close + (range_ * 1.1 / 2)
-    R2 = close + (range_ * 1.1 / 4)
-    R1 = close + (range_ * 1.1 / 6)
-    PP = typical
-    S1 = close - (range_ * 1.1 / 6)
-    S2 = close - (range_ * 1.1 / 4)
-    S3 = close - (range_ * 1.1 / 2)
-    
-    return R3, R2, R1, PP, S1, S2, S3
 
 def generate_signals(prices):
     n = len(prices)
@@ -41,33 +22,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 12h Camarilla levels
-    R3, R2, R1, PP, S1, S2, S3 = calculate_camarilla(high, low, close)
-    
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align 1d EMA to 12h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume average for confirmation (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate average volume for volume filter (50-period)
+    avg_vol = pd.Series(volume).rolling(window=50, min_periods=1).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA to be stable
+    start_idx = 50  # Ensure volume average is stable
     
     for i in range(start_idx, n):
-        # Skip if any critical data is not ready
-        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_avg[i])):
+        # Skip if EMA data not ready
+        if np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,32 +50,42 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_spike = volume[i] > 1.5 * vol_avg[i]
+        # Calculate Camarilla levels for previous period
+        # Use previous bar's high/low/close to avoid look-ahead
+        ph = high[i-1]
+        pl = low[i-1]
+        pc = close[i-1]
         
-        # Trend filter: price relative to 1d EMA
-        price_above_ema = close[i] > ema_1d_aligned[i]
-        price_below_ema = close[i] < ema_1d_aligned[i]
+        # Camarilla levels
+        range_val = ph - pl
+        if range_val <= 0:
+            r1 = s1 = pc
+        else:
+            r1 = pc + (range_val * 1.1 / 12)
+            s1 = pc - (range_val * 1.1 / 12)
+        
+        # Volume filter: current volume > 1.5x average
+        vol_filter = volume[i] > 1.5 * avg_vol[i]
         
         if position == 0:
-            # LONG: Price breaks above R3 with volume spike and 1d EMA up
-            if close[i] > R3[i] and volume_spike and price_above_ema:
+            # LONG: price breaks above R1, above 1d EMA34, and volume confirmation
+            if close[i] > r1 and close[i] > ema_34_1d_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with volume spike and 1d EMA down
-            elif close[i] < S3[i] and volume_spike and price_below_ema:
+            # SHORT: price breaks below S1, below 1d EMA34, and volume confirmation
+            elif close[i] < s1 and close[i] < ema_34_1d_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price falls below PP or opposite signal with volume
-            if close[i] < PP[i] or (close[i] < S3[i] and volume_spike):
+            # EXIT LONG: price breaks below S1 OR trend fails (price below EMA)
+            if close[i] < s1 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above PP or opposite signal with volume
-            if close[i] > PP[i] or (close[i] > R3[i] and volume_spike):
+            # EXIT SHORT: price breaks above R1 OR trend fails (price above EMA)
+            if close[i] > r1 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
