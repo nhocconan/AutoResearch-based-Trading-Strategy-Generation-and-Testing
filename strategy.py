@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Keltner_Breakout_1wTrend"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,33 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w trend filter: EMA50
-    df_1w = get_htf_data(prices, '1w')
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1d trend filter: EMA34
+    df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # ATR for Keltner Channel (20-period)
-    atr_period = 20
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Elder Ray on 6h: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Keltner Channel: 20-period EMA ± 2 * ATR
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper = ema20 + 2 * atr
-    lower = ema20 - 2 * atr
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # need enough data for 1w EMA50 and ATR
+    start_idx = 34  # need enough data for 1d EMA34
     
     for i in range(start_idx, n):
-        # Skip if 1w trend data not ready
-        if np.isnan(ema50_1w_aligned[i]):
+        # Skip if 1d trend data not ready
+        if np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,24 +45,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close breaks above upper Keltner band + 1w uptrend
-            if close[i] > upper[i] and close[i] > ema50_1w_aligned[i]:
+            # Long: Bull Power > 0 (buying pressure) + Bear Power < 0 (no selling pressure) + 1d uptrend
+            if (bull_power[i] > 0 and bear_power[i] < 0 and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below lower Keltner band + 1w downtrend
-            elif close[i] < lower[i] and close[i] < ema50_1w_aligned[i]:
+            # Short: Bear Power > 0 (selling pressure) + Bull Power < 0 (no buying pressure) + 1d downtrend
+            elif (bear_power[i] > 0 and bull_power[i] < 0 and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when close crosses below EMA20 (middle band)
-            if close[i] < ema20[i]:
+            # Exit long when Bear Power becomes positive (selling pressure emerges) or 1d trend turns down
+            if (bear_power[i] > 0 or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when close crosses above EMA20 (middle band)
-            if close[i] > ema20[i]:
+            # Exit short when Bull Power becomes positive (buying pressure emerges) or 1d trend turns up
+            if (bull_power[i] > 0 or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
