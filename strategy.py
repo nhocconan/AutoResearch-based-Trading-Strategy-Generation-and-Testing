@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Keltner_Channel_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,20 +20,26 @@ def generate_signals(prices):
     # ===== 1d Trend Filter (HTF) =====
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    
+    # 1d EMA(34) for trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # ===== 1d Camarilla Pivot Levels (HTF) =====
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]  # first day uses same close
     
-    # 1d EMA(50) for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
+    range_1d = high_1d - low_1d
     
-    # ===== Keltner Channel (10-period EMA, ATR(10)*2) =====
-    ema10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    kc_upper = ema10 + 2 * atr10
-    kc_lower = ema10 - 2 * atr10
+    # Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    r1 = close_1d_prev + range_1d * 1.1 / 12
+    s1 = close_1d_prev - range_1d * 1.1 / 12
+    
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # ===== Volume Spike Filter =====
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,8 +52,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -57,28 +63,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close crosses above KC upper + above 1d EMA50 + volume spike
-            if (close[i] > kc_upper[i] and close[i-1] <= kc_upper[i-1] and
-                close[i] > ema50_1d_aligned[i] and
+            # Long: Close crosses above R1 + above 1d EMA34 + volume spike
+            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and
+                close[i] > ema34_1d_aligned[i] and
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close crosses below KC lower + below 1d EMA50 + volume spike
-            elif (close[i] < kc_lower[i] and close[i-1] >= kc_lower[i-1] and
-                  close[i] < ema50_1d_aligned[i] and
+            # Short: Close crosses below S1 + below 1d EMA34 + volume spike
+            elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and
+                  close[i] < ema34_1d_aligned[i] and
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close crosses below KC lower OR below 1d EMA50
-            if close[i] < kc_lower[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit long: Close crosses below S1 OR below 1d EMA34
+            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close crosses above KC upper OR above 1d EMA50
-            if close[i] > kc_upper[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit short: Close crosses above R1 OR above 1d EMA34
+            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
