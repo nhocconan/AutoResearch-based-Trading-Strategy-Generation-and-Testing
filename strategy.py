@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-6h Pivot Reversal with Volume Confirmation
-Uses daily pivot points (PP, R1, S1, R2, S2) for mean reversion in ranging markets.
-Long when price touches S2 with bullish divergence on RSI(2); short when touches R2 with bearish divergence.
-Uses 1d trend filter (price vs EMA50) to avoid counter-trend trades in strong trends.
-Volume spike confirms reversal intent. Targets 15-25 trades/year.
-Works in bull/bear: mean reversion in ranges, trend filter avoids whipsaws in trends.
+12h Camarilla R1/S1 breakout with 1d EMA trend filter and volume spike.
+Works in bull/bear markets because: 1) Camarilla levels act as support/resistance in ranges, 2) EMA filter ensures trend alignment, 
+3) Volume spike confirms breakout strength, reducing false signals. Target 15-25 trades/year.
 """
-name = "6h_Pivot_Reversal_Volume_Confirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,56 +22,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR PIVOTS AND TREND ===
+    # === 1d DATA FOR TREND FILTER ===
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === DAILY CAMARILLA PIVOT LEVELS (R1, S1) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily pivot points
     pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # === 6h INDICATORS ===
-    # RSI(2) for short-term momentum
-    rsi_period = 2
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Volume confirmation (20-period average)
+    # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need EMA50 and volume MA
+    start_idx = max(34, 1)  # 34 for daily EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(rsi_values[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,30 +63,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price at S2 with bullish RSI divergence, above daily EMA50 (not in strong downtrend)
-            if (low[i] <= s2_aligned[i] and 
-                rsi_values[i] < 30 and  # Oversold
-                close[i] > ema50_1d_aligned[i] and  # Not in strong downtrend
+            # LONG: Price breaks above R1, price above daily EMA34, volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at R2 with bearish RSI divergence, below daily EMA50 (not in strong uptrend)
-            elif (high[i] >= r2_aligned[i] and 
-                  rsi_values[i] > 70 and  # Overbought
-                  close[i] < ema50_1d_aligned[i] and  # Not in strong uptrend
+            # SHORT: Price breaks below S1, price below daily EMA34, volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price reaches pivot or RSI overbought
-            if (close[i] >= pivot_aligned[i]) or (rsi_values[i] > 70):
+            # EXIT LONG: Price crosses below S1 or below EMA34
+            if (close[i] < s1_aligned[i]) or (close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches pivot or RSI oversold
-            if (close[i] <= pivot_aligned[i]) or (rsi_values[i] < 30):
+            # EXIT SHORT: Price crosses above R1 or above EMA34
+            if (close[i] > r1_aligned[i]) or (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
