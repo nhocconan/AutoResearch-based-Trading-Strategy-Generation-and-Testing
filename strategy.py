@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Use Camarilla pivot levels from 1d to identify key support/resistance (R1, S1). Enter long on breakout above R1 with 1w uptrend (price > 1w EMA200) and volume confirmation (>1.5x 20-period average). Enter short on breakdown below S1 with 1w downtrend (price < 1w EMA200) and volume confirmation. Exit on reverse signal. Targets 12-37 trades/year to minimize fee drag and work in both bull/bear markets via 1w trend filter.
+# 4h_SuperTrend_Volume_Pullback
+# Hypothesis: Use SuperTrend (ATR=10, mult=3) for trend direction on 4h, enter on pullbacks to the SuperTrend line during low volatility periods, confirmed by volume spikes (>1.5x 20-period average). Works in bull markets via trend continuation and in bear markets via mean-reversion within the trend. Targets ~25-40 trades/year to minimize fee drag.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_SuperTrend_Volume_Pullback"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,34 +20,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate ATR(10) for SuperTrend
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
 
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
+    # SuperTrend calculation
+    upper = (high + low) / 2 + 3 * atr
+    lower = (high + low) / 2 - 3 * atr
 
-    # Calculate Camarilla levels (R1, S1) from previous 1d bar
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    rang = high_1d - low_1d
-    r1 = close_1d + 1.1 * rang / 12
-    s1 = close_1d - 1.1 * rang / 12
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
 
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    supertrend[0] = upper[0]
+    direction[0] = 1
 
-    # 1w EMA200 for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    for i in range(1, n):
+        if close[i] > supertrend[i-1]:
+            supertrend[i] = max(lower[i], supertrend[i-1])
+            direction[i] = 1
+        else:
+            supertrend[i] = min(upper[i], supertrend[i-1])
+            direction[i] = -1
 
     # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,10 +52,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(200, n):
+    for i in range(10, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(supertrend[i]) or np.isnan(direction[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,30 +64,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: breakout above R1 + 1w uptrend + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema200_1w_aligned[i] and
+            # LONG: uptrend (direction=1) + pullback to SuperTrend + volume spike
+            if (direction[i] == 1 and 
+                close[i] <= supertrend[i] * 1.005 and  # within 0.5% above SuperTrend
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakdown below S1 + 1w downtrend + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema200_1w_aligned[i] and
+            # SHORT: downtrend (direction=-1) + pullback to SuperTrend + volume spike
+            elif (direction[i] == -1 and 
+                  close[i] >= supertrend[i] * 0.995 and  # within 0.5% below SuperTrend
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: breakdown below S1
-            if close[i] < s1_aligned[i]:
+            # EXIT LONG: trend reversal (direction=-1)
+            if direction[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: breakout above R1
-            if close[i] > r1_aligned[i]:
+            # EXIT SHORT: trend reversal (direction=1)
+            if direction[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
