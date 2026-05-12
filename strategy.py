@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-Hypothesis: Breakout above daily R1 or below daily S1 with 12h KAMA trend filter and volume confirmation. Designed for 12-37 trades/year on 12h timeframe to work in both bull and bear markets by using strong daily institutional levels and filtering with 12h trend and volume. Daily levels provide more robust support/resistance than weekly, reducing false breakouts while maintaining trend alignment.
+4h_Vortex_Trend_Scalper
+Hypothesis: Use Vortex Indicator (VI) crossovers on 4h with daily trend filter and volume confirmation to capture intermediate-term trends. Works in both bull and bear markets by filtering trades with higher timeframe trend and requiring volume confirmation, reducing false signals during choppy periods. Target: 20-40 trades/year.
 """
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Vortex_Trend_Scalper"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -22,52 +22,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data (call once before loop)
+    # Get daily data for trend filter (call once before loop)
     df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    if len(df_daily) < 34:
         return np.zeros(n)
-
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
     close_daily = df_daily['close'].values
+    ema34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
 
-    # Calculate Daily Camarilla pivot levels for previous day
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    hl_range_daily = high_daily - low_daily
-    r1_daily = close_daily + hl_range_daily * 1.1 / 12
-    s1_daily = close_daily - hl_range_daily * 1.1 / 12
+    # Vortex Indicator on 4h (period=14)
+    tr = np.maximum(np.abs(high[1:] - low[:-1]), 
+                    np.maximum(np.abs(high[1:] - close[:-1]), 
+                               np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.nan], tr])  # align length
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus[0] = np.nan
+    vm_minus[0] = np.nan
 
-    # Align to 12h timeframe (values from previous day's close)
-    r1_daily_aligned = align_htf_to_ltf(prices, df_daily, r1_daily)
-    s1_daily_aligned = align_htf_to_ltf(prices, df_daily, s1_daily)
+    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    sum_vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    sum_vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
 
-    # Get 12h KAMA for trend filter
-    if len(close) < 30:
-        return np.zeros(n)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), 
-                       mode='same')  # simplified ER approximation
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # kama smoothing constant
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    kama = kama  # already aligned to 12h
+    vi_plus = sum_vm_plus14 / sum_tr14
+    vi_minus = sum_vm_minus14 / sum_tr14
 
-    # Volume confirmation: volume > 1.5x 20-period average (on 12h timeframe)
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
-        r1_val = r1_daily_aligned[i]
-        s1_val = s1_daily_aligned[i]
-        kama_val = kama[i]
+    for i in range(100, n):
+        vi_p = vi_plus[i]
+        vi_m = vi_minus[i]
+        ema34_val = ema34_daily_aligned[i]
         vol_avg_val = vol_avg_20[i]
 
-        if np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(kama_val) or np.isnan(vol_avg_val):
+        if np.isnan(vi_p) or np.isnan(vi_m) or np.isnan(ema34_val) or np.isnan(vol_avg_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,32 +68,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above daily R1 + 12h uptrend + volume confirmation
-            if close[i] > r1_val and close[i] > kama_val and volume[i] > vol_avg_val * 1.5:
+            # LONG: VI+ crosses above VI- + daily uptrend + volume confirmation
+            if vi_p > vi_m and vi_plus[i-1] <= vi_minus[i-1] and close[i] > ema34_val and volume[i] > vol_avg_val * 1.3:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below daily S1 + 12h downtrend + volume confirmation
-            elif close[i] < s1_val and close[i] < kama_val and volume[i] > vol_avg_val * 1.5:
+            # SHORT: VI- crosses above VI+ + daily downtrend + volume confirmation
+            elif vi_m > vi_p and vi_minus[i-1] <= vi_plus[i-1] and close[i] < ema34_val and volume[i] > vol_avg_val * 1.3:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below 12h KAMA or daily S3 (strong reversal)
-            camarilla_s3_daily = close_daily - hl_range_daily * 1.1 / 4
-            s3_daily_aligned = align_htf_to_ltf(prices, df_daily, 
-                                np.full_like(close_daily, camarilla_s3_daily))
-            if close[i] < kama_val or close[i] < s3_daily_aligned[i]:
+            # EXIT LONG: VI- crosses above VI+ or close below daily EMA34
+            if vi_m > vi_p or close[i] < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above 12h KAMA or daily R3 (strong reversal)
-            camarilla_r3_daily = close_daily + hl_range_daily * 1.1 / 4
-            r3_daily_aligned = align_htf_to_ltf(prices, df_daily, 
-                                np.full_like(close_daily, camarilla_r3_daily))
-            if close[i] > kama_val or close[i] > r3_daily_aligned[i]:
+            # EXIT SHORT: VI+ crosses above VI- or close above daily EMA34
+            if vi_p > vi_m or close[i] > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
