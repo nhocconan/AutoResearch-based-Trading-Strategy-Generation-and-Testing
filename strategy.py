@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_Reversal_With_Volume_Squeeze
-Hypothesis: Price rejection at 1-day pivot points (R3/S3) with volume squeeze confirmation (volume < 0.7x average) identifies exhaustion points for mean reversion. Works in both bull and bear markets by fading extremes at key support/resistance levels. Uses 60-minute EMA20 for trend filter to avoid counter-trend trades in strong trends.
+12h_Donchian_20_Breakout_1wTrend_VolumeFilter
+Hypothesis: 12h price breaking above/below 20-period Donchian channels, filtered by 1-week EMA50 trend and 12h volume spike (>2x average), captures strong trends in both bull and bear markets while avoiding false breakouts. Uses weekly trend for multi-timeframe alignment and volume confirmation for signal quality.
 """
 
-name = "6h_Pivot_Reversal_With_Volume_Squeeze"
-timeframe = "6h"
+name = "12h_Donchian_20_Breakout_1wTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,46 +22,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
 
-    # Calculate pivot points from 1d data
-    # Standard pivot: P = (H + L + C) / 3
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 20-period Donchian channels on 12h data
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = high_roll
+    donchian_lower = low_roll
 
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
+    # Calculate 1-week EMA50 trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
 
-    # Shift by 1 to use previous day's pivot levels
-    prev_r3 = np.roll(r3_1d, 1)
-    prev_s3 = np.roll(s3_1d, 1)
-    prev_r3[0] = np.nan
-    prev_s3[0] = np.nan
-
-    # Align pivot levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, prev_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, prev_s3)
-
-    # Volume squeeze: volume < 0.7x 20-period average (6h)
+    # Volume spike filter: >2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_squeeze = volume < (0.7 * vol_ma)
-
-    # 60-minute EMA20 trend filter (from 1h data)
-    df_1h = get_htf_data(prices, '1h')
-    close_1h = df_1h['close'].values
-    ema_20_1h = pd.Series(close_1h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_20_1h)
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_20_1h_aligned[i]) or np.isnan(volume_squeeze[i])):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,28 +54,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price rejects below S3 (bounces up) with volume squeeze + above EMA20
-            if (low[i] < s3_aligned[i] and close[i] > s3_aligned[i] and 
-                close[i] > ema_20_1h_aligned[i] and volume_squeeze[i]):
+            # LONG: Price breaks above Donchian upper + 1w EMA50 uptrend + volume spike
+            if (close[i] > donchian_upper[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price rejects above R3 (falls down) with volume squeeze + below EMA20
-            elif (high[i] > r3_aligned[i] and close[i] < r3_aligned[i] and 
-                  close[i] < ema_20_1h_aligned[i] and volume_squeeze[i]):
+            # SHORT: Price breaks below Donchian lower + 1w EMA50 downtrend + volume spike
+            elif (close[i] < donchian_lower[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes above R3 (breakout) or volume expansion
-            if close[i] > r3_aligned[i]:
+            # EXIT LONG: Price closes below Donchian lower (reversal level)
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes below S3 (breakdown) or volume expansion
-            if close[i] < s3_aligned[i]:
+            # EXIT SHORT: Price closes above Donchian upper (reversal level)
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
