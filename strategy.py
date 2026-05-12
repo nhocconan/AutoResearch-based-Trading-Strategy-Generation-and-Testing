@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2
-# Hypothesis: Camarilla R3/S3 breakouts with daily trend and volume filter capture momentum with controlled risk.
-# Uses 1d EMA50 for trend filter and volume > 1.5x 20-period average for confirmation.
-# Designed for low trade frequency and high win rate in both bull and bear markets.
-# Uses discrete position sizing (0.25) to limit drawdown and minimize trade frequency.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Condensed
+# Hypothesis: Condense entry logic to reduce trade frequency. Enter only on strong breaks of R3/S3 with volume surge and 1d trend. Exit on opposite level touch. Target 20-40 trades/year.
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Condensed"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,8 +32,6 @@ def generate_signals(prices):
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Previous day's Camarilla levels (R3, S3)
-    # Camarilla: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    # Use previous day's close, high, low
     prev_close_1d = np.roll(close_1d, 1)
     prev_high_1d = np.roll(df_1d['high'].values, 1)
     prev_low_1d = np.roll(df_1d['low'].values, 1)
@@ -52,9 +47,9 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    # Volume confirmation: current volume > 2.0 * 20-period average (stricter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirm = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -90,15 +85,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Close < S3 (reversal to opposite level) OR trend weakens
-            if close[i] < s3_aligned[i] or not trend_up:
+            # EXIT LONG: Close < S3 (reversal to opposite level)
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close > R3 (reversal to opposite level) OR trend weakens
-            if close[i] > r3_aligned[i] or not trend_down:
+            # EXIT SHORT: Close > R3 (reversal to opposite level)
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
