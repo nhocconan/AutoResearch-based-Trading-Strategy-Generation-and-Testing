@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1D_Camarilla_R4S4_Breakout_ADX_Filter
+# 4h_1D_Camarilla_R4S4_Breakout_ADX_Volume
 # Hypothesis: Breakouts at daily Camarilla R4/S4 levels with ADX trend filter and volume confirmation.
-# ADX > 25 ensures we only trade in trending markets, reducing false breakouts.
-# Works in bull/bear: buy when price breaks above R4 in strong uptrend (ADX>25) with volume spike,
-# sell when price breaks below S4 in strong downtrend (ADX>25) with volume spike.
-# Targets 20-50 trades/year on 4h timeframe to avoid fee drag. Focus on BTC/ETH.
+# Works in bull/bear: ADX > 25 filters chop, only trades strong trends.
+# Entry: Price breaks R4/S4 with ADX>25 and volume spike (>2x 20-bar avg).
+# Exit: Price re-enters R4/S4 or ADX drops below 20.
+# Targets 20-40 trades/year to avoid fee drag. Focus on BTC/ETH.
 
-name = "4h_1D_Camarilla_R4S4_Breakout_ADX_Filter"
+name = "4h_1D_Camarilla_R4S4_Breakout_ADX_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for ADX filter and Camarilla levels
+    # Get 1d data for ADX and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -35,36 +35,46 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
 
     # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
 
     # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
 
-    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    # Smoothed TR, +DM, -DM (14-period Wilder smoothing)
     def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.nansum(data[:period])  # First value is simple average
+        smoothed = np.full_like(data, np.nan)
+        if len(data) < period:
+            return smoothed
+        smoothed[period-1] = np.nansum(data[:period])
         for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + data[i]
+        return smoothed
 
-    atr = wilders_smoothing(tr, 14)
-    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
-    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, 14)
-    adx[np.isnan(adx)] = 0
+    tr14 = wilders_smoothing(tr, 14)
+    plus_dm14 = wilders_smoothing(plus_dm, 14)
+    minus_dm14 = wilders_smoothing(minus_dm, 14)
 
-    # Strong trend filter: ADX > 25
-    strong_trend = adx > 25
-    adx_aligned = align_htf_to_ltf(prices, df_1d, strong_trend)
+    # DI+ and DI-
+    plus_di = np.where(tr14 != 0, (plus_dm14 / tr14) * 100, 0)
+    minus_di = np.where(tr14 != 0, (minus_dm14 / tr14) * 100, 0)
+
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = np.full_like(dx, np.nan)
+    if len(dx) >= 14:
+        adx[13] = np.nanmean(dx[:14])
+        for i in range(14, len(dx)):
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
 
     # Get 1d data for Camarilla R4/S4 levels (from previous day)
     prev_close = df_1d['close'].shift(1).values
@@ -88,8 +98,8 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(volume_ok[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
+            np.isnan(camarilla_s4_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -97,30 +107,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from ADX
-        is_strong_trend = adx_aligned[i]
+        # ADX trend filter: only trade when ADX > 25 (strong trend)
+        strong_trend = adx_aligned[i] > 25
+        weak_trend = adx_aligned[i] < 20  # exit when trend weakens
 
         if position == 0:
             # LONG: Break above Camarilla R4 in strong trend with volume confirmation
-            if (close[i] > camarilla_r4_aligned[i] and is_strong_trend and volume_ok[i]):
+            if (close[i] > camarilla_r4_aligned[i] and strong_trend and volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
             # SHORT: Break below Camarilla S4 in strong trend with volume confirmation
-            elif (close[i] < camarilla_s4_aligned[i] and is_strong_trend and volume_ok[i]):
+            elif (close[i] < camarilla_s4_aligned[i] and strong_trend and volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # EXIT LONG: Price re-enters below R4 or trend weakens
-            if close[i] < camarilla_r4_aligned[i] or not is_strong_trend:
+            if close[i] < camarilla_r4_aligned[i] or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Price re-enters above S4 or trend weakens
-            if close[i] > camarilla_s4_aligned[i] or not is_strong_trend:
+            if close[i] > camarilla_s4_aligned[i] or weak_trend:
                 signals[i] = 0.0
                 position = 0
             else:
