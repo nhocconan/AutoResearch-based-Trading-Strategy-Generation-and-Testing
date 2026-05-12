@@ -1,12 +1,11 @@
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts at daily Camarilla R1/S1 levels with volume confirmation and 4h trend filter on 4h timeframe.
-# Targets 20-40 trades/year to stay within fee limits. Uses daily for structure and 4h for trend filter.
-# Long: Close > daily R1 + volume > 1.5x SMA20 + close > 4h EMA50
-# Short: Close < daily S1 + volume > 1.5x SMA20 + close < 4h EMA50
-# Exit: Close crosses opposite daily Camarilla level (S1 for long, R1 for short)
+#!/usr/bin/env python3
+"""
+1d_WilliamsAlligator_Trend_Confirmation_v1
+Hypothesis: Williams Alligator (SMAs of median price) on daily chart defines trend; enter long when price > Alligator Teeth and Lips > Jaw, short when opposite, on 1d timeframe. Uses weekly trend filter to avoid counter-trend trades. Targets 15-25 trades/year to minimize fee drag. Works in bull (trend-following) and bear (avoids false signals via weekly filter).
+"""
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_Trend_Confirmation_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,49 +20,37 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels
+    # Williams Alligator on daily: Jaw (13), Teeth (8), Lips (5) SMAs of median price
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
 
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2
+    jaw = pd.Series(median_1d).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(median_1d).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(median_1d).rolling(window=5, min_periods=5).mean().values
 
-    # Calculate Camarilla levels from previous daily close
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + camarilla_range * 1.1 / 12
-    s1 = close_1d - camarilla_range * 1.1 / 12
-
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly trend filter: price > weekly EMA50 for uptrend, < for downtrend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
+    weekly_close = df_1w['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
 
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-
-    # Volume confirmation: 1.5x 20-period SMA
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_threshold = volume_sma20 * 1.5
+    # Align all to 1d timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        # Get aligned values for current 4h bar
-        r1_aligned = align_htf_to_ltf(prices, df_1d, r1)[i]
-        s1_aligned = align_htf_to_ltf(prices, df_1d, s1)[i]
-        ema50_aligned = ema50_4h_aligned[i]
-        vol_threshold_val = volume_threshold[i]
-
-        # Skip if any required data is NaN
-        if (np.isnan(r1_aligned) or np.isnan(s1_aligned) or 
-            np.isnan(ema50_aligned) or np.isnan(vol_threshold_val)):
+    for i in range(50, n):  # warmup for longest SMA
+        # Skip if any data is NaN
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or np.isnan(weekly_ema50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,31 +58,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        weekly_trend = weekly_ema50_aligned[i]
+        price = close[i]
+
         if position == 0:
-            # LONG: Price closes above daily R1 + volume spike (1.5x) + 4h uptrend
-            if (close[i] > r1_aligned and
-                volume[i] > vol_threshold_val and
-                close[i] > ema50_aligned):
+            # LONG: Price above Teeth, Lips > Jaw (bullish alignment), and weekly uptrend
+            if (price > teeth_val and lips_val > jaw_val and price > weekly_trend):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below daily S1 + volume spike (1.5x) + 4h downtrend
-            elif (close[i] < s1_aligned and
-                  volume[i] > vol_threshold_val and
-                  close[i] < ema50_aligned):
+            # SHORT: Price below Teeth, Lips < Jaw (bearish alignment), and weekly downtrend
+            elif (price < teeth_val and lips_val < jaw_val and price < weekly_trend):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below daily S1
-            if close[i] < s1_aligned:
+            # EXIT LONG: Price crosses below Teeth or weekly trend turns down
+            if price < teeth_val or price < weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above daily R1
-            if close[i] > r1_aligned:
+            # EXIT SHORT: Price crosses above Teeth or weekly trend turns up
+            if price > teeth_val or price > weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
