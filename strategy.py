@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""
-12h_Camarilla_R1S1_Breakout_Trend_VolumeS
-Hypothesis: Trade breakouts from daily Camarilla R1/S1 levels on 12h timeframe in the direction of daily trend with volume confirmation. Uses 12h timeframe to reduce trade frequency (target: 50-150 total trades over 4 years) while maintaining edge in both bull and bear markets by following higher-timeframe trend. Volume spike filter (1.5x average) ensures only strong breakouts are traded.
-"""
+# 12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v1
+# Hypothesis: Trading breakouts from daily Camarilla R1/S1 levels on 12h timeframe in the direction of daily EMA34 trend with volume confirmation (1.5x average volume). Designed for lower trade frequency (~12-37/year) to avoid fee drag while capturing trend moves in both bull and bear markets by following higher-timeframe trend.
 
-name = "12h_Camarilla_R1S1_Breakout_Trend_VolumeS"
+name = "12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v1"
 timeframe = "12h"
 leverage = 1.0
 
