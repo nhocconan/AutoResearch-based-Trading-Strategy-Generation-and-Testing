@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
 4h_Donchian_Breakout_Volume_Trend
-Hypothesis: Donchian channel breakouts with 1d EMA50 trend filter and volume confirmation capture momentum in both bull and bear markets.
-Breakouts above upper band + uptrend = long; breakdowns below lower band + downtrend = short.
-Uses volatility-based channels to adapt to changing market conditions.
-Target: 20-40 trades/year per symbol with disciplined risk management.
+Hypothesis: Donchian channel breakouts with volume confirmation and 1-day EMA50 trend filter capture directional momentum while avoiding false breakouts in choppy markets. The strategy targets 20-40 trades per year per symbol, suitable for 4H timeframe, with emphasis on BTC and ETH performance.
 """
 
 name = "4h_Donchian_Breakout_Volume_Trend"
@@ -17,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -54,28 +51,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above Donchian Upper + 1d uptrend + volume spike
+            # LONG: Close breaks above Donchian High + 1d uptrend + volume spike
             if close[i] > donchian_high[i] and close[i] > ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
                 signals[i] = 0.30
                 position = 1
-            # SHORT: Close breaks below Donchian Lower + 1d downtrend + volume spike
+            # SHORT: Close breaks below Donchian Low + 1d downtrend + volume spike
             elif close[i] < donchian_low[i] and close[i] < ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
                 signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below Donchian Middle or 1d trend turns down
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
-            if close[i] < donchian_mid or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close crosses below Donchian Low or 1d trend turns down
+            if close[i] < donchian_low[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Close crosses above Donchian Middle or 1d trend turns up
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
-            if close[i] > donchian_mid or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close crosses above Donchian High or 1d trend turns up
+            if close[i] > donchian_high[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
