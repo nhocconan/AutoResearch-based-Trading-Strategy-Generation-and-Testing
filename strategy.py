@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-12H_CAMARILLA_R1_S1_BREAKOUT_1D_TREND_VOLUME_FILTER
-Hypothesis: Camarilla R1/S1 levels on 1d chart represent strong breakout points with trend and volume confirmation.
-Price breaking above R1 with volume and 1d uptrend signals continuation long.
-Price breaking below S1 with volume and 1d downtrend signals continuation short.
-Works in bull (buy breakouts) and bear (sell breakdowns) markets by following trend.
-Target: 12-37 trades/year on 12h timeframe to avoid overtrading.
+4H_CAMARILLA_R1_S1_BREAKOUT_1D_EMA100_TREND_V3
+Hypothesis: Refine Camarilla breakout with higher volume threshold (3x) and require EMA alignment for both entry and exit to reduce trades and improve quality. Target: 20-40 trades/year.
 """
-
-name = "12H_CAMARILLA_R1_S1_BREAKOUT_1D_TREND_VOLUME_FILTER"
-timeframe = "12h"
+name = "4H_CAMARILLA_R1_S1_BREAKOUT_1D_EMA100_TREND_V3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,29 +30,27 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R1 and S1 levels from previous 1d bar (requires previous bar's data)
+    # Camarilla R1 and S1 levels from previous 1d bar
     camarilla_r1 = np.full(len(close_1d), np.nan)
     camarilla_s1 = np.full(len(close_1d), np.nan)
     
     for i in range(1, len(close_1d)):
-        # Previous 1d bar's values
         ph = high_1d[i-1]
         pl = low_1d[i-1]
         pc = close_1d[i-1]
         range_val = ph - pl
         
-        # Camarilla R1 and S1 levels
         camarilla_r1[i] = pc + range_val * 1.1 / 6
         camarilla_s1[i] = pc - range_val * 1.1 / 6
     
     # EMA100 for 1d trend filter
     ema100 = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
     
-    # Volume spike: current 12h volume > 2.5x 20-period average (higher threshold to reduce trades)
+    # Volume spike: current 4h volume > 3x 20-period average (higher threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > 2.5 * vol_ma
+    volume_spike = volume > 3.0 * vol_ma
     
-    # Align all 1d data to 12h timeframe
+    # Align all 1d data to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema100_aligned = align_htf_to_ltf(prices, df_1d, ema100)
@@ -65,8 +58,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to ensure previous bar data exists
-        # Skip if any critical data is not ready
+    for i in range(1, n):
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(ema100_aligned[i])):
             if position != 0:
