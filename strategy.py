@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels on 1d act as strong support/resistance. Price breaking above R1 with 1d uptrend (price > EMA34) and volume spike triggers long. Price breaking below S1 with 1d downtrend (price < EMA34) and volume spike triggers short. Uses 12h timeframe to limit trades (target: 20-50/year) and avoid fee drift. Works in bull/bear via 1d trend filter.
+# 6h_ADX_Volume_Trend_Filter
+# Hypothesis: Use ADX(14) to identify strong trends (ADX > 25) on 6h, combined with +DI/-DI crossover for direction, confirmed by volume spikes (>1.5x 20-period average). Enter long when +DI crosses above -DI with ADX > 25 and volume spike; short when -DI crosses above +DI with ADX > 25 and volume spike. Exit when ADX falls below 20 (trend weakening) or reverse crossover. Targets 15-30 trades/year to avoid fee decay while capturing strong trends in both bull and bear markets.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_ADX_Volume_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,39 +20,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate ADX and DI components
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high[0] - low[0]
 
-    # Camarilla levels from previous 1d bar (H, L, C)
-    # R1 = C + (H - L) * 1.12
-    # S1 = C - (H - L) * 1.12
-    rng = high_1d - low_1d
-    R1 = close_1d + rng * 1.12
-    S1 = close_1d - rng * 1.12
+    # Directional Movement
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
 
-    # Align Camarilla levels to 12h (use previous day's levels)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Smoothed values
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
 
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # DI values
+    plus_di = 100 * plus_dm_sum / tr_sum
+    minus_di = 100 * minus_dm_sum / tr_sum
 
-    # Volume confirmation: volume > 2x 20-period average
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(1, n):  # start from 1 to have previous day's levels
+    for i in range(14, n):
         # Skip if any required value is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,30 +67,28 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price > R1 (breakout resistance) + price > EMA34 (uptrend) + volume spike
-            if (close[i] > R1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 2.0):
+            # LONG: +DI crosses above -DI with ADX > 25 and volume spike
+            if (plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1] and
+                adx[i] > 25 and volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price < S1 (breakdown support) + price < EMA34 (downtrend) + volume spike
-            elif (close[i] < S1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 2.0):
+            # SHORT: -DI crosses above +DI with ADX > 25 and volume spike
+            elif (minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1] and
+                  adx[i] > 25 and volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below EMA34 (trend change)
-            if close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: ADX < 20 (trend weakening) or -DI crosses above +DI
+            if adx[i] < 20 or (minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above EMA34 (trend change)
-            if close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: ADX < 20 (trend weakening) or +DI crosses above -DI
+            if adx[i] < 20 or (plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
