@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Adapted
 # Hypothesis: Daily trend filtered 12h Camarilla R1/S1 breakouts with volume confirmation.
 # Uses daily EMA50 for trend filter to capture intermediate trends in both bull and bear markets.
 # Volume confirmation (2.5x SMA20) reduces false breakouts. Designed for low trade frequency (12-37/year) to minimize fee drag.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Adapted"
 timeframe = "12h"
 leverage = 1.0
 
