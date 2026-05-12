@@ -1,58 +1,65 @@
-# 6H_EAGLE_CLAW_EMA12_CROSS_4H_WAVE_TREND
-# Hypothesis: Uses EMA12 crossover on 6h timeframe for momentum, filtered by 4H WaveTrend oscillator (overbought/oversold).
-# WaveTrend identifies exhaustion points in trends, allowing entries in direction of higher timeframe trend.
-# Works in bull markets: buy dips in uptrend when WT oversold. Works in bear markets: sell rallies in downtrend when WT overbought.
-# Combines fast entry (EMA cross) with WT exhaustion filter to avoid chasing extended moves.
-# Target: 60-120 total trades over 4 years (15-30/year).
+#!/usr/bin/env python3
+# 4H_DONCHIAN_BREAKOUT_VOLUME_CONFIRMATION_1D_TREND_FILTER
+# Hypothesis: Buy breakouts above Donchian(20) high with volume > 1.5x 20-period average in uptrend (EMA50 > EMA200).
+# Sell breakdowns below Donchian(20) low with volume > 1.5x 20-period average in downtrend (EMA50 < EMA200).
+# Works in bull markets via breakout momentum and in bear markets via breakdown continuation.
+# Volume confirmation filters false breakouts; trend filter avoids counter-trend whipsaws.
+# Target: 20-40 trades/year on 4h timeframe.
 
-name = "6H_EAGLE_CLAW_EMA12_CROSS_4H_WAVE_TREND"
-timeframe = "6h"
+name = "4H_DONCHIAN_BREAKOUT_VOLUME_CONFIRMATION_1D_TREND_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mdata import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4H data for WaveTrend indicator
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # WaveTrend Oscillator calculation
-    # Typical price and EMA smoothing
-    ap = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
-    esa = pd.Series(ap).ewm(span=10, adjust=False, min_periods=10).mean()
-    d = pd.Series(abs(ap - esa)).ewm(span=10, adjust=False, min_periods=10).mean()
-    ci = (ap - esa) / (0.015 * d)
-    tci = pd.Series(ci).ewm(span=21, adjust=False, min_periods=21).mean()
-    wt1 = tci.values
-    wt2 = pd.Series(wt1).ewm(span=4, adjust=False, min_periods=4).mean()
+    # Daily EMA50 and EMA200 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # WaveTrend levels: overbought > 60, oversold < -60
-    wt1_aligned = align_htf_to_ltf(prices, df_4h, wt1)
-    wt2_aligned = align_htf_to_ltf(prices, df_4h, wt2)
+    # Align daily EMAs to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 6H EMA12 for entry signal
-    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    # 4h Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    
+    # 4h volume average (20-period)
+    vol_avg = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        vol_avg[i] = np.mean(volume[i - lookback + 1:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 12)  # Ensure EMA and WT are stable
+    start_idx = max(200, lookback - 1)  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(wt1_aligned[i]) or np.isnan(wt2_aligned[i]) or np.isnan(ema12[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,27 +67,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Trend determination
+        uptrend = ema50_1d_aligned[i] > ema200_1d_aligned[i]
+        downtrend = ema50_1d_aligned[i] < ema200_1d_aligned[i]
+        
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        
         if position == 0:
-            # LONG: EMA12 crosses above previous value AND WaveTrend oversold (< -60)
-            if (ema12[i] > ema12[i-1] and wt1_aligned[i] < -60):
+            # LONG: Donchian breakout + volume + uptrend
+            if close[i] > highest_high[i] and vol_confirm and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: EMA12 crosses below previous value AND WaveTrend overbought (> 60)
-            elif (ema12[i] < ema12[i-1] and wt1_aligned[i] > 60):
+            # SHORT: Donchian breakdown + volume + downtrend
+            elif close[i] < lowest_low[i] and vol_confirm and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: EMA12 turns down OR WaveTrend overbought (> 60)
-            if (ema12[i] < ema12[i-1]) or (wt1_aligned[i] > 60):
+            # EXIT LONG: Donchian breakdown or trend reversal
+            if close[i] < lowest_low[i] or ema50_1d_aligned[i] < ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: EMA12 turns up OR WaveTrend oversold (< -60)
-            if (ema12[i] > ema12[i-1]) or (wt1_aligned[i] < -60):
+            # EXIT SHORT: Donchian breakout or trend reversal
+            if close[i] > highest_high[i] or ema50_1d_aligned[i] > ema200_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
