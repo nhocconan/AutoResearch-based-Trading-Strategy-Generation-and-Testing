@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_1W_Camarilla_R4S4_Breakout_1wTrend_Volume
-# Hypothesis: Breakouts at weekly Camarilla R4/S4 levels with 1w trend filter and volume confirmation.
-# Weekly timeframe filters noise and captures major trend moves. Works in bull/bear:
-# - Buy when price breaks above weekly R4 in bullish weekly trend with volume spike
-# - Sell when price breaks below weekly S4 in bearish weekly trend with volume spike
-# Targets 10-30 trades/year on 1d timeframe to avoid fee drag. Focus on BTC/ETH.
+# 4h_1D_Camarilla_R4S4_Breakout_ADX_Filter
+# Hypothesis: Breakouts at daily Camarilla R4/S4 levels with ADX trend filter and volume confirmation.
+# ADX > 25 ensures we only trade in trending markets, reducing false breakouts.
+# Works in bull/bear: buy when price breaks above R4 in strong uptrend (ADX>25) with volume spike,
+# sell when price breaks below S4 in strong downtrend (ADX>25) with volume spike.
+# Targets 20-50 trades/year on 4h timeframe to avoid fee drag. Focus on BTC/ETH.
 
-name = "1d_1W_Camarilla_R4S4_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_1D_Camarilla_R4S4_Breakout_ADX_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,33 +24,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1w data for trend filter and Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for ADX filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate EMA(34) for 1w trend filter
-    close_1w = df_1w['close'].values
-    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    # Calculate ADX (14-period) on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Get 1w data for Camarilla R4/S4 levels (from previous week)
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR
 
-    # Calculate Camarilla levels from previous 1w OHLC
-    # Using previous week's data to avoid look-ahead
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+
+    # Smooth TR, +DM, -DM using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])  # First value is simple average
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+
+    atr = wilders_smoothing(tr, 14)
+    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, 14)
+    adx[np.isnan(adx)] = 0
+
+    # Strong trend filter: ADX > 25
+    strong_trend = adx > 25
+    adx_aligned = align_htf_to_ltf(prices, df_1d, strong_trend)
+
+    # Get 1d data for Camarilla R4/S4 levels (from previous day)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
 
     # Camarilla R4 and S4 levels (outer bands)
     camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
 
-    # Align Camarilla levels to 1d timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
 
     # Volume confirmation: current volume > 2.0x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,8 +88,8 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(volume_ok[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,31 +97,30 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from EMA(34)
-        bullish_trend = close[i] > ema_34_aligned[i]
-        bearish_trend = close[i] < ema_34_aligned[i]
+        # Trend filter from ADX
+        is_strong_trend = adx_aligned[i]
 
         if position == 0:
-            # LONG: Break above weekly Camarilla R4 in bullish trend with volume confirmation
-            if (close[i] > camarilla_r4_aligned[i] and bullish_trend and volume_ok[i]):
+            # LONG: Break above Camarilla R4 in strong trend with volume confirmation
+            if (close[i] > camarilla_r4_aligned[i] and is_strong_trend and volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below weekly Camarilla S4 in bearish trend with volume confirmation
-            elif (close[i] < camarilla_s4_aligned[i] and bearish_trend and volume_ok[i]):
+            # SHORT: Break below Camarilla S4 in strong trend with volume confirmation
+            elif (close[i] < camarilla_s4_aligned[i] and is_strong_trend and volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R4 or trend turns bearish
-            if close[i] < camarilla_r4_aligned[i] or not bullish_trend:
+            # EXIT LONG: Price re-enters below R4 or trend weakens
+            if close[i] < camarilla_r4_aligned[i] or not is_strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S4 or trend turns bullish
-            if close[i] > camarilla_s4_aligned[i] or not bearish_trend:
+            # EXIT SHORT: Price re-enters above S4 or trend weakens
+            if close[i] > camarilla_s4_aligned[i] or not is_strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
