@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_TRIX_ZeroCross_With_Volume_And_Trend_Filter
-Hypothesis: TRIX (triple smoothed EMA) crossing above/below zero line indicates momentum shifts.
-Combine with volume > 1.5x average and 1d EMA50 trend filter to capture strong momentum moves
-while avoiding whipsaws. Works in both bull and bear markets by following momentum direction.
-Target: 20-40 trades per year to minimize fee drag.
+1d_Camarilla_R1_S1_Breakout_1wTrend
+Hypothesis: On daily timeframe, buy when price breaks above Camarilla R1 level from previous day with volume >2x average and 1w EMA50 trending up; sell when price breaks below Camarilla S1 level with volume >2x average and 1w EMA50 trending down. Uses weekly trend filter to capture strong trends while minimizing false breakouts in both bull and bear markets. Targets 10-25 trades per year to reduce fee drag and improve generalization.
 """
 
-name = "12h_TRIX_ZeroCross_With_Volume_And_Trend_Filter"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,36 +17,54 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
+    close_1w = df_1w['close'].values
+
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate TRIX on 12h close: triple EMA then % change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = (ema3 / ema3.shift(1) - 1) * 100  # percentage change
-    trix = trix.fillna(0).values
+    # Calculate Camarilla levels from previous daily bar
+    range_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + range_1d * 1.12 / 12
+    camarilla_s1 = close_1d - range_1d * 1.12 / 12
 
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Use previous day's levels (shift by 1)
+    camarilla_r1_prev = np.roll(camarilla_r1, 1)
+    camarilla_s1_prev = np.roll(camarilla_s1, 1)
+    camarilla_r1_prev[0] = np.nan
+    camarilla_s1_prev[0] = np.nan
 
-    # Volume confirmation: volume > 1.5x 24-period average
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Align Camarilla levels to daily timeframe (1:1 since same TF)
+    camarilla_r1_aligned = camarilla_r1_prev
+    camarilla_s1_aligned = camarilla_s1_prev
+
+    # 1w EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+
+    # Volume confirmation: volume > 2x 20-day average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(24, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(trix[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_avg_24[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,30 +73,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX crosses above zero + uptrend + volume spike
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume[i] > vol_avg_24[i] * 1.5):
+            # LONG: Price breaks above Camarilla R1 + 1w uptrend + volume spike
+            if (close[i] > camarilla_r1_aligned[i] and 
+                close[i] > ema50_1w_aligned[i] and 
+                volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero + downtrend + volume spike
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume[i] > vol_avg_24[i] * 1.5):
+            # SHORT: Price breaks below Camarilla S1 + 1w downtrend + volume spike
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  close[i] < ema50_1w_aligned[i] and 
+                  volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero OR trend turns down
-            if (trix[i] < 0 and trix[i-1] >= 0) or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price breaks below Camarilla S1 OR trend turns down
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero OR trend turns up
-            if (trix[i] > 0 and trix[i-1] <= 0) or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above Camarilla R1 OR trend turns up
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
