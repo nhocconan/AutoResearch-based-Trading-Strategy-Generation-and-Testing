@@ -1,13 +1,15 @@
+#3/0.110
 #!/usr/bin/env python3
 """
-4h EMA_Crossover + Volume + ADX Trend Filter
-Hypothesis: EMA crossover captures momentum, volume confirms institutional interest,
-and ADX > 25 filters for trending markets. This combination reduces false signals
-in ranging markets while capturing sustained moves in both bull and bear cycles.
-Designed for low trade frequency (~20-40/year) to minimize fee drag.
+12h KAMA + RSI + Chop Regime Filter (12h)
+Hypothesis: KAMA adapts to market noise - in trending markets it follows price closely,
+in ranging markets it stays flat. Combined with RSI momentum and Chop filter to avoid
+false signals in low volatility regimes. Designed for low trade frequency (<30/year)
+to minimize fee drag while capturing sustained moves in both bull and bear markets.
+12h timeframe reduces trade frequency to avoid fee drag, using 1d HTF for regime confirmation.
 """
-name = "4h_EMA_Crossover_Volume_ADX"
-timeframe = "4h"
+name = "12h_KAMA_RSI_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,31 +26,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === EMA Fast (9) and Slow (21) ===
-    ema_fast = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema_slow = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # === KAMA (Adaptive Moving Average) ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.zeros(n)
+    for i in range(1, n):
+        if np.sum(volatility[max(0, i-9):i+1]) > 0:
+            er[i] = change[i] / np.sum(volatility[max(0, i-9):i+1])
+        else:
+            er[i] = 0
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # === ADX (14) for trend strength ===
+    # === RSI (14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Chop Index (14) ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    up_move = np.diff(high, prepend=high[0])
-    down_move = -np.diff(low, prepend=low[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr_sum
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr_sum
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    adx = pd.Series(dx, index=range(len(dx))).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr14 * 14 / (highest_high - lowest_low)) / np.log10(14)
     
     # === Volume Spike (20) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 1.5)
+    
+    # === 1d HTF Trend (EMA34) ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,8 +78,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,29 +87,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Determine trend from 1d EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
+        
         if position == 0:
-            # LONG: Fast EMA above Slow EMA + ADX > 25 (trending) + volume spike
-            if (ema_fast[i] > ema_slow[i] and 
-                adx[i] > 25 and
-                vol_spike[i]):
+            # LONG: Price above KAMA + RSI > 50 + Chop < 61.8 (trending) + volume spike + 1d uptrend
+            if (close[i] > kama[i] and 
+                rsi[i] > 50 and
+                chop[i] < 61.8 and
+                vol_spike[i] and
+                trend_up):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Fast EMA below Slow EMA + ADX > 25 (trending) + volume spike
-            elif (ema_fast[i] < ema_slow[i] and 
-                  adx[i] > 25 and
-                  vol_spike[i]):
+            # SHORT: Price below KAMA + RSI < 50 + Chop < 61.8 (trending) + volume spike + 1d downtrend
+            elif (close[i] < kama[i] and 
+                  rsi[i] < 50 and
+                  chop[i] < 61.8 and
+                  vol_spike[i] and
+                  trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Fast EMA below Slow EMA OR ADX < 20 (no trend)
-            if ema_fast[i] < ema_slow[i] or adx[i] < 20:
+            # EXIT LONG: Price below KAMA OR RSI < 40 OR Chop > 61.8 (ranging) OR 1d trend turns down
+            if close[i] < kama[i] or rsi[i] < 40 or chop[i] > 61.8 or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Fast EMA above Slow EMA OR ADX < 20 (no trend)
-            if ema_fast[i] > ema_slow[i] or adx[i] < 20:
+            # EXIT SHORT: Price above KAMA OR RSI > 60 OR Chop > 61.8 (ranging) OR 1d trend turns up
+            if close[i] > kama[i] or rsi[i] > 60 or chop[i] > 61.8 or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
