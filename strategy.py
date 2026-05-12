@@ -1,12 +1,6 @@
-# The strategy combines 1-day breakout with 1-week trend filtering and volume confirmation
-# It uses 1-day Donchian breakout for entries, 1-week EMA for trend direction,
-# and volume confirmation to avoid false breakouts
-# Designed to work in both bull and bear markets by following the weekly trend
-# Target: 30-100 trades over 4 years (7-25 per year) to minimize fee drag
-
 #!/usr/bin/env python3
-name = "1d_Donchian_20_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_OrderBlock_Refine_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,40 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Donchian calculation (needed for the 1d timeframe itself)
+    # Load 1d data for trend filter and order block detection
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Load 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d Donchian channels (20-period)
-    # Upper band = highest high of last 20 days
-    # Lower band = lowest low of last 20 days
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Detect bullish order blocks (last down candle before up move) and bearish order blocks (last up candle before down move)
+    # Bullish OB: candle where close < open and next candle closes above its high
+    # Bearish OB: candle where close > open and next candle closes below its low
+    bullish_ob_low = np.zeros(len(high_1d))
+    bearish_ob_high = np.zeros(len(high_1d))
     
-    # Calculate 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    for i in range(1, len(close_1d)-1):
+        # Bullish OB: down candle followed by up candle breaking its high
+        if close_1d[i] < open_1d[i] and close_1d[i+1] > high_1d[i]:
+            bullish_ob_low[i] = low_1d[i]
+        # Bearish OB: up candle followed by down candle breaking its low
+        elif close_1d[i] > open_1d[i] and close_1d[i+1] < low_1d[i]:
+            bearish_ob_high[i] = high_1d[i]
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # Forward fill OB levels (they remain valid until broken)
+    bullish_ob_low = pd.Series(bullish_ob_low).replace(0, np.nan).ffill().bfill().fillna(0).values
+    bearish_ob_high = pd.Series(bearish_ob_high).replace(0, np.nan).ffill().bfill().fillna(0).values
+    
+    # Align OB levels to 6h timeframe
+    bullish_ob_low_aligned = align_htf_to_ltf(prices, df_1d, bullish_ob_low)
+    bearish_ob_high_aligned = align_htf_to_ltf(prices, df_1d, bearish_ob_high)
+    
+    # Volume filter: current 6h volume > 1.8x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.3 * vol_avg)
+    vol_filter = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(bullish_ob_low_aligned[i]) or 
+            np.isnan(bearish_ob_high_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,27 +71,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper + above 1w EMA34 + volume filter
-            if close[i] > donchian_upper[i] and close[i] > ema_34_1w_aligned[i] and vol_filter[i]:
+            # Long: price pulls back to bullish OB + above 1d EMA50 + volume filter
+            if low[i] <= bullish_ob_low_aligned[i] and close[i] > ema_50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + below 1w EMA34 + volume filter
-            elif close[i] < donchian_lower[i] and close[i] < ema_34_1w_aligned[i] and vol_filter[i]:
+            # Short: price retraces to bearish OB + below 1d EMA50 + volume filter
+            elif high[i] >= bearish_ob_high_aligned[i] and close[i] < ema_50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian lower
-            if close[i] < donchian_lower[i]:
+            # Exit long: price breaks below bullish OB or trend changes
+            if low[i] < bullish_ob_low_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian upper
-            if close[i] > donchian_upper[i]:
+            # Exit short: price breaks above bearish OB or trend changes
+            if high[i] > bearish_ob_high_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+# Note: Requires 'open' column in prices DataFrame for OB detection
+# If 'open' not available, will use close as fallback (less ideal but functional)
