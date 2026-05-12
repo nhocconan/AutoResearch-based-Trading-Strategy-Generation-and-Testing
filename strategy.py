@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 12h_WickReversal_WeeklyTrend_DailyVol
-# Hypothesis: Long when weekly uptrend + daily volume spike + rejection of lower wicks (bullish engulfing or hammer),
-# short when weekly downtrend + daily volume spike + rejection of upper wicks (bearish engulfing or shooting star).
-# Uses 1-week EMA50 for trend filter and daily volume > 1.5x 20-period average for confirmation.
-# Designed for 12h timeframe to avoid overtrading and capture multi-day swings.
+# 4h_Williams_R_Reversal_1dTrend_Volume
+# Hypothesis: Williams %R identifies overbought/oversold extremes; long when %R crosses above -50 from oversold with volume spike and daily uptrend, short when %R crosses below -50 from overbought with volume spike and daily downtrend. Uses Williams %R(14) for mean reversion signals, daily EMA50 for trend filter, and volume > 1.5x 20-period average for confirmation. Designed for 4h timeframe to avoid overtrading. Works in bull markets via pullbacks in uptrends and in bear markets via bounces in downtrends.
 
-name = "12h_WickReversal_WeeklyTrend_DailyVol"
-timeframe = "12h"
+name = "4h_Williams_R_Reversal_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,39 +12,40 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-
-    # Weekly EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-
-    # Daily data for volume confirmation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Daily volume average
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Daily EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+
+    # Volume confirmation: current volume > 1.5x average of last 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,53 +53,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from weekly EMA50
-        price_above_weekly_ema = close[i] > ema_50_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_50_1w_aligned[i]
-
-        # Daily volume confirmation
-        volume_ok = volume[i] > (1.5 * vol_ma_1d_aligned[i])
-
-        # Wick rejection signals
-        body_size = np.abs(close[i] - open_[i])
-        lower_wick = np.minimum(open_[i], close[i]) - low[i]
-        upper_wick = high[i] - np.maximum(open_[i], close[i])
-        total_range = high[i] - low[i]
-
-        # Avoid division by zero
-        if total_range == 0:
-            lower_wick_ratio = 0
-            upper_wick_ratio = 0
-        else:
-            lower_wick_ratio = lower_wick / total_range
-            upper_wick_ratio = upper_wick / total_range
-
-        # Bullish rejection: long lower wick, small body (hammer or bullish engulfing)
-        bullish_rejection = (lower_wick_ratio > 0.6) and (body_size < 0.3 * total_range)
-        # Bearish rejection: long upper wick, small body (shooting star or bearish engulfing)
-        bearish_rejection = (upper_wick_ratio > 0.6) and (body_size < 0.3 * total_range)
+        # Trend filter from daily EMA50
+        price_above_daily_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_daily_ema = close[i] < ema_50_1d_aligned[i]
 
         if position == 0:
-            # LONG: weekly uptrend + volume spike + bullish rejection
-            if price_above_weekly_ema and volume_ok and bullish_rejection:
+            # LONG: Williams %R crosses above -50 from oversold with volume spike and daily uptrend
+            if i > 0 and not np.isnan(williams_r[i-1]) and williams_r[i-1] <= -80 and williams_r[i] > -50 and volume_ok[i] and price_above_daily_ema:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: weekly downtrend + volume spike + bearish rejection
-            elif price_below_weekly_ema and volume_ok and bearish_rejection:
+            # SHORT: Williams %R crosses below -50 from overbought with volume spike and daily downtrend
+            elif i > 0 and not np.isnan(williams_r[i-1]) and williams_r[i-1] >= -20 and williams_r[i] < -50 and volume_ok[i] and price_below_daily_ema:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: weekly trend turns down or bearish rejection
-            if (not price_above_weekly_ema) or bearish_rejection:
+            # EXIT LONG: Williams %R crosses below -50 or trend turns down
+            if i > 0 and not np.isnan(williams_r[i-1]) and williams_r[i-1] >= -20 and williams_r[i] < -50 or not price_above_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: weekly trend turns up or bullish rejection
-            if (not price_below_weekly_ema) or bullish_rejection:
+            # EXIT SHORT: Williams %R crosses above -50 or trend turns up
+            if i > 0 and not np.isnan(williams_r[i-1]) and williams_r[i-1] <= -80 and williams_r[i] > -50 or not price_below_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
