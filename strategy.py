@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Direction_1wTrend_Filter"
-timeframe = "1d"
+name = "6h_BollingerTrend_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,52 +9,50 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d KAMA (Kaufman Adaptive Moving Average)
-    # ER = Efficiency Ratio = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # placeholder for rolling sum
+    # Get 1-day data for Bollinger Bands and trend
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Proper rolling volatility calculation
-    volatility_rolling = pd.Series(np.abs(np.diff(close, n=1))).rolling(window=10, min_periods=10).sum().values
-    # Prepend first 10 values to align lengths
-    volatility_rolling = np.concatenate([np.full(10, np.nan), volatility_rolling])
+    # 20-period Bollinger Bands on 1D
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper = sma_20 + 2.0 * std_20
+    lower = sma_20 - 2.0 * std_20
     
-    er = np.where(volatility_rolling != 0, change / volatility_rolling, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # 50-period EMA for trend on 1D
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1w trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # 20-period EMA on weekly
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align to 6h timeframe
+    upper_6h = align_htf_to_ltf(prices, df_1d, upper)
+    lower_6h = align_htf_to_ltf(prices, df_1d, lower)
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: volume > 1.5 * 20-day average
+    # Bollinger Bandwidth for volatility filter
+    bb_width = (upper - lower) / sma_20
+    bb_width_6h = align_htf_to_ltf(prices, df_1d, bb_width)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure sufficient data for KAMA and EMA
+    start_idx = 50  # ensure sufficient data
     
     for i in range(start_idx, n):
-        # Skip if KAMA or EMA data not ready
-        if np.isnan(kama[i]) or np.isnan(ema_20_1w_aligned[i]):
+        # Skip if data not ready
+        if np.isnan(upper_6h[i]) or np.isnan(lower_6h[i]) or np.isnan(ema_50_6h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,24 +61,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above KAMA + price above weekly EMA + volume confirmation
-            if (close[i] > kama[i]) and (close[i] > ema_20_1w_aligned[i]) and vol_confirm[i]:
+            # Long: Price near lower BB + uptrend + volume confirmation + low volatility
+            if (close[i] <= lower_6h[i] * 1.02) and (close[i] > ema_50_6h[i]) and vol_confirm[i] and (bb_width_6h[i] < 0.05):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA + price below weekly EMA + volume confirmation
-            elif (close[i] < kama[i]) and (close[i] < ema_20_1w_aligned[i]) and vol_confirm[i]:
+            # Short: Price near upper BB + downtrend + volume confirmation + low volatility
+            elif (close[i] >= upper_6h[i] * 0.98) and (close[i] < ema_50_6h[i]) and vol_confirm[i] and (bb_width_6h[i] < 0.05):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price below KAMA or below weekly EMA
-            if (close[i] < kama[i]) or (close[i] < ema_20_1w_aligned[i]):
+            # Exit long: Price crosses above SMA or trend breaks
+            if (close[i] >= sma_20[-1] if not np.isnan(sma_20[-1]) else upper_6h[i]) or (close[i] <= ema_50_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price above KAMA or above weekly EMA
-            if (close[i] > kama[i]) or (close[i] > ema_20_1w_aligned[i]):
+            # Exit short: Price crosses below SMA or trend breaks
+            if (close[i] <= sma_20[-1] if not np.isnan(sma_20[-1]) else lower_6h[i]) or (close[i] >= ema_50_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
