@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_Camarilla_R3_S3_Breakout_1wTrend_Volume
-# Hypothesis: Camarilla pivot levels (R3/S3) on daily timeframe identify key support/resistance.
-# Breakouts above R3 or breakdowns below S3 with volume confirmation and weekly trend alignment
-# provide high-probability trades. Weekly trend filter avoids counter-trend trades in strong trends.
-# Works in bull and bear markets by trading breakouts of significant daily levels with trend filter.
-# Target: 10-25 trades/year per symbol (40-100 total over 4 years).
+# 6h_Volatility_Squeeze_Breakout_1dTrend_Volume
+# Hypothesis: Bollinger Band squeeze (low volatility) on 6m followed by breakout with volume
+# and alignment to daily trend (EMA50) captures explosive moves in both bull and bear markets.
+# Works by identifying periods of low volatility (BB width < 20th percentile) and entering
+# on breakouts above/below the bands with volume confirmation and trend filter.
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Volatility_Squeeze_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -24,40 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels and volume
+    # Bollinger Bands on 6m (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + bb_std * std
+    lower = sma - bb_std * std
+    bb_width = (upper - lower) / sma  # normalized width
+
+    # BB width percentile (20-period lookback) to detect squeeze
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    squeeze = bb_width_percentile < 20  # in lowest 20% = squeeze
+
+    # Daily EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Calculate Camarilla levels (R3, S3) from previous day
-    # R3 = close + 1.1*(high - low)
-    # S3 = close - 1.1*(high - low)
-    # Shift by 1 to use previous day's levels
-    camarilla_r3 = (df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low'])).shift(1).values
-    camarilla_s3 = (df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low'])).shift(1).values
-
-    # Align Camarilla levels to 1d timeframe (no extra delay needed as we use previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-
-    # Weekly trend filter: EMA34 on weekly timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-
-    # Volume confirmation: current volume > 1.5x average of last 20 days
+    # Volume confirmation: current volume > 1.8x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    volume_ok = volume > (1.8 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(volume_ok[i]) or np.isnan(squeeze[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,37 +65,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Weekly trend filter
-        price_above_weekly_ema = close[i] > ema_34_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_34_1w_aligned[i]
+        # Trend filter from daily EMA50
+        price_above_daily_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_daily_ema = close[i] < ema_50_1d_aligned[i]
 
         if position == 0:
-            # LONG: Price breaks above R3 with volume and weekly uptrend
-            if (not np.isnan(camarilla_r3_aligned[i]) and 
-                close[i] > camarilla_r3_aligned[i] and
-                price_above_weekly_ema and volume_ok[i]):
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Price breaks below S3 with volume and weekly downtrend
-            elif (not np.isnan(camarilla_s3_aligned[i]) and 
-                  close[i] < camarilla_s3_aligned[i] and
-                  price_below_weekly_ema and volume_ok[i]):
-                signals[i] = -0.25
-                position = -1
+            # Only trade on breakout after squeeze
+            if squeeze[i-1] and not squeeze[i]:  # squeeze just released
+                # LONG: Break above upper band with volume and uptrend
+                if close[i] > upper[i] and price_above_daily_ema and volume_ok[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # SHORT: Break below lower band with volume and downtrend
+                elif close[i] < lower[i] and price_below_daily_ema and volume_ok[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 or weekly trend turns down
-            if (not np.isnan(camarilla_s3_aligned[i]) and 
-                close[i] < camarilla_s3_aligned[i]) or not price_above_weekly_ema:
+            # EXIT LONG: Price closes below middle Bollinger Band (mean reversion) or trend turns down
+            if close[i] < sma[i] or not price_above_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 or weekly trend turns up
-            if (not np.isnan(camarilla_r3_aligned[i]) and 
-                close[i] > camarilla_r3_aligned[i]) or not price_below_weekly_ema:
+            # EXIT SHORT: Price closes above middle Bollinger Band or trend turns up
+            if close[i] > sma[i] or not price_below_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
