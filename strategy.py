@@ -1,13 +1,13 @@
-# #!/usr/bin/env python3
-# 1d_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Camarilla R1/S1 breakout from weekly levels with weekly EMA trend filter and volume spike confirmation on daily timeframe.
-# Uses Camarilla pivot levels (R1, S1) calculated from prior week's OHLC. Long when price breaks above R1 with weekly uptrend (price > EMA34) and volume spike.
-# Short when price breaks below S1 with weekly downtrend (price < EMA34) and volume spike. Designed for low trade frequency (7-25/year) to avoid fee drag.
-# Works in bull/bear markets by following weekly EMA trend direction. Exit on opposite Camarilla level touch (S1 for long exit, R1 for short exit).
-# Target: 30-100 total trades over 4 years.
+#!/usr/bin/env python3
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+# Hypothesis: 1h strategy using 4h Camarilla R1/S1 breakouts with 1d EMA trend filter and volume spike confirmation.
+# Uses 4h Camarilla levels from prior 4h bar to avoid look-ahead. Long when price breaks above R1 with uptrend (price > 1d EMA34) and volume spike.
+# Short when price breaks below S1 with downtrend (price < 1d EMA34) and volume spike.
+# Designed for low trade frequency (15-37/year) to avoid fee drift. Works in bull/bear markets by following 1d EMA trend direction.
+# Exit on opposite 4h Camarilla level touch (S1 for long exit, R1 for short exit).
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,32 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Camarilla levels and EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 4h data for Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
 
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
 
-    # Calculate Camarilla levels for each week: based on prior week's OHLC
+    # Calculate Camarilla levels for each 4h bar: based on prior 4h bar's OHLC
     # R1 = close + 1.1 * (high - low) / 12
     # S1 = close - 1.1 * (high - low) / 12
-    # We use prior week's values to avoid look-ahead
-    rng_1w = high_1w - low_1w
-    camarilla_r1 = close_1w + 1.1 * rng_1w / 12
-    camarilla_s1 = close_1w - 1.1 * rng_1w / 12
+    # We use prior 4h bar's values to avoid look-ahead
+    rng_4h = high_4h - low_4h
+    camarilla_r1 = close_4h + 1.1 * rng_4h / 12
+    camarilla_s1 = close_4h - 1.1 * rng_4h / 12
 
-    # Align Camarilla levels to daily timeframe (use prior week's levels for current week)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    # Align Camarilla levels to 1h timeframe (use prior 4h bar's levels for current 4h bar)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
 
-    # Get weekly EMA34 for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Get 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate volume spike threshold (2.0x 20-period SMA on daily)
+    # Calculate volume spike threshold (2.0x 20-period SMA on 1h)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 2.0
@@ -60,7 +64,7 @@ def generate_signals(prices):
     for i in range(34, n):
         # Skip if any required data is NaN
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_sma20[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,17 +73,17 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above R1 with weekly uptrend and volume spike
+            # LONG: price breaks above R1 with uptrend and volume spike
             if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema34_1w_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 volume[i] > volume_sma20[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # SHORT: price breaks below S1 with weekly downtrend and volume spike
+            # SHORT: price breaks below S1 with downtrend and volume spike
             elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema34_1w_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   volume[i] > volume_sma20[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
@@ -89,13 +93,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # EXIT SHORT: price touches or crosses above R1 (opposite level)
             if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
