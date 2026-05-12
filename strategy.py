@@ -1,15 +1,15 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-6h_1d_Camarilla_R3_S3_Breakout_TrendVol_v1
-Hypothesis: 6-hour breakouts from Camarilla R3/S3 levels (based on 1-day price action) with 1-day trend filter and volume spike confirmation.
-Targets 6h timeframe to reduce trade frequency while using proven 1d Camarilla levels. 
+12h_1d_Camarilla_R3_S3_Breakout_TrendVol_v1
+Hypothesis: 12-hour breakouts from Camarilla R3/S3 levels (based on 1-day price action) with 1-day trend filter and volume spike confirmation.
+Targets 12h timeframe to reduce trade frequency while using proven 1d Camarilla levels. 
 Only takes long when price breaks above R3 with volume spike and 1d uptrend, short when breaks below S3 with volume spike and 1d downtrend.
 Designed to work in both bull and bear markets via trend filter and volume confirmation to avoid false breakouts.
 Focuses on stronger breakout levels (R3/S3) rather than R1/S1 for higher quality signals.
 """
 
-name = "6h_1d_Camarilla_R3_S3_Breakout_TrendVol_v1"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R3_S3_Breakout_TrendVol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,7 +26,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >2.0x 20-period average (on 6h timeframe)
+    # Volume spike: >2.0x 20-period average (on 12h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
@@ -46,7 +46,7 @@ def generate_signals(prices):
     R3 = prev_close + 1.1 * range_ / 4
     S3 = prev_close - 1.1 * range_ / 4
     
-    # Align Camarilla levels to 6h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
