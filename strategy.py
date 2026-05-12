@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_WilliamsAlligator_1dTrend_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,30 +12,48 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA34 (Williams Alligator jaw)
+    # 1d trend filter: EMA34
     df_1d = get_htf_data(prices, '1d')
     ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Williams Alligator on 4h: Jaw (EMA13), Teeth (EMA8), Lips (EMA5)
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema8 = close_series.ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema5 = close_series.ewm(span=5, adjust=False, min_periods=5).mean().values
+    # 1d volume spike: volume > 1.5 * 20-period average
+    vol_ma20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_spike = df_1d['volume'].values > (1.5 * vol_ma20)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
+    # We use H3/L3 and H4/L4 for breakout
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
+    
+    # Camarilla H3, L3, H4, L4
+    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # need enough data for 1d EMA34
+    start_idx = 34  # need enough data for 1d EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if 1d trend data not ready
-        if np.isnan(ema34_1d_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_spike_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -44,28 +62,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Alligator aligned upward (Lips > Teeth > Jaw) + price above Jaw + 1d uptrend
-            if (ema5[i] > ema8[i] and ema8[i] > ema13[i] and  # Alligator mouth open up
-                close[i] > ema13[i] and                       # price above jaw
-                close[i] > ema34_1d_aligned[i]):              # 1d uptrend filter
+            # Long: price breaks above H3 with volume spike and 1d uptrend
+            if (close[i] > h3_aligned[i] and 
+                vol_spike_aligned[i] and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator aligned downward (Lips < Teeth < Jaw) + price below Jaw + 1d downtrend
-            elif (ema5[i] < ema8[i] and ema8[i] < ema13[i] and  # Alligator mouth open down
-                  close[i] < ema13[i] and                       # price below jaw
-                  close[i] < ema34_1d_aligned[i]):              # 1d downtrend filter
+            # Short: price breaks below L3 with volume spike and 1d downtrend
+            elif (close[i] < l3_aligned[i] and 
+                  vol_spike_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when Alligator reverses (Lips < Teeth) or price crosses below Jaw
-            if (ema5[i] < ema8[i] or close[i] < ema13[i]):
+            # Exit long when price breaks below L3 or 1d trend turns down
+            if (close[i] < l3_aligned[i] or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when Alligator reverses (Lips > Teeth) or price crosses above Jaw
-            if (ema5[i] > ema8[i] or close[i] > ema13[i]):
+            # Exit short when price breaks above H3 or 1d trend turns up
+            if (close[i] > h3_aligned[i] or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
