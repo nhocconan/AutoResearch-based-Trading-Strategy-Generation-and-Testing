@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Camarilla pivot levels from daily data act as strong support/resistance. Breakouts above R1 or below S1 with weekly trend confirmation and volume spikes capture momentum moves. Works in bull markets via breakouts and in bear via mean reversion touches of the pivot point (close). Weekly trend filter avoids counter-trend trades. Target: 15-30 trades/year per symbol.
+# 6h_VWAP_Deviation_Trend_Follow
+# Hypothesis: Price deviations from VWAP with 12h trend filter and volume confirmation capture mean-reversion in ranging markets and trend continuation in breakouts.
+# Works in bull markets via trend-following VWAP breaks, in bear via mean reversion to VWAP during consolidation.
+# Target: 15-35 trades/year per symbol.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "6h_VWAP_Deviation_Trend_Follow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,50 +22,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter (call once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
+    # 12h EMA34 for trend
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
 
-    # Calculate Camarilla levels (based on previous day)
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    # Using previous day's values to avoid look-ahead
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # first period
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Calculate VWAP (session-based: daily reset)
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    # Reset VWAP at daily boundaries (00:00 UTC)
+    dates = pd.to_datetime(prices['open_time']).date
+    unique_dates = np.unique(dates)
+    for d in unique_dates:
+        mask = (dates == d)
+        if np.any(mask):
+            first_idx = np.where(mask)[0][0]
+            vwap_num[first_idx] = typical_price[first_idx] * volume[first_idx]
+            vwap_den[first_idx] = volume[first_idx]
+            for i in range(first_idx + 1, len(vwap)):
+                if dates[i] != dates[i-1]:
+                    vwap_num[i] = typical_price[i] * volume[i]
+                    vwap_den[i] = volume[i]
+                else:
+                    vwap_num[i] = vwap_num[i-1] + typical_price[i] * volume[i]
+                    vwap_den[i] = vwap_den[i-1] + volume[i]
+            # Recompute VWAP for this day
+            for i in range(first_idx, len(vwap)):
+                if dates[i] != dates[first_idx]:
+                    break
+                if vwap_den[i] != 0:
+                    vwap[i] = vwap_num[i] / vwap_den[i]
+                else:
+                    vwap[i] = np.nan
 
-    range_1d = prev_high - prev_low
-    camarilla_r1 = prev_close + range_1d * 1.1 / 12
-    camarilla_s1 = prev_close - range_1d * 1.1 / 12
+    # VWAP deviation as z-score of recent deviation
+    vwap_dev = close - vwap
+    vwap_dev_ma = pd.Series(vwap_dev).rolling(window=24, min_periods=24).mean().values  # 24*6h = 6 days
+    vwap_dev_std = pd.Series(vwap_dev).rolling(window=24, min_periods=24).std().values
+    vwap_z = np.divide(vwap_dev - vwap_dev_ma, vwap_dev_std, out=np.full_like(vwap_dev, np.nan), where=vwap_dev_std!=0)
 
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-
-    # Volume confirmation: volume > 1.5x 50-period average
-    vol_avg_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: volume > 1.5x 24-period average
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_50[i]):
+    for i in range(24, n):
+        if np.isnan(vwap_z[i]) or np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_avg_24[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,38 +83,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above Camarilla R1 + weekly uptrend + volume spike
-            if close[i] > camarilla_r1_aligned[i] and close[i] > ema50_1w_aligned[i] and volume[i] > vol_avg_50[i] * 1.5:
+            # LONG: Price below VWAP (mean reversion) + 12h uptrend + volume spike
+            if vwap_z[i] < -1.0 and close[i] > ema34_12h_aligned[i] and volume[i] > vol_avg_24[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below Camarilla S1 + weekly downtrend + volume spike
-            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema50_1w_aligned[i] and volume[i] > vol_avg_50[i] * 1.5:
+            # SHORT: Price above VWAP (mean reversion) + 12h downtrend + volume spike
+            elif vwap_z[i] > 1.0 and close[i] < ema34_12h_aligned[i] and volume[i] > vol_avg_24[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below Camarilla pivot point (close) or weekly trend turns down
-            pivot_point = (prev_close[i] + prev_high[i] + prev_low[i]) / 3 if i > 0 else (close_1d[0] + high_1d[0] + low_1d[0]) / 3
-            # Align pivot point to current index
-            if i < len(prev_close):
-                pivot_aligned = (prev_close[i] + prev_high[i] + prev_low[i]) / 3
-            else:
-                pivot_aligned = camarilla_r1_aligned[i]  # fallback
-            
-            if close[i] < pivot_aligned or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Price crosses above VWAP or 12h trend turns down
+            if close[i] > vwap[i] or close[i] < ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses above Camarilla pivot point or weekly trend turns up
-            if i < len(prev_close):
-                pivot_aligned = (prev_close[i] + prev_high[i] + prev_low[i]) / 3
-            else:
-                pivot_aligned = camarilla_s1_aligned[i]  # fallback
-                
-            if close[i] > pivot_aligned or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Price crosses below VWAP or 12h trend turns up
+            if close[i] < vwap[i] or close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
