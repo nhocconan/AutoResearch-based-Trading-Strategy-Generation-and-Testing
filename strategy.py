@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_KAMA_Trend_Follow_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,33 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter and volume
+    # Load daily data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # KAMA on 12h: ER = 10, fast = 2, slow = 30
-    def kama(close, er_period=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, n=er_period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama_out = np.zeros_like(close)
-        kama_out[0] = close[0]
-        for i in range(1, len(close)):
-            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
-        return kama_out
-    
-    kama_12h = kama(close, 10, 2, 30)
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily volume filter: current 12h volume > 1.5x average of last 10 days
-    vol_avg_10d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
-    vol_avg_10d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_10d)
-    vol_filter = volume > (1.5 * vol_avg_10d_aligned)
+    # Camarilla levels from previous day
+    close_prev = np.roll(close_1d, 1)
+    high_prev = np.roll(high_1d, 1)
+    low_prev = np.roll(low_1d, 1)
+    close_prev[0] = np.nan
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    range_prev = high_prev - low_prev
+    
+    # Camarilla levels
+    R4 = close_prev + range_prev * 1.500
+    R3 = close_prev + range_prev * 1.250
+    R2 = close_prev + range_prev * 1.166
+    R1 = close_prev + range_prev * 1.083
+    S1 = close_prev - range_prev * 1.083
+    S2 = close_prev - range_prev * 1.166
+    S3 = close_prev - range_prev * 1.250
+    S4 = close_prev - range_prev * 1.500
+    
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Volume filter: current volume > 1.8x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,8 +61,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama_12h[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_filter[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,24 +71,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above KAMA and above daily EMA34 + volume filter
-            if close[i] > kama_12h[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
+            # Long: breakout above R1 + above daily EMA34 + volume filter
+            if high[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and below daily EMA34 + volume filter
-            elif close[i] < kama_12h[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
+            # Short: breakdown below S1 + below daily EMA34 + volume filter
+            elif low[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below KAMA or below daily EMA34
-            if close[i] < kama_12h[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: breakdown below S1 or below daily EMA34
+            if low[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above KAMA or above daily EMA34
-            if close[i] > kama_12h[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: breakout above R1 or above daily EMA34
+            if high[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
