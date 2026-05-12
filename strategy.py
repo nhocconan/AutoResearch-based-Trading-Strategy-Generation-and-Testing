@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_PhaseAccumulation_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,43 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== Camarilla Pivot Levels from 1d =====
+    # === Phase Accumulation Indicator (LTF) ===
+    # Hilbert Transform - Phase Accumulation
+    # Using 4-bar difference to detect cycle phase
+    diff4 = np.zeros(n)
+    diff4[4:] = close[4:] - close[:-4]
+    
+    # Smooth the difference
+    alpha = 0.07
+    smoothed = np.zeros(n)
+    smoothed[0] = diff4[0] if not np.isnan(diff4[0]) else 0
+    for i in range(1, n):
+        if np.isnan(diff4[i]):
+            smoothed[i] = smoothed[i-1]
+        else:
+            smoothed[i] = alpha * diff4[i] + (1 - alpha) * smoothed[i-1]
+    
+    # === 12h Trend Filter (HTF) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # === 1d Volume Spike Filter (HTF) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla R1, S1
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = pivot + (high_1d - low_1d) * 1.1 / 12
-    s1 = pivot - (high_1d - low_1d) * 1.1 / 12
-    
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # ===== Daily Trend Filter =====
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
-    
-    # ===== Daily Volume Spike Filter =====
     vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (1.8 * vol_ma_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
-    # ===== Session Filter: 08-20 UTC =====
+    # === Session Filter: 08-20 UTC ===
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(sma50_1d_aligned[i]) or
+        if (np.isnan(smoothed[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or
             np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,31 +78,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above R1 + above daily SMA50 + daily volume spike
-            if (close[i] > r1_aligned[i] and
-                close[i] > sma50_1d_aligned[i] and
+            # Long: Phase accumulation rising (market becoming bullish) + above 12h EMA50 + volume spike
+            if (smoothed[i] > smoothed[i-1] and  # Phase rising
+                close[i] > ema50_12h_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 + below daily SMA50 + daily volume spike
-            elif (close[i] < s1_aligned[i] and
-                  close[i] < sma50_1d_aligned[i] and
+            # Short: Phase accumulation falling (market becoming bearish) + below 12h EMA50 + volume spike
+            elif (smoothed[i] < smoothed[i-1] and  # Phase falling
+                  close[i] < ema50_12h_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below S1 or below daily SMA50
-            if close[i] < s1_aligned[i] or close[i] < sma50_1d_aligned[i]:
+            # Exit long: Phase accumulation turns down or closes below 12h EMA50
+            if smoothed[i] < smoothed[i-1] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above R1 or above daily SMA50
-            if close[i] > r1_aligned[i] or close[i] > sma50_1d_aligned[i]:
+            # Exit short: Phase accumulation turns up or closes above 12h EMA50
+            if smoothed[i] > smoothed[i-1] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
