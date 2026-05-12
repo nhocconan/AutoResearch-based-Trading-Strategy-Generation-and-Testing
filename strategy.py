@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-1D_KAMA_TREND_RSI_WITH_VOLUME_CONFIRMATION
-Hypothesis: Use 1d KAMA for trend direction, RSI for pullback entry, and volume spike for confirmation.
-KAMA adapts to market noise, reducing whipsaw in sideways markets. RSI identifies overextended pullbacks
-within the trend. Volume spike ensures institutional participation. Works in bull markets (buy pullbacks
-in uptrend) and bear markets (sell rallies in downtrend). Target: 15-25 trades/year (60-100 total) to
-stay within 1d limits and minimize fee drag.
+6H_TRIX_ZERO_CROSS_1DVOLUME_REGIME
+Hypothesis: Use TRIX (triple smoothed ROC) zero crosses as momentum signals, filtered by daily volume regime and 1d trend.
+- Long when TRIX crosses above zero AND volume > 1.5x 20-day average AND price > 50-day EMA
+- Short when TRIX crosses below zero AND volume > 1.5x 20-day average AND price < 50-day EMA
+- Exit when TRIX crosses back through zero or volatility regime changes
+- Volume regime filter ensures trades occur during institutional participation
+- Trend filter (50-day EMA) aligns with higher timeframe direction to reduce whipsaw
+- Target: 25-35 trades/year (100-140 total over 4 years) within 6h limits
+- Works in bull markets (TRIX catches momentum) and bear markets (short signals from downside crosses)
 """
-name = "1D_KAMA_TREND_RSI_WITH_VOLUME_CONFIRMATION"
-timeframe = "1d"
+name = "6H_TRIX_ZERO_CROSS_1DVOLUME_REGIME"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,42 +20,47 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA trend: 1d close, fast=2, slow=30
-    close_s = pd.Series(close)
-    change = abs(close_s.diff(1))
-    volatility = change.rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = [close[0]]
-    for i in range(1, n):
-        kama.append(kama[-1] + sc.iloc[i] * (close[i] - kama[-1]))
-    kama = np.array(kama)
-    
-    # RSI(14) for pullback
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Volume spike: volume > 2.0 * 20-period average
+    # Volume regime: volume > 1.5x 20-period average (using close price for ROC calculation)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_regime = volume > (1.5 * vol_ma)
+    
+    # 1d data for TRIX calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # TRIX calculation: triple smoothed 1-period ROC
+    # ROC = (close - close.shift(1)) / close.shift(1) * 100
+    roc = pd.Series(df_1d['close']).pct_change() * 100
+    # Triple exponential smoothing
+    ema1 = roc.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = ema3.values
+    
+    # Align TRIX to 6h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    
+    # 50-day EMA for trend filter
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup for volatility and volume MA
-        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
+    for i in range(15, n):  # Start after TRIX warmup
+        if (np.isnan(trix_aligned[i]) or 
+            np.isnan(trix_aligned[i-1]) or 
+            np.isnan(ema_50_aligned[i]) or 
+            np.isnan(volume_regime[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,26 +69,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Uptrend (close > KAMA) + RSI pullback (RSI < 30) + volume spike
-            if close[i] > kama[i] and rsi[i] < 30 and volume_spike[i]:
+            # LONG: TRIX crosses above zero + volume regime + price above 50-day EMA
+            if (trix_aligned[i-1] <= 0 and trix_aligned[i] > 0 and 
+                volume_regime[i] and 
+                close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend (close < KAMA) + RSI overextended (RSI > 70) + volume spike
-            elif close[i] < kama[i] and rsi[i] > 70 and volume_spike[i]:
+            # SHORT: TRIX crosses below zero + volume regime + price below 50-day EMA
+            elif (trix_aligned[i-1] >= 0 and trix_aligned[i] < 0 and 
+                  volume_regime[i] and 
+                  close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal (close < KAMA) OR RSI overbought (RSI > 70)
-            if close[i] < kama[i] or rsi[i] > 70:
+            # EXIT LONG: TRIX crosses back below zero OR volatility regime ends
+            if trix_aligned[i] < 0 or not volume_regime[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal (close > KAMA) OR RSI oversold (RSI < 30)
-            if close[i] > kama[i] or rsi[i] < 30:
+            # EXIT SHORT: TRIX crosses back above zero OR volatility regime ends
+            if trix_aligned[i] > 0 or not volume_regime[i]:
                 signals[i] = 0.0
                 position = 0
             else:
