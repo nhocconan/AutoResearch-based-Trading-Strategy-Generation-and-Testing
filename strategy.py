@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
-# Hypothesis: Price breaking above Camarilla R1 or below S1 with 12h EMA trend and volume confirmation.
-# Works in bull/bear via trend filter and avoids false breakouts with volume. Targets 25-35 trades/year.
+# 1h_4H_Trend_Signal_1D_Volume_Confirmation
+# Hypothesis: Use 4h trend direction (above/below EMA200) as signal direction, 
+# confirmed by 1d volume spike (>1.5x average) and 1h RSI pullback (RSI<40 for long, RSI>60 for short).
+# Enter on 1h pullback in direction of 4h trend with volume confirmation.
+# Designed for low trade frequency (15-35/year) to avoid fee drag, works in bull/bear via trend filter.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_4H_Trend_Signal_1D_Volume_Confirmation"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 200:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -21,46 +23,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla calculation
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # 4h EMA200 trend filter
+    ema_200_4h = pd.Series(df_4h['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_200_4h)
+
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
+    
+    # 1d volume average (20-day)
+    vol_avg_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
 
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].shift(1).values  # previous day high
-    pl = df_1d['low'].shift(1).values   # previous day low
-    pc = df_1d['close'].shift(1).values # previous day close
-
-    # Only calculate when we have valid previous day data
-    valid = ~(np.isnan(ph) | np.isnan(pl) | np.isnan(pc))
-    range_val = np.where(valid, ph - pl, 0)
-    r1 = np.where(valid, pc + (range_val * 1.1 / 12), np.nan)
-    s1 = np.where(valid, pc - (range_val * 1.1 / 12), np.nan)
-
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-
-    # 12h EMA20 trend filter
-    ema_20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-
-    # Volume confirmation: current volume > 1.5x average of last 6 periods
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    # 1h RSI for entry timing
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(60, n):  # Start after warmup
+    for i in range(200, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_20_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_200_4h_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i]) or 
+            np.isnan(rsi_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +66,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Trend direction from 4h EMA200
+        trend_up = close[i] > ema_200_4h_aligned[i]
+        trend_down = close[i] < ema_200_4h_aligned[i]
+
+        # Volume confirmation from 1d
+        volume_spike = volume[i] > (1.5 * vol_avg_1d_aligned[i])
+
+        # RSI conditions for entry
+        rsi_oversold = rsi_values[i] < 40
+        rsi_overbought = rsi_values[i] > 60
+
         if position == 0:
-            # LONG: Price > R1 AND above 12h EMA20 AND volume
-            if close[i] > r1_aligned[i] and close[i] > ema_20_aligned[i] and volume_ok[i]:
-                signals[i] = 0.25
+            # LONG: 4h uptrend AND volume spike AND RSI oversold
+            if trend_up and volume_spike and rsi_oversold:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price < S1 AND below 12h EMA20 AND volume
-            elif close[i] < s1_aligned[i] and close[i] < ema_20_aligned[i] and volume_ok[i]:
-                signals[i] = -0.25
+            # SHORT: 4h downtrend AND volume spike AND RSI overbought
+            elif trend_down and volume_spike and rsi_overbought:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price < S1 OR below 12h EMA20
-            if close[i] < s1_aligned[i] or close[i] < ema_20_aligned[i]:
+            # EXIT LONG: 4h trend turns down OR RSI overbought (take profit)
+            if not trend_up or rsi_values[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price > R1 OR above 12h EMA20
-            if close[i] > r1_aligned[i] or close[i] > ema_20_aligned[i]:
+            # EXIT SHORT: 4h trend turns up OR RSI oversold (take profit)
+            if not trend_down or rsi_values[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
