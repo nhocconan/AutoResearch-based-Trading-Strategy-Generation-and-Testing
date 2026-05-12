@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-# 6h_1W_1D_Camarilla_R3S3_Breakout_Trend_Volume
-# Hypothesis: Buy at 6h open when price breaks above daily Camarilla R3 with weekly bullish trend and volume confirmation; sell when breaks below daily Camarilla S3 with weekly bearish trend and volume confirmation. Weekly trend ensures alignment with higher timeframe momentum. R3/S3 levels act as strong support/resistance; breakouts here indicate strong momentum. Volume filters false breakouts. Designed for low frequency (12-37 trades/year) to minimize fee drag.
+# 12h_1D_Camarilla_R3S3_Breakout_Trend_Volume
+# Hypothesis: Trade 12h timeframe using daily Camarilla R3/S3 breakouts with 1d trend filter and volume confirmation. 
+# Long when price breaks above daily R3 with bullish 1d trend (close > EMA34) and volume spike.
+# Short when price breaks below daily S3 with bearish 1d trend (close < EMA34) and volume spike.
+# Exit when price crosses back through the opposite level (S3 for longs, R3 for shorts).
+# Uses daily trend to avoid counter-trend trades in choppy markets. Low-frequency design (12-37 trades/year) to minimize fee drag.
+# Works in bull markets via breakout momentum and in bear markets via short-side breakdowns.
 
-name = "6h_1W_1D_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "6h"
+name = "12h_1D_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,20 +25,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-
-    # Get daily data for Camarilla levels
+    # Get daily data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
     # Calculate daily Camarilla levels (R3 and S3) based on previous day
     # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
@@ -48,7 +48,7 @@ def generate_signals(prices):
     R3 = prev_close + rang * 1.1 / 4
     S3 = prev_close - rang * 1.1 / 4
 
-    # Align daily levels to 6h timeframe
+    # Align daily levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
 
@@ -61,7 +61,7 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
             np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,31 +70,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Weekly trend filter
-        bullish_trend = close[i] > ema_1w_aligned[i]
-        bearish_trend = close[i] < ema_1w_aligned[i]
+        # Daily trend filter
+        bullish_trend = close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_1d_aligned[i]
 
         if position == 0:
-            # LONG: Price crosses above R3 with bullish weekly trend and volume confirmation
+            # LONG: Price crosses above R3 with bullish daily trend and volume confirmation
             if close[i] > R3_aligned[i] and close[i-1] <= R3_aligned[i-1] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below S3 with bearish weekly trend and volume confirmation
+            # SHORT: Price crosses below S3 with bearish daily trend and volume confirmation
             elif close[i] < S3_aligned[i] and close[i-1] >= S3_aligned[i-1] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S3 or weekly trend turns bearish
-            if close[i] < S3_aligned[i] and close[i-1] >= S3_aligned[i-1] or not bullish_trend:
+            # EXIT LONG: Price crosses below S3
+            if close[i] < S3_aligned[i] and close[i-1] >= S3_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R3 or weekly trend turns bullish
-            if close[i] > R3_aligned[i] and close[i-1] <= R3_aligned[i-1] or not bearish_trend:
+            # EXIT SHORT: Price crosses above R3
+            if close[i] > R3_aligned[i] and close[i-1] <= R3_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
