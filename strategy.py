@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-6H_FIBONACCI_PULLBACK_1D_TREND_RSI
-Hypothesis: On 6b, pullbacks to 61.8% Fibonacci retracement of the prior 12h swing in the direction of 1d EMA50 trend, with RSI(14) < 40 for long and > 60 for short. Uses natural retracement levels in trending markets, effective in both bull and bear regimes. Target: 20-30 trades/year.
+4H_DONCHIAN_BREAKOUT_1DVOLUME_CONFIRMATION_1W_VOLUME_REGIME
+Hypothesis: Donchian(20) breakout on 4h with 1d volume confirmation and 1w volume regime filter. 
+Breakouts only when volume > 1.5x 20-day average AND weekly volume > 50th percentile. 
+This filters out low-conviction breakouts and focuses on institutional participation. 
+Exit when price crosses 20-period EMA on 4h. Designed for fewer, higher-quality trades.
 """
-name = "6H_FIBONACCI_PULLBACK_1D_TREND_RSI"
-timeframe = "6h"
+name = "4H_DONCHIAN_BREAKOUT_1DVOLUME_CONFIRMATION_1W_VOLUME_REGIME"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,54 +22,42 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 12h data for swing high/low
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Donchian channel (20-period) on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Identify swing high and low over last 2 12h bars
-    swing_high = np.maximum.reduce([high_12h[-2:], high_12h[-1:]]) if len(high_12h) >= 2 else high_12h[-1]
-    swing_low = np.minimum.reduce([low_12h[-2:], low_12h[-1:]]) if len(low_12h) >= 2 else low_12h[-1]
-    
-    # For array compatibility, compute per 12h bar
-    swing_high_arr = np.maximum.accumulate(high_12h)
-    swing_low_arr = np.minimum.accumulate(low_12h)
-    
-    # 61.8% Fibonacci level
-    fib_range = swing_high_arr - swing_low_arr
-    fib_618 = swing_low_arr + 0.618 * fib_range
-    
-    # Align to 6h
-    fib_618_aligned = align_htf_to_ltf(prices, df_12h, fib_618)
-    
-    # 1d trend: EMA50
+    # 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_20d_ratio = vol_1d / vol_ma_20d  # Current day volume / 20-day average
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_20d_ratio)
     
-    # RSI(14) on 6h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # 1w data for volume regime (filter for high-volume weeks)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    vol_1w = df_1w['volume'].values
+    vol_percentile_50w = pd.Series(vol_1w).rolling(window=50, min_periods=30).quantile(0.5).values
+    vol_1w_above_median = vol_1w > vol_percentile_50w
+    vol_regime_aligned = align_htf_to_ltf(prices, df_1w, vol_1w_above_median, additional_delay_bars=1)
+    
+    # Exit condition: 20-period EMA on 4h
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # wait for RSI warmup
-        if (np.isnan(fib_618_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(rsi[i])):
+    for i in range(20, n):  # Start after Donchian warmup
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(vol_ratio_aligned[i]) or np.isnan(vol_regime_aligned[i]) or
+            np.isnan(ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,34 +66,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: price near 61.8% fib, above 1d EMA50, RSI < 40
-            if (low[i] <= fib_618_aligned[i] * 1.005 and  # within 0.5% of fib level
-                high[i] >= fib_618_aligned[i] * 0.995 and
-                close[i] > ema50_1d_aligned[i] and
-                rsi[i] < 40):
+            # LONG: Break above Donchian high with volume confirmation and regime filter
+            if (high[i] > high_max[i] and 
+                vol_ratio_aligned[i] > 1.5 and 
+                vol_regime_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price near 61.8% fib, below 1d EMA50, RSI > 60
-            elif (low[i] <= fib_618_aligned[i] * 1.005 and
-                  high[i] >= fib_618_aligned[i] * 0.995 and
-                  close[i] < ema50_1d_aligned[i] and
-                  rsi[i] > 60):
+            # SHORT: Break below Donchian low with volume confirmation and regime filter
+            elif (low[i] < low_min[i] and 
+                  vol_ratio_aligned[i] > 1.5 and 
+                  vol_regime_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses above swing high or RSI > 60
-            if (high[i] > swing_high_arr[-1] if len(swing_high_arr) > 0 else False or 
-                rsi[i] > 60):
+            # EXIT LONG: Price crosses below 20 EMA
+            if close[i] < ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses below swing low or RSI < 40
-            if (low[i] < swing_low_arr[-1] if len(swing_low_arr) > 0 else False or 
-                rsi[i] < 40):
+            # EXIT SHORT: Price crosses above 20 EMA
+            if close[i] > ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
