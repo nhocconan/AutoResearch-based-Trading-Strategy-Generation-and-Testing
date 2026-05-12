@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_1dRSI_Filter
-Hypothesis: Trade KAMA direction on 4h when confirmed by 1d RSI (not overbought/oversold) and volume spike.
-Uses KAMA for adaptive trend following, avoids whipsaw in ranging markets. RSI filter prevents entries at extremes.
-Works in both bull and bear markets by adapting trend speed to volatility. Targets 20-50 trades/year.
-Timeframe: 4h
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 12h timeframe when aligned with 1d EMA50 trend and confirmed by volume spike. Targets 12-37 trades/year by requiring confluence of price level breakout, trend alignment, and volume confirmation. Works in both bull and bear markets by using trend-following entries and mean-reversion exits at the daily pivot point.
+Timeframe: 12h
 """
 
-name = "4h_KAMA_Trend_With_1dRSI_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,51 +15,44 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for RSI filter ONCE before loop
+    # Get daily data for Camarilla levels ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
 
-    # Calculate daily RSI(14)
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    ph = df_1d['high'].shift(1).values  # prior day high
+    pl = df_1d['low'].shift(1).values   # prior day low
+    pc = df_1d['close'].shift(1).values # prior day close
+    r1 = pc + (ph - pl) * 1.1 / 12
+    s1 = pc - (ph - pl) * 1.1 / 12
+    # Align to 12h: daily Camarilla values are constant through the day
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+
+    # Get daily data for EMA50 trend filter ONCE before loop
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # KAMA on 4h
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = change / (volatility + 1e-10)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-
-    # Volume spike: current > 1.5x average of last 12 bars (3 days on 4h)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Volume spike: current > 2.0x average of last 2 bars (1 day on 12h)
+    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after warmup
-        if (np.isnan(kama[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+    for i in range(100, n):  # Start after EMA50 warmup
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,35 +61,37 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price > KAMA + RSI < 70 (not overbought) + volume spike
-            if (close[i] > kama[i] and 
-                rsi_1d_aligned[i] < 70 and 
+            # LONG: close > daily R1 + price > 1d EMA50 + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price < KAMA + RSI > 30 (not oversold) + volume spike
-            elif (close[i] < kama[i] and 
-                  rsi_1d_aligned[i] > 30 and 
+            # SHORT: close < daily S1 + price < 1d EMA50 + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price < KAMA
-            if close[i] < kama[i]:
+            # EXIT LONG: close < daily pivot P
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price > KAMA
-            if close[i] > kama[i]:
+            # EXIT SHORT: close > daily pivot P
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
 
     return signals
-
-EOF
