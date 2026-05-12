@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_Price_Action_Reversal_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Data for trend and Camarilla calculation ===
+    # === 1d Data for trend and price action ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
@@ -27,20 +27,17 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Camarilla levels from previous 1d candle ===
-    # Calculate Camarilla levels using previous day's range
-    prev_close_1d = np.roll(close_1d, 1)
+    # === 1d Price Action: Higher High/Lower Low pattern ===
+    # Higher High: current high > previous high
+    # Lower Low: current low < previous low
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
-    range_1d = prev_high_1d - prev_low_1d
+    higher_high = high_1d > prev_high_1d
+    lower_low = low_1d < prev_low_1d
     
-    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
-    r4 = prev_close_1d + (range_1d * 1.1 / 2)
-    s4 = prev_close_1d - (range_1d * 1.1 / 2)
-    
-    # Align to 12h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 6h timeframe
+    higher_high_aligned = align_htf_to_ltf(prices, df_1d, higher_high.astype(float))
+    lower_low_aligned = align_htf_to_ltf(prices, df_1d, lower_low.astype(float))
     
     # === Volume spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,13 +46,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 34, 20)  # Ensure enough data for all indicators
+    start_idx = max(200, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or
+            np.isnan(higher_high_aligned[i]) or
+            np.isnan(lower_low_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,28 +62,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R4 + volume spike + 1d trend up
-            if (close[i] > r4_aligned[i] and 
+            # Long: HH on 1d + volume spike + price above 1d EMA
+            if (higher_high_aligned[i] == 1.0 and 
                 volume_spike[i] and
                 close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S4 + volume spike + 1d trend down
-            elif (close[i] < s4_aligned[i] and 
+            # Short: LL on 1d + volume spike + price below 1d EMA
+            elif (lower_low_aligned[i] == 1.0 and 
                   volume_spike[i] and
                   close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below S4 or trend breaks
-            if close[i] < s4_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: LL on 1d or price below EMA
+            if lower_low_aligned[i] == 1.0 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above R4 or trend breaks
-            if close[i] > r4_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: HH on 1d or price above EMA
+            if higher_high_aligned[i] == 1.0 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
