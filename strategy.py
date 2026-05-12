@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_21_EMA_Crossover_With_Volume_Filter
-Simple 21-period EMA crossover on 6h timeframe with volume confirmation.
-Long when price crosses above EMA21 with volume > 1.5x average, short when crosses below.
-Uses volume filter to avoid whipsaws in sideways markets.
-Designed for low trade frequency (~50-150 total trades over 4 years) to minimize fee drag.
-Works in both bull and bear markets by following trend with volume confirmation.
+12h_1w_1d_Camarilla_R1S1_Breakout_WeekTrend_Volume
+Uses 1d Camarilla R1/S1 levels as key support/resistance on 12h timeframe.
+Enters long when price breaks above R1 with 1w uptrend and volume confirmation.
+Enters short when price breaks below S1 with 1w downtrend and volume confirmation.
+Uses 1w EMA20 as trend filter to avoid counter-trend trades.
+Designed for low trade frequency (~50-150 total trades over 4 years) to minimize fee drift.
+Works in bull/bear markets by following 1w trend while using 1d Camarilla breakouts for precise entries.
 """
 
-name = "6h_21_EMA_Crossover_With_Volume_Filter"
-timeframe = "6h"
+name = "12h_1w_1d_Camarilla_R1S1_Breakout_WeekTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,24 +19,55 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-period average (on 6h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: >1.5x 30-period average (on 12h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # 6h EMA21 for trend
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla pivot levels for each day
+    # R1 = C + ((H-L) * 1.1/12)
+    # S1 = C - ((H-L) * 1.1/12)
+    camarilla_r1 = close_1d + ((high_1d - low_1d) * 1.1 / 12)
+    camarilla_s1 = close_1d - ((high_1d - low_1d) * 1.1 / 12)
+    
+    # Weekly data for EMA20 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # 1w EMA20 for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align all indicators to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(21, n):
-        if np.isnan(ema_21[i]):
+    for i in range(100, n):
+        if (np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_20_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -44,33 +76,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price crosses above EMA21 with volume spike
-            if (close[i] > ema_21[i] and 
-                close[i-1] <= ema_21[i-1] and 
+            # LONG: Price breaks above R1 + 1w EMA20 uptrend + volume spike
+            if (close[i] > camarilla_r1_aligned[i] and 
+                close[i] > ema_20_1w_aligned[i] and 
                 volume_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Price crosses below EMA21 with volume spike
-            elif (close[i] < ema_21[i] and 
-                  close[i-1] >= ema_21[i-1] and 
+            # SHORT: Price breaks below S1 + 1w EMA20 downtrend + volume spike
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  close[i] < ema_20_1w_aligned[i] and 
                   volume_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below EMA21
-            if close[i] < ema_21[i] and close[i-1] >= ema_21[i-1]:
+            # EXIT LONG: Price breaks below S1 OR closes below 1w EMA20
+            if (close[i] < camarilla_s1_aligned[i]) or \
+               (close[i] < ema_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Price crosses above EMA21
-            if close[i] > ema_21[i] and close[i-1] <= ema_21[i-1]:
+            # EXIT SHORT: Price breaks above R1 OR closes above 1w EMA20
+            if (close[i] > camarilla_r1_aligned[i]) or \
+               (close[i] > ema_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
