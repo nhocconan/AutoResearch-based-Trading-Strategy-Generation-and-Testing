@@ -1,13 +1,12 @@
-# 4h_RSI_Trend_Reversal_1dADX_Filter
-# Hypothesis: RSI extremes combined with trend filter on 1d ADX and volume confirmation.
-# In bull markets, buy RSI<30 with 1d ADX>25 (trending) and volume spike.
-# In bear markets, sell RSI>70 with 1d ADX>25 and volume spike.
-# RSI mean reversion works in ranging markets, while ADX filter avoids chop.
-# Volume spike confirms institutional participation at turning points.
-# Designed for low turnover: only trade at extreme RSI with trend and volume confirmation.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: On 12h timeframe, trade breakouts above daily Camarilla R1 or below S1 only when aligned with 1d trend (EMA50) and confirmed by volume spike.
+# Camarilla levels from daily timeframe provide institutional reference points.
+# 1d EMA50 filters counter-trend moves; volume spike ensures institutional participation.
+# Designed for low turnover: only trade when price breaks key daily levels with trend and volume confirmation.
+# Works in bull (breakouts up in uptrend) and bear (breakdowns in downtrend) markets.
 
-name = "4h_RSI_Trend_Reversal_1dADX_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,69 +18,49 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
 
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
 
-    # RSI(14) on 4h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
-
-    # 1d ADX(14) for trend strength
-    if len(df_1d) < 30:
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    # R4 = C + (H-L)*1.1/2
+    # R3 = C + (H-L)*1.1/4
+    # R2 = C + (H-L)*1.1/6
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    # S2 = C - (H-L)*1.1/6
+    # S3 = C - (H-L)*1.1/4
+    # S4 = C - (H-L)*1.1/2
+    if len(df_1d) < 2:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ph = df_1d['high'].shift(1).values  # prior day high
+    pl = df_1d['low'].shift(1).values   # prior day low
+    pc = df_1d['close'].shift(1).values # prior day close
+    r1 = pc + (ph - pl) * 1.1 / 12
+    s1 = pc - (ph - pl) * 1.1 / 12
+    # Align to 12h: daily Camarilla values are constant through the day
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+
+    # 1d EMA50 trend filter
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dpi_plus = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dpi_minus = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # DI and DX
-    di_plus = 100 * dpi_plus / atr
-    di_minus = 100 * dpi_minus / atr
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-
-    # Align ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-
-    # Volume spike: current > 2.0x average of last 6 bars (1 day on 4h)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume spike: current > 2.0x average of last 2 bars (1 day on 12h)
+    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after warmup
-        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,32 +69,37 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI < 30 (oversold) + ADX > 25 (trending) + volume spike
-            if (rsi[i] < 30 and 
-                adx_aligned[i] > 25 and 
+            # LONG: close > daily R1 + price > 1d EMA50 + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI > 70 (overbought) + ADX > 25 (trending) + volume spike
-            elif (rsi[i] > 70 and 
-                  adx_aligned[i] > 25 and 
+            # SHORT: close < daily S1 + price < 1d EMA50 + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI > 50 (mean reversion complete) or trend weakens
-            if (rsi[i] > 50 or 
-                adx_aligned[i] < 20):
+            # EXIT LONG: close < daily pivot P or trend breaks
+            # Calculate daily pivot P for exit
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if (close[i] < pp_aligned[i] or 
+                close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI < 50 or trend weakens
-            if (rsi[i] < 50 or 
-                adx_aligned[i] < 20):
+            # EXIT SHORT: close > daily pivot P or trend breaks
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if (close[i] > pp_aligned[i] or 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
