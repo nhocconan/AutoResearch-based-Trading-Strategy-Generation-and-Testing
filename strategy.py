@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-1h_Combined_Momentum_Reversal
-Hypothesis: Combines momentum (RSI) and mean-reversion (Bollinger Bands) on 1h timeframe,
-filtered by 4h trend (EMA50) and 1d volume regime to avoid false signals. Uses volume spike
-after low volatility to capture momentum bursts in both bull and bear markets. Designed for
-low trade frequency (15-30/year) with discrete sizing (0.20) to minimize fee drag.
+6h_WeeklyPivot_RangeBreakout
+Hypothesis: Uses weekly pivot levels to identify key support/resistance zones.
+Enters long when price breaks above weekly R1 with bullish weekly trend (price > weekly VWAP),
+enters short when price breaks below weekly S1 with bearish weekly trend (price < weekly VWAP).
+Uses volume confirmation to avoid false breakouts. Designed for 6h timeframe to capture
+multi-day moves while avoiding excessive trading. Weekly pivot provides structural levels
+that work in both bull and bear markets by adapting to current price regime.
 """
 
-name = "1h_Combined_Momentum_Reversal"
-timeframe = "1h"
+name = "6h_WeeklyPivot_RangeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,63 +27,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for trend filter (call once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot points and trend filter (call once before loop)
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 5:
         return np.zeros(n)
 
-    # Calculate 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly VWAP for trend filter
+    typical_price_w = (df_w['high'] + df_w['low'] + df_w['close']) / 3
+    vwap_w = (typical_price_w * df_w['volume']).cumsum() / df_w['volume'].cumsum()
+    vwap_w = vwap_w.values
+
+    # Calculate weekly pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    hh_w = df_w['high'].values
+    ll_w = df_w['low'].values
+    cc_w = df_w['close'].values
     
-    # Get 1d data for volume regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1d volume average and standard deviation for volatility regime
-    vol_avg_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_std_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).std().values
-    
-    # Calculate RSI (14) on 1h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Bollinger Bands (20, 2) on 1h close
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + 2 * std20
-    lower_band = sma20 - 2 * std20
-    
-    # Calculate volume spike detector (20-period average)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align all indicators to 1h timeframe
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    vol_std_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_std_20_1d)
-    
+    pivot_w = (hh_w + ll_w + cc_w) / 3
+    r1_w = 2 * pivot_w - ll_w
+    s1_w = 2 * pivot_w - hh_w
+
+    # Volume confirmation: 24-period average (4 days of 6h data)
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start from 50 to have enough data for all indicators
-        # Get aligned values for current 1h bar
-        ema50_val = ema50_4h_aligned[i]
-        vol_avg_20_1d_val = vol_avg_20_1d_aligned[i]
-        vol_std_20_1d_val = vol_std_20_1d_aligned[i]
-        rsi_val = rsi[i]
-        close_val = close[i]
-        lower_band_val = lower_band[i]
-        upper_band_val = upper_band[i]
-        vol_avg_val = vol_avg_20[i]
+    for i in range(24, n):  # Start from 24 to have enough data for volume average
+        # Get aligned values for current 6h bar
+        vwap_w_aligned = align_htf_to_ltf(prices, df_w, vwap_w)[i]
+        r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)[i]
+        s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)[i]
+        vol_avg_val = vol_avg_24[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(ema50_val) or np.isnan(vol_avg_20_1d_val) or np.isnan(vol_std_20_1d_val) or 
-            np.isnan(rsi_val) or np.isnan(lower_band_val) or np.isnan(upper_band_val) or 
+        if (np.isnan(vwap_w_aligned) or np.isnan(r1_w_aligned) or np.isnan(s1_w_aligned) or 
             np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -90,41 +72,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Low volatility regime: 1d volume volatility < 50% of average
-        low_vol_regime = vol_std_20_1d_val < (vol_avg_20_1d_val * 0.5)
-        
         if position == 0:
-            # LONG: RSI < 30 (oversold) + price at/below lower BB + 4h uptrend + low vol + volume spike
-            if (rsi_val < 30 and 
-                close_val <= lower_band_val and 
-                close_val > ema50_val and 
-                low_vol_regime and 
-                volume[i] > vol_avg_val * 2.0):
-                signals[i] = 0.20
+            # LONG: Break above weekly R1 with bullish weekly trend and volume surge
+            if (close[i] > r1_w_aligned and 
+                close[i] > vwap_w_aligned and 
+                volume[i] > vol_avg_val * 1.5):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: RSI > 70 (overbought) + price at/above upper BB + 4h downtrend + low vol + volume spike
-            elif (rsi_val > 70 and 
-                  close_val >= upper_band_val and 
-                  close_val < ema50_val and 
-                  low_vol_regime and 
-                  volume[i] > vol_avg_val * 2.0):
-                signals[i] = -0.20
+            # SHORT: Break below weekly S1 with bearish weekly trend and volume surge
+            elif (close[i] < s1_w_aligned and 
+                  close[i] < vwap_w_aligned and 
+                  volume[i] > vol_avg_val * 1.5):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI > 50 or price > upper BB or trend turns down
-            if (rsi_val > 50 or close_val > upper_band_val or close_val < ema50_val):
+            # EXIT LONG: Price falls below weekly VWAP or breaks below S1 (reversal signal)
+            if (close[i] < vwap_w_aligned or close[i] < s1_w_aligned):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI < 50 or price < lower BB or trend turns up
-            if (rsi_val < 50 or close_val < lower_band_val or close_val > ema50_val):
+            # EXIT SHORT: Price rises above weekly VWAP or breaks above R1 (reversal signal)
+            if (close[i] > vwap_w_aligned or close[i] > r1_w_aligned):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
