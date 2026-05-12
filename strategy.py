@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Use daily Camarilla pivot levels (R1/S1) for breakout entries on 4h timeframe.
-# Enter long on break above R1 with volume confirmation and daily trend filter (price > EMA34).
-# Enter short on break below S1 with volume confirmation and daily trend filter (price < EMA34).
-# Exit when price returns to daily pivot or trend reverses.
-# This strategy targets breakouts in the direction of the daily trend with volume confirmation.
-# Designed to work in bull markets (breakouts continue) and bear markets (breakdowns continue).
-# Targets 20-40 trades/year by requiring confluence of level break, volume, and trend.
+# 4h_Williams_Alligator_Elder_Ray_Signal_1dTrend_Filter
+# Hypothesis: Combine Williams Alligator (trend) and Elder Ray (bull/bear power) signals on 4h,
+# filtered by 1d EMA50 trend. Enter long when Alligator bullish (jaw<teeth<lips) AND Bull Power > 0.
+# Enter short when Alligator bearish (jaw>teeth>lips) AND Bear Power < 0.
+# Exit when signals conflict or trend weakens. Uses volume confirmation to avoid false breakouts.
+# Designed for 4-8 trades/year per symbol, works in both bull and bear via dual indicators.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_Williams_Alligator_Elder_Ray_Signal_1dTrend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,37 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivots and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate daily Camarilla levels
-    # Based on previous day's high, low, close
-    ph = df_1d['high'].shift(1).values  # Previous day high
-    pl = df_1d['low'].shift(1).values   # Previous day low
-    pc = df_1d['close'].shift(1).values # Previous day close
-    
-    # Calculate pivot and ranges
-    pivot = (ph + pl + pc) / 3
-    range_val = ph - pl
-    
-    # Camarilla levels (R1/S1)
-    r1 = pc + range_val * 1.1 / 6
-    s1 = pc - range_val * 1.1 / 6
-    pivot_level = pc  # Use close as pivot for exit
-    
-    # Align daily levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_level)
-    
-    # Daily trend filter: EMA34
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: current volume > 1.5x average of last 4 periods (1 day)
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+
+    # Williams Alligator on 4h: SMAs of median price
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+
+    # Volume confirmation: current volume > 1.5x average of last 6 periods (1.5 days)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
@@ -64,9 +53,9 @@ def generate_signals(prices):
 
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_aligned[i]) or
-            np.isnan(volume_ok[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,31 +63,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Check trend alignment from daily EMA34
-        price_above_ema = close[i] > ema_34_aligned[i]
-        price_below_ema = close[i] < ema_34_aligned[i]
+        # Trend filter from 1d EMA50
+        price_above_ema = close[i] > ema_50_aligned[i]
+        price_below_ema = close[i] < ema_50_aligned[i]
 
         if position == 0:
-            # LONG: break above R1 with volume and uptrend
-            if close[i] > r1_aligned[i] and volume_ok[i] and price_above_ema:
+            # LONG: Alligator bullish AND Bull Power positive AND volume AND uptrend
+            if (jaw[i] < teeth[i] < lips[i]) and (bull_power[i] > 0) and volume_ok[i] and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1 with volume and downtrend
-            elif close[i] < s1_aligned[i] and volume_ok[i] and price_below_ema:
+            # SHORT: Alligator bearish AND Bear Power negative AND volume AND downtrend
+            elif (jaw[i] > teeth[i] > lips[i]) and (bear_power[i] < 0) and volume_ok[i] and price_below_ema:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: return to pivot or trend turns down
-            if close[i] < pivot_aligned[i] or close[i] < ema_34_aligned[i]:
+            # EXIT LONG: Alligator turns bearish OR Bull Power negative OR trend down
+            if not (jaw[i] < teeth[i] < lips[i]) or (bull_power[i] <= 0) or (close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: return to pivot or trend turns up
-            if close[i] > pivot_aligned[i] or close[i] > ema_34_aligned[i]:
+            # EXIT SHORT: Alligator turns bullish OR Bear Power positive OR trend up
+            if not (jaw[i] > teeth[i] > lips[i]) or (bear_power[i] >= 0) or (close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
