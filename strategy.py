@@ -1,13 +1,14 @@
-# 4H_CAMARILLA_R2_S2_BREAKOUT_1D_TREND_VOLUME_SPIKE
-# Hypothesis: On 4h timeframe, use daily Camarilla R2/S2 levels as breakout triggers.
-# Enter long when price breaks above R2 with volume spike and daily uptrend (close > EMA34).
-# Enter short when price breaks below S2 with volume spike and daily downtrend (close < EMA34).
-# Exit when price returns to the opposite level (S2 for longs, R2 for shorts).
-# Targets 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-# Uses tighter R2/S2 levels vs R1/S1 to reduce false breakouts and overtrading.
+#!/usr/bin/env python3
+# 4H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_VOLUME_SPIKE
+# Hypothesis: On 4h timeframe, use daily Camarilla R3/S3 levels as breakout triggers.
+# Enter long when price breaks above R3 with volume spike and daily uptrend (close > EMA34).
+# Enter short when price breaks below S3 with volume spike and daily downtrend (close < EMA34).
+# Exit when price returns to the opposite level (S3 for longs, R3 for shorts).
+# Uses R3/S3 levels (wider than R2/S2) for fewer, higher-quality breakouts.
+# Targets 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
 # Designed to work in both bull and bear markets via trend filter.
 
-name = "4H_CAMARILLA_R2_S2_BREAKOUT_1D_TREND_VOLUME_SPIKE"
+name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_VOLUME_SPIKE"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,18 +31,18 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels: R2, S2
+    # Calculate Camarilla levels: R3, S3
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla formulas: R2 = C + (H-L)*1.1/4, S2 = C - (H-L)*1.1/4
-    R2 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    S2 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Camarilla formulas: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    R3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    S3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
     # Align Camarilla levels to 4h timeframe
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # 1d EMA for trend filter (34-period)
     ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -58,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or 
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
             np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,26 +69,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R2 with volume spike and daily uptrend
-            if close[i] > R2_aligned[i] and vol_spike[i] and close[i] > ema34_aligned[i]:
+            # LONG: Price breaks above R3 with volume spike and daily uptrend
+            if close[i] > R3_aligned[i] and vol_spike[i] and close[i] > ema34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S2 with volume spike and daily downtrend
-            elif close[i] < S2_aligned[i] and vol_spike[i] and close[i] < ema34_aligned[i]:
+            # SHORT: Price breaks below S3 with volume spike and daily downtrend
+            elif close[i] < S3_aligned[i] and vol_spike[i] and close[i] < ema34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to S2 level
-            if close[i] < S2_aligned[i]:
+            # EXIT LONG: Price returns to S3 level
+            if close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to R2 level
-            if close[i] > R2_aligned[i]:
+            # EXIT SHORT: Price returns to R3 level
+            if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
