@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 4h_SuperTrend_Volume_Pullback
-# Hypothesis: Use SuperTrend (ATR=10, mult=3) for trend direction on 4h, enter on pullbacks to the SuperTrend line during low volatility periods, confirmed by volume spikes (>1.5x 20-period average). Works in bull markets via trend continuation and in bear markets via mean-reversion within the trend. Targets ~25-40 trades/year to minimize fee drag.
+# 12h_Donchian20_Breakout_Volume_Trend
+# Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d EMA50 trend filter. 
+# Long when price breaks above 20-period high with volume > 1.5x 20-period average and price > 1d EMA50. 
+# Short when price breaks below 20-period low with volume > 1.5x 20-period average and price < 1d EMA50. 
+# Exit when price crosses back below/above the 10-period moving average in the opposite direction. 
+# Targets 15-30 trades/year to minimize fee decay and work in both bull/bear markets via trend filter.
 
-name = "4h_SuperTrend_Volume_Pullback"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,42 +24,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate ATR(10) for SuperTrend
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
 
-    # SuperTrend calculation
-    upper = (high + low) / 2 + 3 * atr
-    lower = (high + low) / 2 - 3 * atr
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
-
-    supertrend[0] = upper[0]
-    direction[0] = 1
-
-    for i in range(1, n):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = max(lower[i], supertrend[i-1])
-            direction[i] = 1
-        else:
-            supertrend[i] = min(upper[i], supertrend[i-1])
-            direction[i] = -1
+    # Calculate Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
 
     # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
+    # Exit condition: 10-period SMA
+    sma10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(10, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(supertrend[i]) or np.isnan(direction[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or 
+            np.isnan(sma10[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,30 +60,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: uptrend (direction=1) + pullback to SuperTrend + volume spike
-            if (direction[i] == 1 and 
-                close[i] <= supertrend[i] * 1.005 and  # within 0.5% above SuperTrend
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: price breaks above 20-period high + volume surge + price > 1d EMA50
+            if (close[i] > high_max_20[i] and 
+                volume[i] > vol_avg_20[i] * 1.5 and
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: downtrend (direction=-1) + pullback to SuperTrend + volume spike
-            elif (direction[i] == -1 and 
-                  close[i] >= supertrend[i] * 0.995 and  # within 0.5% below SuperTrend
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: price breaks below 20-period low + volume surge + price < 1d EMA50
+            elif (close[i] < low_min_20[i] and 
+                  volume[i] > vol_avg_20[i] * 1.5 and
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: trend reversal (direction=-1)
-            if direction[i] == -1:
+            # EXIT LONG: price crosses below 10-period SMA
+            if close[i] < sma10[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: trend reversal (direction=1)
-            if direction[i] == 1:
+            # EXIT SHORT: price crosses above 10-period SMA
+            if close[i] > sma10[i]:
                 signals[i] = 0.0
                 position = 0
             else:
