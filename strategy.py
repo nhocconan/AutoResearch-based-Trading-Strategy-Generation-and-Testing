@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_TrendFilter
-Hypothesis: Elder Ray's Bull/Bear Power (EMA13-based) combined with 1d trend filter and volume confirmation 
-captures institutional momentum while filtering false signals. Works in both bull and bear markets by 
-aligning with higher timeframe direction and requiring volume validation.
-Target: 15-35 trades/year (60-140 total over 4 years) with low turnover to minimize fee drag.
+12h_VWAP_MeanReversion_Range
+Hypothesis: In ranging markets (choppy regime), price reverts to VWAP with high probability.
+Long when price crosses above VWAP from below with volume confirmation, short when crosses below VWAP from above.
+Uses 1d ADX < 25 to identify ranging regime and avoid trending markets. Targets 12-37 trades/year on 12h timeframe.
 """
 
-name = "6h_ElderRay_BullBearPower_TrendFilter"
-timeframe = "6h"
+name = "12h_VWAP_MeanReversion_Range"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,47 +24,95 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter and Elder Ray calculation (call once before loop)
+    # Calculate VWAP (typical price * volume) cumulative
+    typical_price = (high + low + close) / 3
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = vwap_num / vwap_den
+    # Handle division by zero at start
+    vwap = np.where(vwap_den == 0, typical_price, vwap)
+
+    # Get 1d data for ADX ranging filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate EMA13 for Elder Ray (13-period EMA of close)
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Bull Power (High - EMA13) and Bear Power (Low - EMA13)
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
-    
-    # Align Elder Ray components to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume confirmation: 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate ADX (14) on 1d data
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(low)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            hl = high[i] - low[i]
+            hc = abs(high[i] - close[i-1])
+            lc = abs(low[i] - close[i-1])
+            tr[i] = max(hl, hc, lc)
+            
+            up = high[i] - high[i-1]
+            down = low[i-1] - low[i]
+            if up > down and up > 0:
+                plus_dm[i] = up
+            else:
+                plus_dm[i] = 0
+            if down > up and down > 0:
+                minus_dm[i] = down
+            else:
+                minus_dm[i] = 0
+        
+        # Smooth using Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(tr)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(low)
+        
+        atr[period-1] = np.mean(tr[1:period])
+        plus_dm_smooth = np.zeros_like(plus_dm)
+        minus_dm_smooth = np.zeros_like(minus_dm)
+        plus_dm_smooth[period-1] = np.mean(plus_dm[1:period])
+        minus_dm_smooth[period-1] = np.mean(minus_dm[1:period])
+        
+        for i in range(period, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        plus_di = 100 * plus_dm_smooth / atr
+        minus_di = 100 * minus_dm_smooth / atr
+        dx = np.zeros_like(high)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = np.zeros_like(high)
+        adx[2*period-2] = np.mean(dx[period-1:2*period-1])
+        for i in range(2*period-1, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
+
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
-        # Get aligned values for current 6h bar
-        bull = bull_power_aligned[i]
-        bear = bear_power_aligned[i]
-        ema50 = ema50_1d_aligned[i]
-        vol_avg_val = vol_avg_20[i]
-        close_price = close[i]
+        adx_val = adx_1d_aligned[i]
+        vwap_val = vwap[i]
+        vol_avg_10 = np.mean(volume[max(0, i-9):i+1]) if i >= 9 else np.mean(volume[:i+1])
 
-        # Skip if any required data is NaN
-        if (np.isnan(bull) or np.isnan(bear) or 
-            np.isnan(ema50) or np.isnan(vol_avg_val)):
+        # Skip if ADX not available
+        if np.isnan(adx_val):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        # Range filter: only trade when ADX < 25 (ranging market)
+        if adx_val >= 25:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,30 +121,28 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Strong Bull Power (>0) + price above EMA50 + volume surge
-            if (bull > 0 and 
-                close_price > ema50 and 
-                volume[i] > vol_avg_val * 1.5):
+            # LONG: Price crosses above VWAP with volume confirmation
+            if (close[i] > vwap_val and close[i-1] <= vwap[i-1] and 
+                volume[i] > vol_avg_10 * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Strong Bear Power (<0) + price below EMA50 + volume surge
-            elif (bear < 0 and 
-                  close_price < ema50 and 
-                  volume[i] > vol_avg_val * 1.5):
+            # SHORT: Price crosses below VWAP with volume confirmation
+            elif (close[i] < vwap_val and close[i-1] >= vwap[i-1] and 
+                  volume[i] > vol_avg_10 * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bear Power turns negative or price below EMA50
-            if (bear < 0 or close_price < ema50):
+            # EXIT LONG: Price crosses below VWAP
+            if close[i] < vwap_val and close[i-1] >= vwap[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bull Power turns positive or price above EMA50
-            if (bull > 0 or close_price > ema50):
+            # EXIT SHORT: Price crosses above VWAP
+            if close[i] > vwap_val and close[i-1] <= vwap[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
