@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12H_VOLATILITY_BREAKOUT_1D_TREND_FILTER
-# Hypothesis: Breakouts from 12h volatility-based channels (ATR-based) with daily trend filter capture momentum in both bull and bear markets.
-# In bull markets: buy breakouts above upper channel in uptrend. In bear markets: sell breakdowns below lower channel in downtrend.
-# Uses volatility contraction/expansion to filter low-volatility periods and avoid whipsaws.
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
+# 4H_DONCHIAN_BREAKOUT_20_VOLUME_CONFIRMATION_1D_TREND_FILTER
+# Hypothesis: 4-hour Donchian channel (20-period) breakouts with 1-day trend filter (EMA34) and volume confirmation capture momentum in both bull and bear markets.
+# Long when price breaks above upper band in uptrend with above-average volume; short when breaks below lower band in downtrend with above-average volume.
+# Uses volume ratio (current volume / 20-period average) > 1.2 for confirmation to reduce false breakouts.
+# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years).
 
-name = "12H_VOLATILITY_BREAKOUT_1D_TREND_FILTER"
-timeframe = "12h"
+name = "4H_DONCHIAN_BREAKOUT_20_VOLUME_CONFIRMATION_1D_TREND_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,42 +21,40 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # 1-day data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h ATR-based volatility channel (20-period)
-    atr_period = 20
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First TR
-    atr = np.zeros_like(close)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * (atr_period - 1) + tr[i]) / atr_period
-    
-    # Calculate upper and lower channels (ATR multiplier = 1.5)
-    mult = 1.5
-    upper_channel = np.roll(close, 1) + atr * mult
-    lower_channel = np.roll(close, 1) - atr * mult
-    # First value has no previous close, set to extreme values
-    upper_channel[0] = high[0] + atr[0] * mult
-    lower_channel[0] = low[0] - atr[0] * mult
-    
-    # Daily EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 4-hour Donchian channel (20-period)
+    lookback = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(lookback - 1, n):
+        upper[i] = np.max(high[i - lookback + 1:i + 1])
+        lower[i] = np.min(low[i - lookback + 1:i + 1])
+    
+    # Volume confirmation: current volume / 20-period average volume
+    vol_ma = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        vol_ma[i] = np.mean(volume[i - lookback + 1:i + 1])
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Need at least one period of data
+    start_idx = lookback - 1  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if trend filter data is not ready
-        if np.isnan(ema34_aligned[i]):
+        # Skip if any critical data is not ready
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,30 +63,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper channel in uptrend
-            if (close[i] > upper_channel[i] and 
-                close[i] > ema34_aligned[i]):
+            # LONG: Price breaks above upper band in uptrend with volume confirmation
+            if (close[i] > upper[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                vol_ratio[i] > 1.2):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower channel in downtrend
-            elif (close[i] < lower_channel[i] and 
-                  close[i] < ema34_aligned[i]):
+            # SHORT: Price breaks below lower band in downtrend with volume confirmation
+            elif (close[i] < lower[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  vol_ratio[i] > 1.2):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below lower channel or trend reversal
-            if (close[i] < lower_channel[i] or 
-                close[i] <= ema34_aligned[i]):
+            # EXIT LONG: Price falls below lower band or trend reversal
+            if (close[i] < lower[i] or 
+                close[i] <= ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above upper channel or trend reversal
-            if (close[i] > upper_channel[i] or 
-                close[i] >= ema34_aligned[i]):
+            # EXIT SHORT: Price rises above upper band or trend reversal
+            if (close[i] > upper[i] or 
+                close[i] >= ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
