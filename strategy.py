@@ -1,6 +1,6 @@
-#/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+#!/usr/bin/env python3
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Zone_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -32,7 +32,7 @@ def generate_signals(prices):
     r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0
     s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -40,12 +40,14 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_filter = volume > (1.8 * vol_avg)
     
-    # Volatility regime filter: avoid extremes
+    # Price range filter: avoid choppy markets (ATR-based)
     tr1 = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
     tr2 = np.maximum(np.absolute(low[1:] - close[:-1]), tr1)
     tr = np.concatenate([[tr1[0]], tr2]) if len(tr1) > 0 else np.array([0.0])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Normalize ATR by price to get percentage
     atr_pct = atr / close
+    # Only trade when volatility is moderate (not too high, not too low)
     vol_regime = (atr_pct > 0.012) & (atr_pct < 0.045)
     
     signals = np.zeros(n)
