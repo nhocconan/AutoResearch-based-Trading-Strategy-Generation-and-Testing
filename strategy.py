@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyTrend_DailyPullback_Entry_v3"
-timeframe = "1d"
+name = "6h_WeeklyTrend_DailyPullback_Entry"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,19 +17,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== Weekly Trend Filter (HTF) =====
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # ===== 1d Weekly Trend Filter (HTF) =====
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    weekly_ema = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1d, weekly_ema)
     
-    # ===== Daily Pullback Entry =====
-    ema20_d = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    rsi14_d = compute_rsi(close, 14)
+    # ===== 6h Daily Pullback Setup =====
+    # 6h EMA for pullback entry
+    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
     
     # ===== Daily Volume Spike Filter =====
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg_20)
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (1.8 * vol_avg_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     # ===== Session Filter: 08-20 UTC =====
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -37,13 +39,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(ema20_d[i]) or np.isnan(rsi14_d[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(weekly_ema_aligned[i]) or 
+            np.isnan(ema8[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,43 +65,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Weekly uptrend + price pulls back to EMA20 + RSI < 40 + volume spike
-            if (close[i] > ema50_1w_aligned[i] and
-                low[i] <= ema20_d[i] and
-                rsi14_d[i] < 40 and
-                vol_spike[i]):
+            # Long: Weekly uptrend (price > weekly EMA) + 6h pullback to EMA8 + volume spike
+            if (close[i] > weekly_ema_aligned[i] and
+                low[i] <= ema8[i] and
+                vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Weekly downtrend + price bounces to EMA20 + RSI > 60 + volume spike
-            elif (close[i] < ema50_1w_aligned[i] and
-                  high[i] >= ema20_d[i] and
-                  rsi14_d[i] > 60 and
-                  vol_spike[i]):
+            # Short: Weekly downtrend (price < weekly EMA) + 6h bounce to EMA8 + volume spike
+            elif (close[i] < weekly_ema_aligned[i] and
+                  high[i] >= ema8[i] and
+                  vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Weekly trend breaks or RSI > 70
-            if close[i] < ema50_1w_aligned[i] or rsi14_d[i] > 70:
+            # Exit long: Weekly trend reversal or 6h close above EMA8 (take profit)
+            if close[i] < weekly_ema_aligned[i] or close[i] > ema8[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Weekly trend breaks or RSI < 30
-            if close[i] > ema50_1w_aligned[i] or rsi14_d[i] < 30:
+            # Exit short: Weekly trend reversal or 6h close below EMA8 (take profit)
+            if close[i] > weekly_ema_aligned[i] or close[i] < ema8[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-def compute_rsi(prices, period=14):
-    delta = np.diff(prices, prepend=prices[0])
-    up = np.where(delta > 0, delta, 0.0)
-    down = np.where(delta < 0, -delta, 0.0)
-    roll_up = pd.Series(up).ewm(alpha=1/period, adjust=False).mean().values
-    roll_down = pd.Series(down).ewm(alpha=1/period, adjust=False).mean().values
-    rs = roll_up / (roll_down + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
