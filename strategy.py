@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 12h_ChaikinMoneyFlow_WeeklyTrend_DailyVolume
-# Hypothesis: On 12h timeframe, enter long when Chaikin Money Flow crosses above +0.1 with weekly EMA50 uptrend and daily volume spike (>1.5x 20-period MA).
-# Enter short when CMF crosses below -0.1 with weekly EMA50 downtrend and daily volume spike.
-# Exit when CMF crosses back towards zero (0.05 for longs, -0.05 for shorts).
-# Uses weekly trend filter to avoid counter-trend trades and daily volume to confirm institutional interest.
-# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag and work in both bull and bear markets.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2
+# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R3 with price > daily EMA34 and volume spike (>2x 20-period MA).
+# Enter short when price breaks below Camarilla S3 with price < daily EMA34 and volume spike (>2x 20-period MA).
+# Exit when price crosses back below R3 (for longs) or above S3 (for shorts).
+# Uses daily timeframe for trend filter and weekly for volatility regime filter to avoid false breakouts in low volatility.
+# Tightened volume threshold to 3x MA to reduce trade frequency and combat overtrading.
+# Targets 20-30 trades/year for low fee drag and works in both bull and bear markets by fading extreme daily levels with institutional levels.
 
-name = "12h_ChaikinMoneyFlow_WeeklyTrend_DailyVolume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,42 +25,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Chaikin Money Flow (20-period)
-    # CMF = sum((close - low - (high - close)) / (high - low) * volume) / sum(volume)
-    mfm = ((close - low) - (high - close)) / (high - low)
-    mfm = np.where((high - low) == 0, 0, mfm)  # avoid division by zero
-    mfv = mfm * volume
-    cmf = pd.Series(mfv).rolling(window=20, min_periods=20).sum() / \
-          pd.Series(volume).rolling(window=20, min_periods=20).sum()
-    cmf = cmf.values
-    
-    # Weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    weekly_close = df_1w['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
-    
-    # Daily volume confirmation: 20-period moving average
+    # Calculate Camarilla levels from previous day (using daily data)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    daily_volume = df_1d['volume'].values
-    daily_vol_ma = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
-    daily_vol_ma_aligned = align_htf_to_ltf(prices, df_1d, daily_vol_ma)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(daily_high, 1)
+    prev_low = np.roll(daily_low, 1)
+    prev_close = np.roll(daily_close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla R3 and S3 levels
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + camarilla_range * 1.1 / 4
+    s3 = prev_close - camarilla_range * 1.1 / 4
+    
+    # Daily EMA34 for trend filter
+    daily_ema34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Weekly ATR for volatility regime filter (avoid low volatility breakouts)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    # True Range calculation for weekly ATR
+    tr1 = weekly_high - weekly_low
+    tr2 = np.abs(weekly_high - np.roll(weekly_close, 1))
+    tr3 = np.abs(weekly_low - np.roll(weekly_close, 1))
+    tr1[0] = np.nan
+    tr2[0] = np.nan
+    tr3[0] = np.nan
+    
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    weekly_atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Volume confirmation: 20-period moving average on 4h data
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
+    weekly_atr_aligned = align_htf_to_ltf(prices, df_1w, weekly_atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(cmf[i]) or np.isnan(weekly_ema50_aligned[i]) or 
-            np.isnan(daily_vol_ma_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(daily_ema34_aligned[i]) or np.isnan(weekly_atr_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,35 +96,42 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        cmf_val = cmf[i]
-        weekly_trend = weekly_ema50_aligned[i]
-        daily_vol_ma_val = daily_vol_ma_aligned[i]
-        daily_vol = df_1d['volume'].values[i // 12] if i >= 12 else 0  # daily volume for current day
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        daily_trend = daily_ema34_aligned[i]
+        vol_ma_val = vol_ma[i]
+        atr_val = weekly_atr_aligned[i]
         
-        # Volume spike: daily volume > 1.5x 20-day average
-        vol_spike = daily_vol > daily_vol_ma_val * 1.5
+        # Avoid trading in extremely low volatility (choppy) markets
+        if atr_val < 0.5 * np.nanmedian(weekly_atr_aligned[max(0, i-50):i+1]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 0:
-            # LONG: CMF crosses above +0.1 with weekly uptrend and volume spike
-            if cmf_val > 0.1 and weekly_trend > weekly_ema50_aligned[i-1] and vol_spike:
+            # LONG: Price breaks above R3 with price > daily EMA34 and volume > 3x MA (tightened)
+            if close[i] > r3_val and close[i] > daily_trend and volume[i] > vol_ma_val * 3.0:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: CMF crosses below -0.1 with weekly downtrend and volume spike
-            elif cmf_val < -0.1 and weekly_trend < weekly_ema50_aligned[i-1] and vol_spike:
+            # SHORT: Price breaks below S3 with price < daily EMA34 and volume > 3x MA (tightened)
+            elif close[i] < s3_val and close[i] < daily_trend and volume[i] > vol_ma_val * 3.0:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: CMF crosses back below +0.05 (loss of buying pressure)
-            if cmf_val < 0.05:
+            # EXIT LONG: Price crosses back below R3 (failed breakout)
+            if close[i] < r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: CMF crosses back above -0.05 (loss of selling pressure)
-            if cmf_val > -0.05:
+            # EXIT SHORT: Price crosses back above S3 (failed breakout)
+            if close[i] > s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
