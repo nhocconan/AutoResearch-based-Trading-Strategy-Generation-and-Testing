@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_PivotReversal_1dTrend_Volume
-# Hypothesis: Fade moves to weekly pivot levels (R1/S1) when price is overextended from 1d EMA20,
-# with volume confirmation. Works in both bull and bear markets by combining mean reversion
-# at key levels with trend filtering and volume validation. Targets 20-40 trades/year.
+# 4h_Camarilla_R3S3_Breakout_12hTrend_Volume
+# Hypothesis: Trade 4h breakouts of daily Camarilla R3/S3 levels aligned with 12h EMA trend and volume spikes.
+# Camarilla levels provide precise support/resistance; 12h EMA filters trend; volume confirms momentum.
+# Designed for low frequency (20-50 trades/year) to survive both bull and bear markets by following higher timeframe structure.
 
-name = "6h_PivotReversal_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,40 +22,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d EMA20 for trend filter ===
+    # === 12h EMA50 for trend filter ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # === Daily Camarilla levels (R3, S3) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # === Weekly pivot levels (R1, S1) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
+    # Shift by 1 to use previous day's data for current day's Camarilla
+    high_1d_prev = np.roll(high_1d, 1)
+    low_1d_prev = np.roll(low_1d, 1)
+    close_1d_prev = np.roll(close_1d, 1)
+    high_1d_prev[0] = np.nan
+    low_1d_prev[0] = np.nan
+    close_1d_prev[0] = np.nan
     
-    wk_high = df_1w['high'].values
-    wk_low = df_1w['low'].values
-    wk_close = df_1w['close'].values
+    # Camarilla calculation
+    range_1d = high_1d_prev - low_1d_prev
+    close_prev = close_1d_prev
+    r3 = close_prev + range_1d * 1.1 / 4
+    s3 = close_prev - range_1d * 1.1 / 4
     
-    wk_high_prev = np.roll(wk_high, 1)
-    wk_low_prev = np.roll(wk_low, 1)
-    wk_close_prev = np.roll(wk_close, 1)
-    wk_high_prev[0] = np.nan
-    wk_low_prev[0] = np.nan
-    wk_close_prev[0] = np.nan
-    
-    pivot = (wk_high_prev + wk_low_prev + wk_close_prev) / 3.0
-    r1 = pivot + (wk_high_prev - wk_low_prev) / 2.0
-    s1 = pivot - (wk_high_prev - wk_low_prev) / 2.0
-    
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # === Deviation from 1d EMA20 (%) ===
-    ema_dev = (close - ema_20_1d_aligned) / ema_20_1d_aligned * 100
+    # Align daily levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # === Volume confirmation (20-period average) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,8 +68,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_dev[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,32 +77,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Conditions
-        near_r1 = high[i] >= r1_aligned[i] * 0.998  # Within 0.2% of R1
-        near_s1 = low[i] <= s1_aligned[i] * 1.002   # Within 0.2% of S1
-        overextended_up = ema_dev[i] > 2.0          # >2% above EMA20
-        overextended_down = ema_dev[i] < -2.0       # >2% below EMA20
+        # Trend filter: price above/below 12h EMA50
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
+        
+        # Breakout conditions
+        breakout_up = close[i] > r3_aligned[i]
+        breakout_down = close[i] < s3_aligned[i]
+        
+        # Volume filter: above average
         vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: price near S1, oversold, volume confirmation
-            if near_s1 and overextended_down and vol_ok:
+            # LONG: breakout above R3, uptrend, volume confirmation
+            if breakout_up and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price near R1, overbought, volume confirmation
-            elif near_r1 and overextended_up and vol_ok:
+            # SHORT: breakout below S3, downtrend, volume confirmation
+            elif breakout_down and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: price crosses above EMA20 or reaches R1
-            if close[i] >= ema_20_1d_aligned[i] or high[i] >= r1_aligned[i]:
+            # EXIT LONG: breakdown below S3 or trend reversal
+            if breakout_down or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses below EMA20 or reaches S1
-            if close[i] <= ema_20_1d_aligned[i] or low[i] <= s1_aligned[i]:
+            # EXIT SHORT: breakout above R3 or trend reversal
+            if breakout_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
