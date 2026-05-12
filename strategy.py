@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 
 # 12h_1D_Camarilla_R1S1_Breakout_Trend_Volume
-# Hypothesis: Breakout above daily R1 with 12h price > 12h EMA21 (trend) and volume confirmation.
-# In bear markets, short below daily S1 with 12h price < 12h EMA21 and volume confirmation.
-# Uses 12h timeframe for low frequency (12-37 trades/year target) and daily Camarilla levels for structure.
-# Weekly trend filter is omitted to reduce complexity; trend is derived from 12h EMA21.
-# Volume confirmation requires current volume > 1.5x 20-period average to avoid false breakouts.
+# Hypothesis: Breakout above R1 or below S1 on 12h timeframe with daily trend filter and volume confirmation.
+# Uses 12h for primary timeframe (lower trade frequency) and 1d for trend filter to reduce whipsaw.
+# Targets 15-30 trades/year to minimize fee drag while capturing significant moves.
 
 name = "12h_1D_Camarilla_R1S1_Breakout_Trend_Volume"
 timeframe = "12h"
@@ -17,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -25,27 +23,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels
+    # Get daily data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
 
-    # Calculate 12h EMA21 for trend filter
-    ema_12h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
     # Calculate daily Camarilla levels (based on previous day)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
     
     rang = prev_high - prev_low
     R1 = prev_close + rang * 1.1 / 12
     S1 = prev_close - rang * 1.1 / 12
-
-    # Align daily levels to 12h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
 
@@ -56,9 +54,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(21, n):
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_12h[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
             np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,27 +65,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Daily trend filter
+        bullish_trend = close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_1d_aligned[i]
+
         if position == 0:
-            # LONG: Price crosses above R1 with 12h uptrend and volume confirmation
-            if close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1] and close[i] > ema_12h[i] and volume_ok[i]:
+            # LONG: Price crosses above R1 with bullish daily trend and volume confirmation
+            if close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below S1 with 12h downtrend and volume confirmation
-            elif close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1] and close[i] < ema_12h[i] and volume_ok[i]:
+            # SHORT: Price crosses below S1 with bearish daily trend and volume confirmation
+            elif close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 or 12h trend turns down
-            if close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1] or close[i] < ema_12h[i]:
+            # EXIT LONG: Price crosses below S1 or daily trend turns bearish
+            if close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 or 12h trend turns up
-            if close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1] or close[i] > ema_12h[i]:
+            # EXIT SHORT: Price crosses above R1 or daily trend turns bullish
+            if close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
