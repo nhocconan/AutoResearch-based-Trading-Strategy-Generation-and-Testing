@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:  # Need sufficient data for daily calculations
+    if n < 300:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,33 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D DATA FOR CAMARILLA PIVOTS AND TREND ===
+    # === 12H DATA FOR TREND FILTER ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # 12H EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # === 1D DATA FOR CAMARILLA PIVOTS ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
     # P = (H + L + C) / 3
-    # R3 = C + (H - L) * 1.1/4
-    # S3 = C - (H - L) * 1.1/4
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
     
-    # Calculate for each day using previous day's data
     prev_close = np.roll(close_1d, 1)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     range_hl = prev_high - prev_low
     
-    r3 = prev_close + range_hl * 1.1 / 4
-    s3 = prev_close - range_hl * 1.1 / 4
+    r1 = prev_close + range_hl * 1.1 / 12
+    s1 = prev_close - range_hl * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # 1D EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align Camarilla levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,7 +59,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(ema34_1d_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,28 +68,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above R3 with volume, trend up
-            if (close[i] > r3_12h[i] and 
-                close[i] > ema34_1d_12h[i] and  # Uptrend filter
+            # LONG: Break above R1 with volume, trend up
+            if (close[i] > r1_4h[i] and 
+                close[i] > ema50_12h_aligned[i] and  # Uptrend filter
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S3 with volume, trend down
-            elif (close[i] < s3_12h[i] and 
-                  close[i] < ema34_1d_12h[i] and  # Downtrend filter
+            # SHORT: Break below S1 with volume, trend down
+            elif (close[i] < s1_4h[i] and 
+                  close[i] < ema50_12h_aligned[i] and  # Downtrend filter
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # EXIT LONG: Trend breaks down
-            if close[i] < ema34_1d_12h[i]:
+            if close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Trend breaks up
-            if close[i] > ema34_1d_12h[i]:
+            if close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
