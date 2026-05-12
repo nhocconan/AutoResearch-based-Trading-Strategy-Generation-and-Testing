@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_TRIX_Volume_Spike_Regime_1wTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_4hSMA50"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,74 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== 1W Trend Filter (HTF) =====
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # ===== 1D Trend Filter =====
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 1w TRIX (12-period)
-    ema1 = pd.Series(close_1w).ewm(span=12, adjust=False).mean()
-    ema2 = ema1.ewm(span=12, adjust=False).mean()
-    ema3 = ema2.ewm(span=12, adjust=False).mean()
-    trix_raw = 100 * (ema3.diff() / ema3.shift(1))
-    trix = trix_raw.fillna(0).values
-    trix_aligned = align_htf_to_ltf(prices, df_1w, trix)
+    # 1d EMA(34)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # ===== TRIX Signal (LTF) =====
+    # ===== 4H SMA50 for Confluence =====
     close_s = pd.Series(close)
-    ema1 = close_s.ewm(span=12, adjust=False).mean()
-    ema2 = ema1.ewm(span=12, adjust=False).mean()
-    ema3 = ema2.ewm(span=12, adjust=False).mean()
-    trix_ltf = 100 * (ema3.diff() / ema3.shift(1))
-    trix_ltf = trix_ltf.fillna(0).values
+    sma50_4h = close_s.rolling(window=50, min_periods=50).mean().values
     
     # ===== Volume Spike Filter =====
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_avg)
     
-    # ===== Choppy Market Filter (using 1d CHOP) =====
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # ===== Camarilla Pivot Levels (from previous 1D close) =====
+    # Calculate pivot from previous day's data
+    prev_close_1d = np.concatenate([[close_1d[0]], close_1d[:-1]])
+    prev_high_1d = np.concatenate([[high_1d[0]], high_1d[:-1]])
+    prev_low_1d = np.concatenate([[low_1d[0]], low_1d[:-1]])
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    range_hl = prev_high_1d - prev_low_1d
+    r1 = pivot + (range_hl * 1.1 / 12)
+    s1 = pivot - (range_hl * 1.1 / 12)
     
-    # ATR(14)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # ADX(14) components
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / tr_14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Chop = (log10(sum(TR)/ATR) / log10(period)) * 100
-    chop = (np.log10(pd.Series(tr).rolling(window=14, min_periods=14).sum().values / (atr + 1e-10)) / np.log10(14)) * 100
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix_aligned[i]) or 
-            np.isnan(trix_ltf[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(sma50_4h[i]) or
             np.isnan(vol_spike[i]) or
-            np.isnan(chop_aligned[i])):
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,30 +68,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero + chop < 61.8 (trending) + volume spike + 1w TRIX positive
-            if (trix_ltf[i] > 0 and trix_ltf[i-1] <= 0 and 
-                chop_aligned[i] < 61.8 and 
+            # Long: Close > R1 + volume spike + price > SMA50 + 1d close > EMA34
+            if (close[i] > r1_aligned[i] and 
                 vol_spike[i] and 
-                trix_aligned[i] > 0):
+                close[i] > sma50_4h[i] and 
+                close_1d[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero + chop < 61.8 (trending) + volume spike + 1w TRIX negative
-            elif (trix_ltf[i] < 0 and trix_ltf[i-1] >= 0 and 
-                  chop_aligned[i] < 61.8 and 
+            # Short: Close < S1 + volume spike + price < SMA50 + 1d close < EMA34
+            elif (close[i] < s1_aligned[i] and 
                   vol_spike[i] and 
-                  trix_aligned[i] < 0):
+                  close[i] < sma50_4h[i] and 
+                  close_1d[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TRIX crosses below zero OR chop > 61.8 (choppy)
-            if trix_ltf[i] < 0 or chop_aligned[i] > 61.8:
+            # Exit long: Close < S1 OR volume spike reversal
+            if close[i] < s1_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX crosses above zero OR chop > 61.8 (choppy)
-            if trix_ltf[i] > 0 or chop_aligned[i] > 61.8:
+            # Exit short: Close > R1 OR volume spike reversal
+            if close[i] > r1_aligned[i] or not vol_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
