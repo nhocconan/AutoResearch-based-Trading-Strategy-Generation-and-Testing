@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # 4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3
-# Hypothesis: Further refined version with stricter volume confirmation (2.0x average volume) and tighter exit conditions (price must close below/above Camarilla S1/R1 levels) to reduce trade frequency and improve signal quality. Targets 50-150 total trades over 4 years to minimize fee drag while maintaining edge in both bull and bear markets by following higher-timeframe trend. Uses strict volume confirmation to avoid false breakouts and tighter exits to prevent whipsaws.
+# Hypothesis: Trading breakouts from daily Camarilla R1/S1 levels in the direction of daily EMA34 trend with volume confirmation (1.5x average volume). Designed for low trade frequency (<50/year) to minimize fee drag while maintaining edge in bull/bear markets via trend filter. Uses discrete position sizing (0.25) and strict entry conditions to avoid overtrading.
 
 name = "4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3"
 timeframe = "4h"
@@ -45,7 +45,7 @@ def generate_signals(prices):
     # Calculate 4h volume SMA20 for volume confirmation (with spike filter)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0  # Require 2.0x average volume (stricter)
+    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,15 +73,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Camarilla S1 level (stronger signal)
-            if close[i] < s1_aligned[i]:
+            # EXIT LONG: Price closes below 1d EMA34 (trend change)
+            if close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Camarilla R1 level (stronger signal)
-            if close[i] > r1_aligned[i]:
+            # EXIT SHORT: Price closes above 1d EMA34 (trend change)
+            if close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
