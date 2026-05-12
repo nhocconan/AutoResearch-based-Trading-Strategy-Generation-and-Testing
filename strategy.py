@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h TRIX with Volume Spike and 12h Trend Filter
-# Hypothesis: TRIX (triple-smoothed EMA) identifies momentum and trend changes.
-# TRIX > 0 indicates bullish momentum, TRIX < 0 indicates bearish momentum.
-# Combines with volume spike for momentum confirmation and 12h EMA50 trend filter.
-# Designed for low trade frequency (~20-40/year) with clear entry/exit rules.
-# Works in both bull and bear markets by following TRIX momentum.
+# 6h Elder Ray Power + Daily Trend + Volume Spike
+# Hypothesis: Elder Ray (Bull/Bear Power) measures bullish/bearish strength relative to EMA.
+# Bull Power = High - EMA, Bear Power = Low - EMA.
+# Combines with 1d EMA trend filter and volume spikes for momentum confirmation.
+# Works in bull markets via Bull Power > 0 and in bear markets via Bear Power < 0.
+# Low trade frequency expected due to strict confluence requirements.
 
-name = "4h_TRIX_Volume_Trend"
-timeframe = "4h"
+name = "6h_ElderRay_Power_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,28 +24,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Data for EMA Trend Filter ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # === 1d Data for EMA Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === TRIX (15-period triple EMA) ===
-    # Calculate TRIX = EMA(EMA(EMA(close, 15), 15), 15)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # === Elder Ray (13-period EMA) ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA
+    bear_power = low - ema13   # Bear Power = Low - EMA
     
-    # TRIX = (ema3 - previous ema3) / previous ema3 * 100
-    trix = np.full(n, np.nan)
-    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    
-    # === Volume Spike (20-period on 4h) ===
+    # === Volume Spike (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 2.0)
     
@@ -56,7 +51,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix[i]) or np.isnan(ema_50_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_6h[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,24 +60,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: TRIX > 0 (bullish momentum) + volume spike + price above 12h EMA50
-            if trix[i] > 0 and vol_spike[i] and close[i] > ema_50_4h[i]:
+            # LONG: Bull Power > 0 (bullish strength) + price above 1d EMA34 + volume spike
+            if bull_power[i] > 0 and close[i] > ema_34_6h[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX < 0 (bearish momentum) + volume spike + price below 12h EMA50
-            elif trix[i] < 0 and vol_spike[i] and close[i] < ema_50_4h[i]:
+            # SHORT: Bear Power < 0 (bearish strength) + price below 1d EMA34 + volume spike
+            elif bear_power[i] < 0 and close[i] < ema_34_6h[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: TRIX turns negative (momentum shifts bearish)
-            if trix[i] < 0:
+            # EXIT LONG: Bull Power <= 0 (bullish strength faded) or trend change
+            if bull_power[i] <= 0 or close[i] < ema_34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX turns positive (momentum shifts bullish)
-            if trix[i] > 0:
+            # EXIT SHORT: Bear Power >= 0 (bearish strength faded) or trend change
+            if bear_power[i] >= 0 or close[i] > ema_34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
