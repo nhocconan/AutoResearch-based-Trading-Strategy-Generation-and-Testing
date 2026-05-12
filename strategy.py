@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_Trend_Confirm_v1
-# Hypothesis: Keltner Channel breakouts (ATR-based) combined with 12h EMA trend and volume
-# confirmation work in both bull and bear markets. Breakouts capture momentum,
-# while the EMA filter ensures we trade with the higher timeframe trend.
-# Volume filter reduces false breakouts. Designed for ~30-40 trades/year to minimize fee drag.
+# 1D_Camarilla_R1_S1_Breakout_1WTrend_VolumeS
+# Hypothesis: Camarilla pivot R1/S1 breakouts on daily chart with weekly trend filter and volume confirmation
+# work in both bull and bear markets. Camarilla levels provide institutional-grade support/resistance,
+# weekly trend ensures directional alignment, volume reduces false breakouts. Targets 15-25 trades/year.
 
-name = "4h_Keltner_Breakout_Trend_Confirm_v1"
-timeframe = "4h"
+name = "1D_Camarilla_R1_S1_Breakout_1WTrend_VolumeS"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,44 +22,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
         return np.zeros(n)
 
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate ATR for Keltner Channels (20-period)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Calculate 21-period EMA for weekly trend
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
 
-    # Calculate 20-period EMA for Keltner Center
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate daily Camarilla pivot levels (using previous day's OHLC)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous day's data, so shift by 1
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # First value
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
 
-    # Keltner Channels: EMA(20) ± 2 * ATR
-    keltner_upper = ema20 + 2 * atr
-    keltner_lower = ema20 - 2 * atr
+    camarilla_range = prev_high - prev_low
+    camarilla_r1 = prev_close + camarilla_range * 1.1 / 12
+    camarilla_s1 = prev_close - camarilla_range * 1.1 / 12
 
-    # Get 12h EMA21 for trend filter
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
-
-    # Volume confirmation: 1.8x 20-period SMA
+    # Volume confirmation: 1.5x 20-period SMA
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_threshold = volume_sma20 * 1.8
+    volume_threshold = volume_sma20 * 1.5
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):  # Start after indicators need 20 bars
         # Skip if any required data is NaN
-        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
-            np.isnan(ema21_12h_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
+            np.isnan(ema21_1w_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,30 +67,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Keltner Upper + volume + 12h uptrend
-            if (close[i] > keltner_upper[i] and
+            # LONG: Price breaks above Camarilla R1 + volume + weekly uptrend
+            if (close[i] > camarilla_r1[i] and
                 volume[i] > volume_threshold[i] and
-                close[i] > ema21_12h_aligned[i]):
+                close[i] > ema21_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Keltner Lower + volume + 12h downtrend
-            elif (close[i] < keltner_lower[i] and
+            # SHORT: Price breaks below Camarilla S1 + volume + weekly downtrend
+            elif (close[i] < camarilla_s1[i] and
                   volume[i] > volume_threshold[i] and
-                  close[i] < ema21_12h_aligned[i]):
+                  close[i] < ema21_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Keltner Center OR 12h trend turns down
-            if close[i] < ema20[i] or close[i] < ema21_12h_aligned[i]:
+            # EXIT LONG: Price closes below Camarilla S1 OR weekly trend turns down
+            if close[i] < camarilla_s1[i] or close[i] < ema21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Keltner Center OR 12h trend turns up
-            if close[i] > ema20[i] or close[i] > ema21_12h_aligned[i]:
+            # EXIT SHORT: Price closes above Camarilla R1 OR weekly trend turns up
+            if close[i] > camarilla_r1[i] or close[i] > ema21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
