@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Williams_Alligator_ElderRay_Trend
-# Hypothesis: On 4h timeframe, use Williams Alligator (3 SMAs) to determine trend direction and avoid chop.
-# Combine with Elder Ray (bull/bear power from EMA13) to confirm trend strength.
-# Enter long when price > Alligator Jaw, Bull Power > 0, and Bear Power < 0 with volume confirmation.
-# Enter short when price < Alligator Jaw, Bear Power > 0, and Bull Power < 0 with volume confirmation.
-# Exit when Elder Ray signals reverse or price crosses the Alligator Teeth.
-# Uses 1-day trend filter to avoid counter-trend trades, targeting 20-40 trades/year for low friction.
-# Works in bull via strong bull power and in bear via strong bear power with trend alignment.
+# 4h_Camarilla_Pivot_R1S1_Breakout_12hTrend_Volume
+# Hypothesis: On 4h timeframe, use daily Camarilla pivot levels (R1/S1) for entries with 12h EMA50 trend filter and volume confirmation.
+# Enter long when price closes above R1 with volume > 1.5x 20-bar average and 12h EMA50 uptrend.
+# Enter short when price closes below S1 with volume > 1.5x 20-bar average and 12h EMA50 downtrend.
+# Exit when price returns to the daily pivot point (mean reversion) or reverses at opposite level (R1 for longs, S1 for shorts).
+# Targets 20-40 trades/year to minimize fee drag while capturing meaningful moves in both bull and bear markets.
 
-name = "4h_Williams_Alligator_ElderRay_Trend"
+name = "4h_Camarilla_Pivot_R1S1_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,28 +24,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: 3 SMAs (Jaw=13, Teeth=8, Lips=5)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Volume confirmation: current volume > 1.3 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_ma)
-    
-    # 1-day trend filter: EMA50
+    # Load daily data for Camarilla pivot calculation (using previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    
+    # Calculate pivot point and range
+    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+    daily_range = daily_high - daily_low
+    
+    # Camarilla R1 and S1 levels (most significant for breakouts)
+    r1 = daily_pivot + daily_range * 1.083
+    s1 = daily_pivot - daily_range * 1.083
+    
+    # Align daily levels to 4h timeframe (wait for completed daily bar)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,9 +66,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(daily_ema50_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,39 +76,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Alligator condition: price > Jaw for uptrend, price < Jaw for downtrend
-        price_above_jaw = close[i] > jaw[i]
-        price_below_jaw = close[i] < jaw[i]
-        
-        # Elder Ray condition: Bull Power > 0 and Bear Power < 0 for long,
-        # Bear Power > 0 and Bull Power < 0 for short
-        bull_strong = bull_power[i] > 0 and bear_power[i] < 0
-        bear_strong = bear_power[i] > 0 and bull_power[i] < 0
-        
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        pivot_val = pivot_aligned[i]
+        ema12h_trend = ema50_12h_aligned[i]
         vol_confirm = volume_confirm[i]
-        daily_trend = daily_ema50_aligned[i]
         
         if position == 0:
-            # LONG: Price above Jaw, Bull Power positive, Bear Power negative, volume confirmation, daily uptrend
-            if price_above_jaw and bull_strong and vol_confirm and close[i] > daily_trend:
+            # LONG: Price closes above R1 with volume confirmation and 12h uptrend
+            if close[i] > r1_val and close[i] > ema12h_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below Jaw, Bear Power positive, Bull Power negative, volume confirmation, daily downtrend
-            elif price_below_jaw and bear_strong and vol_confirm and close[i] < daily_trend:
+            # SHORT: Price closes below S1 with volume confirmation and 12h downtrend
+            elif close[i] < s1_val and close[i] < ema12h_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below Teeth or Elder Ray weakens
-            if close[i] < teeth[i] or bull_power[i] <= 0:
+            # EXIT LONG: Price returns to pivot (mean reversion) or breaks below S1 (invalidates bullish bias)
+            if close[i] <= pivot_val or close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above Teeth or Elder Ray weakens
-            if close[i] > teeth[i] or bear_power[i] <= 0:
+            # EXIT SHORT: Price returns to pivot (mean reversion) or breaks above R1 (invalidates bearish bias)
+            if close[i] >= pivot_val or close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
