@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_VolumeWeighted_RSI_TrendFilter"
-timeframe = "12h"
+name = "1d_Camarilla_R3_S4_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,47 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D DATA FOR TREND FILTER AND RSI ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === 1W DATA FOR TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 34-period EMA for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 50-period EMA for weekly trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate 14-period RSI on 1d closes
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_values = rsi_1d.values
-    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
+    # === DAILY CAMARILLA PIVOTS (based on previous day) ===
+    # Calculate pivot levels using previous day's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
     
-    # === VOLUME WEIGHTED PRICE MOMENTUM (12-period) ===
-    # Price change weighted by volume
-    price_change = np.diff(close, prepend=close[0])
-    vol_weighted_change = price_change * volume
-    vol_weighted_ma = pd.Series(vol_weighted_change).rolling(window=12, min_periods=12).mean().values
-    vol_weighted_mean = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    volume_weighted_momentum = np.divide(
-        vol_weighted_ma, 
-        vol_weighted_mean, 
-        out=np.zeros_like(vol_weighted_ma), 
-        where=vol_weighted_mean!=0
-    )
+    # First day: use first available values
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    # Camarilla calculations
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Resistance levels
+    r1 = pivot + (range_hl * 1.0833)
+    r2 = pivot + (range_hl * 1.1666)
+    r3 = pivot + (range_hl * 1.2500)
+    r4 = pivot + (range_hl * 1.3333)
+    
+    # Support levels
+    s1 = pivot - (range_hl * 1.0833)
+    s2 = pivot - (range_hl * 1.1666)
+    s3 = pivot - (range_hl * 1.2500)
+    s4 = pivot - (range_hl * 1.3333)
+    
+    # === VOLUME CONFIRMATION ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 12, 14)
+    start_idx = 50  # Need enough data for EMA and pivots
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_12h[i]) or np.isnan(rsi_12h[i]) or 
-            np.isnan(volume_weighted_momentum[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(r3[i]) or np.isnan(s3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,28 +73,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price above trend + RSI not overbought + positive volume-weighted momentum
-            if (close[i] > ema34_12h[i] and 
-                rsi_12h[i] < 70 and
-                volume_weighted_momentum[i] > 0):
+            # LONG: Price breaks above R3 with volume spike and weekly uptrend
+            if (close[i] > r3[i] and 
+                volume_spike[i] and
+                close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below trend + RSI not oversold + negative volume-weighted momentum
-            elif (close[i] < ema34_12h[i] and 
-                  rsi_12h[i] > 30 and
-                  volume_weighted_momentum[i] < 0):
+            # SHORT: Price breaks below S3 with volume spike and weekly downtrend
+            elif (close[i] < s3[i] and 
+                  volume_spike[i] and
+                  close[i] < ema50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below trend OR RSI overbought
-            if close[i] < ema34_12h[i] or rsi_12h[i] >= 70:
+            # EXIT LONG: Price breaks below R1 or weekly trend turns down
+            if close[i] < r1[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above trend OR RSI oversold
-            if close[i] > ema34_12h[i] or rsi_12h[i] <= 30:
+            # EXIT SHORT: Price breaks above S1 or weekly trend turns up
+            if close[i] > s1[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
