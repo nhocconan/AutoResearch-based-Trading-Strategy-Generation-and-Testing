@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_1D_Camarilla_R1_S1_Breakout_TrendVol
-Hypothesis: 4-hour breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
-Only takes long when price breaks above R1 with volume spike and daily uptrend, short when breaks below S1 with volume spike and daily downtrend.
-Uses tight entry conditions (trend + volume + level break) to target 20-50 trades per year, avoiding overtrading.
-Works in bull markets via trend-following breaks and in bear markets via counter-trend reversals at extreme daily levels.
+4h_1D_Camarilla_R1_S1_Breakout_Pullback
+Hypothesis: 4-hour pullbacks to daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume confirmation.
+In uptrend: buy pullbacks to S1 with volume. In downtrend: sell pullbacks to R1 with volume.
+Captures mean reversion within trend, works in both bull (pullbacks in uptrend) and bear (bounces in downtrend).
 """
 
-name = "4h_1D_Camarilla_R1_S1_Breakout_TrendVol"
+name = "4h_1D_Camarilla_R1_S1_Breakout_Pullback"
 timeframe = "4h"
 leverage = 1.0
 
@@ -65,14 +64,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + volume spike + price above daily EMA50 (daily uptrend)
-            if (close[i] > R1_1d_aligned[i] and 
+            # LONG: Pullback to S1 in uptrend with volume
+            if (close[i] <= S1_1d_aligned[i] * 1.005 and  # Allow small tolerance
+                close[i] >= S1_1d_aligned[i] * 0.995 and
                 volume_spike[i] and 
                 close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + volume spike + price below daily EMA50 (daily downtrend)
-            elif (close[i] < S1_1d_aligned[i] and 
+            # SHORT: Pullback to R1 in downtrend with volume
+            elif (close[i] <= R1_1d_aligned[i] * 1.005 and 
+                  close[i] >= R1_1d_aligned[i] * 0.995 and
                   volume_spike[i] and 
                   close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
@@ -80,17 +81,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters previous day's H-L range OR closes below daily EMA50
-            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
-               close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: Price reaches R1 or closes below EMA50
+            if close[i] >= R1_1d_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters previous day's H-L range OR closes above daily EMA50
-            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
-               close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: Price reaches S1 or closes above EMA50
+            if close[i] <= S1_1d_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
