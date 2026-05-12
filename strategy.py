@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_Filter_Donchian_Breakout_With_Volume
-# Hypothesis: On 4h timeframe, enter long when price breaks above Donchian(20) high and KAMA > KAMA.prev (uptrend) with volume > 1.5x average.
-# Enter short when price breaks below Donchian(20) low and KAMA < KAMA.prev (downtrend) with volume > 1.5x average.
-# Exit when price crosses back inside Donchian channel (mean reversion).
-# Uses KAMA for adaptive trend, Donchian for breakout structure, volume for confirmation.
-# Designed to work in both bull (breakouts) and bear (breakdowns) with low trade frequency.
+# 4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter
+# Hypothesis: On 4h timeframe, enter long when price closes above daily R1 with close > daily EMA34.
+# Enter short when price closes below daily S1 with close < daily EMA34.
+# Exit when price crosses daily EMA34 (trend reversal).
+# Uses close-based filters only to avoid look-ahead. Targets 25-35 trades/year for low fee drag.
+# Works in bull markets via breakouts and in bear via short reversals at S1.
 
-name = "4h_KAMA_Trend_Filter_Donchian_Breakout_With_Volume"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,26 +24,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_len = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Load daily data for Camarilla pivot calculation and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
+        return np.zeros(n)
     
-    # Calculate KAMA
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0, keepdims=True)
-    # Fix volatility calculation: rolling sum of absolute changes
-    volatility = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=er_len, min_periods=1).sum().values
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate pivot point and range
+    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+    daily_range = daily_high - daily_low
+    
+    # Camarilla R1 and S1 levels
+    r1 = daily_pivot + daily_range * 1.083
+    s1 = daily_pivot - daily_range * 1.083
+    
+    # 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align daily levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: 20-period moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,12 +55,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure indicators are stable
+    start_idx = 60  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(kama[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,33 +68,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        kama_val = kama[i]
-        kama_prev = kama[i-1]
-        donch_high = donchian_high[i]
-        donch_low = donchian_low[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema1d_trend = ema34_1d_aligned[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: Price breaks above Donchian high with KAMA up and volume confirmation
-            if close[i] > donch_high and kama_val > kama_prev and volume[i] > 1.5 * vol_ma_val:
+            # LONG: Price closes above R1 with close > daily EMA34
+            if close[i] > r1_val and close[i] > ema1d_trend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low with KAMA down and volume confirmation
-            elif close[i] < donch_low and kama_val < kama_prev and volume[i] > 1.5 * vol_ma_val:
+            # SHORT: Price closes below S1 with close < daily EMA34
+            elif close[i] < s1_val and close[i] < ema1d_trend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back inside Donchian channel (mean reversion)
-            if close[i] < donch_high and close[i] > donch_low:
+            # EXIT LONG: Price closes below daily EMA34 (trend reversal)
+            if close[i] < ema1d_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back inside Donchian channel (mean reversion)
-            if close[i] < donch_high and close[i] > donch_low:
+            # EXIT SHORT: Price closes above daily EMA34 (trend reversal)
+            if close[i] > ema1d_trend:
                 signals[i] = 0.0
                 position = 0
             else:
