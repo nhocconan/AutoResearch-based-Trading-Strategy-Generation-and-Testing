@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_1dVolume"
-timeframe = "12h"
+name = "4h_StructureBreak_MR_Zscore_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,30 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA34
+    # Daily close for structure and mean-reversion
     df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Daily volume filter: volume > 1.5x 20-period average
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Daily price data for Camarilla levels
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Previous day's Camarilla levels (R3/S3)
-    range_1d = high_1d - low_1d
-    camarilla_h3 = close_1d + range_1d * 1.1 / 4
-    camarilla_l3 = close_1d - range_1d * 1.1 / 4
+    # 20-period Z-score of daily returns (mean reversion signal)
+    returns_1d = np.diff(np.log(close_1d), prepend=np.log(close_1d[0]))
+    mean_20 = pd.Series(returns_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(returns_1d).rolling(window=20, min_periods=20).std().values
+    zscore_20 = (returns_1d - mean_20) / (std_20 + 1e-9)
+    zscore_20_aligned = align_htf_to_ltf(prices, df_1d, zscore_20)
     
-    # Align to 12h
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Daily volume filter: volume > 1.5x 20-period average
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Session filter: 00-12 UTC (first half of day) and 12-24 UTC (second half)
+    # Daily structure: 20-period high/low for breakout
+    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
+    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
+    
+    # Session filter: active during London/NY overlap (08-16 UTC) and Asia (00-08 UTC)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -49,8 +50,9 @@ def generate_signals(prices):
     start_idx = 20  # need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if daily trend or volume data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
+        # Skip if daily data not ready
+        if np.isnan(zscore_20_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or \
+           np.isnan(high_20_1d_aligned[i]) or np.isnan(low_20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,32 +73,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above H3 with daily uptrend and volume confirmation
-            if (high[i] > camarilla_h3_aligned[i] and 
-                close[i] > camarilla_h3_aligned[i] and
-                close[i] > ema34_1d_aligned[i] and  # daily uptrend
-                volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
+            # Long: price breaks above daily 20-period high AND Z-score < -1.5 (oversold) with volume confirmation
+            if (high[i] > high_20_1d_aligned[i] and 
+                close[i] > high_20_1d_aligned[i] and
+                zscore_20_aligned[i] < -1.5 and
+                volume[i] > vol_ma_20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below L3 with daily downtrend and volume confirmation
-            elif (low[i] < camarilla_l3_aligned[i] and 
-                  close[i] < camarilla_l3_aligned[i] and
-                  close[i] < ema34_1d_aligned[i] and  # daily downtrend
-                  volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
+            # Short: price breaks below daily 20-period low AND Z-score > 1.5 (overbought) with volume confirmation
+            elif (low[i] < low_20_1d_aligned[i] and 
+                  close[i] < low_20_1d_aligned[i] and
+                  zscore_20_aligned[i] > 1.5 and
+                  volume[i] > vol_ma_20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price breaks below L3 or reverses against trend
-            if (low[i] < camarilla_l3_aligned[i] or 
-                close[i] < ema34_1d_aligned[i]):
+            # Exit long when price breaks below daily 20-period low or Z-score reverts
+            if (low[i] < low_20_1d_aligned[i] or 
+                zscore_20_aligned[i] > -0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price breaks above H3 or reverses against trend
-            if (high[i] > camarilla_h3_aligned[i] or 
-                close[i] > ema34_1d_aligned[i]):
+            # Exit short when price breaks above daily 20-period high or Z-score reverts
+            if (high[i] > high_20_1d_aligned[i] or 
+                zscore_20_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
