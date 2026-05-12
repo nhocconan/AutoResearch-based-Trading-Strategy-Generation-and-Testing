@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1D_KAMA_Trend_RSI_Filter
-# Hypothesis: 12-hour KAMA trend with daily RSI filter and volume confirmation.
-# Uses KAMA to identify trend direction, RSI for momentum exhaustion (RSI > 70 for short, RSI < 30 for long),
-# and volume spike for confirmation. Designed for fewer trades (target 15-30/year) to avoid fee drag.
-# Works in bull markets via trend following and in bear markets via mean reversion at extremes.
+# 4h_1D_R3S3_Breakout_TrendVol_v2
+# Hypothesis: 4-hour breakouts from daily Camarilla R3/S3 levels with daily EMA34 trend filter and volume spike confirmation.
+# Only takes long when price breaks above R3 with volume spike and daily uptrend, short when breaks below S3 with volume spike and daily downtrend.
+# Uses tight entry conditions (trend + volume + level break) to target 20-50 trades per year, avoiding overtrading.
+# Works in bull markets via trend-following breaks and in bear markets via counter-trend reversals at extreme daily levels.
 
-name = "12h_1D_KAMA_Trend_RSI_Filter"
-timeframe = "12h"
+name = "4h_1D_R3S3_Breakout_TrendVol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,47 +27,34 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Daily data for RSI and KAMA trend
+    # Daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily RSI(14)
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14 = rsi_14.fillna(50).values  # neutral when undefined
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily KAMA for trend
-    close_1d = df_1d['close']
-    # Efficiency Ratio
-    change = abs(close_1d - close_1d.shift(10))
-    volatility = abs(close_1d.diff()).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0).values
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d.iloc[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d.iloc[i] - kama[i-1])
-    kama = kama
+    # Daily Camarilla R3 and S3 from previous day
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    rang_1d = prev_high_1d - prev_low_1d
+    R3_1d = prev_close_1d + 1.1 * rang_1d * 3.0 / 4
+    S3_1d = prev_close_1d - 1.1 * rang_1d * 3.0 / 4
     
-    # Align daily indicators to 12h timeframe
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Align daily levels to 4h timeframe
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(rsi_14_aligned[i]) or 
-            np.isnan(kama_aligned[i])):
+    for i in range(100, n):
+        if (np.isnan(R3_1d_aligned[i]) or 
+            np.isnan(S3_1d_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,30 +63,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price above KAMA (uptrend) + RSI < 30 (oversold) + volume spike
-            if (close[i] > kama_aligned[i] and 
-                rsi_14_aligned[i] < 30 and 
-                volume_spike[i]):
+            # LONG: Price breaks above R3 + volume spike + price above daily EMA34 (daily uptrend)
+            if (close[i] > R3_1d_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA (downtrend) + RSI > 70 (overbought) + volume spike
-            elif (close[i] < kama_aligned[i] and 
-                  rsi_14_aligned[i] > 70 and 
-                  volume_spike[i]):
+            # SHORT: Price breaks below S3 + volume spike + price below daily EMA34 (daily downtrend)
+            elif (close[i] < S3_1d_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA OR RSI > 70 (overbought)
-            if close[i] < kama_aligned[i] or rsi_14_aligned[i] > 70:
+            # EXIT LONG: Price re-enters previous day's H-L range OR closes below daily EMA34
+            if (close[i] < R3_1d_aligned[i] and close[i] > S3_1d_aligned[i]) or \
+               close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA OR RSI < 30 (oversold)
-            if close[i] > kama_aligned[i] or rsi_14_aligned[i] < 30:
+            # EXIT SHORT: Price re-enters previous day's H-L range OR closes above daily EMA34
+            if (close[i] < R3_1d_aligned[i] and close[i] > S3_1d_aligned[i]) or \
+               close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
