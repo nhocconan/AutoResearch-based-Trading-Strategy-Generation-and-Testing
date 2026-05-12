@@ -1,12 +1,11 @@
-# 1d_WeeklyTrend_KAMA_Reversal
-# Hypothesis: On daily timeframe, KAMA (Kaufman Adaptive Moving Average) with ER=10 identifies adaptive trend direction.
-# Long when price > KAMA and weekly trend bullish (weekly EMA34 > weekly EMA89), short when price < KAMA and weekly trend bearish.
-# Weekly trend filter reduces whipsaw in choppy markets. Position size 0.25 for balanced risk/return.
-# Designed to work in both bull (trend following) and bear (counter-trend reversals at extremes) via adaptive KAMA.
-# Target: 10-25 trades/year to minimize fee drag.
+#!/usr/bin/env python3
+"""
+4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: 4h breakouts of daily Camarilla R1/S1 levels trigger entries when confirmed by 1d EMA trend alignment and volume surge (>1.5x 20-period average). Exits on opposite level breach or trend flip. Designed for low-frequency, high-conviction trades in both bull and bear markets via trend filter and volume confirmation. Targets 20-40 trades/year.
+"""
 
-name = "1d_WeeklyTrend_KAMA_Reversal"
-timeframe = "1d"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,46 +17,43 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get weekly data for trend filter (call once before loop)
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 50:
+    # Get daily data (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
 
-    # Calculate KAMA on daily close
-    close_series = pd.Series(close)
-    # Efficiency Ratio: |change over 10 periods| / sum of absolute changes over 10 periods
-    change = abs(close_series - close_series.shift(10))
-    volatility = abs(close_series.diff()).rolling(window=10, min_periods=10).sum()
-    er = change / volatility
-    er = er.fillna(0)  # Handle division by zero
-    # Smoothing constants: fastest SC = 2/(2+1) = 0.67, slowest SC = 2/(30+1) = 0.0645
-    sc = (er * (0.67 - 0.0645) + 0.0645) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate daily Camarilla R1/S1
+    hh_1d = df_1d['high'].values
+    ll_1d = df_1d['low'].values
+    cc_1d = df_1d['close'].values
+    r1_1d = cc_1d + (hh_1d - ll_1d) * 1.1 / 12
+    s1_1d = cc_1d - (hh_1d - ll_1d) * 1.1 / 12
 
-    # Calculate weekly EMA34 and EMA89 for trend filter
-    close_weekly = pd.Series(df_weekly['close'].values)
-    ema34_weekly = close_weekly.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_weekly = close_weekly.ewm(span=89, adjust=False, min_periods=89).mean().values
+    # Calculate daily EMA20 for trend
+    close_1d = pd.Series(cc_1d)
+    ema20_1d = close_1d.ewm(span=20, adjust=False, min_periods=20).mean().values
 
-    # Align weekly EMAs to daily timeframe
-    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
-    ema89_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema89_weekly)
+    # Volume confirmation: 1.5x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after KAMA warmup
+    for i in range(20, n):
+        # Get aligned values for current 4h bar
+        r1_1d_a = align_htf_to_ltf(prices, df_1d, r1_1d)[i]
+        s1_1d_a = align_htf_to_ltf(prices, df_1d, s1_1d)[i]
+        ema20_1d_a = align_htf_to_ltf(prices, df_1d, ema20_1d)[i]
+        vol_avg_val = vol_avg_20[i]
+
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema34_weekly_aligned[i]) or 
-            np.isnan(ema89_weekly_aligned[i])):
+        if (np.isnan(r1_1d_a) or np.isnan(s1_1d_a) or np.isnan(ema20_1d_a) or 
+            np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,30 +61,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        weekly_bullish = ema34_weekly_aligned[i] > ema89_weekly_aligned[i]
-        weekly_bearish = ema34_weekly_aligned[i] < ema89_weekly_aligned[i]
-
         if position == 0:
-            # LONG: Price above KAMA and weekly trend bullish
-            if close[i] > kama[i] and weekly_bullish:
+            # LONG: Break above daily R1 with bullish trend and volume surge
+            if (close[i] > r1_1d_a and 
+                ema20_1d_a > close[i] and 
+                volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA and weekly trend bearish
-            elif close[i] < kama[i] and weekly_bearish:
+            # SHORT: Break below daily S1 with bearish trend and volume surge
+            elif (close[i] < s1_1d_a and 
+                  ema20_1d_a < close[i] and 
+                  volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA or weekly trend turns bearish
-            if close[i] < kama[i] or not weekly_bullish:
+            # EXIT LONG: Price breaks below daily S1 or trend turns bearish
+            if (close[i] < s1_1d_a or ema20_1d_a < close[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA or weekly trend turns bullish
-            if close[i] > kama[i] or not weekly_bearish:
+            # EXIT SHORT: Price breaks above daily R1 or trend turns bullish
+            if (close[i] > r1_1d_a or ema20_1d_a > close[i]):
                 signals[i] = 0.0
                 position = 0
             else:
