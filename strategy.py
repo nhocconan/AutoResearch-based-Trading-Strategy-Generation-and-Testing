@@ -1,10 +1,11 @@
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Alpha
+#!/usr/bin/env python3
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Beta
 # Hypothesis: Use 1d Camarilla pivot levels (R3/S3) for breakout signals with 1d EMA trend filter and volume spike confirmation.
 # Long when price breaks above R3 with price > 1d EMA and volume > 2x MA; short when price breaks below S3 with price < 1d EMA and volume > 2x MA.
 # Exit when price reverses back to the 1d EMA level. Designed to capture strong intraday moves with trend and volume filters.
 # Targets 15-30 trades/year to minimize fee drag while maintaining edge in both bull and bear markets.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Alpha"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Beta"
 timeframe = "4h"
 leverage = 1.0
 
