@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1H_4H_1D_Camarilla_R1S1_Breakout_Trend_Filter
-# Hypothesis: 1H strategy using 4H trend direction (EMA50) and 1D Camarilla R1/S1 breakouts with volume confirmation.
-# Uses 4H EMA50 for trend direction, 1D Camarilla levels for breakout signals, and 1H for entry timing.
-# Designed to work in bull markets (buy R1 breakout in uptrend) and bear markets (sell S1 breakdown in downtrend).
-# Includes session filter (08-20 UTC) and volume confirmation to reduce false signals.
-# Target: 15-37 trades/year on 1H timeframe to avoid fee drag.
+# 6h_1D_1W_Camarilla_R3S3_Breakout_Trend_Filter
+# Hypothesis: Breakouts at weekly and daily Camarilla R3/S3 levels with trend alignment on 6h.
+# Uses 1w for long-term trend bias (EMA50) and 1d for entry levels (R3/S3).
+# Requires price to be above/below weekly EMA50 for long/short bias, then breaks daily R3/S3.
+# Designed to work in both bull and bear markets by filtering trades with weekly trend.
+# Targets 12-37 trades/year on 6h timeframe to avoid fee drag.
 
-name = "1H_4H_1D_Camarilla_R1S1_Breakout_Trend_Filter"
-timeframe = "1h"
+name = "6h_1D_1W_Camarilla_R3S3_Breakout_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,56 +16,46 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
 
-    # Get 4H data for trend direction (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
 
-    # Get 1D data for Camarilla levels
+    # Calculate 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+
+    # Get 1d data for Camarilla R3/S3 levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
 
-    # Calculate 4H EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate Camarilla R3 and S3 from previous 1d OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
 
-    # Calculate 1D Camarilla R1 and S1 levels from previous 1D OHLC
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
 
-    camarilla_r1 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
-    camarilla_s1 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
-
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-
-    # Volume confirmation: current volume > 1.5x average of last 10 periods
-    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
-
-    # Session filter: 08-20 UTC (pre-compute hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_ok = (hours >= 8) & (hours <= 20)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_ok[i]) or
-            np.isnan(session_ok[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,43 +63,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Only trade during session
-        if not session_ok[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Trend filter: bullish if price > 4H EMA50, bearish if price < 4H EMA50
-        bullish_trend = close[i] > ema_4h_aligned[i]
-        bearish_trend = close[i] < ema_4h_aligned[i]
+        # Trend filter: price relative to weekly EMA50
+        bullish_trend = close[i] > ema_1w_aligned[i]
+        bearish_trend = close[i] < ema_1w_aligned[i]
 
         if position == 0:
-            # LONG: Break above Camarilla R1 with bullish trend and volume confirmation
-            if (close[i] > camarilla_r1_aligned[i] and bullish_trend and volume_ok[i]):
-                signals[i] = 0.20
+            # LONG: Price above weekly EMA50 and breaks above daily R3
+            if bullish_trend and close[i] > camarilla_r3_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Camarilla S1 with bearish trend and volume confirmation
-            elif (close[i] < camarilla_s1_aligned[i] and bearish_trend and volume_ok[i]):
-                signals[i] = -0.20
+            # SHORT: Price below weekly EMA50 and breaks below daily S3
+            elif bearish_trend and close[i] < camarilla_s3_aligned[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R1 or trend turns bearish
-            if close[i] < camarilla_r1_aligned[i] or not bullish_trend:
+            # EXIT LONG: Price breaks below weekly EMA50 or re-enters below R3
+            if not bullish_trend or close[i] < camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S1 or trend turns bullish
-            if close[i] > camarilla_s1_aligned[i] or not bearish_trend:
+            # EXIT SHORT: Price breaks above weekly EMA50 or re-enters above S3
+            if not bearish_trend or close[i] > camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
