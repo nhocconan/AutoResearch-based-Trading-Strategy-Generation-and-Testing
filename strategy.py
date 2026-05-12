@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 1d_WilliamsAlligator_ElderRay_Vortex_Volume
-# Hypothesis: Williams Alligator (JAW/TEETH/LIPS) identifies trend direction, Elder Ray measures bull/bear power,
-# Vortex confirms trend strength, and volume spike filters for institutional participation.
-# Works in bull markets via long when bull power > 0 and price above teeth; in bear markets via short when bear power > 0 and price below teeth.
-# Uses 1d timeframe with 1w trend filter to reduce noise and false signals.
+# 6h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 levels represent strong support/resistance where breakouts with volume confirmation and 1d EMA34 trend filter capture momentum moves. Works in bull markets via long breakouts above R3 and in bear markets via short breakdowns below S3. Uses 6h timeframe with 1d trend filter to reduce noise and false breakouts.
 
-name = "1d_WilliamsAlligator_ElderRay_Vortex_Volume"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,42 +20,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1w Data for Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === 1d Data for Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Williams Alligator on weekly: SMMA(13,8), SMMA(8,5), SMMA(5,3)
-    # Using EMA as proxy for SMMA with same period
-    jaw_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips_1w = pd.Series(close_1w).ewm(span=5, adjust=False, min_periods=5).mean().values
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    jaw_1d = align_htf_to_ltf(prices, df_1w, jaw_1w)
-    teeth_1d = align_htf_to_ltf(prices, df_1w, teeth_1w)
-    lips_1d = align_htf_to_ltf(prices, df_1w, lips_1w)
+    # === Camarilla Pivot Levels (using previous day) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Elder Ray Power (13-period EMA) ===
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = ema13 - low
+    # Pivot point and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    s3 = close_1d - (range_1d * 1.1 / 4)
     
-    # === Vortex Indicator (14-period) ===
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], tr])
-    
-    vm_plus = np.abs(high - low[1:])
-    vm_plus = np.concatenate([[vm_plus[0]], vm_plus])
-    vm_minus = np.abs(low - high[1:])
-    vm_minus = np.concatenate([[vm_minus[0]], vm_minus])
-    
-    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    sum_vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    sum_vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    vi_plus = sum_vm_plus14 / sum_tr14
-    vi_minus = sum_vm_minus14 / sum_tr14
+    # Align to 6h
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
     
     # === Volume Spike (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,9 +55,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_1d[i]) or np.isnan(teeth_1d[i]) or np.isnan(lips_1d[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,24 +64,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Bull power > 0, price above teeth, VI+ > VI-, and volume spike
-            if bull_power[i] > 0 and close[i] > teeth_1d[i] and vi_plus[i] > vi_minus[i] and vol_spike[i]:
+            # LONG: Close breaks above R3 + above 1d EMA34 + volume spike
+            if close[i] > r3_6h[i] and close[i] > ema_34_6h[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear power > 0, price below teeth, VI- > VI+, and volume spike
-            elif bear_power[i] > 0 and close[i] < teeth_1d[i] and vi_minus[i] > vi_plus[i] and vol_spike[i]:
+            # SHORT: Close breaks below S3 + below 1d EMA34 + volume spike
+            elif close[i] < s3_6h[i] and close[i] < ema_34_6h[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Bull power <= 0 or price below lips or trend change (VI- > VI+)
-            if bull_power[i] <= 0 or close[i] < lips_1d[i] or vi_minus[i] > vi_plus[i]:
+            # EXIT LONG: Close below S3 or trend change (below 1d EMA34)
+            if close[i] < s3_6h[i] or close[i] < ema_34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear power <= 0 or price above lips or trend change (VI+ > VI-)
-            if bear_power[i] <= 0 or close[i] > lips_1d[i] or vi_plus[i] > vi_minus[i]:
+            # EXIT SHORT: Close above R3 or trend change (above 1d EMA34)
+            if close[i] > r3_6h[i] or close[i] > ema_34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
