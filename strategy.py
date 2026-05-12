@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Momentum_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,7 +21,7 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # 1d EMA100 for trend filter
+    # 1d EMA100 for trend filter (smoother than 50)
     ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
     ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
@@ -36,7 +36,7 @@ def generate_signals(prices):
     r1 = close_1d_piv + (high_1d_piv - low_1d_piv) * 1.1 / 12
     s1 = close_1d_piv - (high_1d_piv - low_1d_piv) * 1.1 / 12
     
-    # Align pivot levels to 12h timeframe (use previous day's levels)
+    # Align pivot levels to 4h timeframe (use previous day's levels)
     pivot_aligned = align_htf_to_ltf(prices, df_1d_piv, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d_piv, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d_piv, s1)
@@ -44,6 +44,19 @@ def generate_signals(prices):
     # Volume filter: current volume > 2.5x 20-period average (stricter)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (2.5 * vol_avg)
+    
+    # Momentum filter: RSI(14) > 50 for long, < 50 for short
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_long_filter = rsi_values > 50
+    rsi_short_filter = rsi_values < 50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,7 +69,9 @@ def generate_signals(prices):
             np.isnan(pivot_aligned[i]) or
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
-            np.isnan(vol_filter[i])):
+            np.isnan(vol_filter[i]) or
+            np.isnan(rsi_long_filter[i]) or
+            np.isnan(rsi_short_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,16 +80,18 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 1d EMA100 + volume spike
+            # Long: price breaks above R1 + above 1d EMA100 + volume spike + RSI>50
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema_100_1d_aligned[i] and 
-                vol_filter[i]):
+                vol_filter[i] and 
+                rsi_long_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 1d EMA100 + volume spike
+            # Short: price breaks below S1 + below 1d EMA100 + volume spike + RSI<50
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_100_1d_aligned[i] and 
-                  vol_filter[i]):
+                  vol_filter[i] and 
+                  rsi_short_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
