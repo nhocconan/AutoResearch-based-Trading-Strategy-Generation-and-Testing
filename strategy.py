@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_Pullback_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,30 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly pivot levels (from previous week) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1d Camarilla pivot levels ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
+    # Camarilla R1, S1 levels
+    rango = high_1d - low_1d
+    camarilla_r1 = close_1d + (rango * 1.1 / 12)
+    camarilla_s1 = close_1d - (rango * 1.1 / 12)
     
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === Weekly trend filter (close above/below pivot) ===
-    weekly_trend = close_1w > pivot  # True for bullish week
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend.astype(float))
+    # === 1d EMA34 trend filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === 60-period EMA for 6h trend (smoother than SMA) ===
-    ema60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
-    
-    # === Volume spike filter (2x 20-period average) ===
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)
+    # === 1d Volume spike filter ===
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,12 +48,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(weekly_trend_aligned[i]) or
-            np.isnan(ema60[i]) or
-            np.isnan(vol_avg[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,30 +60,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Pullback to S1 in bullish week + above 60 EMA + volume spike
-            if (weekly_trend_aligned[i] > 0.5 and
-                low[i] <= s1_aligned[i] and
-                close[i] > ema60[i] and
-                vol_spike[i]):
+            # Long: Close above R1 + above daily EMA34 + volume spike
+            if (close[i] > camarilla_r1_aligned[i] and
+                close[i] > ema34_1d_aligned[i] and
+                vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Pullback to R1 in bearish week + below 60 EMA + volume spike
-            elif (weekly_trend_aligned[i] < 0.5 and
-                  high[i] >= r1_aligned[i] and
-                  close[i] < ema60[i] and
-                  vol_spike[i]):
+            # Short: Close below S1 + below daily EMA34 + volume spike
+            elif (close[i] < camarilla_s1_aligned[i] and
+                  close[i] < ema34_1d_aligned[i] and
+                  vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below S1 or below 60 EMA
-            if close[i] < s1_aligned[i] or close[i] < ema60[i]:
+            # Exit long: Close below S1 or below EMA34
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above R1 or above 60 EMA
-            if close[i] > r1_aligned[i] or close[i] > ema60[i]:
+            # Exit short: Close above R1 or above EMA34
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
