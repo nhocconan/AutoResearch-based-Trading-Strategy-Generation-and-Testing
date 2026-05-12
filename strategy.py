@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout
-Hypothesis: Use Ichimoku Cloud on daily timeframe to define trend and support/resistance, with 6h Tenkan-Kijun cross for entry timing. In bull markets, price above cloud with bullish TK cross signals long; in bear markets, price below cloud with bearish TK cross signals short. Volume confirmation filters false breaks. Works in both regimes by aligning with higher timeframe Ichimoku structure.
+4h_Triple_Confirmation_Breakout
+Hypothesis: Combines Donchian breakout (20-period) with ADX trend strength and volume confirmation to capture strong trending moves. Uses ADX > 25 to filter choppy markets, volume > 1.5x 20-period average for confirmation, and Donchian breakouts for entry. Designed for 4h timeframe to balance trade frequency and signal quality, targeting 20-40 trades per year. Works in both bull and bear markets by requiring strong trend confirmation (ADX) before entering breakout trades.
 """
 
-name = "6h_Ichimoku_Cloud_Breakout"
-timeframe = "6h"
+name = "4h_Triple_Confirmation_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -22,50 +22,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Ichimoku (call once before loop)
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 52:
-        return np.zeros(n)
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Donchian Channel (20-period) - using pandas rolling with min_periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
 
-    # Ichimoku components on daily
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high_daily).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low_daily).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
+    # ADX calculation (14-period) - measures trend strength
+    # True Range
+    tr1 = np.abs(high[1:] - low[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align length
 
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high_daily).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low_daily).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
 
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high_daily).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low_daily).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
+    # Smooth TR, DM+, DM- using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    def wilder_smoothing(arr, period):
+        """Wilder's smoothing (same as EMA with alpha=1/period)"""
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(arr[1:period])  # skip first NaN
+        # Subsequent values: smoothed = prev * (1-1/period) + current * (1/period)
+        for i in range(period, len(arr)):
+            if not np.isnan(arr[i]):
+                if np.isnan(result[i-1]):
+                    result[i] = arr[i]
+                else:
+                    result[i] = result[i-1] * (1 - 1/period) + arr[i] * (1/period)
+        return result
 
-    # Align Ichimoku components to 6h timeframe (wait for daily close)
-    tenkan_aligned = align_htf_to_ltf(prices, df_daily, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_daily, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_daily, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_daily, senkou_b)
+    tr14 = wilder_smoothing(tr, 14)
+    dm_plus_14 = wilder_smoothing(dm_plus, 14)
+    dm_minus_14 = wilder_smoothing(dm_minus, 14)
 
-    # Tenkan-Kijun cross on 6h for entry timing
-    period_tenkan_6h = 9
-    period_kijun_6h = 26
-    max_high_tenkan_6h = pd.Series(high).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).max().values
-    min_low_tenkan_6h = pd.Series(low).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).min().values
-    tenkan_6h = (max_high_tenkan_6h + min_low_tenkan_6h) / 2
-    max_high_kijun_6h = pd.Series(high).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).max().values
-    min_low_kijun_6h = pd.Series(low).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).min().values
-    kijun_6h = (max_high_kijun_6h + min_low_kijun_6h) / 2
+    # DI+ and DI-
+    di_plus = np.where(tr14 != 0, 100 * dm_plus_14 / tr14, 0)
+    di_minus = np.where(tr14 != 0, 100 * dm_minus_14 / tr14, 0)
+
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smoothing(dx, 14)
 
     # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -73,57 +77,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
-        # Skip if any Ichimoku values are not yet available
-        if np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]):
+    for i in range(20, n):  # start from 20 to ensure Donchian is valid
+        # Skip if any required values are NaN
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.0
             continue
-
-        tenkan_val = tenkan_6h[i]
-        kijun_val = kijun_6h[i]
-        senkou_a_val = senkou_a_aligned[i]
-        senkou_b_val = senkou_b_aligned[i]
-        vol_avg_val = vol_avg_20[i]
-
-        if np.isnan(tenkan_val) or np.isnan(kijun_val) or np.isnan(senkou_a_val) or np.isnan(senkou_b_val) or np.isnan(vol_avg_val):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Determine cloud boundaries and price position
-        upper_cloud = max(senkou_a_val, senkou_b_val)
-        lower_cloud = min(senkou_a_val, senkou_b_val)
-        price_above_cloud = close[i] > upper_cloud
-        price_below_cloud = close[i] < lower_cloud
 
         if position == 0:
-            # LONG: price above cloud + bullish TK cross + volume confirmation
-            if price_above_cloud and tenkan_val > kijun_val and tenkan_6h[i-1] <= kijun_6h[i-1] and volume[i] > vol_avg_val * 1.5:
+            # LONG: price breaks above Donchian high + ADX > 25 (strong trend) + volume confirmation
+            if (close[i] > donchian_high[i] and 
+                adx[i] > 25 and 
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price below cloud + bearish TK cross + volume confirmation
-            elif price_below_cloud and tenkan_val < kijun_val and tenkan_6h[i-1] >= kijun_6h[i-1] and volume[i] > vol_avg_val * 1.5:
+            # SHORT: price breaks below Donchian low + ADX > 25 (strong trend) + volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  adx[i] > 25 and 
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price falls below cloud or bearish TK cross
-            if price_below_cloud or (tenkan_val < kijun_val and tenkan_6h[i-1] >= kijun_6h[i-1]):
+            # EXIT LONG: price breaks below Donchian low or ADX falls below 20 (trend weakening)
+            if close[i] < donchian_low[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price rises above cloud or bullish TK cross
-            if price_above_cloud or (tenkan_val > kijun_val and tenkan_6h[i-1] <= kijun_6h[i-1]):
+            # EXIT SHORT: price breaks above Donchian high or ADX falls below 20 (trend weakening)
+            if close[i] > donchian_high[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
