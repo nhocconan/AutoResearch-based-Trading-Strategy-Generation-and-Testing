@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Zone_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,11 +32,11 @@ def generate_signals(prices):
     r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0
     s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Volume filter: current volume > 1.8x 30-period average
+    # Volume filter: current volume > 1.8x 30-period average (tightened from 2.0)
     vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_filter = volume > (1.8 * vol_avg)
     
@@ -48,12 +48,12 @@ def generate_signals(prices):
     # Normalize ATR by price to get percentage
     atr_pct = atr / close
     # Only trade when volatility is moderate (not too high, not too low)
-    vol_regime = (atr_pct > 0.012) & (atr_pct < 0.045)
+    vol_regime = (atr_pct > 0.012) & (atr_pct < 0.045)  # tightened range
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
