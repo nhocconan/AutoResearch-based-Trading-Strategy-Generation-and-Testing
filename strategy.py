@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,42 +9,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    open_ = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA34 on 1d close
+    # Daily timeframe data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels from previous day
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    camarilla_R3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_S3 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe (previous day's levels)
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    
+    # Daily trend filter: EMA34
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 12h Donchian channel breakout (20-period)
-    donchian_period = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    
-    for i in range(donchian_period, n):
-        donchian_high[i] = np.max(high[i-donchian_period:i])
-        donchian_low[i] = np.min(low[i-donchian_period:i])
-    
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donchian_period, 34)  # ensure Donchian and EMA data ready
+    start_idx = 34  # ensure EMA34 has enough data
     
     for i in range(start_idx, n):
         # Skip if EMA data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,24 +56,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + above daily EMA34 + volume expansion
-            if (close[i] > donchian_high[i]) and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]:
+            # Long: price breaks above R3 + above daily EMA34 + volume spike
+            if (close[i] > camarilla_R3_aligned[i]) and (close[i] > ema34_1d_aligned[i]) and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + below daily EMA34 + volume expansion
-            elif (close[i] < donchian_low[i]) and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]:
+            # Short: price breaks below S3 + below daily EMA34 + volume spike
+            elif (close[i] < camarilla_S3_aligned[i]) and (close[i] < ema34_1d_aligned[i]) and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit long: price breaks below S3
+            if close[i] < camarilla_S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit short: price breaks above R3
+            if close[i] > camarilla_R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
