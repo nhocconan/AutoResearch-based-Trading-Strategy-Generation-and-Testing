@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_1dVol"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_1dVol"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
