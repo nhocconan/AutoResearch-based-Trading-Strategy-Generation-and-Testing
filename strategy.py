@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Donchian20_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_ChaikinMoneyFlow_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,23 +17,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Daily Donchian channels (20-day)
+    # Load daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Chaikin Money Flow (20-period)
+    mfm = ((close - low) - (high - close)) / (high - low)
+    mfm = np.where(high == low, 0, mfm)  # avoid division by zero
+    mfv = mfm * volume
+    cmf = pd.Series(mfv).rolling(window=20, min_periods=20).sum() / pd.Series(volume).rolling(window=20, min_periods=20).sum()
+    cmf = cmf.values
     
     # Volume filter: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,8 +43,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(cmf[i]) or
             np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -57,24 +54,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above Donchian high + above weekly EMA50 + volume filter
-            if high[i] > donchian_high_aligned[i] and close[i] > ema_50_1w_aligned[i] and vol_filter[i]:
+            # Long: CMF > 0.1 + above daily EMA34 + volume filter
+            if cmf[i] > 0.1 and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below Donchian low + below weekly EMA50 + volume filter
-            elif low[i] < donchian_low_aligned[i] and close[i] < ema_50_1w_aligned[i] and vol_filter[i]:
+            # Short: CMF < -0.1 + below daily EMA34 + volume filter
+            elif cmf[i] < -0.1 and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: breakdown below Donchian low or below weekly EMA50
-            if low[i] < donchian_low_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: CMF < 0 or below daily EMA34
+            if cmf[i] < 0 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: breakout above Donchian high or above weekly EMA50
-            if high[i] > donchian_high_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: CMF > 0 or above daily EMA34
+            if cmf[i] > 0 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
