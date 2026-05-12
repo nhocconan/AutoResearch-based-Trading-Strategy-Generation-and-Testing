@@ -1,33 +1,28 @@
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: 4h breakouts of Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike.
-# Works in bull/bear by following 1d trend, avoids whipsaws via volume confirmation.
-# Targets 20-50 trades/year on 4h timeframe.
+# 1d_WeeklyKAMA_Trend_Volume
+# Hypothesis: Trade weekly KAMA direction on daily timeframe with volume confirmation.
+# Weekly KAMA adapts to market efficiency - trending in strong moves, mean-reverting in chop.
+# Works in bull/bear by following weekly trend, avoids whipsaws via adaptive smoothing.
+# Volume spike confirms institutional participation. Targets 15-25 trades/year.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_WeeklyKAMA_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close, close, close, close, close
-    c = close
-    h = high
-    l = low
-    r4 = c + (range_val * 1.5000)
-    r3 = c + (range_val * 1.2500)
-    r2 = c + (range_val * 1.1666)
-    r1 = c + (range_val * 1.0833)
-    s1 = c - (range_val * 1.0833)
-    s2 = c - (range_val * 1.1666)
-    s3 = c - (range_val * 1.2500)
-    s4 = c - (range_val * 1.5000)
-    return r4, r3, r2, r1, s1, s2, s3, s4
+def calculate_kama(close, er_len=10, fast=2, slow=30):
+    """Kaufman's Adaptive Moving Average"""
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -39,33 +34,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter and Camarilla levels ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Get weekly data for KAMA trend ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
 
-    # Calculate daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly KAMA
+    wk_close = df_1w['close'].values
+    wk_kama = calculate_kama(wk_close, er_len=10, fast=2, slow=30)
+    wk_kama_prev = np.roll(wk_kama, 1)
+    wk_kama_prev[0] = wk_kama[0]
+    
+    # Align to daily
+    wk_kama_aligned = align_htf_to_ltf(prices, df_1w, wk_kama)
+    wk_kama_prev_aligned = align_htf_to_ltf(prices, df_1w, wk_kama_prev)
 
-    # Calculate Camarilla levels from daily OHLC
-    r4_1d, r3_1d, r2_1d, r1_1d, s1_1d, s2_1d, s3_1d, s4_1d = calculate_camarilla(
-        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
-    )
-    # Align Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-
-    # Volume spike: current > 2.0x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Daily volume spike: current > 1.5x average of last 10 days
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(35, n):  # Start after EMA34 warmup
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(30, n):  # Start after weekly KAMA warmup
+        if (np.isnan(wk_kama_aligned[i]) or np.isnan(wk_kama_prev_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,35 +67,31 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above R1 + 1d uptrend + volume spike
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
+            # LONG: weekly price > KAMA + volume spike
+            if (wk_kama_aligned[i] > wk_kama_prev_aligned[i] and 
                 volume_spike[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1 + 1d downtrend + volume spike
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
+            # SHORT: weekly price < KAMA + volume spike
+            elif (wk_kama_aligned[i] < wk_kama_prev_aligned[i] and 
                   volume_spike[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below S1 or trend changes
-            if (close[i] < s1_1d_aligned[i] or 
-                close[i] < ema34_1d_aligned[i]):
+            # EXIT LONG: weekly price < KAMA (trend change)
+            if wk_kama_aligned[i] < wk_kama_prev_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above R1 or trend changes
-            if (close[i] > r1_1d_aligned[i] or 
-                close[i] > ema34_1d_aligned[i]):
+            # EXIT SHORT: weekly price > KAMA (trend change)
+            if wk_kama_aligned[i] > wk_kama_prev_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
 
     return signals
