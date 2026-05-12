@@ -1,13 +1,14 @@
-#/usr/bin/env python3
-# 1D_1W_KAMA_TREND_WITH_RSI_FILTER
-# Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise—fast in trends, slow in ranges.
-# On daily timeframe, use KAMA(10,2,30) for trend direction. Filter with weekly trend (EMA34 on 1w) to avoid counter-trend trades.
-# Add RSI(14) on daily to avoid overextended entries. Enter on pullbacks to KAMA in trending markets.
-# Works in bull markets (trend following) and bear markets (avoiding false signals via weekly filter).
-# Target: 15-25 trades/year on 1d timeframe.
+#!/usr/bin/env python3
+# 6H_WILLIAMS_R_MULTIPLIER_1D_TREND_FILTER
+# Hypothesis: Williams %R measures overbought/oversold conditions on the daily chart.
+# In 1d uptrend (price > EMA50), go long when Williams %R crosses above -80 from below.
+# In 1d downtrend (price < EMA50), go short when Williams %R crosses below -20 from above.
+# This captures mean reversion within the trend, working in both bull and bear markets.
+# Uses Williams %R(14) on daily timeframe with trend filter to avoid counter-trend trades.
+# Target: 20-30 trades/year on 6h timeframe.
 
-name = "1D_1W_KAMA_TREND_WITH_RSI_FILTER"
-timeframe = "1d"
+name = "6H_WILLIAMS_R_MULTIPLIER_1D_TREND_FILTER"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,68 +22,43 @@ def generate_signals(prices):
     
     close = prices['close'].values
     
-    # Daily data for KAMA and RSI
+    # Daily data for Williams %R and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # KAMA parameters: ER fast=2, slow=30
+    # Williams %R calculation: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    high_14 = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    low_14 = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
     close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)  # This needs correction
+    williams_r = (high_14 - close_1d) / (high_14 - low_14) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((high_14 - low_14) == 0, -50, williams_r)
     
-    # Correct efficiency ratio calculation
-    dir = np.abs(np.diff(close_1d, n=30, prepend=close_1d[:30]))  # direction over 30 periods
-    vol = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)  # incorrect, fixing below
+    # EMA50 for trend filter
+    ema50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Proper ER calculation
-    change_t = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility_t = np.zeros_like(close_1d)
-    for i in range(30, len(close_1d)):
-        volatility_t[i] = np.sum(np.abs(np.diff(close_1d[i-29:i+1])))
+    # Align to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    # Simpler and correct ER calculation
-    price_change = np.abs(close_1d[30:] - close_1d[:-30])
-    volatility_sum = np.array([np.sum(np.abs(np.diff(close_1d[i-29:i+1]))) for i in range(29, len(close_1d))])
-    er = np.zeros_like(close_1d)
-    er[30:] = np.where(volatility_sum > 0, price_change / volatility_sum, 0)
+    # Williams %R cross signals
+    williams_r_prev = np.roll(williams_r_aligned, 1)
+    williams_r_prev[0] = 50  # neutral value
     
-    # Smooth ER with smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[29] = close_1d[29]  # seed
-    for i in range(30, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # RSI(14) on daily
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Weekly trend filter: EMA34 on 1w
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align all to 1d timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Cross above -80 (oversold to normal)
+    cross_above_80 = (williams_r_aligned > -80) & (williams_r_prev <= -80)
+    # Cross below -20 (overbought to normal)
+    cross_below_20 = (williams_r_aligned < -20) & (williams_r_prev >= -20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(williams_r_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,32 +67,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price > KAMA (uptrend), RSI not overbought, weekly uptrend
-            if (close[i] > kama_aligned[i] and 
-                rsi_aligned[i] < 70 and 
-                close[i] > ema34_1w_aligned[i]):
+            # LONG: 1d uptrend + Williams %R crosses above -80
+            if (close[i] > ema50_aligned[i] and cross_above_80[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price < KAMA (downtrend), RSI not oversold, weekly downtrend
-            elif (close[i] < kama_aligned[i] and 
-                  rsi_aligned[i] > 30 and 
-                  close[i] < ema34_1w_aligned[i]):
+            # SHORT: 1d downtrend + Williams %R crosses below -20
+            elif (close[i] < ema50_aligned[i] and cross_below_20[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal or overextension
-            if (close[i] <= kama_aligned[i] or 
-                rsi_aligned[i] >= 80):
+            # EXIT LONG: Trend reversal or overbought condition
+            if (close[i] <= ema50_aligned[i] or williams_r_aligned[i] >= -20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal or overextension
-            if (close[i] >= kama_aligned[i] or 
-                rsi_aligned[i] <= 20):
+            # EXIT SHORT: Trend reversal or oversold condition
+            if (close[i] >= ema50_aligned[i] or williams_r_aligned[i] <= -80):
                 signals[i] = 0.0
                 position = 0
             else:
