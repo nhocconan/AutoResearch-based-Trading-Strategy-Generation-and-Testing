@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
+# 4h_Vortex_Volume_Trend_Filter
+# Hypothesis: Use Vortex Indicator (VI+) and (VI-) to detect trend direction on 4h, confirmed by 1d trend (EMA50) and volume spikes (>2x 20-period average). Enter long when VI+ > VI- and price > 1d EMA50 with volume spike; short when VI- > VI+ and price < 1d EMA50 with volume spike. Exit on Vortex crossover reverse. Targets 20-50 trades/year to minimize fee drag and work in both bull/bear markets via trend filter.
 
-# 4h_4H_RSI_34_SMA_50_Crossover_1dTrend_VolumeConfirm
-# Hypothesis: On 4h timeframe, enter long when RSI(34) crosses above SMA(50) with volume >1.5x average and 1d EMA50 trending up; enter short when RSI(34) crosses below SMA(50) with volume >1.5x average and 1d EMA50 trending down.
-# Uses daily trend filter to avoid counter-trend trades. Targets 15-25 trades/year to minimize fee drag and improve generalization across bull/bear markets.
-# Focus on BTC/ETH as primary targets. Uses RSI crossover with trend confirmation for robustness.
-
-name = "4h_4H_RSI_34_SMA_50_Crossover_1dTrend_VolumeConfirm"
+name = "4h_Vortex_Volume_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,42 +24,41 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate RSI(34) on 4h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/34, adjust=False, min_periods=34).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/34, adjust=False, min_periods=34).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Vortex Indicator (VI) on 4h
+    # VI+ = sum(|high - prev_low|) / sum(true_range)
+    # VI- = sum(|low - prev_high|) / sum(true_range)
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.maximum(high - low, np.absolute(low - np.roll(close, 1)))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]  # first bar true range
+    vm_plus = np.absolute(high - np.roll(low, 1))
+    vm_minus = np.absolute(low - np.roll(high, 1))
+    vm_plus[0] = np.absolute(high[0] - low[0])
+    vm_minus[0] = np.absolute(low[0] - high[0])
 
-    # Calculate SMA(50) on 4h close
-    sma = pd.Series(close).rolling(window=50, min_periods=50).mean().values
-
-    # Calculate RSI-SMA crossover signals
-    rsi_above_sma = rsi > sma
-    rsi_above_sma_prev = np.roll(rsi_above_sma, 1)
-    rsi_above_sma_prev[0] = False
-    crossover_up = rsi_above_sma & (~rsi_above_sma_prev)
-    crossover_down = (~rsi_above_sma) & rsi_above_sma_prev
+    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / \
+              pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / \
+               pd.Series(tr).rolling(window=14, min_periods=14).sum().values
 
     # 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(14, n):
         # Skip if any required value is NaN
-        if (np.isnan(rsi[i]) or np.isnan(sma[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,30 +67,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI crosses above SMA + 1d uptrend + volume confirmation
-            if (crossover_up[i] and 
+            # LONG: VI+ > VI- (bullish vortex) + price > 1d EMA50 + volume spike
+            if (vi_plus[i] > vi_minus[i] and 
                 close[i] > ema50_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+                volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI crosses below SMA + 1d downtrend + volume confirmation
-            elif (crossover_down[i] and 
+            # SHORT: VI- > VI+ (bearish vortex) + price < 1d EMA50 + volume spike
+            elif (vi_minus[i] > vi_plus[i] and 
                   close[i] < ema50_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+                  volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI crosses below SMA
-            if crossover_down[i]:
+            # EXIT LONG: Vortex turns bearish (VI- > VI+)
+            if vi_minus[i] > vi_plus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI crosses above SMA
-            if crossover_up[i]:
+            # EXIT SHORT: Vortex turns bullish (VI+ > VI-)
+            if vi_plus[i] > vi_minus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
