@@ -1,11 +1,11 @@
-# 2025-06-11: Strategy for 4h timeframe
-# Hypothesis: Combining Bollinger Band squeeze with RSI momentum and volume confirmation
-# captures breakouts from low volatility periods. Works in both bull and bear markets
-# by trading the breakout direction only when volume confirms institutional interest.
-# Uses 1-day timeframe for volatility regime filter to avoid false signals in ranging markets.
+#!/usr/bin/env python3
+"""
+1d_RSI_MeanReversion_WeeklyTrend
+Hypothesis: Daily RSI mean reversion (buy oversold, sell overbought) filtered by weekly trend works in both bull and bear markets. Weekly EMA200 defines trend: long when RSI<30 and price>weekly EMA200, short when RSI>70 and price<weekly EMA200. Uses weekly trend filter to avoid counter-trend trades in strong trends, reducing false signals.
+"""
 
-name = "4h_Bollinger_Squeeze_RSI_Momentum_Volume"
-timeframe = "4h"
+name = "1d_RSI_MeanReversion_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,55 +17,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get 1-day data for volatility regime and RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter (call once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    # Weekly EMA200 for trend
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
 
-    # Bollinger Bands (20, 2) on daily timeframe
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (std_20 * 2)
-    lower_bb = sma_20 - (std_20 * 2)
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
-
-    # Bollinger Squeeze: BB width below 20-period average
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze_condition = bb_width < bb_width_ma
-
-    # RSI (14) on daily timeframe
-    delta = pd.Series(close_1d).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
+    # Daily RSI(14) for mean reversion signals
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     rsi_values = rsi.values
-
-    # Align daily indicators to 4h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze_condition)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        # Skip if any required data is NaN
-        if (np.isnan(squeeze_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+    for i in range(14, n):
+        if np.isnan(ema200_1w_aligned[i]) or np.isnan(rsi_values[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,34 +51,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Bollinger squeeze breakout above upper band + RSI > 50 + volume spike
-            if (squeeze_aligned[i] and 
-                close[i] > upper_bb_aligned[i] and 
-                rsi_aligned[i] > 50 and 
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: RSI oversold (<30) and price above weekly EMA200 (uptrend)
+            if rsi_values[i] < 30 and close[i] > ema200_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bollinger squeeze breakout below lower band + RSI < 50 + volume spike
-            elif (squeeze_aligned[i] and 
-                  close[i] < lower_bb_aligned[i] and 
-                  rsi_aligned[i] < 50 and 
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: RSI overbought (>70) and price below weekly EMA200 (downtrend)
+            elif rsi_values[i] > 70 and close[i] < ema200_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to middle of Bollinger Bands or squeeze ends
-            middle_bb = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
-            if close[i] < middle_bb or not squeeze_aligned[i]:
+            # EXIT LONG: RSI overbought (>70) or price below weekly EMA200 (trend change)
+            if rsi_values[i] > 70 or close[i] < ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to middle of Bollinger Bands or squeeze ends
-            middle_bb = (upper_bb_aligned[i] + lower_bb_aligned[i]) / 2
-            if close[i] > middle_bb or not squeeze_aligned[i]:
+            # EXIT SHORT: RSI oversold (<30) or price above weekly EMA200 (trend change)
+            if rsi_values[i] < 30 or close[i] > ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
