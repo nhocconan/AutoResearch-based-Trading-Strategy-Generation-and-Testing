@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 12h timeframe when aligned with 1d EMA50 trend and confirmed by volume spike. Targets 12-37 trades/year by requiring confluence of price level breakout, trend alignment, and volume confirmation. Works in both bull and bear markets by using trend-following entries and mean-reversion exits at the daily pivot point.
-Timeframe: 12h
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Sliding
+Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 4h timeframe when aligned with 1d EMA50 trend and confirmed by volume spike, with sliding exits at the daily pivot point to reduce whipsaw. Designed to capture trending moves in both bull and bear markets while minimizing false breakouts through volume confirmation. Targets 25-40 trades/year by requiring confluence of price level breakout, trend alignment, and volume confirmation.
+Timeframe: 4h
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Sliding"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 80:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -34,25 +34,29 @@ def generate_signals(prices):
     pc = df_1d['close'].shift(1).values # prior day close
     r1 = pc + (ph - pl) * 1.1 / 12
     s1 = pc - (ph - pl) * 1.1 / 12
-    # Align to 12h: daily Camarilla values are constant through the day
+    # Pivot point (used for exit)
+    pp = (ph + pl + pc) / 3.0
+    # Align to 4h: daily values are constant through the day
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
 
     # Get daily data for EMA50 trend filter ONCE before loop
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Volume spike: current > 2.0x average of last 2 bars (1 day on 12h)
-    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume spike: current > 2.0x average of last 6 bars (1 day on 4h)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):  # Start after EMA50 warmup
+    for i in range(80, n):  # Start after EMA50 warmup
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(pp_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,18 +80,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: close < daily pivot P
-            pp = (ph + pl + pc) / 3.0
-            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            # EXIT LONG: close < daily pivot point (sliding exit)
             if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: close > daily pivot P
-            pp = (ph + pl + pc) / 3.0
-            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            # EXIT SHORT: close > daily pivot point (sliding exit)
             if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
