@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Engulfing_Pattern_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,48 +9,51 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once for Camarilla pivots and trend filter
+    # Load 1d data once for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily OHLC for Camarilla R3 and S3 (previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla R3 and S3 for previous day
-    p = (high_1d + low_1d + close_1d) / 3
-    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    
-    # Align Camarilla levels to 6h (wait for daily close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
     # 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # Bullish/Bearish Engulfing detection
+    bullish_engulf = (close > open_price) & (open_price < close) & \
+                     (close > open_price) & (open_price < close) & \
+                     (close > open_price.shift(1)) & (open_price < close.shift(1)) & \
+                     (close > open_price.shift(1)) & (open_price < close.shift(1))
+    # Actually: Bullish engulf: current green candle engulfs previous red candle
+    bullish_engulf = (close > open_price) & (open_price <= close.shift(1)) & (close >= open_price.shift(1)) & \
+                     (close > open_price) & (open_price < close.shift(1))
+    # Bearish engulf: current red candle engulfs previous green candle
+    bearish_engulf = (close < open_price) & (open_price >= close.shift(1)) & (close <= open_price.shift(1)) & \
+                     (close < open_price) & (open_price > close.shift(1))
+    
+    # Simplified correct engulfing
+    bullish_engulf = (close > open_price) & (open_price <= close.shift(1)) & (close >= open_price.shift(1)) & (close > open_price.shift(1))
+    bearish_engulf = (close < open_price) & (open_price >= close.shift(1)) & (close <= open_price.shift(1)) & (close < open_price.shift(1))
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 20  # ensure volume avg has enough data
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        # Skip if trend data not ready
+        if np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,28 +62,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + 1d trend up + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                vol_spike[i]):
+            # Long: bullish engulf + 1d uptrend + volume filter
+            if bullish_engulf[i] and (close[i] > ema34_1d_aligned[i]) and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + 1d trend down + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  vol_spike[i]):
+            # Short: bearish engulf + 1d downtrend + volume filter
+            elif bearish_engulf[i] and (close[i] < ema34_1d_aligned[i]) and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S3
-            if close[i] < s3_aligned[i]:
+            # Exit: bearish engulf or trend reversal
+            if bearish_engulf[i] or (close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above R3
-            if close[i] > r3_aligned[i]:
+            # Exit: bullish engulf or trend reversal
+            if bullish_engulf[i] or (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
