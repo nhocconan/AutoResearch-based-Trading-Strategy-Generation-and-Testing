@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Use 4h close breaks of daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume confirmation.
-# This strategy targets 20-40 trades/year by requiring trend alignment and volume spikes, reducing false breakouts.
-# Works in both bull and bear markets via daily trend filter that avoids counter-trend entries.
+# 1d_TRIX_VolumeSpike_1wTrend
+# Hypothesis: TRIX momentum with volume spike confirmation and weekly trend filter.
+# TRIX filters noise and identifies momentum; volume spike confirms conviction.
+# Weekly trend filter ensures trades align with long-term direction, reducing false signals in chop.
+# Designed for 10-25 trades/year per symbol, works in both bull and bear markets via trend alignment.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_TRIX_VolumeSpike_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,35 +18,28 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
 
-    # Daily EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly EMA34 trend filter (smooth, reliable trend)
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
 
-    # Calculate Camarilla levels from previous daily bar
-    prev_1d_high = df_1d['high'].shift(1).values
-    prev_1d_low = df_1d['low'].shift(1).values
-    prev_1d_close = df_1d['close'].shift(1).values
+    # Calculate TRIX on daily close: EMA of EMA of EMA of log returns, then ROC
+    # TRIX(18) = 100 * (EMA3 of log(close) ROC)
+    log_close = np.log(close)
+    ema1 = pd.Series(log_close).ewm(span=18, adjust=False, min_periods=18).mean().values
+    ema2 = pd.Series(ema1).ewm(span=18, adjust=False, min_periods=18).mean().values
+    ema3 = pd.Series(ema2).ewm(span=18, adjust=False, min_periods=18).mean().values
+    trix = 100 * (pd.Series(ema3).pct_change(1).values)  # ROC of triple EMA
 
-    # R1 = C + 1.1*(H-L)/6, S1 = C - 1.1*(H-L)/6
-    r1 = prev_1d_close + 1.1 * (prev_1d_high - prev_1d_low) / 6
-    s1 = prev_1d_close - 1.1 * (prev_1d_high - prev_1d_low) / 6
-
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-
-    # Volume confirmation: current volume > 2.0x average of last 4 periods (8 hours)
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume confirmation: current volume > 2.0x average of last 20 days
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
@@ -53,8 +47,8 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(trix[i]) or 
+            np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,31 +56,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from daily EMA50
-        price_above_daily_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_daily_ema = close[i] < ema_50_1d_aligned[i]
+        # Trend filter from weekly EMA34
+        price_above_weekly_ema = close[i] > ema_34_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_34_1w_aligned[i]
 
         if position == 0:
-            # LONG: Close breaks above R1 AND above daily EMA50 AND volume
-            if close[i] > r1_aligned[i] and price_above_daily_ema and volume_ok[i]:
+            # LONG: TRIX turns positive AND above weekly EMA34 AND volume spike
+            if trix[i] > 0 and trix[i] > trix[i-1] and price_above_weekly_ema and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S1 AND below daily EMA50 AND volume
-            elif close[i] < s1_aligned[i] and price_below_daily_ema and volume_ok[i]:
+            # SHORT: TRIX turns negative AND below weekly EMA34 AND volume spike
+            elif trix[i] < 0 and trix[i] < trix[i-1] and price_below_weekly_ema and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close falls back below R1 OR daily trend turns down
-            if close[i] < r1_aligned[i] or not price_above_daily_ema:
+            # EXIT LONG: TRIX turns negative OR weekly trend turns down
+            if trix[i] < 0 or not price_above_weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close rises back above S1 OR daily trend turns up
-            if close[i] > s1_aligned[i] or not price_below_daily_ema:
+            # EXIT SHORT: TRIX turns positive OR weekly trend turns up
+            if trix[i] > 0 or not price_below_weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
