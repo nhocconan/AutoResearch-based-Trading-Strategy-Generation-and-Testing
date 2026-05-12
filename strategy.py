@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_RSI_Divergence_12hTrend_1dVol"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,23 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== 12h Trend Filter (HTF) =====
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # ===== 1d Trend Filter (HTF) =====
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # ===== RSI (6-period on 6h) =====
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # ===== Daily Pivot Points (1d) =====
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]
+    
+    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
+    r1 = pivot + (high_1d - low_1d)
+    s1 = pivot - (high_1d - low_1d)
+    
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # ===== Daily Volume Spike Filter =====
-    df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
@@ -45,12 +49,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(rsi[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,40 +74,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # RSI divergence detection (bullish: price LL, RSI HL; bearish: price HH, RSI LH)
-        bullish_div = False
-        bearish_div = False
-        if i >= 2:
-            # Bullish divergence: lower low in price, higher low in RSI
-            if low[i] < low[i-1] and rsi[i] > rsi[i-1]:
-                bullish_div = True
-            # Bearish divergence: higher high in price, lower high in RSI
-            if high[i] > high[i-1] and rsi[i] < rsi[i-1]:
-                bearish_div = True
-        
         if position == 0:
-            # Long: Bullish RSI divergence + above 12h EMA50 + daily volume spike
-            if (bullish_div and
-                close[i] > ema50_12h_aligned[i] and
+            # Long: Price touches S1 + above 1d EMA34 + daily volume spike
+            if (low[i] <= s1_aligned[i] and
+                close[i] > ema34_1d_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish RSI divergence + below 12h EMA50 + daily volume spike
-            elif (bearish_div and
-                  close[i] < ema50_12h_aligned[i] and
+            # Short: Price touches R1 + below 1d EMA34 + daily volume spike
+            elif (high[i] >= r1_aligned[i] and
+                  close[i] < ema34_1d_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bearish RSI divergence or closes below 12h EMA50
-            if bearish_div or close[i] < ema50_12h_aligned[i]:
+            # Exit long: Price reaches pivot or closes below 1d EMA34
+            if high[i] >= pivot_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bullish RSI divergence or closes above 12h EMA50
-            if bullish_div or close[i] > ema50_12h_aligned[i]:
+            # Exit short: Price reaches pivot or closes above 1d EMA34
+            if low[i] <= pivot_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
