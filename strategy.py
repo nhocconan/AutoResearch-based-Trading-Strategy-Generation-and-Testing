@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1D_WEEKLY_NATR_BREAKOUT_1W_TREND_FILTER
-Hypothesis: Weekly ATR-based volatility breakout with trend filter captures strong moves in both bull and bear markets.
-Long when price breaks above weekly high + 0.5*weekly ATR with weekly EMA50 uptrend.
-Short when price breaks below weekly low - 0.5*weekly ATR with weekly EMA50 downtrend.
-Uses daily timeframe for entries with weekly volatility and trend as structure. Target: 10-25 trades/year on 1d timeframe.
+6H_DONCHIAN_BREAKOUT_20_WEEKLY_DIRECTION_1D_TREND_FILTER
+Hypothesis: 6-hour Donchian(20) breakouts aligned with weekly trend direction from daily candles
+provide high-probability entries in both bull and bear markets. Weekly trend is determined by
+price position relative to 20-week EMA on daily timeframe (proxy for weekly trend). Volume
+confirmation filters false breakouts. Target: 25-40 trades/year on 6h timeframe.
 """
-name = "1D_WEEKLY_NATR_BREAKOUT_1W_TREND_FILTER"
-timeframe = "1d"
+name = "6H_DONCHIAN_BREAKOUT_20_WEEKLY_DIRECTION_1D_TREND_FILTER"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,55 +22,38 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Weekly data for volatility and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Daily data for weekly trend filter and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly ATR(10) for volatility measurement
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # 20-period EMA on daily (proxy for weekly trend)
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Weekly trend: 1 = uptrend (price above EMA20), -1 = downtrend (price below EMA20)
+    weekly_trend = np.where(close_1d > ema20_1d, 1, -1)
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1d, weekly_trend)
     
-    # Weekly EMA50 for trend filter
-    ema50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Donchian channels (20-period) on 6h
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly high/low for breakout levels
-    weekly_high = pd.Series(high_1w).rolling(window=1, min_periods=1).max().values  # current week high
-    weekly_low = pd.Series(low_1w).rolling(window=1, min_periods=1).min().values    # current week low
-    
-    # Align weekly data to daily timeframe (wait for weekly bar close)
-    atr10_aligned = align_htf_to_ltf(prices, df_1w, atr10)
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50)
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    volume_spike = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need EMA50 warmup
-    
-    for i in range(start_idx, n):
-        # Skip if any critical data is not ready
-        if (np.isnan(atr10_aligned[i]) or np.isnan(ema50_aligned[i]) or 
-            np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        atr_val = atr10_aligned[i]
-        if np.isnan(atr_val) or atr_val <= 0:
+    for i in range(20, n):  # Need Donchian formation
+        # Skip if weekly trend not available
+        if np.isnan(weekly_trend_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,30 +62,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above weekly high + 0.5*weekly ATR in uptrend
-            if (close[i] > weekly_high_aligned[i] + 0.5 * atr_val and 
-                close[i] > ema50_aligned[i]):
+            # LONG: Price breaks above Donchian high with volume in uptrend
+            if (high[i] > high_roll[i-1] and 
+                volume_spike[i] and 
+                weekly_trend_aligned[i] == 1):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly low - 0.5*weekly ATR in downtrend
-            elif (close[i] < weekly_low_aligned[i] - 0.5 * atr_val and 
-                  close[i] < ema50_aligned[i]):
+            # SHORT: Price breaks below Donchian low with volume in downtrend
+            elif (low[i] < low_roll[i-1] and 
+                  volume_spike[i] and 
+                  weekly_trend_aligned[i] == -1):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below weekly low or trend reversal
-            if (close[i] < weekly_low_aligned[i] or 
-                close[i] < ema50_aligned[i]):
+            # EXIT LONG: Price breaks below Donchian low or trend reversal
+            if (low[i] < low_roll[i-1] or 
+                weekly_trend_aligned[i] == -1):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above weekly high or trend reversal
-            if (close[i] > weekly_high_aligned[i] or 
-                close[i] > ema50_aligned[i]):
+            # EXIT SHORT: Price breaks above Donchian high or trend reversal
+            if (high[i] > high_roll[i-1] or 
+                weekly_trend_aligned[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
