@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Volume_Expansion_Trend_Continuation"
-timeframe = "6h"
+name = "12h_Donchian20_VolumeBreakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -28,9 +28,9 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_expansion = volume > (2.0 * vol_ma)
     
-    # Price momentum: close > open (bullish candle) or close < open (bearish candle)
-    bullish_candle = close > open_
-    bearish_candle = close < open_
+    # 12h Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,12 +48,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above daily EMA34 + bullish candle + volume expansion
-            if (close[i] > ema34_1d_aligned[i]) and bullish_candle[i] and vol_expansion[i]:
+            # Long: price above Donchian upper + above daily EMA34 + volume expansion
+            if (close[i] > high_max[i]) and (close[i] > ema34_1d_aligned[i]) and vol_expansion[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below daily EMA34 + bearish candle + volume expansion
-            elif (close[i] < ema34_1d_aligned[i]) and bearish_candle[i] and vol_expansion[i]:
+            # Short: price below Donchian lower + below daily EMA34 + volume expansion
+            elif (close[i] < low_min[i]) and (close[i] < ema34_1d_aligned[i]) and vol_expansion[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
