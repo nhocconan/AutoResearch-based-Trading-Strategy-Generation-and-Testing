@@ -1,10 +1,6 @@
-# hypothesis: 6h timeframe strategy using 1w EMA50 trend filter and 1d Bollinger Bands mean reversion
-# long when price touches lower BB + weekly uptrend; short when price touches upper BB + weekly downtrend
-# exits on middle band reversion or trend reversal; targets 15-35 trades/year with low churn
-
 #!/usr/bin/env python3
-name = "6h_BollingerMeanReversion_1wTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,31 +9,37 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Daily Bollinger Bands (20, 2)
+    # Load daily data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    middle_bb = sma_20
     
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    middle_bb_aligned = align_htf_to_ltf(prices, df_1d, middle_bb)
+    # Calculate daily Camarilla pivot levels (based on previous day)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    R1 = pivot + (range_hl * 1.1 / 12)
+    S1 = pivot - (range_hl * 1.1 / 12)
+    
+    # Align Camarilla levels to 4h timeframe (available after daily bar closes)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: current volume > 1.5x 20-period average (approx 10 days of 4h data)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,9 +48,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
-            np.isnan(middle_bb_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,24 +58,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: touch lower BB + weekly uptrend
-            if low[i] <= lower_bb_aligned[i] and close[i] > ema_50_1w_aligned[i]:
+            # Long: break above R1 + above daily EMA34 + volume filter
+            if high[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: touch upper BB + weekly downtrend
-            elif high[i] >= upper_bb_aligned[i] and close[i] < ema_50_1w_aligned[i]:
+            # Short: break below S1 + below daily EMA34 + volume filter
+            elif low[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches middle BB or trend turns down
-            if high[i] >= middle_bb_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: break below S1 or below daily EMA34
+            if low[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches middle BB or trend turns up
-            if low[i] <= middle_bb_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: break above R1 or above daily EMA34
+            if high[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
