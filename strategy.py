@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S4_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyPivot_Direction_VolumeConfirmation"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D DATA FOR EMA34 TREND FILTER ===
+    # === WEEKLY DATA FOR PIVOT DIRECTION AND DONCHIAN ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # === DAILY DATA FOR VOLUME CONFIRMATION ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # === CALCULATE EMA34 FOR TREND FILTER ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # === CALCULATE WEEKLY PIVOT POINT (CLASSIC) ===
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
     
-    # === CALCULATE CAMARILLA LEVELS (R3, S4) FROM PREVIOUS DAY ===
-    rng = high_1d - low_1d
-    R3 = close_1d + rng * 1.1 / 4
-    S4 = close_1d - rng * 1.1 / 4
+    # === CALCULATE WEEKLY DONCHIAN CHANNEL (20) ===
+    donch_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # ALIGN TO 4H TIMEFRAME (PREVIOUS DAY'S LEVELS AVAILABLE AT OPEN)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
+    # === CALCULATE DAILY VOLUME SPIKE (20) ===
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (vol_ma_1d * 2.0)
     
-    # === VOLUME SPIKE DETECTION (20-PERIOD) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # === ALIGN WEEKLY INDICATORS TO 6H TIMEFRAME ===
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
+    
+    # === ALIGN DAILY VOLUME SPIKE TO 6H TIMEFRAME ===
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(20, 20)  # Donchian and volume MA need 20 periods
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(R3_4h[i]) or
-            np.isnan(S4_4h[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or 
+            np.isnan(donch_high_20_aligned[i]) or
+            np.isnan(donch_low_20_aligned[i]) or
+            np.isnan(volume_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,28 +65,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: PRICE BREAKS ABOVE R3 + ABOVE 1D EMA34 + VOLUME SPIKE
-            if (close[i] > R3_4h[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume_spike[i]):
+            # LONG: PRICE BREAKS ABOVE WEEKLY DONCHIAN HIGH + ABOVE WEEKLY PIVOT + DAILY VOLUME SPIKE
+            if (close[i] > donch_high_20_aligned[i] and 
+                close[i] > pivot_1w_aligned[i] and
+                volume_spike_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: PRICE BREAKS BELOW S4 + BELOW 1D EMA34 + VOLUME SPIKE
-            elif (close[i] < S4_4h[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume_spike[i]):
+            # SHORT: PRICE BREAKS BELOW WEEKLY DONCHIAN LOW + BELOW WEEKLY PIVOT + DAILY VOLUME SPIKE
+            elif (close[i] < donch_low_20_aligned[i] and 
+                  close[i] < pivot_1w_aligned[i] and
+                  volume_spike_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: PRICE BREAKS BELOW S4 (REVERSAL) OR BELOW 1D EMA34
-            if close[i] < S4_4h[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: PRICE BREAKS BELOW WEEKLY DONCHIAN LOW OR BELOW WEEKLY PIVOT
+            if close[i] < donch_low_20_aligned[i] or close[i] < pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: PRICE BREAKS ABOVE R3 (REVERSAL) OR ABOVE 1D EMA34
-            if close[i] > R3_4h[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: PRICE BREAKS ABOVE WEEKLY DONCHIAN HIGH OR ABOVE WEEKLY PIVOT
+            if close[i] > donch_high_20_aligned[i] or close[i] > pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
