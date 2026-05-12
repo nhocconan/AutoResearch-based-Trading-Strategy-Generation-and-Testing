@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-# 6h_MultiTimeframe_Stochastic_Signal_with_12hTrend
-# Hypothesis: Use 6h Stochastic oscillator for mean-reversion entries (oversold/overbought) but only in the direction of 12h trend.
-# Long when 6h Stochastic < 20 and 12h close > 12h EMA50 (uptrend).
-# Short when 6h Stochastic > 80 and 12h close < 12h EMA50 (downtrend).
-# Exit when Stochastic crosses back above 50 (long) or below 50 (short) to avoid overstaying.
-# Uses volume confirmation to avoid low-liquidity whipsaws.
-# Targets 15-25 trades/year to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_1dEMA34_TrendFilter_V2
+# Hypothesis: Breakout above/below daily R1/S1 with 1d EMA34 trend filter and volume confirmation
+# works in both bull and bear markets by filtering false breakouts. Target: 20-30 trades/year.
 
-name = "6h_MultiTimeframe_Stochastic_Signal_with_12hTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_TrendFilter_V2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,31 +21,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 55:
+    # Load daily data for Camarilla pivot calculation and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Calculate 12h EMA50 for trend
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate pivot point and range
+    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+    daily_range = daily_high - daily_low
     
-    # Align 12h EMA50 to 6h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Camarilla R1 and S1 levels
+    r1 = daily_pivot + daily_range * 1.083
+    s1 = daily_pivot - daily_range * 1.083
     
-    # Calculate 6h Stochastic (14,3,3)
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    # Calculate 1d EMA34
+    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Avoid division by zero
-    denom = highest_high - lowest_low
-    denom = np.where(denom == 0, 1e-10, denom)
-    
-    k_percent = 100 * ((close - lowest_low) / denom)
-    
-    # Smooth K to get D (3-period SMA of K)
-    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    # Align daily levels and 1d EMA34 to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: 20-period moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,12 +52,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are stable
+    start_idx = 60  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(d_percent[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,31 +65,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        ema12h_trend = ema50_12h_aligned[i]
-        stoch_d = d_percent[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema1d_trend = ema34_1d_aligned[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: Oversold Stochastic + 12h uptrend + volume confirmation
-            if stoch_d < 20 and close[i] > ema12h_trend and volume[i] > vol_ma_val:
+            # LONG: Price closes above R1 with close > 1d EMA34 and volume > 20MA
+            if close[i] > r1_val and close[i] > ema1d_trend and volume[i] > vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Overbought Stochastic + 12h downtrend + volume confirmation
-            elif stoch_d > 80 and close[i] < ema12h_trend and volume[i] > vol_ma_val:
+            # SHORT: Price closes below S1 with close < 1d EMA34 and volume > 20MA
+            elif close[i] < s1_val and close[i] < ema1d_trend and volume[i] > vol_ma_val:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Stochastic crosses back above 50 (mean reversion complete)
-            if stoch_d > 50:
+            # EXIT LONG: Price closes below 1d EMA34 (trend reversal)
+            if close[i] < ema1d_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Stochastic crosses back below 50 (mean reversion complete)
-            if stoch_d < 50:
+            # EXIT SHORT: Price closes above 1d EMA34 (trend reversal)
+            if close[i] > ema1d_trend:
                 signals[i] = 0.0
                 position = 0
             else:
