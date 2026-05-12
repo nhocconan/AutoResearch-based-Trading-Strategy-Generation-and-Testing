@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_V2
-# Hypothesis: Tighter version of Camarilla breakout with stricter volume confirmation (3x volume SMA) and mandatory trend alignment (price > EMA34 for long, < EMA34 for short). Designed for low trade frequency (12-37/year) to avoid fee drag while maintaining edge in bull/bear markets via daily trend filter.
+# 4h_Camarilla_R1_S1_Breakout_1dEMA34_TrendVolume_v1
+# Hypothesis: Camarilla R1/S1 breakout from daily levels with 1d EMA trend filter and volume spike confirmation on 4h timeframe.
+# Uses Camarilla pivot levels (R1, S1) calculated from prior day's OHLC. Long when price breaks above R1 with uptrend (price > EMA34) and volume spike.
+# Short when price breaks below S1 with downtrend (price < EMA34) and volume spike. Designed for low trade frequency (19-50/year) to avoid fee drag.
+# Works in bull/bear markets by following daily EMA trend direction. Exit on opposite Camarilla level touch (S1 for long exit, R1 for short exit).
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_V2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_TrendVolume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -37,7 +40,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + 1.1 * rng_1d / 12
     camarilla_s1 = close_1d - 1.1 * rng_1d / 12
 
-    # Align Camarilla levels to 12h timeframe (use prior day's levels for current day)
+    # Align Camarilla levels to 4h timeframe (use prior day's levels for current day)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
@@ -45,10 +48,10 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate volume spike threshold (3.0x 20-period SMA on 12h for tighter filter)
+    # Calculate volume spike threshold (2.0x 20-period SMA on 4h)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 3.0
+    volume_spike_threshold = volume_sma20 * 2.0
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,16 +68,16 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above R1 with uptrend and volume spike (3x SMA)
+            # LONG: price breaks above R1 with uptrend and volume spike
             if (close[i] > camarilla_r1_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
-                volume[i] > volume_spike_threshold[i]):
+                volume[i] > volume_sma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1 with downtrend and volume spike (3x SMA)
+            # SHORT: price breaks below S1 with downtrend and volume spike
             elif (close[i] < camarilla_s1_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > volume_spike_threshold[i]):
+                  volume[i] > volume_sma20[i]):
                 signals[i] = -0.25
                 position = -1
             else:
