@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Signal"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_20_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once for daily trend and Camarilla pivots
+    # Load 1d data once for daily trend
     df_1d = get_htf_data(prices, '1d')
     
     # 1d EMA34 for daily trend filter
@@ -25,19 +25,11 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily OHLC for Camarilla R3 and S3 (previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
-    
-    # Calculate Camarilla R3 and S3 for previous day
-    p = (high_1d + low_1d + close_1d_vals) / 3
-    r3 = close_1d_vals + (high_1d - low_1d) * 1.1 / 4
-    s3 = close_1d_vals - (high_1d - low_1d) * 1.1 / 4
-    
-    # Align Camarilla levels to 12h (wait for daily close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Donchian(20) on 4h - upper and lower bands
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_band = high_series.rolling(window=20, min_periods=20).max().values
+    lower_band = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,8 +42,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,24 +53,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + above 1d EMA34 + volume spike
-            if (close[i] > r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_spike[i]):
+            # Long: price breaks above upper band + above 1d EMA34 + volume spike
+            if (close[i] > upper_band[i] and close[i] > ema_34_1d_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + below 1d EMA34 + volume spike
-            elif (close[i] < s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_spike[i]):
+            # Short: price breaks below lower band + below 1d EMA34 + volume spike
+            elif (close[i] < lower_band[i] and close[i] < ema_34_1d_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S3
-            if close[i] < s3_aligned[i]:
+            # Exit long: price closes below lower band
+            if close[i] < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above R3
-            if close[i] > r3_aligned[i]:
+            # Exit short: price closes above upper band
+            if close[i] > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
