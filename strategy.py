@@ -1,9 +1,13 @@
-# 12h_Ichimoku_Cloud_TenkanKijun_Cross_1dTrend
-# Ichimoku Cloud system: Tenkan-Kijun cross with cloud color filter + 1d trend alignment
-# Works in both bull and bear: buys when Tenkan crosses above Kijun above cloud in uptrend,
-# sells when Tenkan crosses below Kijun below cloud in downtrend. Uses volume confirmation.
+#!/usr/bin/env python3
+"""
+12h_ThreeFactor_TrendV2
+Hypothesis: Combine three robust factors for 12h timeframe - 1) Donchian channel breakout for trend strength, 
+2) Volume spike for conviction, and 3) 1d RSI for momentum filtering. This creates a high-conviction 
+signal with low trade frequency suitable for 12h timeframe. Works in both bull (breakouts up) and 
+bear (breakouts down) markets by requiring volume confirmation and momentum alignment.
+"""
 
-name = "12h_Ichimoku_Cloud_TenkanKijun_Cross_1dTrend"
+name = "12h_ThreeFactor_TrendV2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -21,54 +25,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
+    # Get 1d data for RSI filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     close_1d = df_1d['close'].values
 
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Calculate Donchian channels (20-period) on 12h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
 
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Calculate RSI(14) on 1d data
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = (-delta).where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_14 = (100 - (100 / (1 + rs))).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
 
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
-    senkou_a = ((tenkan + kijun) / 2)
-
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 52 periods
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-
-    # Cloud color: green when Senkou A > Senkou B (bullish), red when A < B (bearish)
-    # We'll use the current cloud (not shifted) for simplicity in filtering
-    # For cloud color at time i, we need Senkou A/B from 26 periods ago
-    senkou_a_lag = np.roll(senkou_a, 26)
-    senkou_b_lag = np.roll(senkou_b, 26)
-    senkou_a_lag[:26] = np.nan
-    senkou_b_lag[:26] = np.nan
-    cloud_green = senkou_a_lag > senkou_b_lag  # True when cloud is bullish
-
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(52, n):  # Need enough data for Ichimoku
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a_lag[i]) or np.isnan(senkou_b_lag[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+    for i in range(20, n):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,43 +60,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Cloud boundaries at current time (using lagged Senkou lines)
-        upper_cloud = np.maximum(senkou_a_lag[i], senkou_b_lag[i])
-        lower_cloud = np.minimum(senkou_a_lag[i], senkou_b_lag[i])
-
         if position == 0:
-            # LONG: Tenkan crosses above Kijun AND price above cloud AND bullish cloud AND 1d uptrend + volume
-            if (tenkan[i-1] <= kijun[i-1] and tenkan[i] > kijun[i] and  # Cross
-                close[i] > upper_cloud and                           # Above cloud
-                cloud_green[i] and                                   # Bullish cloud
-                close[i] > ema34_1d_aligned[i] and                   # 1d uptrend
-                volume[i] > vol_avg_20[i] * 1.5):                    # Volume spike
+            # LONG: Price breaks above Donchian high + volume spike + RSI not overbought
+            if close[i] > donchian_high[i] and volume[i] > vol_avg_20[i] * 1.8 and rsi_1d_aligned[i] < 70:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Tenkan crosses below Kijun AND price below cloud AND bearish cloud AND 1d downtrend + volume
-            elif (tenkan[i-1] >= kijun[i-1] and tenkan[i] < kijun[i] and  # Cross
-                  close[i] < lower_cloud and                            # Below cloud
-                  not cloud_green[i] and                                # Bearish cloud
-                  close[i] < ema34_1d_aligned[i] and                    # 1d downtrend
-                  volume[i] > vol_avg_20[i] * 1.5):                     # Volume spike
+            # SHORT: Price breaks below Donchian low + volume spike + RSI not oversold
+            elif close[i] < donchian_low[i] and volume[i] > vol_avg_20[i] * 1.8 and rsi_1d_aligned[i] > 30:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Tenkan crosses below Kijun OR price breaks below cloud OR 1d trend turns down
-            if (tenkan[i] < kijun[i] or 
-                close[i] < lower_cloud or
-                close[i] < ema34_1d_aligned[i]):
+            # EXIT LONG: Price breaks below Donchian low or RSI overbought
+            if close[i] < donchian_low[i] or rsi_1d_aligned[i] > 75:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Tenkan crosses above Kijun OR price breaks above cloud OR 1d trend turns up
-            if (tenkan[i] > kijun[i] or 
-                close[i] > upper_cloud or
-                close[i] > ema34_1d_aligned[i]):
+            # EXIT SHORT: Price breaks above Donchian high or RSI oversold
+            if close[i] > donchian_high[i] or rsi_1d_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
