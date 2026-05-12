@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Donchian_20_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_MarketFacilitation_Index_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 300:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,18 +17,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1w Data for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1d Data for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # === 1w EMA50 for trend ===
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # === 1d EMA34 for trend ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Daily Donchian Channel (20) ===
-    period = 20
-    dc_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    dc_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    # === Market Facilitation Index (MFI) (6h) ===
+    # MFI = (High - Low) / Volume
+    range_hl = high - low
+    mfi = np.where(volume > 0, range_hl / volume, 0)
+    
+    # === MFI smoothing (3-period SMA) ===
+    mfi_sma = pd.Series(mfi).rolling(window=3, min_periods=3).mean().values
     
     # === Volume spike detection (20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -37,13 +42,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(300, 50, 20)  # Ensure enough data for all indicators
+    start_idx = max(50, 34, 20)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(dc_high[i]) or
-            np.isnan(dc_low[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(mfi_sma[i]) or
+            np.isnan(mfi_sma[i-1] if i > 0 else np.nan)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,28 +57,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high + 1w uptrend + volume spike
-            if (close[i] > dc_high[i] and 
-                close[i] > ema50_1w_aligned[i] and
-                volume_spike[i]):
+            # Long: MFI rising (increasing efficiency) + volume spike + 1d trend up
+            if (mfi_sma[i] > mfi_sma[i-1] and 
+                volume_spike[i] and
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + 1w downtrend + volume spike
-            elif (close[i] < dc_low[i] and 
-                  close[i] < ema50_1w_aligned[i] and
-                  volume_spike[i]):
+            # Short: MFI falling (decreasing efficiency) + volume spike + 1d trend down
+            elif (mfi_sma[i] < mfi_sma[i-1] and 
+                  volume_spike[i] and
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price closes below Donchian low or trend breaks
-            if close[i] < dc_low[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit long: MFI falls or trend breaks
+            if mfi_sma[i] < mfi_sma[i-1] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price closes above Donchian high or trend breaks
-            if close[i] > dc_high[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit short: MFI rises or trend breaks
+            if mfi_sma[i] > mfi_sma[i-1] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
