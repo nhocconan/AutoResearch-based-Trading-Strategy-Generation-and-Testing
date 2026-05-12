@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# 4h Donchian Breakout + Volume Spike + Daily Trend
-# Hypothesis: Breakouts above/below 20-period Donchian channels capture strong momentum.
-# Volume spikes confirm breakout strength, and daily EMA50 filters trend direction.
-# Works in bull/bear by following breakout direction with trend filter. Targets ~25-40 trades/year.
+# 4h Williams Alligator + Volume Spike + Daily EMA Trend
+# Hypothesis: Williams Alligator (3 SMAs: Jaw 13, Teeth 8, Lips 5) identifies trend when lines are aligned and separated.
+# Jaw below Teeth below Lips = uptrend; Jaw above Teeth above Lips = downtrend.
+# Combines with daily EMA50 trend filter and volume spikes for confirmation.
+# Works in both bull and bear markets by following Alligator-defined momentum.
+# Designed for low trade frequency (~20-40/year) with clear entry/exit rules.
 
-name = "4h_Donchian_Breakout_Volume_Trend"
+name = "4h_Williams_Alligator_Volume_DailyTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,9 +35,14 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(daily_close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Donchian Channel (20-period) ===
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === Williams Alligator (13,8,5) SMAs ===
+    # Jaw (13-period SMA of median price)
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    # Teeth (8-period SMA of median price)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    # Lips (5-period SMA of median price)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
     
     # === Volume Spike (20-period on 4h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,11 +51,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure all indicators ready
+    start_idx = 13  # Ensure all indicators ready (max period 13)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
             np.isnan(ema_50_4h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -58,28 +65,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper Donchian + volume spike + price above daily EMA50
-            if (close[i] > high_20[i] and 
+            # LONG: Jaw < Teeth < Lips (uptrend alignment) + volume spike + price above daily EMA50
+            if (jaw[i] < teeth[i] and teeth[i] < lips[i] and 
                 vol_spike[i] and
                 close[i] > ema_50_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian + volume spike + price below daily EMA50
-            elif (close[i] < low_20[i] and 
+            # SHORT: Jaw > Teeth > Lips (downtrend alignment) + volume spike + price below daily EMA50
+            elif (jaw[i] > teeth[i] and teeth[i] > lips[i] and 
                   vol_spike[i] and
                   close[i] < ema_50_4h[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price closes below lower Donchian (reversal signal)
-            if close[i] < low_20[i]:
+            # EXIT LONG: Trend weakens (Alligator lines cross or entangle)
+            if not (jaw[i] < teeth[i] and teeth[i] < lips[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above upper Donchian (reversal signal)
-            if close[i] > high_20[i]:
+            # EXIT SHORT: Trend weakens (Alligator lines cross or entangle)
+            if not (jaw[i] > teeth[i] and teeth[i] > lips[i]):
                 signals[i] = 0.0
                 position = 0
             else:
