@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "6h_LiquidityVoid_1wTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,28 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 1w trend filter: EMA50 (to avoid counter-trend trades)
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 4h Donchian channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Liquidity void detection: gap between candle low and prior candle high (or vice versa)
+    # Bullish void: current candle low > previous candle high
+    # Bearish void: current candle high < previous candle low
+    bullish_void = (low > np.roll(high, 1)) & ~np.isnan(np.roll(high, 1))
+    bearish_void = (high < np.roll(low, 1)) & ~np.isnan(np.roll(low, 1))
     
-    # Volume filter: current volume > 1.5 * 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Volume filter: current volume > 1.5x average volume (to confirm institutional interest)
+    volume_avg = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_filter = volume > (1.5 * volume_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 34)  # need enough data for Donchian and 1d EMA
+    start_idx = 50  # need enough data for 1w EMA50
     
     for i in range(start_idx, n):
-        # Skip if 1d trend data not ready
-        if np.isnan(ema34_1d_aligned[i]):
+        # Skip if 1w trend data not ready
+        if np.isnan(ema50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -47,28 +48,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume filter + 1d uptrend
-            if (close[i] > highest_high[i] and 
-                volume_filter[i] and 
-                close[i] > ema34_1d_aligned[i]):
+            # Long: Bullish liquidity void + volume filter + 1w uptrend
+            if bullish_void[i] and volume_filter[i] and (close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + volume filter + 1d downtrend
-            elif (close[i] < lowest_low[i] and 
-                  volume_filter[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+            # Short: Bearish liquidity void + volume filter + 1w downtrend
+            elif bearish_void[i] and volume_filter[i] and (close[i] < ema50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price breaks below Donchian low
-            if close[i] < lowest_low[i]:
+            # Exit long when bearish void appears or price closes below entry area (simple: below prior candle low)
+            if bearish_void[i] or (close[i] < np.roll(low, 1)[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price breaks above Donchian high
-            if close[i] > highest_high[i]:
+            # Exit short when bullish void appears or price closes above entry area (simple: above prior candle high)
+            if bullish_void[i] or (close[i] > np.roll(high, 1)[i]):
                 signals[i] = 0.0
                 position = 0
             else:
