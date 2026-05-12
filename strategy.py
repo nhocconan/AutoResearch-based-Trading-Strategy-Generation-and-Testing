@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Trade 12h breakouts of daily Camarilla pivot levels (R1/S1) aligned with daily trend and volume confirmation.
-# Uses daily Camarilla levels from previous day, daily EMA50 for trend filter, and volume spike confirmation.
-# Designed for low frequency (12-37 trades/year) to survive both bull and bear markets by following higher timeframe structure.
-# Focus on BTC/ETH as primary targets.
+# 6h_PivotReversal_1dTrend_Volume
+# Hypothesis: Fade moves to weekly pivot levels (R1/S1) when price is overextended from 1d EMA20,
+# with volume confirmation. Works in both bull and bear markets by combining mean reversion
+# at key levels with trend filtering and volume validation. Targets 20-40 trades/year.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_PivotReversal_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,41 +22,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily Camarilla pivot levels (R1, S1) from previous day ===
+    # === 1d EMA20 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Use previous day's OHLC for current day's Camarilla levels
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
-    
-    # Shift by 1 to use previous day's data
-    prev_high_prev = np.roll(prev_high, 1)
-    prev_low_prev = np.roll(prev_low, 1)
-    prev_close_prev = np.roll(prev_close, 1)
-    prev_high_prev[0] = np.nan
-    prev_low_prev[0] = np.nan
-    prev_close_prev[0] = np.nan
-    
-    # Calculate Camarilla levels
-    # R1 = Close + (High - Low) * 1.1/12
-    # S1 = Close - (High - Low) * 1.1/12
-    r1 = prev_close_prev + (prev_high_prev - prev_low_prev) * 1.1 / 12
-    s1 = prev_close_prev - (prev_high_prev - prev_low_prev) * 1.1 / 12
-    
-    # Align daily levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Daily EMA50 for trend filter ===
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # === Volume confirmation (24-period average on 12h) ===
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === Weekly pivot levels (R1, S1) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    wk_high = df_1w['high'].values
+    wk_low = df_1w['low'].values
+    wk_close = df_1w['close'].values
+    
+    wk_high_prev = np.roll(wk_high, 1)
+    wk_low_prev = np.roll(wk_low, 1)
+    wk_close_prev = np.roll(wk_close, 1)
+    wk_high_prev[0] = np.nan
+    wk_low_prev[0] = np.nan
+    wk_close_prev[0] = np.nan
+    
+    pivot = (wk_high_prev + wk_low_prev + wk_close_prev) / 3.0
+    r1 = pivot + (wk_high_prev - wk_low_prev) / 2.0
+    s1 = pivot - (wk_high_prev - wk_low_prev) / 2.0
+    
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # === Deviation from 1d EMA20 (%) ===
+    ema_dev = (close - ema_20_1d_aligned) / ema_20_1d_aligned * 100
+    
+    # === Volume confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,8 +67,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_dev[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,36 +76,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
-        
-        # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakout_down = close[i] < s1_aligned[i]
-        
-        # Volume filter: above average
-        vol_ok = volume[i] > vol_ma_24[i]
+        # Conditions
+        near_r1 = high[i] >= r1_aligned[i] * 0.998  # Within 0.2% of R1
+        near_s1 = low[i] <= s1_aligned[i] * 1.002   # Within 0.2% of S1
+        overextended_up = ema_dev[i] > 2.0          # >2% above EMA20
+        overextended_down = ema_dev[i] < -2.0       # >2% below EMA20
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: breakout above R1, uptrend, volume confirmation
-            if breakout_up and trend_up and vol_ok:
+            # LONG: price near S1, oversold, volume confirmation
+            if near_s1 and overextended_down and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakout below S1, downtrend, volume confirmation
-            elif breakout_down and trend_down and vol_ok:
+            # SHORT: price near R1, overbought, volume confirmation
+            elif near_r1 and overextended_up and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: breakdown below S1 or trend reversal
-            if breakout_down or not trend_up:
+            # EXIT LONG: price crosses above EMA20 or reaches R1
+            if close[i] >= ema_20_1d_aligned[i] or high[i] >= r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: breakout above R1 or trend reversal
-            if breakout_up or not trend_down:
+            # EXIT SHORT: price crosses below EMA20 or reaches S1
+            if close[i] <= ema_20_1d_aligned[i] or low[i] <= s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
