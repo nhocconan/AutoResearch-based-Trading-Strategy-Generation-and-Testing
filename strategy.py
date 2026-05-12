@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Vortex_Trend_1dTrend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,27 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY TREND FILTER (1d EMA50) ===
+    # === 1D DATA FOR TREND FILTER ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === VORTEX INDICATOR (14-period) ===
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])  # align tr to original length
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    vm_plus = np.abs(high - low[:-1])  # |high - previous low|
-    vm_minus = np.abs(low - high[:-1]) # |low - previous high|
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
+    # === 1D DATA FOR CAMARILLA PIVOTS ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_val = df_1d['close'].values
     
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    sum_vm_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    sum_vm_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    # Calculate Camarilla levels from previous day
+    # R3 = Close + 1.1*(High - Low)
+    # S3 = Close - 1.1*(High - Low)
+    camarilla_range = high_1d - low_1d
+    r3 = close_1d_val + 1.1 * camarilla_range
+    s3 = close_1d_val - 1.1 * camarilla_range
     
-    vi_plus = sum_vm_plus / sum_tr
-    vi_minus = sum_vm_minus / sum_tr
+    # Align R3/S3 to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,11 +48,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,28 +61,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: VI+ > VI- (bullish trend), price above daily EMA50, volume spike
-            if (vi_plus[i] > vi_minus[i] and 
-                close[i] > ema50_1d_aligned[i] and 
+            # LONG: Price breaks above R3, above daily EMA34, volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: VI- > VI+ (bearish trend), price below daily EMA50, volume spike
-            elif (vi_minus[i] > vi_plus[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
+            # SHORT: Price breaks below S3, below daily EMA34, volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: VI- > VI+ (trend turns bearish) OR price crosses below daily EMA50
-            if (vi_minus[i] > vi_plus[i]) or (close[i] < ema50_1d_aligned[i]):
+            # EXIT LONG: Price falls back below R3 OR below daily EMA34
+            if (close[i] < r3_aligned[i]) or (close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: VI+ > VI- (trend turns bullish) OR price crosses above daily EMA50
-            if (vi_plus[i] > vi_minus[i]) or (close[i] > ema50_1d_aligned[i]):
+            # EXIT SHORT: Price rises back above S3 OR above daily EMA34
+            if (close[i] > s3_aligned[i]) or (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
