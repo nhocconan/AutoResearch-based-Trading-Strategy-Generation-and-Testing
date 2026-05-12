@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3_S4_Breakout_1dTrend_VolumeSpike"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ElderRay_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,43 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Data for 1d EMA34 trend filter and Camarilla pivot ===
+    # === 1w Data for trend filter (Alligator) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # === 1d Data for Elder Ray (Bull/Bear Power) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d EMA34 for trend filter ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === Williams Alligator on 1w (Jaw: SMA13, Teeth: SMA8, Lips: SMA5) ===
+    jaw_1w = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().values
+    teeth_1w = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().values
+    lips_1w = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().values
     
-    # === Calculate Camarilla levels (R3, S4) from previous day ===
-    rng = high_1d - low_1d
-    R3 = close_1d + 1.1 * rng / 2
-    S4 = close_1d - 2 * rng
+    jaw_1w_aligned = align_htf_to_ltf(prices, df_1w, jaw_1w)
+    teeth_1w_aligned = align_htf_to_ltf(prices, df_1w, teeth_1w)
+    lips_1w_aligned = align_htf_to_ltf(prices, df_1w, lips_1w)
     
-    # Align to 1h timeframe (previous day's levels available at open)
-    R3_1h = align_htf_to_ltf(prices, df_1d, R3)
-    S4_1h = align_htf_to_ltf(prices, df_1d, S4)
+    # === Elder Ray on 1d: Bull Power = High - EMA13, Bear Power = Low - EMA13 ===
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
+    
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
     # === Volume spike detection (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
-    # === Session filter: 08-20 UTC ===
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_mask = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(13, 13, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R3_1h[i]) or 
-            np.isnan(S4_1h[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
+        if (np.isnan(jaw_1w_aligned[i]) or 
+            np.isnan(teeth_1w_aligned[i]) or
+            np.isnan(lips_1w_aligned[i]) or
+            np.isnan(bull_power_1d_aligned[i]) or
+            np.isnan(bear_power_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,40 +70,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if not session_mask[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+        alligator_bull = lips_1w_aligned[i] > teeth_1w_aligned[i] > jaw_1w_aligned[i]
+        alligator_bear = lips_1w_aligned[i] < teeth_1w_aligned[i] < jaw_1w_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + above 1d EMA34 + volume spike
-            if (close[i] > R3_1h[i] and 
-                close[i] > ema34_1d_aligned[i] and
+            # Long: Alligator bullish + Bull Power positive + volume spike
+            if (alligator_bull and 
+                bull_power_1d_aligned[i] > 0 and
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S4 + below 1d EMA34 + volume spike
-            elif (close[i] < S4_1h[i] and 
-                  close[i] < ema34_1d_aligned[i] and
+            # Short: Alligator bearish + Bear Power negative + volume spike
+            elif (alligator_bear and 
+                  bear_power_1d_aligned[i] < 0 and
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below S4 (reversal) or below 1d EMA34
-            if close[i] < S4_1h[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Alligator turns bearish OR Bull Power turns negative
+            if alligator_bear or bull_power_1d_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above R3 (reversal) or above 1d EMA34
-            if close[i] > R3_1h[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Alligator turns bullish OR Bear Power turns positive
+            if alligator_bull or bear_power_1d_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
