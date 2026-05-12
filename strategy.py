@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_1dTrend_Volume_Momentum
-# Hypothesis: Price breaking above/below Keltner Channel (ATR-based) with 1-day EMA50 trend filter and volume momentum captures strong moves. Keltner adapts to volatility, reducing false breakouts in ranging markets. Trend filter ensures alignment with higher timeframe direction. Works in bull/bear by following 1d trend. Target: 20-40 trades/year.
+# 6h_Chaikin_Flow_1dTrend_Volume_Weighted_Momentum
+# Hypothesis: Chaikin Money Flow (CMF) measures institutional buying/selling pressure. Combined with 1-day EMA trend filter and volume-weighted momentum, it captures sustained moves in both bull and bear markets. CMF > 0 indicates buying pressure, CMF < 0 selling pressure. The 1d EMA ensures alignment with higher timeframe direction. Volume-weighting filters weak signals. Target: 20-40 trades/year.
 
-name = "4h_Keltner_Breakout_1dTrend_Volume_Momentum"
-timeframe = "4h"
+name = "6h_Chaikin_Flow_1dTrend_Volume_Weighted_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -28,25 +28,34 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Keltner Channel (20, 2.0) on 4h
-    # Middle = EMA20 of close
-    # Upper = Middle + 2 * ATR(20)
-    # Lower = Middle - 2 * ATR(20)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values  # Simple TR approximation
-    kc_upper = ema_20 + 2.0 * atr
-    kc_lower = ema_20 - 2.0 * atr
-
-    # Volume momentum: current > 1.5x average of last 20 bars
+    # Chaikin Money Flow (20) - measures money flow volume
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Money Flow Volume = Money Flow Multiplier * Volume
+    # CMF = 20-period SMA of Money Flow Volume / 20-period SMA of Volume
+    hl_range = high - low
+    # Avoid division by zero
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
+    mfm = ((close - low) - (high - close)) / hl_range
+    mfv = mfm * volume
+    
+    # Calculate 20-period averages
+    mfv_ma = pd.Series(mfv).rolling(window=20, min_periods=20).mean().values
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_momentum = volume > (1.5 * vol_ma)
+    
+    # Avoid division by zero
+    cmf = np.divide(mfv_ma, vol_ma, out=np.zeros_like(mfv_ma), where=vol_ma!=0)
+    
+    # Volume-weighted momentum: price change weighted by volume
+    price_change = close - np.roll(close, 1)
+    price_change[0] = 0  # First value has no previous
+    vol_weighted_momentum = pd.Series(price_change * volume).rolling(window=10, min_periods=10).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):  # Start after EMA50 warmup
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(kc_upper[i]) or 
-            np.isnan(kc_lower[i]) or np.isnan(volume_momentum[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(cmf[i]) or 
+            np.isnan(vol_weighted_momentum[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,30 +64,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Keltner Upper + 1d EMA50 uptrend + volume momentum
-            if (close[i] > kc_upper[i] and 
+            # LONG: Positive CMF (buying pressure) + 1d EMA50 uptrend + positive volume-weighted momentum
+            if (cmf[i] > 0.05 and 
                 close[i] > ema_50_1d_aligned[i] and 
-                volume_momentum[i]):
+                vol_weighted_momentum[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Keltner Lower + 1d EMA50 downtrend + volume momentum
-            elif (close[i] < kc_lower[i] and 
+            # SHORT: Negative CMF (selling pressure) + 1d EMA50 downtrend + negative volume-weighted momentum
+            elif (cmf[i] < -0.05 and 
                   close[i] < ema_50_1d_aligned[i] and 
-                  volume_momentum[i]):
+                  vol_weighted_momentum[i] < 0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Keltner Middle (reversion to mean)
-            if close[i] < ema_20[i]:
+            # EXIT LONG: CMF turns negative or momentum fades
+            if cmf[i] < -0.02 or vol_weighted_momentum[i] < -0.1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Keltner Middle (reversion to mean)
-            if close[i] > ema_20[i]:
+            # EXIT SHORT: CMF turns positive or momentum fades
+            if cmf[i] > 0.02 or vol_weighted_momentum[i] > 0.1:
                 signals[i] = 0.0
                 position = 0
             else:
