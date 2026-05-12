@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_1d_Three_Point_Trend_Breakout
-# Hypothesis: Uses 1d 3-point trend structure (higher highs/lows or lower highs/lows) to determine trend direction,
-# and enters on 4h breakouts of swing points in the direction of the 1d trend. Volume confirmation (>1.5x 20-period average)
-# filters for institutional participation. Designed for low trade frequency (<150 total 4h trades) to minimize fee drag.
-# Works in bull/bear markets by following the 1d structure while using 4h breaks for precise entries.
+# 1d_1w_Camarilla_R3_S3_Breakout_Volume
+# Hypothesis: Uses weekly Camarilla pivot levels (R3, S3) from 1w timeframe for structure.
+# Enters on 1d breakouts of these levels in the direction of the weekly trend (EMA34).
+# Volume confirmation (>1.5x 20-period average) filters for institutional participation.
+# Designed for low trade frequency (<150 total 1d trades) to minimize fee drag.
+# Works in bull/bear markets by following the weekly trend while using 1d breaks for precise entries.
 
-name = "4h_1d_Three_Point_Trend_Breakout"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R3_S3_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,96 +24,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-period average (on 4h timeframe)
+    # Volume spike: >1.5x 20-period average (on 1d timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Daily data for 3-point trend structure
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for Camarilla pivot levels and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 3-point trend: Higher Highs (HH) and Higher Lows (HL) for uptrend,
-    # Lower Highs (LH) and Lower Lows (LL) for downtrend
-    # We'll track consecutive HH/HL or LH/LL to establish trend
-    hh_hl = np.zeros(len(high_1d), dtype=bool)  # Higher High and Higher Low
-    lh_ll = np.zeros(len(high_1d), dtype=bool)  # Lower High and Lower Low
+    # Calculate Camarilla pivot levels for weekly timeframe
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R3 = Pivot + (Range * 1.1)
+    # S3 = Pivot - (Range * 1.1)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r3_1w = pivot_1w + (range_1w * 1.1)
+    s3_1w = pivot_1w - (range_1w * 1.1)
     
-    for i in range(2, len(high_1d)):
-        # Higher High: current high > previous high
-        # Higher Low: current low > previous low
-        hh = high_1d[i] > high_1d[i-1]
-        hl = low_1d[i] > low_1d[i-1]
-        hh_hl[i] = hh and hl
-        
-        # Lower High: current high < previous high
-        # Lower Low: current low < previous low
-        lh = high_1d[i] < high_1d[i-1]
-        ll = low_1d[i] < low_1d[i-1]
-        lh_ll[i] = lh and ll
+    # Weekly trend: EMA34 of close
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    uptrend_1w = close_1w > ema_34_1w
+    downtrend_1w = close_1w < ema_34_1w
     
-    # Determine trend state: need 2 consecutive HH/HL for uptrend, 2 consecutive LH/LL for downtrend
-    uptrend = np.zeros(len(high_1d), dtype=bool)
-    downtrend = np.zeros(len(high_1d), dtype=bool)
-    
-    uptrend_count = 0
-    downtrend_count = 0
-    
-    for i in range(len(high_1d)):
-        if hh_hl[i]:
-            uptrend_count += 1
-            downtrend_count = 0
-        elif lh_ll[i]:
-            downtrend_count += 1
-            uptrend_count = 0
-        else:
-            uptrend_count = 0
-            downtrend_count = 0
-        
-        uptrend[i] = uptrend_count >= 2
-        downtrend[i] = downtrend_count >= 2
-    
-    # Align 1d trend to 4h timeframe
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend)
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend)
-    
-    # 4h swing points for entry/exit
-    swing_high_4h = np.zeros(len(high), dtype=bool)
-    swing_low_4h = np.zeros(len(low), dtype=bool)
-    
-    for i in range(1, len(high)-1):
-        if high[i] > high[i-1] and high[i] > high[i+1]:
-            swing_high_4h[i] = True
-        if low[i] < low[i-1] and low[i] < low[i+1]:
-            swing_low_4h[i] = True
-    
-    # Calculate 4h swing high and low levels
-    last_swing_high_4h = np.full(len(high), np.nan)
-    last_swing_low_4h = np.full(len(low), np.nan)
-    
-    last_high_4h = np.nan
-    last_low_4h = np.nan
-    
-    for i in range(len(high)):
-        if swing_high_4h[i]:
-            last_high_4h = high[i]
-        if swing_low_4h[i]:
-            last_low_4h = low[i]
-        last_swing_high_4h[i] = last_high_4h
-        last_swing_low_4h[i] = last_low_4h
+    # Align weekly data to daily timeframe
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(uptrend_aligned[i]) or
-            np.isnan(downtrend_aligned[i]) or
-            np.isnan(last_swing_high_4h[i]) or
-            np.isnan(last_swing_low_4h[i])):
+    for i in range(34, n):
+        if (np.isnan(r3_1w_aligned[i]) or
+            np.isnan(s3_1w_aligned[i]) or
+            np.isnan(uptrend_1w_aligned[i]) or
+            np.isnan(downtrend_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -121,32 +74,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Uptrend on 1d + price breaks above 4h swing high + volume spike
-            if (uptrend_aligned[i] and 
-                close[i] > last_swing_high_4h[i] and 
+            # LONG: Uptrend on 1w + price breaks above R3 + volume spike
+            if (uptrend_1w_aligned[i] and 
+                close[i] > r3_1w_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend on 1d + price breaks below 4h swing low + volume spike
-            elif (downtrend_aligned[i] and 
-                  close[i] < last_swing_low_4h[i] and 
+            # SHORT: Downtrend on 1w + price breaks below S3 + volume spike
+            elif (downtrend_1w_aligned[i] and 
+                  close[i] < s3_1w_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 4h swing low OR 1d trend turns down
-            if (close[i] < last_swing_low_4h[i]) or \
-               downtrend_aligned[i]:
+            # EXIT LONG: Price breaks below S3 OR 1w trend turns down
+            if (close[i] < s3_1w_aligned[i]) or \
+               downtrend_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 4h swing high OR 1d trend turns up
-            if (close[i] > last_swing_high_4h[i]) or \
-               uptrend_aligned[i]:
+            # EXIT SHORT: Price breaks above R3 OR 1w trend turns up
+            if (close[i] > r3_1w_aligned[i]) or \
+               uptrend_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
