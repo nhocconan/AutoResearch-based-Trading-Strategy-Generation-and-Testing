@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_Breakout_DailyTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_KAMA_RSI_Trend_Strategy"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,38 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Weekly Pivot (from weekly data) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot calculation (standard floor trader pivot)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Weekly R1 and S1 (key levels for breakout)
-    weekly_range = high_1w - low_1w
-    r1_1w = pivot_1w + weekly_range
-    s1_1w = pivot_1w - weekly_range
-    
-    # Align weekly levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    
-    # === 1d EMA34 trend filter ===
+    # === 1d KAMA trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # KAMA calculation
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i == 0:
+            er[i] = 0
+        else:
+            sum_change = np.sum(change[max(0, i-9):i+1]) if i >= 9 else np.sum(change[:i+1])
+            sum_volatility = np.sum(volatility[max(0, i-9):i+1]) if i >= 9 else np.sum(volatility[:i+1])
+            er[i] = sum_change / sum_volatility if sum_volatility != 0 else 0
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # === 1d Volume spike filter ===
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (2.0 * vol_avg_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # === 1d RSI filter ===
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # === 4h Volume confirmation ===
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,10 +61,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,28 +72,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above weekly R1 + above daily EMA34 + volume spike
-            if (close[i] > r1_1w_aligned[i] and
-                close[i] > ema34_1d_aligned[i] and
-                vol_spike_1d_aligned[i] > 0.5):
+            # Long: Price above KAMA + RSI > 50 + volume spike
+            if (close[i] > kama_aligned[i] and
+                rsi_aligned[i] > 50 and
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below weekly S1 + below daily EMA34 + volume spike
-            elif (close[i] < s1_1w_aligned[i] and
-                  close[i] < ema34_1d_aligned[i] and
-                  vol_spike_1d_aligned[i] > 0.5):
+            # Short: Price below KAMA + RSI < 50 + volume spike
+            elif (close[i] < kama_aligned[i] and
+                  rsi_aligned[i] < 50 and
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below weekly S1 or below daily EMA34
-            if close[i] < s1_1w_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Price below KAMA or RSI < 40
+            if close[i] < kama_aligned[i] or rsi_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above weekly R1 or above daily EMA34
-            if close[i] > r1_1w_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Price above KAMA or RSI > 60
+            if close[i] > kama_aligned[i] or rsi_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
