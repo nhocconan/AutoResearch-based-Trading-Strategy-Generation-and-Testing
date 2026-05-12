@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4H_TRIX_VOLUME_SPIKE_CHOPPINESS_REGIME
-Hypothesis: TRIX (triple smoothed EMA) captures momentum shifts, and when combined 
-with volume spikes and a chop regime filter (Choppiness Index > 61.8 for mean reversion),
-it identifies high-probability reversals in both bull and bear markets. Uses 12h EMA50 
-as trend filter to avoid counter-trend trades. Designed for ~25-40 trades/year on 4h 
-to minimize fee drag while capturing momentum exhaustion points.
+12H_CAMARILLA_R1_S1_BREAKOUT_1D_VOLUME_SPIKE
+Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance.
+Price breaking above R1 or below S1 with volume spike indicates institutional interest.
+Volume confirmation reduces false breakouts. Designed for ~15-25 trades/year on 12h
+to minimize fee decay while capturing meaningful market moves in both bull and bear markets.
 """
-name = "4H_TRIX_VOLUME_SPIKE_CHOPPINESS_REGIME"
-timeframe = "4h"
+name = "12H_CAMARILLA_R1_S1_BREAKOUT_1D_VOLUME_SPIKE"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,53 +24,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX: triple EMA of price, then ROC
-    close_series = pd.Series(close)
-    ema1 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3.pct_change(1))  # ROC of triple EMA
-    trix = trix.fillna(0).values
+    # Volume spike: volume > 2.0 * 30-period average (strict filter to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Volume spike: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
-    
-    # Choppiness Index: determines if market is ranging (choppy) or trending
-    # High CHOP (>61.8) = ranging = good for mean reversion
-    # Low CHOP (<38.2) = trending = avoid mean reversion
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
-    
-    # Avoid division by zero
-    sum_atr = np.sum(atr) if np.sum(atr) > 0 else 1e-10
-    chop = 100 * np.log10(highest_high - lowest_low) / np.log10(atr_period) / sum_atr * atr_period
-    chop = np.nan_to_num(chop, nan=50.0)
-    
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1D data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate Camarilla levels from previous day's OHLC
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C,H,L are close, high, low of previous day
+    prev_close = df_1d['close'].shift(1).values  # previous day close
+    prev_high = df_1d['high'].shift(1).values    # previous day high
+    prev_low = df_1d['low'].shift(1).values      # previous day low
+    
+    # Calculate R1 and S1 for each day
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align daily Camarilla levels to 12h timeframe (wait for day to close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
-        if (np.isnan(trix[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(chop[i])):
+    for i in range(30, n):  # Start after warmup for volume MA
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,32 +63,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: TRIX turning up (momentum shift) + volume spike + choppy market (mean reversion) + above 12h EMA50 (uptrend bias)
-            if (trix[i] > trix[i-1] and  # TRIX rising
-                volume_spike[i] and 
-                chop[i] > 61.8 and  # Choppy/ranging market
-                close[i] > ema50_12h_aligned[i]):
+            # LONG: Price breaks above R1 with volume spike
+            if close[i] > camarilla_r1_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX turning down (momentum shift) + volume spike + choppy market + below 12h EMA50 (downtrend bias)
-            elif (trix[i] < trix[i-1] and  # TRIX falling
-                  volume_spike[i] and 
-                  chop[i] > 61.8 and  # Choppy/ranging market
-                  close[i] < ema50_12h_aligned[i]):
+            # SHORT: Price breaks below S1 with volume spike
+            elif close[i] < camarilla_s1_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX turning down OR chop drops below 38.2 (trending market)
-            if (trix[i] < trix[i-1] or chop[i] < 38.2):
+            # EXIT LONG: Price returns below R1 (false breakout) or reverses below midpoint
+            # Midpoint between R1 and S1 for re-entry prevention
+            midpoint = (camarilla_r1_aligned[i] + camarilla_s1_aligned[i]) / 2
+            if close[i] < camarilla_r1_aligned[i] or close[i] < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX turning up OR chop drops below 38.2 (trending market)
-            if (trix[i] > trix[i-1] or chop[i] < 38.2):
+            # EXIT SHORT: Price returns above S1 or reverses above midpoint
+            midpoint = (camarilla_r1_aligned[i] + camarilla_s1_aligned[i]) / 2
+            if close[i] > camarilla_s1_aligned[i] or close[i] > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
