@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_12hVolatilityFilter_Volume
-# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) on 4h for trend direction,
-# filtered by 12h volatility regime (low ATR ratio = trend-favorable),
-# with volume confirmation (>1.5x 20-period average) to ensure institutional participation.
-# KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends.
-# Designed for low trade frequency (<400 total 4h trades) to minimize fee drag.
-# Works in bull/bear markets by following adaptive trend with volatility filter to avoid chop.
+# 1h_4d1d_Camarilla_R1S1_Breakout_4hTrend_Volume
+# Hypothesis: Uses daily Camarilla pivot levels (R1/S1) for breakout entries on 1h timeframe.
+# Trend filtered by 4h EMA50 to align with higher timeframe direction.
+# Volume confirmation (>1.5x 20-period average) ensures institutional participation.
+# Session filter (08-20 UTC) reduces noise trades.
+# Designed for low trade frequency (<200 total 1h trades) to minimize fee drag.
+# Works in bull/bear markets by following 4h trend direction while using daily Camarilla levels for precise entries.
 
-name = "4h_KAMA_Trend_12hVolatilityFilter_Volume"
-timeframe = "4h"
+name = "1h_4d1d_Camarilla_R1S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -25,55 +25,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-period average (on 4h timeframe)
+    # Volume spike: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Calculate KAMA on 4h close
-    def kama(close, er_len=10, fast_len=2, slow_len=30):
-        change = np.abs(np.diff(close, n=er_len))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1)) ** 2
-        kama_out = np.full_like(close, np.nan, dtype=float)
-        kama_out[er_len] = close[er_len]
-        for i in range(er_len+1, len(close)):
-            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
-        return kama_out
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
-    kama_val = kama(close)
-    
-    # 12h data for volatility filter (ATR ratio)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # 4h data for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate ATR(14) on 12h
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([np.array([np.nan]), tr])
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate ATR ratio: current ATR / 50-period average ATR
-    atr_ma_50 = pd.Series(atr_12h).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_12h / atr_ma_50
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align indicators to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, prices, kama_val)  # same timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio)
+    # Previous day's values for Camarilla calculation
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # Handle first value
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    # Camarilla formulas
+    range_1d = prev_high - prev_low
+    camarilla_r1 = prev_close + (range_1d * 1.1 / 12)
+    camarilla_s1 = prev_close - (range_1d * 1.1 / 12)
+    
+    # Align daily indicators to 1h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(kama_aligned[i]) or
-            np.isnan(atr_ratio_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_50_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,37 +83,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR ratio < 1.0 (below average volatility)
-        vol_filter = atr_ratio_aligned[i] < 1.0
-        
         if position == 0:
-            # LONG: Price above KAMA + volume spike + low volatility regime
-            if (close[i] > kama_aligned[i] and 
+            # LONG: Price breaks above Camarilla R1 + volume spike + price above 4h EMA50 + session
+            if (close[i] > camarilla_r1_aligned[i] and 
                 volume_spike[i] and 
-                vol_filter):
-                signals[i] = 0.25
+                close[i] > ema_50_4h_aligned[i] and
+                session_filter[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price below KAMA + volume spike + low volatility regime
-            elif (close[i] < kama_aligned[i] and 
+            # SHORT: Price breaks below Camarilla S1 + volume spike + price below 4h EMA50 + session
+            elif (close[i] < camarilla_s1_aligned[i] and 
                   volume_spike[i] and 
-                  vol_filter):
-                signals[i] = -0.25
+                  close[i] < ema_50_4h_aligned[i] and
+                  session_filter[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA
-            if close[i] < kama_aligned[i]:
+            # EXIT LONG: Price re-enters below Camarilla R1 OR closes below 4h EMA50
+            if (close[i] < camarilla_r1_aligned[i]) or \
+               close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA
-            if close[i] > kama_aligned[i]:
+            # EXIT SHORT: Price re-enters above Camarilla S1 OR closes above 4h EMA50
+            if (close[i] > camarilla_s1_aligned[i]) or \
+               close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
