@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_12h_1d_Donchian_Breakout_VolumeTrend
-Hypothesis: 4-hour Donchian(20) breakouts with 12h EMA trend filter and volume confirmation.
-Works in both bull and bear markets by only taking trades in direction of 12h trend.
-Targets 4h timeframe to achieve 20-50 trades/year. Uses volume spike to filter false breakouts.
+12h_MonetaryPulse_With_Volume_Regime
+Hypothesis: 12-hour strategy combining monetary pulse (price change over 3 periods) with volume confirmation and Choppiness Index regime filter.
+Only takes long when monetary pulse is positive, volume > 2x average, and market is trending (CHOP < 38.2).
+Short when monetary pulse negative, volume spike, and trending.
+Uses 1d EMA200 as additional trend filter to avoid counter-trend trades in strong trends.
+Designed for low trade frequency (target: 15-25/year) to minimize fee drag while capturing sustained moves.
+Works in bull/bear via regime filter and dual trend confirmation.
 """
 
-name = "4h_12h_1d_Donchian_Breakout_VolumeTrend"
-timeframe = "4h"
+name = "12h_MonetaryPulse_With_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,38 +19,57 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >2.0x 30-period average (on 4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Monetary pulse: price change over 3 periods (normalized)
+    price_change = (close - np.roll(close, 3)) / np.roll(close, 3)
+    price_change[0:3] = 0  # first 3 values invalid
+    
+    # Volume confirmation: >2.0x 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Choppiness Index regime filter (14-period)
+    def calculate_chop(high, low, close, window=14):
+        atr = []
+        for i in range(len(high)):
+            if i == 0:
+                tr = high[i] - low[i]
+            else:
+                tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            atr.append(tr)
+        
+        atr = np.array(atr)
+        tr_sum = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
+        hh = pd.Series(high).rolling(window=window, min_periods=window).max().values
+        ll = pd.Series(low).rolling(window=window, min_periods=window).min().values
+        denominator = hh - ll
+        chop = np.where(denominator != 0, 100 * np.log10(tr_sum / denominator) / np.log10(window), 50)
+        return chop
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    chop = calculate_chop(high, low, close, 14)
+    trending = chop < 38.2  # trending regime
+    
+    # 1d EMA200 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_12h_aligned[i])):
+    for i in range(100, n):
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,32 +78,36 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high + volume spike + price above 12h EMA50
-            if (close[i] > donchian_high[i] and 
+            # LONG: Positive monetary pulse + volume spike + trending + price above 1d EMA200
+            if (price_change[i] > 0.01 and 
                 volume_spike[i] and 
-                close[i] > ema_50_12h_aligned[i]):
+                trending[i] and 
+                close[i] > ema_200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low + volume spike + price below 12h EMA50
-            elif (close[i] < donchian_low[i] and 
+            # SHORT: Negative monetary pulse + volume spike + trending + price below 1d EMA200
+            elif (price_change[i] < -0.01 and 
                   volume_spike[i] and 
-                  close[i] < ema_50_12h_aligned[i]):
+                  trending[i] and 
+                  close[i] < ema_200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters Donchian channel OR closes below 12h EMA50
-            if (close[i] > donchian_low[i] and close[i] < donchian_high[i]) or \
-               close[i] < ema_50_12h_aligned[i]:
+            # EXIT LONG: Monetary pulse turns negative OR price below 1d EMA200 OR chop > 61.8 (ranging)
+            if (price_change[i] < 0 or 
+                close[i] < ema_200_1d_aligned[i] or 
+                chop[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters Donchian channel OR closes above 12h EMA50
-            if (close[i] > donchian_low[i] and close[i] < donchian_high[i]) or \
-               close[i] > ema_50_12h_aligned[i]:
+            # EXIT SHORT: Monetary pulse turns positive OR price above 1d EMA200 OR chop > 61.8 (ranging)
+            if (price_change[i] > 0 or 
+                close[i] > ema_200_1d_aligned[i] or 
+                chop[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
