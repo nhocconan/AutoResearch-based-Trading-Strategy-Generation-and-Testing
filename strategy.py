@@ -1,16 +1,37 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS
-Hypothesis: Price breaking above/below Camarilla R1/S1 levels (derived from 1d high-low-close) with 1d EMA34 trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. R1/S1 levels are tighter than R3/S3, increasing signal frequency but still filtered by trend and volume. Works in bull/bear by following 1d trend direction. Target: 20-50 trades/year on 4h.
+6h_FisherTransform_1dTrend_VolumeFilter
+Hypothesis: Ehlers Fisher Transform (length=8) on 6h provides early reversal signals. 
+Filtered by 1d EMA50 trend direction and volume > 1.3x 20-period average. 
+Trades only in direction of 1d trend to avoid counter-trend whipsaws. 
+Designed for low trade frequency (~20-40/year) to minimize fee drag on 6h timeframe.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS"
-timeframe = "4h"
+name = "6h_FisherTransform_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def fisher_transform(hlcc4, length=8):
+    """Ehlers Fisher Transform. Returns values in [-inf, +inf]."""
+    # Normalize price to [-1, 1] range
+    max_h = np.max(hlcc4)
+    min_l = np.min(hlcc4)
+    if max_h == min_l:
+        return np.zeros_like(hlcc4)
+    value1 = 2 * ((hlcc4 - min_l) / (max_h - min_l) - 0.5)
+    # Smooth
+    value1 = np.where(np.isnan(value1), 0, value1)
+    value2 = np.copy(value1)
+    for i in range(1, len(value1)):
+        value2[i] = 0.33 * value1[i] + 0.67 * value2[i-1]
+    # Fisher transform
+    value2 = np.clip(value2, -0.999, 0.999)
+    fish = 0.5 * np.log((1 + value2) / (1 - value2)) * np.sqrt(2)
+    return fish
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,45 +43,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
+    # Calculate HLCC4 for Fisher Transform: (High + Low + 2*Close)/4
+    hlcc4 = (high + low + 2 * close) / 4
+
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
 
-    # Calculate Camarilla levels from 1d data
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C = close, H = high, L = low of previous day
+    # 1d EMA50 trend filter
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Shift by 1 to use previous day's data
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = np.nan
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    # Fisher Transform on 6h
+    fish = fisher_transform(hlcc4, length=8)
 
-    camarilla_upper = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
-    camarilla_lower = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
-
-    # Align Camarilla levels to 4h timeframe
-    camarilla_upper_aligned = align_htf_to_ltf(prices, df_1d, camarilla_upper)
-    camarilla_lower_aligned = align_htf_to_ltf(prices, df_1d, camarilla_lower)
-
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-
-    # Volume spike: >1.5x 20-period average (4h)
+    # Volume filter: >1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):  # Start after EMA34 warmup
-        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(fish[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,30 +75,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 + 1d EMA34 uptrend + volume spike
-            if (close[i] > camarilla_upper_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_spike[i]):
+            # LONG: Fisher crosses above -1.5 + 1d uptrend + volume filter
+            if (fish[i] > -1.5 and fish[i-1] <= -1.5 and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S1 + 1d EMA34 downtrend + volume spike
-            elif (close[i] < camarilla_lower_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: Fisher crosses below +1.5 + 1d downtrend + volume filter
+            elif (fish[i] < 1.5 and fish[i-1] >= 1.5 and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Camarilla S1 (reversal level)
-            if close[i] < camarilla_lower_aligned[i]:
+            # EXIT LONG: Fisher crosses below 0 (exit long)
+            if fish[i] < 0 and fish[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Camarilla R1 (reversal level)
-            if close[i] > camarilla_upper_aligned[i]:
+            # EXIT SHORT: Fisher crosses above 0 (exit short)
+            if fish[i] > 0 and fish[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
