@@ -1,12 +1,13 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 4h_Combined_Signal_Trend_Momentum
-# Hypothesis: Combining EMA trend, RSI momentum, and volume confirmation on 4h timeframe
-# with 12h EMA filter reduces false signals and captures momentum in both bull and bear markets.
-# Uses tight entry conditions to limit trades and avoid fee drag.
+# 1d_KAMA_Direction_RSI_Trend_Follow
+# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) to determine trend direction
+# combined with RSI for momentum confirmation on the daily timeframe. Weekly trend filter
+# ensures alignment with higher timeframe momentum. Designed to capture sustained moves
+# in both bull and bear markets while minimizing whipsaws through adaptive smoothing.
+# Low trade frequency expected due to daily timeframe and strict trend alignment.
 
-name = "4h_Combined_Signal_Trend_Momentum"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_Trend_Follow"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,19 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 12h Trend Filter ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # === Weekly Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # === EMA Trend (4h) ===
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # === KAMA (10, 2, 30) on daily close ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])) > 0)  # placeholder, will compute properly below
+    # Recompute volatility as sum of absolute changes over window
+    volatility = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=30, min_periods=30).sum().values
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # === RSI Momentum (4h) ===
+    # === RSI (14) on daily close ===
     delta = pd.Series(close).diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -44,19 +57,14 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # === Volume Confirmation (4h) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / (vol_ma + 1e-10)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure all indicators ready
+    start_idx = 40  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h[i]) or np.isnan(ema_20[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_34_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,34 +73,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price above EMA20, RSI > 50 and rising, above 12h EMA50, volume above average
-            if (close[i] > ema_20[i] and 
-                rsi[i] > 50 and rsi[i] > rsi[i-1] and 
-                close[i] > ema_50_4h[i] and 
-                vol_ratio[i] > 1.2):
+            # LONG: Price above KAMA, RSI > 50, and above weekly EMA34
+            if (close[i] > kama[i] and 
+                rsi[i] > 50 and 
+                close[i] > ema_34_1d[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below EMA20, RSI < 50 and falling, below 12h EMA50, volume above average
-            elif (close[i] < ema_20[i] and 
-                  rsi[i] < 50 and rsi[i] < rsi[i-1] and 
-                  close[i] < ema_50_4h[i] and 
-                  vol_ratio[i] > 1.2):
+            # SHORT: Price below KAMA, RSI < 50, and below weekly EMA34
+            elif (close[i] < kama[i] and 
+                  rsi[i] < 50 and 
+                  close[i] < ema_34_1d[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price below EMA20 or trend change (below 12h EMA50) or RSI < 40
-            if (close[i] < ema_20[i] or 
-                close[i] < ema_50_4h[i] or 
-                rsi[i] < 40):
+            # EXIT LONG: Price below KAMA or below weekly EMA34
+            if (close[i] < kama[i] or 
+                close[i] < ema_34_1d[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above EMA20 or trend change (above 12h EMA50) or RSI > 60
-            if (close[i] > ema_20[i] or 
-                close[i] > ema_50_4h[i] or 
-                rsi[i] > 60):
+            # EXIT SHORT: Price above KAMA or above weekly EMA34
+            if (close[i] > kama[i] or 
+                close[i] > ema_34_1d[i]):
                 signals[i] = 0.0
                 position = 0
             else:
