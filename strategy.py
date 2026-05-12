@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_Trend_Volume
-# Hypothesis: Use Camarilla pivot levels (R1/S1) from 1d timeframe as dynamic support/resistance.
-# Enter long when price breaks above R1 with volume confirmation (>2x 20-bar avg) and price above 1d EMA50 (uptrend).
-# Enter short when price breaks below S1 with volume confirmation and price below 1d EMA50 (downtrend).
-# Exit when price returns to the 1d EMA50 (mean reversion to trend) or on opposite signal.
-# Uses 12h timeframe to limit trades (target: 50-150 over 4 years) and reduce fee drift.
-# Works in bull/bear via EMA50 trend filter and volatility-adjusted breakout.
+# 4h_True_Strength_Index_Momentum
+# Hypothesis: Use True Strength Index (TSI) to capture momentum with reduced whipsaw, confirmed by 1d trend (EMA34) and volume spikes (>1.8x 20-period average). Enter long when TSI crosses above its signal line and price > 1d EMA34 with volume spike; short when TSI crosses below signal line and price < 1d EMA34 with volume spike. Exit on opposite TSI crossover. Targets 20-40 trades/year to minimize fee decay while capturing momentum in both bull and bear markets via trend filter.
 
-name = "12h_Camarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_True_Strength_Index_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,40 +19,54 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_ = prices['open'].values
 
-    # Get 1d data for Camarilla pivots and EMA50
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Camarilla levels (R1, S1) from prior 1d bar
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
-    hl_range_1d = high_1d - low_1d
-    r1_1d = close_1d + 1.1 * hl_range_1d / 12
-    s1_1d = close_1d - 1.1 * hl_range_1d / 12
+    # True Strength Index (TSI) calculation
+    # Step 1: Price change and absolute price change
+    price_change = close - np.roll(close, 1)
+    abs_price_change = np.abs(price_change)
+    price_change[0] = 0  # First value has no previous close
+    abs_price_change[0] = 0
 
-    # Align Camarilla levels to 12h (wait for 1d bar to close)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Step 2: Double smoothed EMA of price change and abs price change
+    # First smoothing (25-period EMA)
+    pc_smoothed1 = pd.Series(price_change).ewm(span=25, adjust=False, min_periods=25).mean().values
+    apc_smoothed1 = pd.Series(abs_price_change).ewm(span=25, adjust=False, min_periods=25).mean().values
+    # Second smoothing (13-period EMA)
+    pc_smoothed2 = pd.Series(pc_smoothed1).ewm(span=13, adjust=False, min_periods=13).mean().values
+    apc_smoothed2 = pd.Series(apc_smoothed1).ewm(span=13, adjust=False, min_periods=13).mean().values
 
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Avoid division by zero
+    apc_smoothed2_safe = np.where(apc_smoothed2 == 0, 1e-10, apc_smoothed2)
+    tsi = (pc_smoothed2 / apc_smoothed2_safe) * 100
 
-    # Volume confirmation: volume > 2x 20-period average
+    # Signal line (7-period EMA of TSI)
+    tsi_signal = pd.Series(tsi).ewm(span=7, adjust=False, min_periods=7).mean().values
+
+    # TSI crossover signals
+    tsi_cross_up = (tsi > tsi_signal) & (np.roll(tsi, 1) <= np.roll(tsi_signal, 1))
+    tsi_cross_down = (tsi < tsi_signal) & (np.roll(tsi, 1) >= np.roll(tsi_signal, 1))
+
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # warmup for EMA50 and rolling
+    for i in range(25, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(tsi[i]) or np.isnan(tsi_signal[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,30 +75,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price > R1 + volume spike + price > EMA50 (uptrend)
-            if (close[i] > r1_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 2.0 and
-                close[i] > ema50_1d_aligned[i]):
+            # LONG: TSI crosses above signal line + price > 1d EMA34 + volume spike
+            if (tsi_cross_up[i] and 
+                close[i] > ema34_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.8):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price < S1 + volume spike + price < EMA50 (downtrend)
-            elif (close[i] < s1_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 2.0 and
-                  close[i] < ema50_1d_aligned[i]):
+            # SHORT: TSI crosses below signal line + price < 1d EMA34 + volume spike
+            elif (tsi_cross_down[i] and 
+                  close[i] < ema34_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.8):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to EMA50 (mean reversion to trend)
-            if close[i] <= ema50_1d_aligned[i]:
+            # EXIT LONG: TSI crosses below signal line
+            if tsi_cross_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to EMA50 (mean reversion to trend)
-            if close[i] >= ema50_1d_aligned[i]:
+            # EXIT SHORT: TSI crosses above signal line
+            if tsi_cross_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
