@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "4h"
+name = "12h_KAMA_RSI_ChopFilter_v3"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,37 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # KAMA parameters
+    kama_fast = 2
+    kama_slow = 30
     
-    # 1d volume filter: volume > 1.5x 20-period average
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, k=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close, k=1)), axis=0) if False else np.abs(np.diff(close, k=1)).sum()  # placeholder for vectorized sum
+    # Proper ER calculation using pandas for simplicity
+    close_series = pd.Series(close)
+    change = abs(close_series.diff(10))
+    volatility = close_series.diff(1).abs().rolling(10, min_periods=1).sum()
+    er = change / volatility.replace(0, np.nan)
     
-    # 1d price data for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Smoothing constants
+    sc = (er * (2/(kama_fast+1) - 2/(kama_slow+1)) + 2/(kama_slow+1)) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
     
-    # Previous day's Camarilla levels (R3/S3)
-    range_1d = high_1d - low_1d
-    camarilla_h3 = close_1d + range_1d * 1.1 / 4
-    camarilla_l3 = close_1d - range_1d * 1.1 / 4
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    ma_up = up.ewm(com=13, adjust=False, min_periods=14).mean()
+    ma_down = down.ewm(com=13, adjust=False, min_periods=14).mean()
+    rsi = 100 - (100 / (1 + ma_up / ma_down))
+    rsi = rsi.values
     
-    # Align to 4h
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Choppiness Index (14) - using high/low/close
+    atr1 = pd.Series(high - low).rolling(14, min_periods=14).mean()
+    atr2 = pd.Series(abs(high - np.roll(close, 1))).rolling(14, min_periods=14).mean()
+    atr3 = pd.Series(abs(low - np.roll(close, 1))).rolling(14, min_periods=14).mean()
+    tr = np.maximum(atr1, np.maximum(atr2, atr3))
+    atr_sum = tr.rolling(14, min_periods=14).sum()
+    highest_high = pd.Series(high).rolling(14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop = chop.fillna(50).values  # neutral when undefined
+    
+    # Signals: KAMA direction + RSI extreme + Chop filter
+    kama_up = kama > np.roll(kama, 1)
+    kama_down = kama < np.roll(kama, 1)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 20  # need enough data for indicators
-    
-    for i in range(start_idx, n):
-        # Skip if 1d trend or volume data not ready
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
+    for i in range(14, n):  # wait for chop calculation
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,32 +77,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above H3 with 1d uptrend and volume confirmation
-            if (high[i] > camarilla_h3_aligned[i] and 
-                close[i] > camarilla_h3_aligned[i] and
-                close[i] > ema50_1d_aligned[i] and  # 1d uptrend
-                volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
+            # Long: KAMA up, RSI oversold, not choppy
+            if kama_up[i] and rsi[i] < 30 and chop[i] > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below L3 with 1d downtrend and volume confirmation
-            elif (low[i] < camarilla_l3_aligned[i] and 
-                  close[i] < camarilla_l3_aligned[i] and
-                  close[i] < ema50_1d_aligned[i] and  # 1d downtrend
-                  volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
+            # Short: KAMA down, RSI overbought, not choppy
+            elif kama_down[i] and rsi[i] > 70 and chop[i] > 61.8:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price breaks below L3 or reverses against trend
-            if (low[i] < camarilla_l3_aligned[i] or 
-                close[i] < ema50_1d_aligned[i]):
+            # Exit long: KAMA down or RSI overbought
+            if kama_down[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price breaks above H3 or reverses against trend
-            if (high[i] > camarilla_h3_aligned[i] or 
-                close[i] > ema50_1d_aligned[i]):
+            # Exit short: KAMA up or RSI oversold
+            if kama_up[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
