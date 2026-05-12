@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_Signal_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filter_3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -32,7 +32,7 @@ def generate_signals(prices):
     r1 = p + (high_1d - low_1d) * 1.1 / 12
     s1 = p - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h (wait for daily close)
+    # Align Camarilla levels to 4h (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -40,10 +40,18 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_avg)
     
-    # Momentum filter: 4-period rate of change > 0
+    # Price momentum: 4-period rate of change > 0
     roc4 = np.zeros_like(close)
     roc4[4:] = (close[4:] - close[:-4]) / close[:-4]
     momentum = roc4 > 0
+    
+    # Add hysteresis: require price to be outside pivot band for 2 consecutive bars
+    outside_long = np.zeros(n, dtype=bool)
+    outside_short = np.zeros(n, dtype=bool)
+    
+    for i in range(1, n):
+        outside_long[i] = (close[i] > r1_aligned[i]) and (outside_long[i-1] or (close[i-1] > r1_aligned[i]))
+        outside_short[i] = (close[i] < s1_aligned[i]) and (outside_short[i-1] or (close[i-1] < s1_aligned[i]))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,13 +70,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 1d EMA34 + volume spike + upward momentum
-            if (close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and 
+            # Long: price outside R1 band for 2 bars + above 1d EMA34 + volume spike + upward momentum
+            if (outside_long[i] and close[i] > ema_34_1d_aligned[i] and 
                 vol_spike[i] and momentum[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 1d EMA34 + volume spike + downward momentum
-            elif (close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and 
+            # Short: price outside S1 band for 2 bars + below 1d EMA34 + volume spike + downward momentum
+            elif (outside_short[i] and close[i] < ema_34_1d_aligned[i] and 
                   vol_spike[i] and not momentum[i]):
                 signals[i] = -0.25
                 position = -1
