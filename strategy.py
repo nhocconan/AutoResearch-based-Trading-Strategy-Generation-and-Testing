@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: On 12h timeframe, enter long when price closes above daily R1 with close > daily EMA34 and volume > 2x average.
-# Enter short when price closes below daily S1 with close < daily EMA34 and volume > 2x average.
-# Exit when price crosses daily EMA34 (trend reversal).
-# Uses daily trend and volume confirmation to reduce false breakouts. Targets 15-30 trades/year for low fee drag.
-# Works in bull markets via breakouts at R1 and in bear via short reversals at S1.
+# 6h_MultiTimeframe_RSI_Momentum_Trend
+# Hypothesis: Combine RSI momentum on 6h with 1d trend filter and volume confirmation.
+# Long when RSI(6h) > 55 and rising, price > 1d EMA50, and volume > 1.5x average.
+# Short when RSI(6h) < 45 and falling, price < 1d EMA50, and volume > 1.5x average.
+# Exit when RSI crosses back to 50 level. Designed to work in both bull and bear markets
+# by following the daily trend while using 6s momentum for entry timing.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_MultiTimeframe_RSI_Momentum_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,35 +19,34 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot calculation and EMA34
+    # Load daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     
-    # Calculate pivot point and range
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_range = daily_high - daily_low
+    # 1-day EMA50 for trend filter
+    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Camarilla R1 and S1 levels
-    r1 = daily_pivot + daily_range * 1.083
-    s1 = daily_pivot - daily_range * 1.083
+    # 6h RSI(14) for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align daily levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # RSI slope for momentum confirmation (3-period change)
+    rsi_slope = pd.Series(rsi_values).diff(3).values
     
     # Volume confirmation: 20-period moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,8 +58,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(rsi_slope[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,32 +67,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema1d_trend = ema34_1d_aligned[i]
+        ema_trend = ema50_1d_aligned[i]
+        rsi_val = rsi_values[i]
+        rsi_slope_val = rsi_slope[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: Price closes above R1 with volume > 2x average and close > daily EMA34
-            if close[i] > r1_val and close[i] > ema1d_trend and volume[i] > 2.0 * vol_ma_val:
+            # LONG: RSI > 55 and rising, price above daily EMA50, volume > 1.5x average
+            if rsi_val > 55 and rsi_slope_val > 0 and close[i] > ema_trend and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below S1 with volume > 2x average and close < daily EMA34
-            elif close[i] < s1_val and close[i] < ema1d_trend and volume[i] > 2.0 * vol_ma_val:
+            # SHORT: RSI < 45 and falling, price below daily EMA50, volume > 1.5x average
+            elif rsi_val < 45 and rsi_slope_val < 0 and close[i] < ema_trend and volume[i] > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below daily EMA34 (trend reversal)
-            if close[i] < ema1d_trend:
+            # EXIT LONG: RSI falls back to 50 or below
+            if rsi_val <= 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above daily EMA34 (trend reversal)
-            if close[i] > ema1d_trend:
+            # EXIT SHORT: RSI rises back to 50 or above
+            if rsi_val >= 50:
                 signals[i] = 0.0
                 position = 0
             else:
