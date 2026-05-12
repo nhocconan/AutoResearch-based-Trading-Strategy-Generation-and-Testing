@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_4hEMA20
-# Hypothesis: Breakout above Camarilla R3 or below S3 from daily pivot, filtered by 1d EMA50 trend and volume confirmation. Exit on 4h EMA20 crossover to reduce whipsaw. Target 20-40 trades/year (80-160 total) to minimize fee drag while capturing strong momentum moves in both bull and bear markets.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_4hEMA20_v2
+# Hypothesis: Breakout above Camarilla R3 or below S3 from daily pivot, filtered by 1d EMA50 trend and volume confirmation. Exit on 4h EMA20 crossover to reduce whipsaw. Tightened entry conditions to reduce trade frequency and avoid overtrading. Target 20-40 trades/year (80-160 total) to minimize fee drag while capturing strong momentum moves in both bull and bear markets.
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_4hEMA20"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_4hEMA20_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -52,9 +52,9 @@ def generate_signals(prices):
     # 4h EMA20 for dynamic exit
     ema20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average (stricter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirm = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
