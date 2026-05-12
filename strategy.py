@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER
+# 12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER
 # Hypothesis: Camarilla pivot levels (R3/S3) from daily chart act as strong support/resistance.
 # Breakouts above R3 or below S3 with 1d trend filter capture momentum moves.
 # Works in bull markets (breakouts continuation) and bear markets (reversals at extremes).
-# Target: 20-30 trades/year on 4h timeframe.
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
 
-name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER"
-timeframe = "4h"
+name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -43,7 +43,7 @@ def generate_signals(prices):
     # EMA34 for trend filter
     ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
