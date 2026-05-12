@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Stochastic_Divergence_1dTrend_Confirmation
-Hypothesis: Stochastic oscillator (14,3,3) identifies overbought/oversold conditions on 6h chart.
-Divergence between price and Stochastic (bullish: price makes lower low, Stoch makes higher low;
-bearish: price makes higher high, Stoch makes lower high) signals potential reversals.
-Trades are only taken in the direction of the 1d EMA50 trend to avoid counter-trend whipsaws.
-Volume confirmation (>1.3x average) filters low-momentum signals.
-Works in bull/bear by following 1d trend direction, reducing false signals in ranging markets.
+12h_KAMA_Trend_With_PriceChannel_Exit
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) identifies the trend direction on 12h, while price crossing above/below the 12h Donchian(20) channel acts as entry trigger. This combination adapts to both trending and ranging markets, reducing whipsaw. Works in bull/bear by following KAMA trend. Uses 1w trend filter for higher timeframe confirmation to avoid counter-trend trades.
 """
 
-name = "6h_Stochastic_Divergence_1dTrend_Confirmation"
-timeframe = "6h"
+name = "12h_KAMA_Trend_With_PriceChannel_Exit"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,41 +20,55 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d EMA50 trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate KAMA on 12h data
+    # Efficiency Ratio (ER) = |close - close[10]| / sum(|close - close[1]|) over 10 periods
+    change = np.abs(close - np.roll(close, 10))
+    volatility = np.sum(np.abs(np.diff(close, axis=0)), axis=0) if len(close) > 1 else 0
+    # Correct volatility calculation for rolling sum
+    volatility = np.zeros_like(close)
+    for i in range(1, len(close)):
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+        if i >= 10:
+            volatility[i] -= np.abs(close[i-10] - close[i-11]) if i >= 11 else 0
+    # Simpler: use pandas for ER calculation
+    close_series = pd.Series(close)
+    change = abs(close_series - close_series.shift(10))
+    volatility = abs(close_series.diff()).rolling(window=10, min_periods=1).sum()
+    er = change / volatility
+    er = er.fillna(0).values
     
-    # Stochastic oscillator (14,3,3) on 6h
-    # %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
-    # %D = SMA of %K, period 3
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    k = 100 * (close - lowest_low) / (highest_high - lowest_low)
-    d = pd.Series(k).rolling(window=3, min_periods=3).mean().values
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Volatility filter: average true range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume spike: >1.3x 20-period average (6h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * vol_ma)
+    # Calculate Donchian channel (20-period) on 12h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # 1w EMA40 trend filter
+    close_1w = df_1w['close'].values
+    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after EMA50 and Stochastic warmup
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(k[i]) or np.isnan(d[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_spike[i])):
+    for i in range(20, n):  # Start after Donchian warmup
+        if (np.isnan(kama[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_40_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,44 +77,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Bullish divergence: price makes lower low, Stoch makes higher low
-            bullish_div = (low[i] < low[i-1] and 
-                          k[i] > d[i] and 
-                          k[i] < 30 and  # Oversold
-                          low[i] < low[i-2] and 
-                          k[i] > k[i-2])
-            
-            # Bearish divergence: price makes higher high, Stoch makes lower high
-            bearish_div = (high[i] > high[i-1] and 
-                          k[i] < d[i] and 
-                          k[i] > 70 and  # Overbought
-                          high[i] > high[i-2] and 
-                          k[i] < k[i-2])
-            
-            # LONG: Bullish divergence + 1d EMA50 uptrend + volume spike
-            if (bullish_div and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_spike[i]):
+            # LONG: Price breaks above Donchian high + KAMA uptrend + 1w uptrend
+            if (close[i] > donchian_high[i] and 
+                close[i] > kama[i] and 
+                close[i] > ema_40_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish divergence + 1d EMA50 downtrend + volume spike
-            elif (bearish_div and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: Price breaks below Donchian low + KAMA downtrend + 1w downtrend
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < kama[i] and 
+                  close[i] < ema_40_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bearish divergence or price crosses below EMA50
-            if (bearish_div or close[i] < ema_50_1d_aligned[i]):
+            # EXIT LONG: Price closes below KAMA (trend reversal)
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bullish divergence or price crosses above EMA50
-            if (bullish_div or close[i] > ema_50_1d_aligned[i]):
+            # EXIT SHORT: Price closes above KAMA (trend reversal)
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
