@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_DynamicExit
-# Hypothesis: Reduce trade frequency by requiring stronger momentum - price must close beyond R3/S3 with volume surge and 1d trend confirmation. Exit on opposite level touch or momentum failure. Designed for fewer, higher-quality trades in both bull and bear markets.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_SignalStrength
+# Hypothesis: Use signal strength based on distance beyond Camarilla levels to scale position size, reducing whipsaws and trade frequency. Stronger breaks = larger positions. Maintains 1d trend filter and volume confirmation for quality. Designed for fewer, higher-quality trades in both bull and bear markets by avoiding small, noisy breakouts.
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_DynamicExit"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_SignalStrength"
 timeframe = "4h"
 leverage = 1.0
 
@@ -49,12 +49,9 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: current volume > 2.2 * 20-period average (stricter for fewer trades)
+    # Volume confirmation: current volume > 2.0 * 20-period average (balanced for fewer trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.2 * vol_ma)
-    
-    # Momentum filter: price must close beyond level by at least 0.5% to avoid whipsaws
-    momentum_threshold = 0.005  # 0.5%
+    volume_confirm = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,38 +77,52 @@ def generate_signals(prices):
         
         vol_confirm = volume_confirm[i]
         
-        # Calculate momentum: how far price is beyond the level
         if position == 0:
-            # LONG: Close > R3 by momentum threshold AND 1d uptrend AND volume confirmation
-            long_condition = (close[i] > r3_aligned[i] * (1 + momentum_threshold)) and trend_up and vol_confirm
-            # SHORT: Close < S3 by momentum threshold AND 1d downtrend AND volume confirmation
-            short_condition = (close[i] < s3_aligned[i] * (1 - momentum_threshold)) and trend_down and vol_confirm
+            # Calculate breakout strength
+            long_breakout = close[i] - r3_aligned[i]
+            short_breakout = s3_aligned[i] - close[i]
             
-            if long_condition:
-                signals[i] = 0.25
+            # LONG: Close > R3 with strength, 1d uptrend, volume confirmation
+            if long_breakout > 0 and trend_up and vol_confirm:
+                # Scale position by breakout strength (capped at 0.30)
+                strength_factor = min(long_breakout / (r3_aligned[i] * 0.02), 1.0)  # Normalize by 2% of level
+                signal_size = 0.15 + (0.15 * strength_factor)  # Range: 0.15 to 0.30
+                signals[i] = signal_size
                 position = 1
-            elif short_condition:
-                signals[i] = -0.25
+            # SHORT: Close < S3 with strength, 1d downtrend, volume confirmation
+            elif short_breakout > 0 and trend_down and vol_confirm:
+                # Scale position by breakout strength (capped at 0.30)
+                strength_factor = min(short_breakout / (s3_aligned[i] * 0.02), 1.0)  # Normalize by 2% of level
+                signal_size = 0.15 + (0.15 * strength_factor)  # Range: 0.15 to 0.30
+                signals[i] = -signal_size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close < S3 (reversal to opposite level) OR momentum failure
+            # EXIT LONG: Close < S3 (reversal to opposite level) OR weak momentum
             exit_condition = close[i] < s3_aligned[i]
-            momentum_fail = close[i] < r3_aligned[i] * (1 - momentum_threshold/2)  # Allow some retracement
-            if exit_condition or momentum_fail:
+            weak_momentum = close[i] < r3_aligned[i]  # Below entry level
+            if exit_condition or weak_momentum:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                # Maintain position, optionally scale with strength
+                long_breakout = close[i] - r3_aligned[i]
+                strength_factor = min(long_breakout / (r3_aligned[i] * 0.02), 1.0)
+                signal_size = 0.15 + (0.15 * strength_factor)
+                signals[i] = signal_size
         elif position == -1:
-            # EXIT SHORT: Close > R3 (reversal to opposite level) OR momentum failure
+            # EXIT SHORT: Close > R3 (reversal to opposite level) OR weak momentum
             exit_condition = close[i] > r3_aligned[i]
-            momentum_fail = close[i] > s3_aligned[i] * (1 + momentum_threshold/2)  # Allow some retracement
-            if exit_condition or momentum_fail:
+            weak_momentum = close[i] > s3_aligned[i]  # Above entry level
+            if exit_condition or weak_momentum:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                # Maintain position, optionally scale with strength
+                short_breakout = s3_aligned[i] - close[i]
+                strength_factor = min(short_breakout / (s3_aligned[i] * 0.02), 1.0)
+                signal_size = 0.15 + (0.15 * strength_factor)
+                signals[i] = -signal_size
     
     return signals
