@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_VolumeSpike
-Hypothesis: Uses daily timeframe with KAMA (Kaufman Adaptive Moving Average) to capture trend direction,
-filtered by volume spike after low volatility regime. Enters long when price > KAMA and volume spikes,
-short when price < KAMA and volume spikes. Uses volume contraction/expansion as regime filter to avoid
-choppy markets. Designed for low frequency (target 10-25 trades/year) to minimize fee drag and work
-in both bull and bear markets by following adaptive trend.
+4h_Vortex_Trend_Confirmation
+Hypothesis: Uses 4h timeframe with Vortex indicator (VI+ and VI-) to detect trend direction,
+confirmed by 1d EMA34 trend and volume surge after low volatility periods.
+The Vortex indicator identifies trend initiation by comparing current high-low ranges
+with prior periods, making it effective for catching momentum bursts in both bull and bear markets.
+Entry occurs when VI+ crosses above VI- (bullish) or VI- crosses above VI+ (bearish),
+filtered by 1d trend alignment and volume confirmation to avoid false signals.
+Uses discrete position sizing (0.25) to minimize fee churn and targets 20-40 trades/year.
 """
 
-name = "1d_KAMA_Trend_VolumeSpike"
-timeframe = "1d"
+name = "4h_Vortex_Trend_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,34 +23,40 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Calculate KAMA (Kaufman Adaptive Moving Average) - 14-period
-    # Efficiency Ratio (ER) = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # sum of abs changes over 10 periods
-    # Fix dimensions: change starts at index 10, volatility needs same length
-    change = change[10:]  # align to close[10:]
-    volatility = volatility[10:]  # align
+    # Get 1d data for trend filter (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Avoid division by zero
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    # Smoothing constants: fastest SC = 2/(2+1)=0.67, slowest SC = 2/(30+1)=0.0645
-    sc = (er * (0.67 - 0.0645) + 0.0645) ** 2
+    # Calculate Vortex Indicator (VI+ and VI-) on 4h data
+    # True Range
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Initialize KAMA array
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # start at index 9 (10th element)
+    # VM+ and VM-
+    vm_plus = np.abs(high[1:] - low[:-1])
+    vm_minus = np.abs(low[1:] - high[:-1])
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
     
-    # Calculate KAMA iteratively (requires loop, but only once outside signal loop)
-    for i in range(10, len(close)):
-        if not np.isnan(sc[i-10]):  # sc index aligned
-            kama[i] = kama[i-1] + sc[i-10] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Sum over 14 periods (standard Vortex period)
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # VI+ and VI-
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
     
     # Volume indicators: 20-period average and volatility regime
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,9 +68,16 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):  # Start from 50 to have enough data for all indicators
+        # Get aligned values for current 4h bar
+        ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)[i]
+        vi_plus_val = vi_plus[i]
+        vi_minus_val = vi_minus[i]
+        vol_avg_val = vol_avg_20[i]
+        low_vol = low_vol_regime[i]
+        
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(vol_avg_20[i]) or 
-            np.isnan(vol_std_20[i]) or np.isnan(vol_avg_50[i])):
+        if (np.isnan(ema34_aligned) or np.isnan(vi_plus_val) or np.isnan(vi_minus_val) or 
+            np.isnan(vol_avg_val) or np.isnan(low_vol)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,30 +86,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above KAMA + low vol regime + volume spike (2x avg)
-            if (close[i] > kama[i] and 
-                low_vol_regime[i] and 
-                volume[i] > vol_avg_20[i] * 2.0):
+            # LONG: VI+ crosses above VI- + 1d uptrend + low vol regime + volume spike
+            if (vi_plus_val > vi_minus_val and 
+                vi_plus[i-1] <= vi_minus[i-1] and  # crossover confirmation
+                close[i] > ema34_aligned and 
+                low_vol and 
+                volume[i] > vol_avg_val * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA + low vol regime + volume spike (2x avg)
-            elif (close[i] < kama[i] and 
-                  low_vol_regime[i] and 
-                  volume[i] > vol_avg_20[i] * 2.0):
+            # SHORT: VI- crosses above VI+ + 1d downtrend + low vol regime + volume spike
+            elif (vi_minus_val > vi_plus_val and 
+                  vi_minus[i-1] <= vi_plus[i-1] and  # crossover confirmation
+                  close[i] < ema34_aligned and 
+                  low_vol and 
+                  volume[i] > vol_avg_val * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA
-            if close[i] < kama[i]:
+            # EXIT LONG: VI- crosses above VI+ or trend turns down
+            if (vi_minus_val > vi_plus_val or close[i] < ema34_aligned):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA
-            if close[i] > kama[i]:
+            # EXIT SHORT: VI+ crosses above VI- or trend turns up
+            if (vi_plus_val > vi_minus_val or close[i] > ema34_aligned):
                 signals[i] = 0.0
                 position = 0
             else:
