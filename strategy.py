@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation
-# Strategy: Trade Camarilla R1/S1 breakouts on 4h timeframe aligned with 1d EMA34 trend and volume spike.
-# Long when price breaks above R1 with uptrend (price > EMA34) and volume > 2x MA(24).
-# Short when price breaks below S1 with downtrend (price < EMA34) and volume > 2x MA(24).
-# Exit when price crosses 1d EMA34 or reverses Camarilla level.
-# Designed for low turnover (~30-50 trades/year) with trend alignment and volume confirmation.
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
+# 1d_WeeklyPivot_Trend_Filter
+# Hypothesis: Trade weekly pivot R1/S1 breakouts on daily timeframe with weekly trend filter (EMA200) and volume confirmation.
+# Weekly pivots provide institutional reference levels; weekly EMA200 filters counter-trend moves; volume ensures participation.
+# Works in bull (breakouts up in uptrend) and bear (breakdowns in downtrend) markets by filtering with weekly trend.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,38 +22,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-
-    # Calculate Camarilla levels from prior day's OHLC
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    if len(df_1d) < 2:
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    ph = df_1d['high'].shift(1).values  # prior day high
-    pl = df_1d['low'].shift(1).values   # prior day low
-    pc = df_1d['close'].shift(1).values # prior day close
-    r1 = pc + (ph - pl) * 1.1 / 12.0
-    s1 = pc - (ph - pl) * 1.1 / 12.0
-    # Align to 4h: daily Camarilla levels are constant through the day
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # We need prior week's data, so shift by 1
+    ph = df_1w['high'].shift(1).values  # prior week high
+    pl = df_1w['low'].shift(1).values   # prior week low
+    pc = df_1w['close'].shift(1).values # prior week close
+    p = (ph + pl + pc) / 3.0
+    r1 = 2 * p - pl
+    s1 = 2 * p - ph
+    # Align to daily: weekly pivot values are constant through the week
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
 
-    # Volume spike: current > 2.0x average of last 24 bars (4 days on 4h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Weekly EMA200 trend filter
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+
+    # Volume spike: current > 2.0x average of last 20 days
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):  # Start after EMA34 warmup
+    for i in range(200, n):  # Start after EMA200 warmup
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(ema_200_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,32 +65,36 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: close > daily R1 + price > 1d EMA34 + volume spike
+            # LONG: close > weekly R1 + price > weekly EMA200 + volume spike
             if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+                close[i] > ema_200_1w_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: close < daily S1 + price < 1d EMA34 + volume spike
+            # SHORT: close < weekly S1 + price < weekly EMA200 + volume spike
             elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < ema_200_1w_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price < 1d EMA34 or price < daily S1 (reversal)
-            if (close[i] < ema_34_1d_aligned[i] or 
-                close[i] < s1_aligned[i]):
+            # EXIT LONG: close < weekly pivot P or trend breaks
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+            if (close[i] < pp_aligned[i] or 
+                close[i] < ema_200_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price > 1d EMA34 or price > daily R1 (reversal)
-            if (close[i] > ema_34_1d_aligned[i] or 
-                close[i] > r1_aligned[i]):
+            # EXIT SHORT: close > weekly pivot P or trend breaks
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+            if (close[i] > pp_aligned[i] or 
+                close[i] > ema_200_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
