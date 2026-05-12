@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dEMA34_TrendFilter_V2
-# Hypothesis: Breakout above/below daily R1/S1 with 1d EMA34 trend filter and volume confirmation
-# works in both bull and bear markets by filtering false breakouts. Target: 20-30 trades/year.
+# 4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter_V3
+# Hypothesis: Uses Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
+# Avoids overtrading by requiring confluence of three conditions: price level, trend, and volume.
+# Designed to work in both bull and bear markets by filtering trades with trend direction.
+# Target: 20-30 trades per year to minimize fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_TrendFilter_V2"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter_V3"
 timeframe = "4h"
 leverage = 1.0
 
