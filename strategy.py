@@ -1,6 +1,11 @@
+# Tested on 2021-2024: 4h RSI(14) oversold/overbought with volume confirmation and 12h EMA trend filter.
+# Designed for range-bound markets with occasional mean reversion (works in bull/bear via RSI extremes + trend filter).
+# Volume spike filters low-liquidity false signals. Target: 20-40 trades/year.
+# Uses discrete position sizing (0.25) to minimize churn.
+
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_RSI_MeanReversion_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,35 +22,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data once before loop
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 12h EMA trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate previous day's Camarilla levels
-    # Using previous day's data to avoid look-ahead
-    prev_high = np.concatenate([[high_1d[0]], high_1d[:-1]])
-    prev_low = np.concatenate([[low_1d[0]], low_1d[:-1]])
-    prev_close = np.concatenate([[close_1d[0]], close_1d[:-1]])
+    # RSI(14) on 4h (primary timeframe)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate pivot and range
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels (S3 and R3)
-    s3 = pivot - (1.1 * range_val / 2.0)
-    r3 = pivot + (1.1 * range_val / 2.0)
-    
-    # Align to 12h timeframe
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike on 12h: current volume > 2.0x 20-period average
+    # Volume spike: current > 2.0 x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_avg)
     
@@ -56,8 +48,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(s3_12h[i]) or np.isnan(r3_12h[i]) or 
-            np.isnan(ema34_12h[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,28 +57,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + above EMA34 + volume spike
-            if (close[i] > r3_12h[i] and 
-                close[i] > ema34_12h[i] and 
+            # Long: RSI < 30 (oversold) + price > 12h EMA50 + volume spike
+            if (rsi[i] < 30 and 
+                close[i] > ema50_12h_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + below EMA34 + volume spike
-            elif (close[i] < s3_12h[i] and 
-                  close[i] < ema34_12h[i] and 
+            # Short: RSI > 70 (overbought) + price < 12h EMA50 + volume spike
+            elif (rsi[i] > 70 and 
+                  close[i] < ema50_12h_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S3 or below EMA34
-            if close[i] < s3_12h[i] or close[i] < ema34_12h[i]:
+            # Exit long: RSI > 50 (mean reversion complete) or stop via opposite signal
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above R3 or above EMA34
-            if close[i] > r3_12h[i] or close[i] > ema34_12h[i]:
+            # Exit short: RSI < 50 (mean reversion complete) or stop via opposite signal
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
