@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_KeltnerChannel_RSI_Filter
-Hypothesis: On 6h timeframe, price reversion to the mean occurs when price touches the Keltner Channel (KC) bands with RSI showing exhaustion. 
-We use 20-period EMA as KC middle, ATR(10) for bands, and RSI(14) to confirm overbought/oversold conditions. 
-Trend filter from 12h EMA50 ensures we only trade in direction of higher timeframe trend to avoid counter-trend whipsaws. 
-Volume confirmation (>1.5x 20-period average) increases reliability of reversals. 
-Designed for low turnover (12-37 trades/year) to minimize fee drag in both bull and bear markets.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: On 4h timeframe, Camarilla R1/S1 levels from prior 1d act as strong support/resistance. 
+Breaks above R1 with 1d EMA34 uptrend and volume > 1.5x 20-period average generate long signals; 
+breaks below S1 with 1d EMA34 downtrend and volume surge generate shorts. 
+Uses 1d Bollinger Band width < 50th percentile to filter choppy regimes. 
+Targets 20-50 trades/year (80-200 total over 4 years) with low turnover to minimize fee drag.
+Works in bull via momentum breaks and bear via mean-reversion at extremes with trend filter.
 """
 
-name = "6h_KeltnerChannel_RSI_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -26,37 +27,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter (call once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
 
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 1d EMA34 for trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate Keltner Channel components on 6h
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    kc_upper = ema20 + 2 * atr10
-    kc_lower = ema20 - 2 * atr10
+    # Calculate 1d Bollinger Band width (20, 2) for squeeze filter
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma20_1d + 2 * std20_1d
+    lower_bb_1d = sma20_1d - 2 * std20_1d
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma20_1d
+    # Percentile rank of bb_width over lookback
+    bb_width_rank = pd.Series(bb_width_1d).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    bb_width_rank_aligned = align_htf_to_ltf(prices, df_1d, bb_width_rank)
 
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend NaN for first element
-    rsi = np.concatenate([[np.nan], rsi])
+    # Calculate 4h Camarilla levels from previous 1d OHLC
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous day's HLC, so shift by 1
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # First value will be invalid, handled by alignment
+    camarilla_mult = 1.1 / 12
+    r1 = prev_close + (prev_high - prev_low) * camarilla_mult
+    s1 = prev_close - (prev_high - prev_low) * camarilla_mult
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
     # Volume confirmation: 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,17 +71,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        # Get aligned values for current 6h bar
-        ema50 = ema50_12h_aligned[i]
-        kc_up = kc_upper[i]
-        kc_low = kc_lower[i]
-        rsi_val = rsi[i]
+    for i in range(60, n):
+        # Get aligned values for current 4h bar
+        ema34 = ema34_1d_aligned[i]
+        bb_rank = bb_width_rank_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
         vol_avg_val = vol_avg_20[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(ema50) or np.isnan(kc_up) or np.isnan(kc_low) or 
-            np.isnan(rsi_val) or np.isnan(vol_avg_val)):
+        if (np.isnan(ema34) or np.isnan(bb_rank) or 
+            np.isnan(r1_level) or np.isnan(s1_level) or 
+            np.isnan(vol_avg_val)):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        # Squeeze filter: only trade when BB width is in lower 50% (contraction)
+        if bb_rank > 0.5:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,32 +100,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price at or below KC lower + RSI oversold (<30) + price above 12h EMA50 + volume surge
-            if (close[i] <= kc_low and 
-                rsi_val < 30 and 
-                close[i] > ema50 and 
+            # LONG: Price breaks above R1 + price above EMA34 + volume surge
+            if (close[i] > r1_level and 
+                close[i] > ema34 and 
                 volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at or above KC upper + RSI overbought (>70) + price below 12h EMA50 + volume surge
-            elif (close[i] >= kc_up and 
-                  rsi_val > 70 and 
-                  close[i] < ema50 and 
+            # SHORT: Price breaks below S1 + price below EMA34 + volume surge
+            elif (close[i] < s1_level and 
+                  close[i] < ema34 and 
                   volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back above KC middle or RSI > 50
-            if (close[i] >= ema20 or rsi_val > 50):
+            # EXIT LONG: Price breaks below S1 or price below EMA34
+            if (close[i] < s1_level or close[i] < ema34):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back below KC middle or RSI < 50
-            if (close[i] <= ema20 or rsi_val < 50):
+            # EXIT SHORT: Price breaks above R1 or price above EMA34
+            if (close[i] > r1_level or close[i] > ema34):
                 signals[i] = 0.0
                 position = 0
             else:
