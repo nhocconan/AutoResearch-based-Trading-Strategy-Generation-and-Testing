@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_RVOL_Reversal_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,25 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA50
+    # 1d trend filter: EMA34
     df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d RSI for trend confirmation
-    delta = pd.Series(df_1d['close'].values).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.fillna(50).values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # 12h Camarilla pivot levels (R3, S3)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 6h RVOL: volume / 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    rvol = volume / np.where(vol_ma == 0, 1, vol_ma)
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    camarilla_r3 = close_12h + (high_12h - low_12h) * 1.1 / 4
+    camarilla_s3 = close_12h - (high_12h - low_12h) * 1.1 / 4
+    
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -44,9 +47,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(rvol[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,24 +58,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RVOL > 2.0 + price below EMA50 + RSI < 40 (oversold in downtrend)
-            if rvol[i] > 2.0 and close[i] < ema_50_1d_aligned[i] and rsi_1d_aligned[i] < 40:
+            # Long: breakout above R3 + above 1d EMA34 + volume filter
+            if high[i] > camarilla_r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RVOL > 2.0 + price above EMA50 + RSI > 60 (overbought in uptrend)
-            elif rvol[i] > 2.0 and close[i] > ema_50_1d_aligned[i] and rsi_1d_aligned[i] > 60:
+            # Short: breakdown below S3 + below 1d EMA34 + volume filter
+            elif low[i] < camarilla_s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RVOL > 2.0 + price crosses above EMA50 or RSI > 60
-            if rvol[i] > 2.0 and (close[i] > ema_50_1d_aligned[i] or rsi_1d_aligned[i] > 60):
+            # Exit long: breakdown below S3 or below 1d EMA34
+            if low[i] < camarilla_s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RVOL > 2.0 + price crosses below EMA50 or RSI < 40
-            if rvol[i] > 2.0 and (close[i] < ema_50_1d_aligned[i] or rsi_1d_aligned[i] < 40):
+            # Exit short: breakout above R3 or above 1d EMA34
+            if high[i] > camarilla_r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
