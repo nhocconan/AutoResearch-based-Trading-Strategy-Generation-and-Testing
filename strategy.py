@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Stochastic_RSI_Bollinger_Reversal_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,41 +17,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter and Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # EMA(34) on 1d for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly EMA(50) for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Camarilla pivot levels for previous day
-    # P = (H + L + C) / 3
-    # R3 = C + (H - L) * 1.1 / 4
-    # S3 = C - (H - L) * 1.1 / 4
-    p = (high_1d + low_1d + close_1d) / 3
-    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Daily Stochastic RSI (14,14,3,3)
+    rsi_period = 14
+    stoch_period = 14
+    k_period = 3
+    d_period = 3
     
-    # Align Camarilla levels to 4h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate RSI
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Volume spike on 4h: current volume > 2.0x 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)
+    # Calculate Stochastic of RSI
+    rsi_min = pd.Series(rsi).rolling(window=stoch_period, min_periods=stoch_period).min().values
+    rsi_max = pd.Series(rsi).rolling(window=stoch_period, min_periods=stoch_period).max().values
+    stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min + 1e-10) * 100
+    
+    # %K and %D
+    k = pd.Series(stoch_rsi).rolling(window=k_period, min_periods=k_period).mean().values
+    d = pd.Series(k).rolling(window=d_period, min_periods=d_period).mean().values
+    
+    # Bollinger Bands (20,2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + (bb_std * std)
+    lower = sma - (bb_std * std)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = max(50, rsi_period + stoch_period + k_period + d_period, bb_period)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(k[i]) or np.isnan(d[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,31 +75,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + 1d trend up + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                vol_spike[i]):
-                signals[i] = 0.30
+            # Long: StochRSI oversold + price near lower BB + weekly uptrend
+            if (k[i] < 20 and d[i] < 20 and 
+                close[i] <= lower[i] * 1.01 and 
+                close[i] > ema50_1w_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + 1d trend down + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  vol_spike[i]):
-                signals[i] = -0.30
+            # Short: StochRSI overbought + price near upper BB + weekly downtrend
+            elif (k[i] > 80 and d[i] > 80 and 
+                  close[i] >= upper[i] * 0.99 and 
+                  close[i] < ema50_1w_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S3
-            if close[i] < s3_aligned[i]:
+            # Exit long: StochRSI overbought or price touches upper BB
+            if k[i] > 80 or close[i] >= upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above R3
-            if close[i] > r3_aligned[i]:
+            # Exit short: StochRSI oversold or price touches lower BB
+            if k[i] < 20 or close[i] <= lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
