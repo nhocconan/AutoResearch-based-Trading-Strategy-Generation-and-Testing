@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_RSI_ChopFilter
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction, 
-combined with RSI for momentum confirmation and Choppiness Index for regime filtering. 
-Enter long when KAMA slopes up, RSI > 50, and market is trending (CHOP < 38.2). 
-Enter short when KAMA slopes down, RSI < 50, and market is trending (CHOP < 38.2). 
-Exit when trend changes or market becomes choppy (CHOP > 61.8). 
-Designed for low trade frequency (<25/year) to avoid fee decay while capturing sustained trends.
+6h_LiquiditySweep_1dOrderBlock
+Hypothesis: On 6h, take long when price sweeps below prior 6h low and closes back above it with bullish 1d order block (close > open) and volume spike; take short when price sweeps above prior 6h high and closes back below it with bearish 1d order block (close < open) and volume spike. Uses 1d trend filter (price > 200 EMA for long, < 200 EMA for short). Designed to work in both bull and bear markets by capturing institutional order flow around liquidity sweeps.
 """
 
-name = "1d_KAMA_RSI_ChopFilter"
-timeframe = "1d"
+name = "6h_LiquiditySweep_1dOrderBlock"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,84 +17,44 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
 
-    # Get 1-week data for trend filter (optional but adds robustness)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend and order block
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
 
-    # KAMA parameters
-    kama_period = 10
-    fast_ema = 2
-    slow_ema = 30
+    # 6-period high/low for liquidity sweep detection (prior bar)
+    high_max_6 = pd.Series(high).rolling(window=6, min_periods=6).max().values
+    low_min_6 = pd.Series(low).rolling(window=6, min_periods=6).min().values
 
-    # Calculate ER (Efficiency Ratio)
-    change = np.abs(np.diff(close, k=10))  # 10-period change
-    vol = np.sum(np.abs(np.diff(close)), axis=0)  # 10-period volatility
-    # Fix: vol needs to be rolling sum of absolute changes
-    vol = np.zeros_like(close)
-    for i in range(1, n):
-        vol[i] = np.abs(close[i] - close[i-1])
-    vol_sum = pd.Series(vol).rolling(window=10, min_periods=10).sum().values
-    change_abs = np.abs(np.diff(close, k=10))
-    # Pad change_abs to match length
-    change_abs_padded = np.concatenate([np.full(10, np.nan), change_abs])
-    er = np.where(vol_sum != 0, change_abs_padded / vol_sum, 0)
-    # Smooth ER
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # 1d EMA200 for trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
 
-    # RSI (14-period)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Pad rsi to align with close (first 14 values are NaN)
-    rsi_padded = np.concatenate([np.full(14, np.nan), rsi])
+    # 1d order block: bullish if close > open, bearish if close < open
+    bullish_ob = (close_1d > open_1d).astype(float)
+    bearish_ob = (close_1d < open_1d).astype(float)
+    bullish_ob_aligned = align_htf_to_ltf(prices, df_1d, bullish_ob)
+    bearish_ob_aligned = align_htf_to_ltf(prices, df_1d, bearish_ob)
 
-    # Choppiness Index (14-period)
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    # Sum of ATR over 14 periods
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    # Max(high) - Min(low) over 14 periods
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_max_min = max_high - min_low
-    # Chop = 100 * log10(atr_sum / range_max_min) / log10(14)
-    chop = np.where(range_max_min != 0, 100 * np.log10(atr_sum / range_max_min) / np.log10(14), 50)
-    # Pad chop to align
-    chop_padded = np.concatenate([np.full(13, np.nan), chop])  # 14-period needs 13 padding
-
-    # Align 1-week close for trend filter
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    # Volume confirmation: volume > 1.5x 24-period average (4 hours worth of 6m bars)
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after warmup period
+    for i in range(24, n):
         # Skip if any required value is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi_padded[i]) or 
-            np.isnan(chop_padded[i]) or np.isnan(close_1w_aligned[i])):
+        if (np.isnan(high_max_6[i]) or np.isnan(low_min_6[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(bullish_ob_aligned[i]) or 
+            np.isnan(bearish_ob_aligned[i]) or np.isnan(vol_avg_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -107,40 +62,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # KAMA slope (direction)
-        kama_slope = kama[i] - kama[i-1]
-
         if position == 0:
-            # LONG: KAMA up, RSI > 50, trending market (CHOP < 38.2), price above 1w close
-            if (kama_slope > 0 and 
-                rsi_padded[i] > 50 and 
-                chop_padded[i] < 38.2 and 
-                close[i] > close_1w_aligned[i]):
+            # LONG: liquidity sweep below prior low + close back above + bullish 1d OB + volume spike + above 1d EMA200
+            if (low[i] < low_min_6[i-1] and  # swept below prior low
+                close[i] > low_min_6[i-1] and  # closed back above
+                bullish_ob_aligned[i] > 0.5 and  # bullish 1d order block
+                volume[i] > vol_avg_24[i] * 1.5 and  # volume spike
+                close[i] > ema200_1d_aligned[i]):  # above 1d EMA200
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA down, RSI < 50, trending market (CHOP < 38.2), price below 1w close
-            elif (kama_slope < 0 and 
-                  rsi_padded[i] < 50 and 
-                  chop_padded[i] < 38.2 and 
-                  close[i] < close_1w_aligned[i]):
+            # SHORT: liquidity sweep above prior high + close back below + bearish 1d OB + volume spike + below 1d EMA200
+            elif (high[i] > high_max_6[i-1] and  # swept above prior high
+                  close[i] < high_max_6[i-1] and  # closed back below
+                  bearish_ob_aligned[i] > 0.5 and  # bearish 1d order block
+                  volume[i] > vol_avg_24[i] * 1.5 and  # volume spike
+                  close[i] < ema200_1d_aligned[i]):  # below 1d EMA200
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA turns down OR market becomes choppy (CHOP > 61.8) OR trend breaks
-            if (kama_slope < 0 or 
-                chop_padded[i] > 61.8 or 
-                close[i] < close_1w_aligned[i]):
+            # EXIT LONG: price breaks below prior low or bearish 1d OB appears
+            if low[i] < low_min_6[i] or bearish_ob_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA turns up OR market becomes choppy (CHOP > 61.8) OR trend breaks
-            if (kama_slope > 0 or 
-                chop_padded[i] > 61.8 or 
-                close[i] > close_1w_aligned[i]):
+            # EXIT SHORT: price breaks above prior high or bullish 1d OB appears
+            if high[i] > high_max_6[i] or bullish_ob_aligned[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
