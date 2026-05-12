@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1d_PV_CRSI_Range_Reversal
-# Hypothesis: On 1d timeframe, use PV_CRSI (price-volume adjusted RSI) to identify extreme mean-reversion opportunities
-# in ranging markets. Enter long when PV_CRSI < 15 and price below VWAP, short when PV_CRSI > 85 and price above VWAP.
-# Use weekly ADX < 20 as range filter to avoid trending markets. Exit when PV_CRSI returns to neutral (40-60 range).
-# Targets 15-25 trades/year to minimize fee drift while capturing mean reversion in BTC/ETH ranging regimes.
+# 4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_Dyn
+# Hypothesis: On 4h timeframe, use daily Camarilla pivot levels (R1/S1) for breakout entries with 1d EMA34 trend filter and volume spike confirmation.
+# Enter long when price closes above R1 with volume > 2.0x 20-bar average and 1d EMA34 uptrend.
+# Enter short when price closes below S1 with volume > 2.0x 20-bar average and 1d EMA34 downtrend.
+# Exit when price crosses the 1d EMA34 (trend reversal) to avoid whipsaw.
+# Targets 25-40 trades/year to minimize fee drag while capturing meaningful moves in both bull and bear markets.
+# Dynamic position sizing: 0.25 for standard conditions, increases to 0.35 when volume > 3.0x average.
 
-name = "1d_PV_CRSI_Range_Reversal"
-timeframe = "1d"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,89 +25,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = vwap_num / vwap_den
-    
-    # Calculate PV_CRSI (Price-Volume Weighted RSI)
-    # 1. Price change
-    delta = np.diff(close, prepend=close[0])
-    # 2. Volume-weighted gains/losses
-    vol_weighted_gain = np.where(delta > 0, delta * volume, 0.0)
-    vol_weighted_loss = np.where(delta < 0, -delta * volume, 0.0)
-    # 3. Smoothed averages (Wilder's smoothing)
-    alpha = 1.0 / 14
-    avg_gain = np.zeros_like(vol_weighted_gain)
-    avg_loss = np.zeros_like(vol_weighted_loss)
-    avg_gain[0] = vol_weighted_gain[0]
-    avg_loss[0] = vol_weighted_loss[0]
-    for i in range(1, n):
-        avg_gain[i] = (1 - alpha) * avg_gain[i-1] + alpha * vol_weighted_gain[i]
-        avg_loss[i] = (1 - alpha) * avg_loss[i-1] + alpha * vol_weighted_loss[i]
-    # 4. RSI calculation
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    pvcrsi = 100 - (100 / (1 + rs))
-    
-    # Load weekly data for ADX range filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Load daily data for Camarilla pivot calculation and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate ADX on weekly data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
-    tr3 = np.abs(low_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate pivot point and range
+    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+    daily_range = daily_high - daily_low
     
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]])) > 
-                       (np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w), 
-                       np.maximum(high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]]), 0), 0)
-    dm_minus = np.where((np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w) > 
-                        (high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]])), 
-                        np.maximum(np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w, 0), 0)
+    # Camarilla R1 and S1 levels
+    r1 = daily_pivot + daily_range * 1.083
+    s1 = daily_pivot - daily_range * 1.083
     
-    # Smoothed values
-    def wilders_smoothing(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    tr14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    # Align daily levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # DI and DX
-    di_plus = np.divide(dm_plus_14, tr14, out=np.zeros_like(dm_plus_14), where=tr14!=0) * 100
-    di_minus = np.divide(dm_minus_14, tr14, out=np.zeros_like(dm_minus_14), where=tr14!=0) * 100
-    dx = np.divide(np.abs(di_plus - di_minus), (di_plus + di_minus), out=np.zeros_like(di_plus), where=(di_plus + di_minus)!=0) * 100
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align weekly ADX to daily (wait for completed weekly bar)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume confirmation: current volume > 1.3 * 20-day average
+    # Volume confirmation: dynamic thresholds
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_ma)
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)  # Avoid division by zero
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 60  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(pvcrsi[i]) or np.isnan(vwap[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -113,41 +70,43 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        pvcrsi_val = pvcrsi[i]
-        vwap_val = vwap[i]
-        adx_val = adx_aligned[i]
-        vol_confirm = volume_confirm[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        ema1d_trend = ema34_1d_aligned[i]
+        vol_ratio_val = vol_ratio[i]
         
         if position == 0:
-            # LONG: PV_CRSI oversold (<15), price below VWAP, ranging market (ADX<20), volume confirmation
-            if pvcrsi_val < 15 and close[i] < vwap_val and adx_val < 20 and vol_confirm:
-                signals[i] = 0.25
+            # LONG: Price closes above R1 with volume spike and 1d uptrend
+            if close[i] > r1_val and close[i] > ema1d_trend and vol_ratio_val > 2.0:
+                # Dynamic sizing: increase position on extreme volume
+                if vol_ratio_val > 3.0:
+                    signals[i] = 0.35
+                else:
+                    signals[i] = 0.25
                 position = 1
-            # SHORT: PV_CRSI overbought (>85), price above VWAP, ranging market (ADX<20), volume confirmation
-            elif pvcrsi_val > 85 and close[i] > vwap_val and adx_val < 20 and vol_confirm:
-                signals[i] = -0.25
+            # SHORT: Price closes below S1 with volume spike and 1d downtrend
+            elif close[i] < s1_val and close[i] < ema1d_trend and vol_ratio_val > 2.0:
+                # Dynamic sizing: increase position on extreme volume
+                if vol_ratio_val > 3.0:
+                    signals[i] = -0.35
+                else:
+                    signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: PV_CRSI returns to neutral range (40-60) or breaks above VWAP with strength
-            if pvcrsi_val > 40 and pvcrsi_val < 60:
-                signals[i] = 0.0
-                position = 0
-            elif close[i] > vwap_val and pvcrsi_val > 50:  # Early exit if momentum shifts
+            # EXIT LONG: Price crosses below 1d EMA34 (trend reversal)
+            if close[i] < ema1d_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25 if vol_ratio_val <= 3.0 else 0.35
         elif position == -1:
-            # EXIT SHORT: PV_CRSI returns to neutral range (40-60) or breaks below VWAP with weakness
-            if pvcrsi_val > 40 and pvcrsi_val < 60:
-                signals[i] = 0.0
-                position = 0
-            elif close[i] < vwap_val and pvcrsi_val < 50:  # Early exit if momentum shifts
+            # EXIT SHORT: Price crosses above 1d EMA34 (trend reversal)
+            if close[i] > ema1d_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25 if vol_ratio_val <= 3.0 else -0.35
     
     return signals
