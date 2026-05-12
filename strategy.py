@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_Pivot_Breakout_4hTrend_Volume
-# Hypothesis: 1h Camarilla pivot breakouts with 4h EMA trend filter and volume confirmation.
-# Uses daily pivots for mean reversion in range markets and breakouts in trends.
-# Target: 15-35 trades/year (60-140 over 4 years).
-# Works in bull (breakouts continue) and bear (mean reversion at extremes via trend filter).
+# 4h_Supertrend_1dTrend_Volume
+# Hypothesis: Supertrend on 4h with 1d EMA trend filter and volume confirmation.
+# Supertrend adapts to volatility and captures trends effectively. The 1d EMA filter ensures
+# alignment with higher timeframe trend, reducing counter-trend trades. Volume confirmation
+# ensures breakouts have conviction. Designed to work in both bull and bear markets by
+# following the trend defined by higher timeframe.
 
-name = "1h_Camarilla_Pivot_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "4h_Supertrend_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,49 +24,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 4h Trend Filter ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    # 34-period EMA on 4h for trend direction
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # === Daily Camarilla Pivots (using previous day's range) ===
+    # === 1d Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    close_1d = df_1d['close'].values
+    # 30-period EMA on 1d for trend direction
+    ema_30_1d = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema_30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_30_1d)
     
-    # Calculate Camarilla levels
-    range_ = prev_high - prev_low
-    camarilla_h4 = prev_close + 1.1 * range_ / 2  # Resistance 4
-    camarilla_l4 = prev_close - 1.1 * range_ / 2  # Support 4
-    camarilla_h3 = prev_close + 1.1 * range_ / 4  # Resistance 3
-    camarilla_l3 = prev_close - 1.1 * range_ / 4  # Support 3
-    camarilla_h2 = prev_close + 1.1 * range_ / 6  # Resistance 2
-    camarilla_l2 = prev_close - 1.1 * range_ / 6  # Support 2
-    camarilla_h1 = prev_close + 1.1 * range_ / 12 # Resistance 1
-    camarilla_l1 = prev_close - 1.1 * range_ / 12 # Support 1
+    # === Supertrend (10, 3.0) on 4h ===
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Align to 1h (use previous day's levels for current day)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
-    camarilla_l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
-    camarilla_h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
-    camarilla_l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
+    # ATR(10)
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # === Volume Confirmation (24-period average) ===
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Basic Upper and Lower Bands
+    hl_avg = (high + low) / 2
+    upper_band = hl_avg + 3.0 * atr_10
+    lower_band = hl_avg - 3.0 * atr_10
+    
+    # Final Upper and Lower Bands
+    final_upper = np.copy(upper_band)
+    final_lower = np.copy(lower_band)
+    
+    for i in range(1, len(final_upper)):
+        if close[i-1] <= final_upper[i-1]:
+            final_upper[i] = min(upper_band[i], final_upper[i-1])
+        else:
+            final_upper[i] = upper_band[i]
+            
+        if close[i-1] >= final_lower[i-1]:
+            final_lower[i] = max(lower_band[i], final_lower[i-1])
+        else:
+            final_lower[i] = lower_band[i]
+    
+    # Supertrend
+    supertrend = np.zeros(len(close))
+    for i in range(len(supertrend)):
+        if i == 0:
+            supertrend[i] = 0  # undefined
+        elif close[i] > final_upper[i-1]:
+            supertrend[i] = 1  # uptrend
+        elif close[i] < final_lower[i-1]:
+            supertrend[i] = -1  # downtrend
+        else:
+            supertrend[i] = supertrend[i-1]  # continue previous trend
+    
+    # === Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,8 +86,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or 
-            np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_30_1d_aligned[i]) or np.isnan(supertrend[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,35 +95,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend direction
-        trend_up = close[i] > ema_34_4h_aligned[i]
-        trend_down = close[i] < ema_34_4h_aligned[i]
+        # Trend direction from 1d EMA
+        trend_up = close[i] > ema_30_1d_aligned[i]
+        trend_down = close[i] < ema_30_1d_aligned[i]
         
         # Volume filter: above average
-        vol_ok = volume[i] > vol_ma_24[i]
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: Price breaks above H3 with volume and uptrend
-            if (close[i] > camarilla_h3_aligned[i] and vol_ok and trend_up):
-                signals[i] = 0.20
+            # LONG: Supertrend uptrend with volume and higher timeframe uptrend
+            if (supertrend[i] == 1 and vol_ok and trend_up):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below L3 with volume and downtrend
-            elif (close[i] < camarilla_l3_aligned[i] and vol_ok and trend_down):
-                signals[i] = -0.20
+            # SHORT: Supertrend downtrend with volume and higher timeframe downtrend
+            elif (supertrend[i] == -1 and vol_ok and trend_down):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price returns to H4 or trend changes
-            if (close[i] < camarilla_h4_aligned[i] or not trend_up):
+            # EXIT LONG: Supertrend turns down or higher timeframe trend changes
+            if (supertrend[i] == -1 or not trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to L4 or trend changes
-            if (close[i] > camarilla_l4_aligned[i] or not trend_down):
+            # EXIT SHORT: Supertrend turns up or higher timeframe trend changes
+            if (supertrend[i] == 1 or not trend_down):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
