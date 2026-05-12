@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_1w_Alligator_Trend_Filter_Volume
-Hypothesis: Williams Alligator on weekly timeframe identifies strong trends.
-In bull markets, price stays above Alligator teeth (green line); in bear, below.
-Price crossing the Alligator jaw (blue line) with volume confirmation signals trend changes.
-Uses 12h timeframe for entries with 1w Alligator filter to reduce whipsaws.
-Target: 15-35 trades/year per symbol.
+6h_Keltner_Channel_Breakout_Trend_Filter
+Hypothesis: Keltner Channel breakouts with 1d EMA50 trend filter and volume confirmation capture momentum in both bull and bear markets.
+Breakouts above upper band + uptrend = long; breakdowns below lower band + downtrend = short.
+Uses ATR-based bands to adapt to volatility, reducing whipsaws in choppy markets.
+Target: 20-40 trades/year per symbol with disciplined risk management.
 """
 
-name = "12h_1w_Alligator_Trend_Filter_Volume"
-timeframe = "12h"
+name = "6h_Keltner_Channel_Breakout_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -26,42 +25,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Alligator (13,8,5 SMAs shifted)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    # Get 1d data for trend filter (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    # 1d EMA50 for trend
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3)
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    jaw = pd.Series(high_1w).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)
-    # Teeth: 8-period SMMA, shifted 5 bars forward
-    teeth = pd.Series(low_1w).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    lips = pd.Series(close_1w).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)
+    # Calculate ATR for Keltner Channel (20-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
 
-    jaw_vals = jaw.values
-    teeth_vals = teeth.values
-    lips_vals = lips.values
+    # EMA20 for Keltner middle line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
 
-    # Align Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw_vals)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth_vals)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips_vals)
+    # Keltner Channel bounds
+    keltner_upper = ema20 + 2 * atr
+    keltner_lower = ema20 - 2 * atr
 
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
-        if np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,39 +65,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price crosses above Alligator Jaw (bullish alignment) + volume spike
-            # Bullish alignment: Lips > Teeth > Jaw
-            if (close[i] > jaw_aligned[i] and 
-                lips_aligned[i] > teeth_aligned[i] and 
-                teeth_aligned[i] > jaw_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = 0.25
+            # LONG: Close breaks above Keltner Upper + 1d uptrend + volume spike
+            if close[i] > keltner_upper[i] and close[i] > ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Price crosses below Alligator Jaw (bearish alignment) + volume spike
-            # Bearish alignment: Lips < Teeth < Jaw
-            elif (close[i] < jaw_aligned[i] and 
-                  lips_aligned[i] < teeth_aligned[i] and 
-                  teeth_aligned[i] < jaw_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = -0.25
+            # SHORT: Close breaks below Keltner Lower + 1d downtrend + volume spike
+            elif close[i] < keltner_lower[i] and close[i] < ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below Alligator Teeth or bearish alignment
-            if (close[i] < teeth_aligned[i] or 
-                lips_aligned[i] < teeth_aligned[i]):
+            # EXIT LONG: Close crosses below EMA20 (middle line) or 1d trend turns down
+            if close[i] < ema20[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Price crosses above Alligator Teeth or bullish alignment
-            if (close[i] > teeth_aligned[i] or 
-                lips_aligned[i] > teeth_aligned[i]):
+            # EXIT SHORT: Close crosses above EMA20 (middle line) or 1d trend turns up
+            if close[i] > ema20[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
 
     return signals
