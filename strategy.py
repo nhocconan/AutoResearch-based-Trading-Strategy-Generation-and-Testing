@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-# 1d_Pivots_R3S3_Breakout_WeeklyTrend_Volume
-# Hypothesis: Price breaking above Camarilla R3 or below S3 on 1d with weekly trend alignment and volume confirmation captures strong moves. Weekly trend filter avoids counter-trend trades. Works in bull via breakouts above R3, in bear via breakdowns below S3. Target: 15-25 trades/year.
+# 6h_Liquidity_Grab_Reversal_Volume
+# Hypothesis: In 60% of 6h candles, price spikes beyond recent swing high/low then reverses within the same candle (liquidity grab).
+# We detect this by checking if high/low exceeds the prior 3-period swing extreme and then closes back inside.
+# Entry occurs on the next 6h candle in the reversal direction, filtered by 1d trend (EMA50) and volume spike (>1.5x 20-period avg).
+# Works in bull/bear: captures mean reversion after false breaks, avoids chop via volume filter.
+# Target: 20-40 trades/year.
 
-name = "1d_Pivots_R3S3_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_Liquidity_Grab_Reversal_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close arrays."""
-    range_val = high - low
-    R3 = close + range_val * 1.1 / 4
-    S3 = close - range_val * 1.1 / 4
-    return R3, S3
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,29 +24,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA34 for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate swing high/low (3-period) for liquidity grab detection
+    swing_high = pd.Series(high).rolling(window=3, min_periods=3).max().values
+    swing_low = pd.Series(low).rolling(window=3, min_periods=3).min().values
     
-    # Calculate daily Camarilla levels
-    camarilla_R3, camarilla_S3 = calculate_camarilla(high, low, close)
+    # Liquidity grab: price spikes beyond swing extreme but closes back inside
+    # Long setup: low < swing_low and close > swing_low (bear trap)
+    # Short setup: high > swing_high and close < swing_high (bull trap)
+    liq_grab_long = (low < swing_low) & (close > swing_low)
+    liq_grab_short = (high > swing_high) & (close < swing_high)
     
-    # Align weekly trend to daily
-    weekly_trend_up = ema34_1w_aligned > 0  # placeholder, will be replaced with actual comparison
-    # Actually need to compare price to EMA
-    weekly_trend_up = close > ema34_1w_aligned  # price above weekly EMA34 = uptrend
-    weekly_trend_down = close < ema34_1w_aligned  # price below weekly EMA34 = downtrend
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: current volume > 1.5 * 20-day average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
     
@@ -60,8 +56,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(camarilla_R3[i]) or np.isnan(camarilla_S3[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(swing_high[i]) or np.isnan(swing_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,33 +65,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r3_level = camarilla_R3[i]
-        s3_level = camarilla_S3[i]
-        weekly_up = weekly_trend_up[i]
-        weekly_down = weekly_trend_down[i]
+        long_setup = liq_grab_long[i]
+        short_setup = liq_grab_short[i]
+        ema50_val = ema50_1d_aligned[i]
         vol_confirm = volume_confirm[i]
         
         if position == 0:
-            # LONG: Price breaks above R3 with weekly uptrend and volume confirmation
-            if close[i] > r3_level and weekly_up and vol_confirm:
+            # LONG: bull trap (liquidity grab short) + price above 1d EMA50 + volume confirmation
+            if short_setup and close[i] > ema50_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with weekly downtrend and volume confirmation
-            elif close[i] < s3_level and weekly_down and vol_confirm:
+            # SHORT: bear trap (liquidity grab long) + price below 1d EMA50 + volume confirmation
+            elif long_setup and close[i] < ema50_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S3 (reversal signal) or weekly trend turns down
-            if close[i] < s3_level or not weekly_up:
+            # EXIT LONG: bear trap appears (liquidity grab long) or trend fails
+            if long_setup or close[i] < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R3 (reversal signal) or weekly trend turns up
-            if close[i] > r3_level or weekly_up:
+            # EXIT SHORT: bull trap appears (liquidity grab short) or trend fails
+            if short_setup or close[i] > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
