@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 6h_MarketStructure_WeeklyTrend_DailyVolume
-# Hypothesis: Market structure (HH/HL or LH/LL) combined with weekly trend and daily volume surge identifies
-# high-probability momentum moves. Long when bullish structure + weekly uptrend + volume spike.
-# Short when bearish structure + weekly downtrend + volume spike. Works in both bull/bear by following
-# weekly trend direction with structure confirmation. Targets 15-25 trades/year via strict conditions.
+# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Camarilla R1 and S1 levels from daily pivots act as strong support/resistance.
+# Long when price breaks above R1 with weekly uptrend and volume confirmation.
+# Short when price breaks below S1 with weekly downtrend and volume confirmation.
+# Uses weekly EMA20 for trend filter, daily Camarilla levels, and volume > 1.3x 20-period average.
+# Designed for 12h timeframe to limit trades (target: 50-150 total over 4 years) and avoid overtrading.
+# Works in bull markets via R1 breakouts in uptrend and bear markets via S1 breakdowns in downtrend.
 
-name = "6h_MarketStructure_WeeklyTrend_DailyVolume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -32,54 +34,42 @@ def generate_signals(prices):
     ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
 
-    # Get daily data for volume average
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
 
-    # Daily volume 20-period average
-    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate Camarilla levels from previous day's OHLC
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C = close, H = high, L = low of previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Avoid NaN from shift
+    prev_close = np.where(np.isnan(prev_close), df_1d['close'].values, prev_close)
+    prev_high = np.where(np.isnan(prev_high), df_1d['high'].values, prev_high)
+    prev_low = np.where(np.isnan(prev_low), df_1d['low'].values, prev_low)
+    
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Market structure: 3-bar swing high/low
-    # Bullish structure: HH and HL
-    # Bearish structure: LH and LL
-    hh = (high > np.roll(high, 1)) & (high > np.roll(high, 2))
-    ll = (low < np.roll(low, 1)) & (low < np.roll(low, 2))
-    # Need confirmation: wait for next bar to confirm swing
-    hh_confirmed = np.roll(hh, 1)  # confirmed on next bar
-    ll_confirmed = np.roll(ll, 1)
-    hh_confirmed[0] = False
-    ll_confirmed[0] = False
-
-    # Track structure state
-    bullish_structure = np.zeros(n, dtype=bool)
-    bearish_structure = np.zeros(n, dtype=bool)
-    bullish_structure[0] = False
-    bearish_structure[0] = False
-
-    for i in range(1, n):
-        if hh_confirmed[i]:
-            bullish_structure[i] = True
-            bearish_structure[i] = False
-        elif ll_confirmed[i]:
-            bullish_structure[i] = False
-            bearish_structure[i] = True
-        else:
-            bullish_structure[i] = bullish_structure[i-1]
-            bearish_structure[i] = bearish_structure[i-1]
-
-    # Volume spike: current 6h volume > 2.0x daily average volume (scaled)
-    # Approximate: 6h volume vs daily volume - daily has 4x 6h bars
-    volume_spike = volume > (2.0 * vol_ma_1d_aligned / 4.0)  # adjust for timeframe difference
+    # Volume confirmation: current volume > 1.3x average of last 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,30 +78,30 @@ def generate_signals(prices):
             continue
 
         # Trend filter from weekly EMA20
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
+        price_above_weekly_ema = close[i] > ema_20_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_20_1w_aligned[i]
 
         if position == 0:
-            # LONG: Bullish structure + weekly uptrend + volume spike
-            if bullish_structure[i] and weekly_uptrend and volume_spike[i]:
+            # LONG: Price breaks above R1, weekly uptrend, volume confirmation
+            if close[i] > r1_aligned[i] and price_above_weekly_ema and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish structure + weekly downtrend + volume spike
-            elif bearish_structure[i] and weekly_downtrend and volume_spike[i]:
+            # SHORT: Price breaks below S1, weekly downtrend, volume confirmation
+            elif close[i] < s1_aligned[i] and price_below_weekly_ema and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Structure turns bearish or weekly trend breaks
-            if not bullish_structure[i] or not weekly_uptrend:
+            # EXIT LONG: Price falls back below R1 or weekly trend turns down
+            if close[i] < r1_aligned[i] or not price_above_weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Structure turns bullish or weekly trend breaks
-            if not bearish_structure[i] or not weekly_downtrend:
+            # EXIT SHORT: Price rises back above S1 or weekly trend turns up
+            if close[i] > s1_aligned[i] or not price_below_weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
