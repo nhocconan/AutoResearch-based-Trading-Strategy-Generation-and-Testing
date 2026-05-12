@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_MultiTF_Ichimoku_Cloud_Breakout
-Hypothesis: Combines 6h Ichimoku Tenkan/Kijun cross with 1d cloud color as trend filter and volume confirmation.
-In bull markets, price above cloud with bullish TK cross signals continuation; in bear markets, price below cloud with bearish TK cross signals continuation.
-The 1d cloud provides higher timeframe trend context, reducing false signals during range-bound periods.
-Volume surge confirms breakout strength. Targets 15-30 trades/year with discrete sizing (0.25) to minimize fee churn.
-Works in both bull and bear by following the higher timeframe trend direction.
+1h_Combined_Momentum_Reversal
+Hypothesis: Combines momentum (RSI) and mean-reversion (Bollinger Bands) on 1h timeframe,
+filtered by 4h trend (EMA50) and 1d volume regime to avoid false signals. Uses volume spike
+after low volatility to capture momentum bursts in both bull and bear markets. Designed for
+low trade frequency (15-30/year) with discrete sizing (0.20) to minimize fee drag.
 """
 
-name = "6h_MultiTF_Ichimoku_Cloud_Breakout"
-timeframe = "6h"
+name = "1h_Combined_Momentum_Reversal"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -26,53 +25,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Ichimoku cloud (call once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Get 4h data for trend filter (call once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
 
-    # Calculate Ichimoku components on 1d data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate 4h EMA50 for trend filter
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Get 1d data for volume regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    # Calculate 1d volume average and standard deviation for volatility regime
+    vol_avg_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_std_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).std().values
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = ((period52_high + period52_low) / 2)
+    # Calculate RSI (14) on 1h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    # Calculate Bollinger Bands (20, 2) on 1h close
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma20 + 2 * std20
+    lower_band = sma20 - 2 * std20
     
-    # Volume confirmation: 24-period average on 6h (4 trading days)
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate volume spike detector (20-period average)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all indicators to 1h timeframe
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    vol_std_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_std_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(52, n):  # Start from 52 to have enough data for all indicators
-        # Get aligned values for current 6h bar
-        tenkan = tenkan_aligned[i]
-        kijun = kijun_aligned[i]
-        senkou_a = senkou_a_aligned[i]
-        senkou_b = senkou_b_aligned[i]
-        vol_avg = vol_avg_24[i]
+    for i in range(50, n):  # Start from 50 to have enough data for all indicators
+        # Get aligned values for current 1h bar
+        ema50_val = ema50_4h_aligned[i]
+        vol_avg_20_1d_val = vol_avg_20_1d_aligned[i]
+        vol_std_20_1d_val = vol_std_20_1d_aligned[i]
+        rsi_val = rsi[i]
+        close_val = close[i]
+        lower_band_val = lower_band[i]
+        upper_band_val = upper_band[i]
+        vol_avg_val = vol_avg_20[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(tenkan) or np.isnan(kijun) or np.isnan(senkou_a) or 
-            np.isnan(senkou_b) or np.isnan(vol_avg)):
+        if (np.isnan(ema50_val) or np.isnan(vol_avg_20_1d_val) or np.isnan(vol_std_20_1d_val) or 
+            np.isnan(rsi_val) or np.isnan(lower_band_val) or np.isnan(upper_band_val) or 
+            np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,51 +90,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Determine cloud color and price position relative to cloud
-        # Green cloud (bullish): Senkou A > Senkou B
-        # Red cloud (bearish): Senkou A < Senkou B
-        green_cloud = senkou_a > senkou_b
-        red_cloud = senkou_a < senkou_b
-        above_cloud = close[i] > max(senkou_a, senkou_b)
-        below_cloud = close[i] < min(senkou_a, senkou_b)
+        # Low volatility regime: 1d volume volatility < 50% of average
+        low_vol_regime = vol_std_20_1d_val < (vol_avg_20_1d_val * 0.5)
         
-        # TK cross signals
-        tk_bullish_cross = tenkan > kijun and tenkan <= kijun  # Current bullish, previous was bearish or equal
-        tk_bearish_cross = kijun > tenkan and kijun <= tenkan  # Current bearish, previous was bullish or equal
-        # Fix crossover detection
-        if i > 52:
-            tk_bullish_cross = tenkan > kijun and tenkan_aligned[i-1] <= kijun_aligned[i-1]
-            tk_bearish_cross = kijun > tenkan and kijun_aligned[i-1] <= tenkan_aligned[i-1]
-        else:
-            tk_bullish_cross = False
-            tk_bearish_cross = False
-
         if position == 0:
-            # LONG: Price above green cloud + bullish TK cross + volume surge
-            if (above_cloud and green_cloud and tk_bullish_cross and 
-                volume[i] > vol_avg * 2.0):
-                signals[i] = 0.25
+            # LONG: RSI < 30 (oversold) + price at/below lower BB + 4h uptrend + low vol + volume spike
+            if (rsi_val < 30 and 
+                close_val <= lower_band_val and 
+                close_val > ema50_val and 
+                low_vol_regime and 
+                volume[i] > vol_avg_val * 2.0):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price below red cloud + bearish TK cross + volume surge
-            elif (below_cloud and red_cloud and tk_bearish_cross and 
-                  volume[i] > vol_avg * 2.0):
-                signals[i] = -0.25
+            # SHORT: RSI > 70 (overbought) + price at/above upper BB + 4h downtrend + low vol + volume spike
+            elif (rsi_val > 70 and 
+                  close_val >= upper_band_val and 
+                  close_val < ema50_val and 
+                  low_vol_regime and 
+                  volume[i] > vol_avg_val * 2.0):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below cloud or bearish TK cross
-            if (close[i] < senkou_a or close[i] < senkou_b or tk_bearish_cross):
+            # EXIT LONG: RSI > 50 or price > upper BB or trend turns down
+            if (rsi_val > 50 or close_val > upper_band_val or close_val < ema50_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price crosses above cloud or bullish TK cross
-            if (close[i] > senkou_a or close[i] > senkou_b or tk_bullish_cross):
+            # EXIT SHORT: RSI < 50 or price < lower BB or trend turns up
+            if (rsi_val < 50 or close_val < lower_band_val or close_val > ema50_val):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
