@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_1w_Trend_1d_Pullback_Swing
-Hypothesis: Buy pullbacks to 1w VWAP in a rising 1w trend, sell rallies to 1w VWAP in a falling 1w trend. Uses 1d RSI to time entries on 12h timeframe. Designed for low trade frequency (20-40/year) with strong trend capture and mean-reversion entries within the trend. Works in bull markets via long pullbacks and in bear markets via short rallies.
-Timeframe: 12h
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 12h timeframe when aligned with 1d EMA50 trend and confirmed by volume spike. This strategy targets 12-37 trades/year by requiring confluence of price level breakout, trend alignment, and volume confirmation. Works in both bull and bear markets by using trend-following entries and mean-reversion exits at the daily pivot point. Timeframe: 12h
 """
 
-name = "12h_1w_Trend_1d_Pullback_Swing"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,46 +22,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend and VWAP ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-
-    # Weekly EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-
-    # Weekly VWAP (volume-weighted average price)
-    typical_price_1w = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3.0
-    vp_1w = typical_price_1w * df_1w['volume'].values
-    cum_vp_1w = np.cumsum(vp_1w)
-    cum_vol_1w = np.cumsum(df_1w['volume'].values)
-    vwap_1w = np.divide(cum_vp_1w, cum_vol_1w, out=np.full_like(cum_vp_1w, np.nan), where=cum_vol_1w!=0)
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
-
-    # Get daily data for RSI pullback filter ONCE before loop
+    # Get daily data for Camarilla levels ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
 
-    # Daily RSI(14)
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    ph = df_1d['high'].shift(1).values  # prior day high
+    pl = df_1d['low'].shift(1).values   # prior day low
+    pc = df_1d['close'].shift(1).values # prior day close
+    r1 = pc + (ph - pl) * 1.1 / 12
+    s1 = pc - (ph - pl) * 1.1 / 12
+    # Align to 12h: daily Camarilla values are constant through the day
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+
+    # Get daily data for EMA50 trend filter ONCE before loop
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+
+    # Volume spike: current > 2.0x average of last 2 bars (1 day on 12h)
+    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):  # Start after warmup
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(vwap_1w_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+    for i in range(100, n):  # Start after EMA50 warmup
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,30 +60,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: 1w trend up (close > EMA20) + pullback to VWAP (close <= VWAP) + RSI not overbought (<60)
-            if (close[i] > ema_20_1w_aligned[i] and 
-                close[i] <= vwap_1w_aligned[i] and 
-                rsi_1d_aligned[i] < 60):
+            # LONG: close > daily R1 + price > 1d EMA50 + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1w trend down (close < EMA20) + rally to VWAP (close >= VWAP) + RSI not oversold (>40)
-            elif (close[i] < ema_20_1w_aligned[i] and 
-                  close[i] >= vwap_1w_aligned[i] and 
-                  rsi_1d_aligned[i] > 40):
+            # SHORT: close < daily S1 + price < 1d EMA50 + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: close > 1w VWAP (mean reversion complete) or trend broken
-            if close[i] > vwap_1w_aligned[i] or close[i] < ema_20_1w_aligned[i]:
+            # EXIT LONG: close < daily pivot P
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: close < 1w VWAP (mean reversion complete) or trend broken
-            if close[i] < vwap_1w_aligned[i] or close[i] > ema_20_1w_aligned[i]:
+            # EXIT SHORT: close > daily pivot P
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
