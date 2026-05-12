@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-1D_WEEKLY_HIGH_LOW_BREAKOUT_VOLUME
-Hypothesis: Breakout of previous week's high/low on daily timeframe with volume confirmation.
-Weekly levels provide strong support/resistance; breakouts indicate institutional interest.
-Volume spike confirms validity. Works in both bull (breakout continuation) and bear (breakdown continuation).
-Target: 15-25 trades/year to stay under 100 total over 4 years.
+4H_CAMARILLA_R1_S1_BREAKOUT_1DTREND_VOLUME
+Hypothesis: Camarilla R1/S1 breakout on 4h with 1d EMA100 trend filter and volume confirmation. Uses previous day's range for pivot levels to avoid look-ahead. Trend filter ensures trades align with daily momentum. Volume spike confirms institutional interest. Target: 20-40 trades/year.
 """
-name = "1D_WEEKLY_HIGH_LOW_BREAKOUT_VOLUME"
-timeframe = "1d"
+name = "4H_CAMARILLA_R1_S1_BREAKOUT_1DTREND_VOLUME"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mta_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,31 +21,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for high/low levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d data for trend filter (EMA100)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous week's high and low
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    prev_weekly_high = np.roll(weekly_high, 1)
-    prev_weekly_low = np.roll(weekly_low, 1)
-    prev_weekly_high[0] = prev_weekly_low[0] = np.nan
+    close_1d = df_1d['close'].values
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # Align weekly levels to daily timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, prev_weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, prev_weekly_low)
+    # 1d data for Camarilla levels (using previous day's range)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume spike: current daily volume > 2x 20-day average
+    # Previous day's range for Camarilla calculation
+    ph = np.roll(high_1d, 1)  # previous day high
+    pl = np.roll(low_1d, 1)   # previous day low
+    pc = np.roll(close_1d, 1) # previous day close
+    ph[0] = pl[0] = pc[0] = np.nan  # first day has no previous day
+    
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    r1 = pc + (ph - pl) * 1.1 / 12
+    s1 = pc - (ph - pl) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume spike: current 4h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > 2.0 * vol_ma
+    volume_spike = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        if np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema100_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,26 +67,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above previous week's high with volume spike
-            if high[i] > weekly_high_aligned[i] and volume_spike[i]:
+            # LONG: Break above R1 with volume spike and price above 1d EMA100
+            if (high[i] > r1_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema100_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below previous week's low with volume spike
-            elif low[i] < weekly_low_aligned[i] and volume_spike[i]:
+            # SHORT: Break below S1 with volume spike and price below 1d EMA100
+            elif (low[i] < s1_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema100_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls back below previous week's low
-            if close[i] < weekly_low_aligned[i]:
+            # EXIT LONG: Price falls back below S1 or below 1d EMA100
+            if (close[i] < s1_aligned[i] or 
+                close[i] < ema100_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises back above previous week's high
-            if close[i] > weekly_high_aligned[i]:
+            # EXIT SHORT: Price rises back above R1 or above 1d EMA100
+            if (close[i] > r1_aligned[i] or 
+                close[i] > ema100_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
