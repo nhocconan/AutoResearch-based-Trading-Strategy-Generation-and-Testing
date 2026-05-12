@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_Weekly_ADX_Filter
-Hypothesis: Use daily Kaufman Adaptive Moving Average (KAMA) for trend direction, filtered by weekly ADX > 25 to ensure trending markets. Enter long when price crosses above KAMA, short when price crosses below KAMA. Exit on opposite cross. This avoids choppy markets and captures sustained trends in both bull and bear cycles.
-Timeframe: 1d
+6h_Russell2000_SMA_Trend_Momentum
+Hypothesis: Combine 60-day SMA trend filter with 20-bar RSI momentum to capture sustained trends while avoiding chop. Russell2000 SMA (60) acts as a long-term trend filter (price > SMA60 = bullish bias, < SMA60 = bearish bias). RSI(20) momentum confirms entry direction with overbought/oversold thresholds. Works in both bull and bear markets by using trend-following entries in the direction of the long-term SMA. Uses volume confirmation to avoid false breaks. Targets 15-35 trades/year on 6h timeframe with disciplined risk management via trend reversal exits.
+Timeframe: 6h
 """
 
-name = "1d_KAMA_Trend_With_Weekly_ADX_Filter"
-timeframe = "1d"
+name = "6h_Russell2000_SMA_Trend_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,98 +15,44 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get weekly data for ADX filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get daily data for SMA60 trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
 
-    # Calculate weekly ADX (14)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily SMA60 for trend filter
+    close_1d = df_1d['close'].values
+    sma_60_1d = pd.Series(close_1d).rolling(window=60, min_periods=60).mean().values
+    sma_60_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_60_1d)
 
-    # True Range
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    # RSI(20) momentum on 6h timeframe
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/20, adjust=False, min_periods=20).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/20, adjust=False, min_periods=20).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
 
-    # Directional Movement
-    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
-                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
-                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-
-    # Smooth TR, DM+, DM- (Wilder smoothing = EMA with alpha=1/period)
-    def wilders_smooth(data, period):
-        alpha = 1.0 / period
-        result = np.full_like(data, np.nan)
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-
-    atr = wilders_smooth(tr, 14)
-    dm_plus_smooth = wilders_smooth(dm_plus, 14)
-    dm_minus_smooth = wilders_smooth(dm_minus, 14)
-
-    # DI+ and DI-
-    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
-
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smooth(dx, 14)
-    adx_14 = adx  # ADX(14)
-
-    # Align weekly ADX to daily
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_14)
-
-    # Daily KAMA (10, 2, 30)
-    def kama(close, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=10))
-        volatility = np.nansum(np.abs(np.diff(close)), axis=0) if len(close) >= 10 else np.full_like(change, np.nan)
-        # Actually compute properly
-        er = np.full_like(close, np.nan)
-        for i in range(10, len(close)):
-            if np.isnan(close[i-10:i]).any() or np.isnan(close[i-10+1:i+1]).any():
-                er[i] = np.nan
-            else:
-                change_val = np.abs(close[i] - close[i-10])
-                volatility_val = np.nansum(np.abs(np.diff(close[i-10:i+1])))
-                er[i] = change_val / volatility_val if volatility_val != 0 else 0
-        # Smoothing constants
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # KAMA
-        kama_val = np.full_like(close, np.nan)
-        kama_val[0] = close[0]
-        for i in range(1, len(close)):
-            if np.isnan(sc[i]):
-                kama_val[i] = kama_val[i-1]
-            else:
-                kama_val[i] = kama_val[i-1] + sc[i] * (close[i] - kama_val[i-1])
-        return kama_val
-
-    kama_val = kama(close, 2, 30)
-    # Warmup period: need at least 30 for KAMA stability
-    warmup = 30
+    # Volume confirmation: current > 1.8x average of last 4 bars
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(warmup, n):
-        if np.isnan(kama_val[i]) or np.isnan(adx_aligned[i]):
+    for i in range(100, n):
+        if (np.isnan(sma_60_1d_aligned[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -114,35 +60,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Only trade when weekly ADX > 25 (trending market)
-        if adx_aligned[i] > 25:
-            if position == 0:
-                if close[i] > kama_val[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < kama_val[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
-                if close[i] < kama_val[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                if close[i] > kama_val[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-        else:
-            # In choppy market (ADX <= 25), stay flat
-            if position != 0:
+        if position == 0:
+            # LONG: price > daily SMA60 + RSI > 50 (bullish momentum) + volume spike
+            if (close[i] > sma_60_1d_aligned[i] and 
+                rsi_values[i] > 50 and 
+                volume_spike[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: price < daily SMA60 + RSI < 50 (bearish momentum) + volume spike
+            elif (close[i] < sma_60_1d_aligned[i] and 
+                  rsi_values[i] < 50 and 
+                  volume_spike[i]):
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # EXIT LONG: price < daily SMA60 (trend reversal)
+            if close[i] < sma_60_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: price > daily SMA60 (trend reversal)
+            if close[i] > sma_60_1d_aligned[i]:
                 signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
 
     return signals
