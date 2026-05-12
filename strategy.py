@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1W_R4S4_Breakout_1wTrend_Volume
-# Hypothesis: Breakouts at weekly Camarilla R4/S4 levels with 1w EMA trend filter and volume confirmation.
-# Weekly R4/S4 represent strong monthly support/resistance; breaks indicate momentum with institutional interest.
+# 4H_1D_R4S4_BREAKOUT_1D_EMA100_FILTER
+# Hypothesis: Breakouts at daily Camarilla R4/S4 levels with 1d EMA100 trend filter and volume confirmation.
+# R4/S4 represent strong support/resistance; breaks indicate momentum with institutional interest.
 # Works in bull/bear: buy R4 breaks in uptrend, sell S4 breaks in downtrend. Volume confirms validity.
-# Targets 12-37 trades/year on 12h timeframe to avoid fee drag. Focus on BTC/ETH.
+# Targets 20-50 trades/year on 4h timeframe to avoid fee drag. Focus on BTC/ETH.
 
-name = "12h_1W_R4S4_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4H_1D_R4S4_BREAKOUT_1D_EMA100_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,32 +23,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # 1w EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA100 trend filter
+    ema_100_1d = pd.Series(df_1d['close']).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
 
-    # Get 1w data for Camarilla R4/S4 levels (from previous week)
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla R4/S4 levels (from previous day)
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate Camarilla levels from previous 1w OHLC
-    # Using previous week's data to avoid look-ahead
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
+    # Calculate Camarilla levels from previous 1d OHLC
+    # Using previous day's data to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
 
     # Camarilla R4 and S4 levels (outer bands)
     camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
     camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
 
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,7 +59,7 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
+        if (np.isnan(ema_100_1d_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
             np.isnan(camarilla_s4_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,9 +68,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from 1w EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Trend filter from 1d EMA100
+        uptrend = close[i] > ema_100_1d_aligned[i]
+        downtrend = close[i] < ema_100_1d_aligned[i]
 
         if position == 0:
             # LONG: Break above Camarilla R4 in uptrend with volume confirmation
