@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Breakout_1dTrend_VolumeFilter
-Hypothesis: Price breaking above/below Keltner Channel (ATR-based) on 4h with 1d EMA trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. Works in bull/bear by following 1d trend direction. Uses 4h timeframe to limit trade frequency and reduce fee drag.
+4h_Camarilla_R1_S1_Breakout_12hEMA34_VolumeSpike
+Hypothesis: Price breaking above/below Camarilla R1/S1 levels (derived from 12h high-low-close) with 12h EMA34 trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. R1/S1 levels are tighter, providing earlier entry with confirmation filters to reduce whipsaw. Works in bull/bear by following 12h trend direction.
 """
 
-name = "4h_Keltner_Breakout_1dTrend_VolumeFilter"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,26 +22,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
 
-    # Calculate 4h ATR(10) for Keltner Channel
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar: no previous close
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Calculate Camarilla levels from 12h data
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
 
-    # Keltner Channel: 20 EMA ± 2 * ATR
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema_20 + 2 * atr
-    kc_lower = ema_20 - 2 * atr
+    # Shift by 1 to use previous 12h bar's data
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    prev_close_12h[0] = np.nan
+    prev_high_12h[0] = np.nan
+    prev_low_12h[0] = np.nan
 
-    # 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Camarilla R1 = C + (H-L)*1.1/6, S1 = C - (H-L)*1.1/6
+    camarilla_upper = prev_close_12h + (prev_high_12h - prev_low_12h) * 1.1 / 6
+    camarilla_lower = prev_close_12h - (prev_high_12h - prev_low_12h) * 1.1 / 6
+
+    # Align Camarilla levels to 4h timeframe
+    camarilla_upper_aligned = align_htf_to_ltf(prices, df_12h, camarilla_upper)
+    camarilla_lower_aligned = align_htf_to_ltf(prices, df_12h, camarilla_lower)
+
+    # 12h EMA34 trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
 
     # Volume spike: >1.5x 20-period average (4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,9 +57,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):  # Start after EMA20 warmup
-        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(34, n):  # Start after EMA34 warmup
+        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,30 +68,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Keltner upper + 1d EMA34 uptrend + volume spike
-            if (close[i] > kc_upper[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # LONG: Price breaks above Camarilla R1 + 12h EMA34 uptrend + volume spike
+            if (close[i] > camarilla_upper_aligned[i] and 
+                close[i] > ema_34_12h_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Keltner lower + 1d EMA34 downtrend + volume spike
-            elif (close[i] < kc_lower[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # SHORT: Price breaks below Camarilla S1 + 12h EMA34 downtrend + volume spike
+            elif (close[i] < camarilla_lower_aligned[i] and 
+                  close[i] < ema_34_12h_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Keltner lower (reversal level)
-            if close[i] < kc_lower[i]:
+            # EXIT LONG: Price closes below Camarilla S1 (reversal level)
+            if close[i] < camarilla_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Keltner upper (reversal level)
-            if close[i] > kc_upper[i]:
+            # EXIT SHORT: Price closes above Camarilla R1 (reversal level)
+            if close[i] > camarilla_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
