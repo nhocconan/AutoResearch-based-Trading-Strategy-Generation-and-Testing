@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_HighLow_Breakout_1dTrend_Volume
-Hypothesis: Trade breakouts above the daily high or below the daily low on 4h timeframe when aligned with 1d EMA50 trend and confirmed by volume spike. This strategy uses the previous day's high/low as key support/resistance levels, which are more robust than pivot points in trending markets. Works in both bull and bear markets by following the daily trend with trend-following entries and exiting at the opposite daily level.
-Timeframe: 4h
+1d_KAMA_Trend_With_Weekly_ADX_Filter
+Hypothesis: Use daily Kaufman Adaptive Moving Average (KAMA) for trend direction, filtered by weekly ADX > 25 to ensure trending markets. Enter long when price crosses above KAMA, short when price crosses below KAMA. Exit on opposite cross. This avoids choppy markets and captures sustained trends in both bull and bear cycles.
+Timeframe: 1d
 """
 
-name = "4h_Pivot_HighLow_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_Weekly_ADX_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,41 +15,98 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 50:
         return np.zeros(n)
 
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get daily data for high/low levels ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for ADX filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
 
-    # Calculate daily high and low (using prior day's OHLC)
-    prev_high = df_1d['high'].shift(1).values  # prior day high
-    prev_low = df_1d['low'].shift(1).values    # prior day low
-    # Align to 4h: daily high/low values are constant through the day
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    # Calculate weekly ADX (14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # Get daily data for EMA50 trend filter ONCE before loop
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # True Range
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
 
-    # Volume spike: current > 2.0x average of last 6 bars (1 day on 4h)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.roll(high_1w, 1)) > (np.roll(low_1w, 1) - low_1w),
+                       np.maximum(high_1w - np.roll(high_1w, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1w, 1) - low_1w) > (high_1w - np.roll(high_1w, 1)),
+                        np.maximum(np.roll(low_1w, 1) - low_1w, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+
+    # Smooth TR, DM+, DM- (Wilder smoothing = EMA with alpha=1/period)
+    def wilders_smooth(data, period):
+        alpha = 1.0 / period
+        result = np.full_like(data, np.nan)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
+
+    atr = wilders_smooth(tr, 14)
+    dm_plus_smooth = wilders_smooth(dm_plus, 14)
+    dm_minus_smooth = wilders_smooth(dm_minus, 14)
+
+    # DI+ and DI-
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smooth(dx, 14)
+    adx_14 = adx  # ADX(14)
+
+    # Align weekly ADX to daily
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_14)
+
+    # Daily KAMA (10, 2, 30)
+    def kama(close, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=10))
+        volatility = np.nansum(np.abs(np.diff(close)), axis=0) if len(close) >= 10 else np.full_like(change, np.nan)
+        # Actually compute properly
+        er = np.full_like(close, np.nan)
+        for i in range(10, len(close)):
+            if np.isnan(close[i-10:i]).any() or np.isnan(close[i-10+1:i+1]).any():
+                er[i] = np.nan
+            else:
+                change_val = np.abs(close[i] - close[i-10])
+                volatility_val = np.nansum(np.abs(np.diff(close[i-10:i+1])))
+                er[i] = change_val / volatility_val if volatility_val != 0 else 0
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # KAMA
+        kama_val = np.full_like(close, np.nan)
+        kama_val[0] = close[0]
+        for i in range(1, len(close)):
+            if np.isnan(sc[i]):
+                kama_val[i] = kama_val[i-1]
+            else:
+                kama_val[i] = kama_val[i-1] + sc[i] * (close[i] - kama_val[i-1])
+        return kama_val
+
+    kama_val = kama(close, 2, 30)
+    # Warmup period: need at least 30 for KAMA stability
+    warmup = 30
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(80, n):  # Start after EMA50 warmup
-        if (np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(warmup, n):
+        if np.isnan(kama_val[i]) or np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,34 +114,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        if position == 0:
-            # LONG: close > previous day's high + price > 1d EMA50 + volume spike
-            if (close[i] > prev_high_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_spike[i]):
-                signals[i] = 0.25
-                position = 1
-            # SHORT: close < previous day's low + price < 1d EMA50 + volume spike
-            elif (close[i] < prev_low_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_spike[i]):
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # EXIT LONG: close < previous day's low
-            if close[i] < prev_low_aligned[i]:
+        # Only trade when weekly ADX > 25 (trending market)
+        if adx_aligned[i] > 25:
+            if position == 0:
+                if close[i] > kama_val[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < kama_val[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            elif position == 1:
+                if close[i] < kama_val[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                if close[i] > kama_val[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:
+            # In choppy market (ADX <= 25), stay flat
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        elif position == -1:
-            # EXIT SHORT: close > previous day's high
-            if close[i] > prev_high_aligned[i]:
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
 
     return signals
