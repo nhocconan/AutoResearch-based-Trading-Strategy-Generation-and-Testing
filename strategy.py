@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1W_1D_Camarilla_R3S3_Breakout_Trend_Volume_Regime
-# Hypothesis: Breakout at weekly and daily combined strong support/resistance levels (R3/S3) with volume confirmation, trend filter from weekly EMA, and a chop regime filter to avoid ranging markets. Designed to work in both bull and bear markets by requiring trend alignment and low-chop conditions. Targets 15-25 trades/year on 12h timeframe to minimize fee drag.
+# 1d_1W_Camarilla_R3S3_Breakout_Trend_Volume_Filtered
+# Hypothesis: Breakout at weekly Camarilla R3/S3 levels with daily trend filter and volume confirmation.
+# Uses weekly price structure for direction and daily timeframe for execution to reduce noise.
+# Targets 15-25 trades/year to minimize fee drag while capturing major trend moves.
 
-name = "12h_1W_1D_Camarilla_R3S3_Breakout_Trend_Volume_Regime"
-timeframe = "12h"
+name = "1d_1W_Camarilla_R3S3_Breakout_Trend_Volume_Filtered"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,62 +22,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly and daily data
+    # Get weekly data for Camarilla levels and trend filter
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 50 or len(df_1d) < 50:
+    if len(df_1w) < 50:
         return np.zeros(n)
 
-    # Weekly EMA for trend filter
+    # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
 
-    # Calculate Choppy Market Index (CMI) on weekly timeframe
-    lookback_period = 14
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = abs(df_1w['low'] - df_1w['close'].shift(1))
-    true_range = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
-    atr_sum = true_range.rolling(window=lookback_period, min_periods=lookback_period).sum()
-    highest_high = df_1w['high'].rolling(window=lookback_period, min_periods=lookback_period).max()
-    lowest_low = df_1w['low'].rolling(window=lookback_period, min_periods=lookback_period).min()
-    cmi = 100 * (atr_sum / (lookback_period * (highest_high - lowest_low)))
-    cmi_values = cmi.fillna(100).values
-    cmi_aligned = align_htf_to_ltf(prices, df_1w, cmi_values)
+    # Calculate weekly RSI for overbought/oversold filter
+    delta = pd.Series(close_1w).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1w = (100 - (100 / (1 + rs))).values
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
 
-    # Combined strong levels: Weekly and Daily R3/S3 (average)
-    # Weekly levels
-    wc_prev_close = df_1w['close'].shift(1).values
-    wc_prev_high = df_1w['high'].shift(1).values
-    wc_prev_low = df_1w['low'].shift(1).values
-    weekly_r3 = wc_prev_close + (wc_prev_high - wc_prev_low) * 1.1 / 4
-    weekly_s3 = wc_prev_close - (wc_prev_high - wc_prev_low) * 1.1 / 4
-    # Daily levels
-    dc_prev_close = df_1d['close'].shift(1).values
-    dc_prev_high = df_1d['high'].shift(1).values
-    dc_prev_low = df_1d['low'].shift(1).values
-    daily_r3 = dc_prev_close + (dc_prev_high - dc_prev_low) * 1.1 / 4
-    daily_s3 = dc_prev_close - (dc_prev_high - dc_prev_low) * 1.1 / 4
-    # Average for stronger confluence
-    camarilla_r3 = (weekly_r3 + daily_r3) / 2
-    camarilla_s3 = (weekly_s3 + daily_s3) / 2
+    # Calculate Camarilla R3 and S3 levels from previous weekly OHLC
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
 
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)  # align to daily then to 12h
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
 
-    # Volume confirmation: current volume > 2.0x average of last 30 periods
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_ok = volume > (2.0 * vol_ma)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+
+    # Volume confirmation: current volume > 1.5x average of last 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ok[i]) or
-            np.isnan(cmi_aligned[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(rsi_1w_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,34 +72,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter: price above/below weekly EMA
+        # Trend filter: price above/below 34-period EMA on weekly
         bullish_trend = close[i] > ema_1w_aligned[i]
         bearish_trend = close[i] < ema_1w_aligned[i]
         
-        # Chop filter: only trade when market is not too choppy (CMI < 40)
-        low_chop = cmi_aligned[i] < 40
+        # RSI filter: avoid extremes
+        rsi_not_overbought = rsi_1w_aligned[i] < 70
+        rsi_not_oversold = rsi_1w_aligned[i] > 30
 
         if position == 0:
-            # LONG: Break above combined R3 with bullish trend, volume confirmation, and low chop
-            if (close[i] > camarilla_r3_aligned[i] and bullish_trend and volume_ok[i] and low_chop):
+            # LONG: Break above weekly Camarilla R3 with bullish trend, volume confirmation, and RSI not overbought
+            if (close[i] > camarilla_r3_aligned[i] and bullish_trend and volume_ok[i] and rsi_not_overbought):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below combined S3 with bearish trend, volume confirmation, and low chop
-            elif (close[i] < camarilla_s3_aligned[i] and bearish_trend and volume_ok[i] and low_chop):
+            # SHORT: Break below weekly Camarilla S3 with bearish trend, volume confirmation, and RSI not oversold
+            elif (close[i] < camarilla_s3_aligned[i] and bearish_trend and volume_ok[i] and rsi_not_oversold):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R3 or trend turns bearish or chop increases
-            if close[i] < camarilla_r3_aligned[i] or not bullish_trend or not low_chop:
+            # EXIT LONG: Price re-enters below R3 or trend turns bearish or RSI overbought
+            if close[i] < camarilla_r3_aligned[i] or not bullish_trend or rsi_1w_aligned[i] >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S3 or trend turns bullish or chop increases
-            if close[i] > camarilla_s3_aligned[i] or not bearish_trend or not low_chop:
+            # EXIT SHORT: Price re-enters above S3 or trend turns bullish or RSI oversold
+            if close[i] > camarilla_s3_aligned[i] or not bearish_trend or rsi_1w_aligned[i] <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
