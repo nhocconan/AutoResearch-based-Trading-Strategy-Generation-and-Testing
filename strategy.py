@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4H_CAMARILLA_R4_S4_BREAKOUT_1D_TREND_FILTER
-# Hypothesis: Daily Camarilla R4/S4 levels (extreme levels) act as stronger support/resistance than R3/S3 on 4h timeframe.
-# Breakouts above R4 or below S4 with daily trend filter (EMA34) capture momentum while reducing false breaks.
-# Works in bull markets (breakouts continuation) and bear markets (reversals at extremes).
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years).
+# 1D_KAMA_DIRECTION_1W_TREND_FILTER
+# Hypothesis: Kaufman Adaptive Moving Average (KAMA) on daily timeframe captures trend direction,
+# while weekly trend filter (EMA34) avoids counter-trend trades. KAMA adapts to market noise,
+# reducing whipsaws in ranging markets and capturing trends in trending markets.
+# Works in bull markets (follows upward KAMA slope) and bear markets (follows downward slope).
+# Target: 7-25 trades/year on 1d timeframe (30-100 total over 4 years).
 
-name = "4H_CAMARILLA_R4_S4_BREAKOUT_1D_TREND_FILTER"
-timeframe = "4h"
+name = "1D_KAMA_DIRECTION_1W_TREND_FILTER"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,40 +19,59 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     
-    # Daily data for Camarilla calculation and trend filter
+    # Daily data for KAMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # R4 = C + (H-L)*1.1, S4 = C - (H-L)*1.1
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    r4 = close_1d + (high_1d - low_1d) * 1.1
-    s4 = close_1d - (high_1d - low_1d) * 1.1
+    # Calculate KAMA (2, 10, 30)
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
     
-    # EMA34 for trend filter
-    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Efficiency ratio
+    change = np.abs(np.diff(close_1d))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0) if len(close_1d) > 1 else 0
+    # Vectorized ER calculation
+    er = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        if i >= 10:
+            ch = np.abs(close_1d[i] - close_1d[i-10])
+            vol = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
+            er[i] = ch / vol if vol != 0 else 0
     
-    # Align to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    # Smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # Weekly EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align to daily timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Need at least one day of data
+    start_idx = 30  # Need sufficient data for KAMA calculation
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema34_aligned[i]):
+        if np.isnan(kama_aligned[i]) or np.isnan(ema34_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,30 +80,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R4 in uptrend
-            if (close[i] > r4_aligned[i] and 
-                close[i] > ema34_aligned[i]):
+            # LONG: Price above KAMA and weekly trend up
+            if (close[i] > kama_aligned[i] and 
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S4 in downtrend
-            elif (close[i] < s4_aligned[i] and 
-                  close[i] < ema34_aligned[i]):
+            # SHORT: Price below KAMA and weekly trend down
+            elif (close[i] < kama_aligned[i] and 
+                  close[i] < ema34_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below S4 or trend reversal
-            if (close[i] < s4_aligned[i] or 
-                close[i] <= ema34_aligned[i]):
+            # EXIT LONG: Price falls below KAMA or weekly trend turns down
+            if (close[i] < kama_aligned[i] or 
+                close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above R4 or trend reversal
-            if (close[i] > r4_aligned[i] or 
-                close[i] >= ema34_aligned[i]):
+            # EXIT SHORT: Price rises above KAMA or weekly trend turns up
+            if (close[i] > kama_aligned[i] or 
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
