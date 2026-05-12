@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,16 +17,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data once for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Weekly EMA(34) for trend filter
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Load daily data for Camarilla pivots (previous day)
+    # Load daily data once for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
+    
+    # Daily EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Daily OHLC for Camarilla R1 and S1 (previous day)
     high_1d = df_1d['high'].values
@@ -38,7 +35,7 @@ def generate_signals(prices):
     r1 = close_1d_vals + (high_1d - low_1d) * 1.1 / 2
     s1 = close_1d_vals - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to 12h (wait for daily close)
+    # Align Camarilla levels to 4h (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -54,7 +51,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,15 +60,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + weekly trend up + volume spike
+            # Long: price breaks above R1 + daily trend up + volume spike
             if (close[i] > r1_aligned[i] and 
-                close[i] > ema34_1w_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.30
                 position = 1
-            # Short: price breaks below S1 + weekly trend down + volume spike
+            # Short: price breaks below S1 + daily trend down + volume spike
             elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_1w_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.30
                 position = -1
