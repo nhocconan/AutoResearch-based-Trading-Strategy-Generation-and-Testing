@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12H_CAMARILLA_R3_S3_BREAKOUT_1W_TREND_FILTER
-# Hypothesis: Weekly Camarilla R3/S3 levels act as major support/resistance.
-# Breakouts above R3 or below S3 with weekly trend filter (EMA34) capture major trend moves.
+# 4H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER
+# Hypothesis: Daily Camarilla R3/S3 levels act as strong support/resistance.
+# Breakouts above R3 or below S3 with daily trend filter (EMA34) capture momentum.
 # Works in bull markets (breakouts continuation) and bear markets (reversals at extremes).
-# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
+# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years).
 
-name = "12H_CAMARILLA_R3_S3_BREAKOUT_1W_TREND_FILTER"
-timeframe = "12h"
+name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,32 +22,32 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Weekly data for Camarilla calculation and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous week
+    # Calculate Camarilla levels from previous day
     # R3 = C + (H-L)*1.25/2, S3 = C - (H-L)*1.25/2
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    r3 = close_1w + (high_1w - low_1w) * 1.25 / 2
-    s3 = close_1w - (high_1w - low_1w) * 1.25 / 2
+    r3 = close_1d + (high_1d - low_1d) * 1.25 / 2
+    s3 = close_1d - (high_1d - low_1d) * 1.25 / 2
     
     # EMA34 for trend filter
-    ema34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    ema34_aligned = align_htf_to_ltf(prices, df_1w, ema34)
+    # Align to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Need at least one week of data
+    start_idx = 1  # Need at least one day of data
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
