@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,7 +26,7 @@ def generate_signals(prices):
     vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # 1d price data for Camarilla levels (previous day's)
+    # 1d price data for Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -36,7 +36,7 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + range_1d * 1.1 / 4
     camarilla_l3 = close_1d - range_1d * 1.1 / 4
     
-    # Align to 12h
+    # Align to 4h
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
@@ -61,14 +61,14 @@ def generate_signals(prices):
                 close[i] > camarilla_h3_aligned[i] and
                 close[i] > ema34_1d_aligned[i] and  # 1d uptrend
                 volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short conditions: price breaks below L3 with 1d downtrend and volume confirmation
             elif (low[i] < camarilla_l3_aligned[i] and 
                   close[i] < camarilla_l3_aligned[i] and
                   close[i] < ema34_1d_aligned[i] and  # 1d downtrend
                   volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit long when price breaks below L3 or reverses against trend
@@ -77,7 +77,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short when price breaks above H3 or reverses against trend
             if (high[i] > camarilla_h3_aligned[i] or 
@@ -85,6 +85,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
