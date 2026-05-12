@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_RSI_Trend_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_SqueezeBreakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,25 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter
+    # Load daily data for trend filter and Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Daily EMA200 for trend filter
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # RSI(14) on 4h data
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Bollinger Bands on 6h (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + bb_std * std
+    lower = sma - bb_std * std
+    bandwidth = (upper - lower) / sma  # Bandwidth for squeeze detection
+    
+    # Bollinger Bandwidth squeeze: bandwidth < 50th percentile of last 50 periods
+    bandwidth_series = pd.Series(bandwidth)
+    bw_rank = bandwidth_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1], raw=False
+    ).values
+    squeeze = bw_rank < 0.5  # True when in squeeze (low volatility)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,12 +50,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(upper[i]) or
+            np.isnan(lower[i]) or
+            np.isnan(squeeze[i]) or
             np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,24 +67,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI > 50 (bullish momentum) + above daily EMA50 + volume filter
-            if rsi[i] > 50 and close[i] > ema_50_1d_aligned[i] and vol_filter[i]:
+            # Long: squeeze breakout up + above daily EMA200 + volume spike
+            if close[i] > upper[i] and squeeze[i-1] and close[i] > ema_200_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 50 (bearish momentum) + below daily EMA50 + volume filter
-            elif rsi[i] < 50 and close[i] < ema_50_1d_aligned[i] and vol_filter[i]:
+            # Short: squeeze breakout down + below daily EMA200 + volume spike
+            elif close[i] < lower[i] and squeeze[i-1] and close[i] < ema_200_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI < 40 or below daily EMA50
-            if rsi[i] < 40 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: close below middle Bollinger Band (SMA)
+            if close[i] < sma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI > 60 or above daily EMA50
-            if rsi[i] > 60 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: close above middle Bollinger Band (SMA)
+            if close[i] > sma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
