@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_RSI_Trend_Filter
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear regimes.
-Combined with RSI(14) > 50 for long and < 50 for short filters, we avoid counter-trend trades.
-This reduces whipsaws and focuses on momentum-aligned entries, suitable for 1d timeframe with low trade frequency.
+6h_Keltner_Channel_Reversal
+Hypothesis: Price reversals at Keltner Channel bands (2*ATR) with 1d trend filter and volume confirmation capture mean-reversion in ranging markets and pullbacks in trends. Designed for 50-150 total trades over 4 years to minimize fee drag while working in both bull and bear regimes.
 """
 
-name = "1d_KAMA_Direction_RSI_Trend_Filter"
-timeframe = "1d"
+name = "6h_Keltner_Channel_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,80 +17,44 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
 
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
 
-    # Calculate KAMA on daily close
-    def calculate_kama(close, length=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.abs(np.diff(close)).cumsum() - np.abs(np.diff(close, prepend=close[0])).cumsum()
-        er = np.where(volatility != 0, change / volatility, 0)
-        # Smoothing constant
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # KAMA
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate 1d EMA34 for trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
 
-    kama = calculate_kama(close, 10, 2, 30)
+    # Calculate ATR(14) for Keltner Channels
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
 
-    # Calculate RSI(14)
-    def calculate_rsi(close, length=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).ewm(alpha=1/length, adjust=False).mean().values
-        avg_loss = pd.Series(loss).ewm(alpha=1/length, adjust=False).mean().values
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate Keltner Channels (2*ATR)
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema20 + 2 * atr
+    lower_keltner = ema20 - 2 * atr
 
-    rsi = calculate_rsi(close, 14)
-
-    # Weekly Supertrend-like filter using ATR
-    def calculate_atr(high, low, close, length=14):
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # first period
-        atr = pd.Series(tr).ewm(alpha=1/length, adjust=False).mean().values
-        return atr
-
-    atr_1w = calculate_atr(high_1w, low_1w, close_1w, 14)
-    # Simple trend: price above/below average of high/low
-    avg_price_1w = (high_1w + low_1w) / 2
-    trend_up = close_1w > avg_price_1w
-    trend_down = close_1w < avg_price_1w
-
-    # Align weekly trend to daily
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up.astype(float))
-    trend_down_aligned = align_htf_to_ltf(prices, df_1w, trend_down.astype(float))
+    # Align 1d EMA34 to 6h timeframe with 1-day delay (need previous day's close)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d, additional_delay_bars=1)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # warmup for KAMA/RSI
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        trend_up_val = trend_up_aligned[i]
-        trend_down_val = trend_down_aligned[i]
-
-        if np.isnan(kama_val) or np.isnan(rsi_val) or np.isnan(trend_up_val) or np.isnan(trend_down_val):
+    for i in range(20, n):
+        if np.isnan(ema20[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -101,26 +63,27 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above KAMA + RSI > 50 + weekly uptrend
-            if close[i] > kama_val and rsi_val > 50 and trend_up_val > 0.5:
+            # LONG: Price at lower Keltner + 1d uptrend + volume above average
+            vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values[i]
+            if close[i] <= lower_keltner[i] and close[i] > ema34_1d_aligned[i] and volume[i] > vol_avg * 1.2:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA + RSI < 50 + weekly downtrend
-            elif close[i] < kama_val and rsi_val < 50 and trend_down_val > 0.5:
+            # SHORT: Price at upper Keltner + 1d downtrend + volume above average
+            elif close[i] >= upper_keltner[i] and close[i] < ema34_1d_aligned[i] and volume[i] > vol_avg * 1.2:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price below KAMA or RSI < 40
-            if close[i] < kama_val or rsi_val < 40:
+            # EXIT LONG: Price crosses above EMA20 or 1d trend turns down
+            if close[i] >= ema20[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above KAMA or RSI > 60
-            if close[i] > kama_val or rsi_val > 60:
+            # EXIT SHORT: Price crosses below EMA20 or 1d trend turns up
+            if close[i] <= ema20[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
