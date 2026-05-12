@@ -1,29 +1,16 @@
-# 1. Hypothesis: The strategy combines a medium-term trend filter (4h EMA 50) with a volume spike condition and a short-term mean-reversion signal (RSI 2-period) to capture pullbacks in trending markets. The 4h EMA 50 defines the trend direction (bullish if price above EMA, bearish if below), while the RSI 2-period identifies overextended moves within that trend. A volume spike (1.5x 20-period average) confirms the validity of the mean-reversion signal. This approach aims to avoid false signals in ranging markets and whipsaws during strong trends by requiring alignment between trend, momentum, and volume. It is designed to work in both bull and bear markets by following the 4h trend direction. The 4h timeframe balances trade frequency and signal quality, targeting 20-50 trades per year to minimize fee drag. Risk is managed via time-based exits (holding period of 6 bars) to limit exposure and avoid large drawdowns.
-
-# 2. Implementation: The strategy uses the 4h EMA 50 for trend direction, RSI 2-period for mean-reversion signals, and a volume spike filter. The RSI is calculated using Wilder's smoothing (equivalent to EMA with alpha=1/period). The volume spike is defined as volume exceeding 1.5 times the 20-period simple moving average. Entries are taken when the price pulls back to the EMA in the direction of the trend (long when price <= EMA and RSI < 30 in an uptrend; short when price >= EMA and RSI > 70 in a downtrend), confirmed by a volume spike. Exits occur after a fixed holding period of 6 bars to lock in profits and prevent overexposure. Position size is set to 0.25 (25% of capital) to balance risk and return, staying within the 0.40 maximum limit.
-
-# 3. Multi-timeframe analysis is not used in this version to keep the model simple and focused on the 4h timeframe, avoiding the complexity and potential look-ahead bias of multi-timeframe alignment. All indicators are calculated on the 4h data itself, ensuring no look-ahead by using only past and present data up to the current bar.
-
-# 4. Proper min_periods are used in all rolling and EMA calculations to ensure that values are only computed when sufficient data is available, preventing the use of incomplete data.
-
-# 5. The strategy is designed to generate a moderate number of trades (estimated 20-50 per year) by requiring multiple conditions to align (trend, RSI extreme, volume spike), reducing the likelihood of overtrading and fee drag.
-
-# 6. The primary focus is on BTC and ETH, with the expectation that the strategy's logic of trend-following pullbacks with volume confirmation will be effective across these major cryptocurrencies.
-
-# 7. This strategy introduces a novel combination of a medium-term EMA trend filter with a very short-term RSI (2-period) and volume confirmation, which is not commonly seen in the saturated EMA/RSI strategies. This combination aims to capture short-term reversals within a stronger trend, providing an edge in both trending and ranging markets by avoiding trades when the trend is weak or when volume does not confirm the signal.
-
 #!/usr/bin/env python3
 """
-4h_EMA50_RSI2_VolumeSpike_Pullback
-Hypothesis: Combines 4h EMA 50 trend filter with RSI 2-period mean-reversion and volume spike to capture pullbacks in trending markets. Works in bull/bear by following 4h trend direction.
+6h_Aroon_DMI_Trend_Filter_VolumeSpike
+Hypothesis: Aroon oscillator (trend strength) combined with DMI (+DI/-DI crossover) and volume spike (1.5x 20-period average) captures high-probability trending moves on 6b timeframe. Uses 1d ADX as regime filter to avoid ranging markets. Works in bull/bear by following 1d trend direction via ADX > 25.
 """
 
-name = "4h_EMA50_RSI2_VolumeSpike_Pullback"
-timeframe = "4h"
+name = "6h_Aroon_DMI_Trend_Filter_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,66 +22,146 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # 4h EMA 50 for trend
-    close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
 
-    # RSI 2-period using Wilder's smoothing (EMA with alpha=1/2)
-    delta = np.diff(close, prepend=close[0])
-    up = np.where(delta > 0, delta, 0)
-    down = np.where(delta < 0, -delta, 0)
-    # Wilder's smoothing: alpha = 1/period
-    ema_up = pd.Series(up).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    ema_down = pd.Series(down).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = np.where(ema_down != 0, ema_up / ema_down, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d ADX for regime filter (trending market)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Volume spike: >1.5x 20-period average
+    # Calculate +DM, -DM, TR
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                               np.abs(low_1d[1:] - close_1d[:-1])))
+
+    # Prepend first values
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[high_1d[0] - low_1d[0]], tr])
+
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan, dtype=float)
+        alpha = 1.0 / period
+        for i in range(len(data)):
+            if np.isnan(result[i-1]) if i > 0 else True:
+                result[i] = data[i]
+            else:
+                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+        return result
+
+    period = 14
+    atr = wilder_smooth(tr, period)
+    plus_di = 100 * wilder_smooth(plus_dm, period) / atr
+    minus_di = 100 * wilder_smooth(minus_dm, period) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilder_smooth(dx, period)
+
+    # Shift ADX to avoid look-ahead (use previous day's value)
+    adx_prev = np.roll(adx, 1)
+    adx_prev[0] = np.nan
+    adx_1d = adx_prev
+
+    # Align 1d ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+
+    # Aroon oscillator (6b timeframe)
+    def aroon(high, low, period=25):
+        n = len(high)
+        aroon_up = np.full(n, np.nan)
+        aroon_down = np.full(n, np.nan)
+        for i in range(period, n):
+            # Find highest high in lookback period
+            high_idx = np.argmax(high[i-period:i+1]) + i - period
+            # Find lowest low in lookback period
+            low_idx = np.argmin(low[i-period:i+1]) + i - period
+            aroon_up[i] = ((period - (i - high_idx)) / period) * 100
+            aroon_down[i] = ((period - (i - low_idx)) / period) * 100
+        return aroon_up - aroon_down  # Oscillator: -100 to 100
+
+    aroon_osc = aroon(high, low, 25)
+
+    # DMI crossover signal (6b timeframe)
+    # Calculate +DM, -DM, TR for 6b
+    plus_dm_6h = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                          np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm_6h = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                           np.maximum(low[:-1] - low[1:], 0), 0)
+    tr_6h = np.maximum(high[1:] - low[1:], 
+                       np.maximum(np.abs(high[1:] - close[:-1]), 
+                                  np.abs(low[1:] - close[:-1])))
+
+    plus_dm_6h = np.concatenate([[0], plus_dm_6h])
+    minus_dm_6h = np.concatenate([[0], minus_dm_6h])
+    tr_6h = np.concatenate([[high[0] - low[0]], tr_6h])
+
+    atr_6h = wilder_smooth(tr_6h, 14)
+    plus_di_6h = 100 * wilder_smooth(plus_dm_6h, 14) / atr_6h
+    minus_di_6h = 100 * wilder_smooth(minus_dm_6h, 14) / atr_6h
+
+    # DMI crossover: +DI crosses above/below -DI
+    dmi_cross_up = np.zeros(n, dtype=bool)
+    dmi_cross_down = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        if (plus_di_6h[i] > minus_di_6h[i] and 
+            plus_di_6h[i-1] <= minus_di_6h[i-1]):
+            dmi_cross_up[i] = True
+        if (plus_di_6h[i] < minus_di_6h[i] and 
+            plus_di_6h[i-1] >= minus_di_6h[i-1]):
+            dmi_cross_down[i] = True
+
+    # Volume spike: >1.5x 20-period average (6b)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
 
-    for i in range(50, n):  # Start after EMA50 warmup
-        if np.isnan(ema_50[i]) or np.isnan(rsi[i]) or np.isnan(volume_spike[i]):
+    for i in range(30, n):  # Start after warmup
+        if (np.isnan(aroon_osc[i]) or np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
             continue
 
         if position == 0:
-            # LONG: Price at or below EMA50 in uptrend, RSI oversold, volume spike
-            if (close[i] <= ema_50[i] and 
-                close[i] > ema_50[i-1] and  # Ensure uptrend (price above prior EMA)
-                rsi[i] < 30 and 
+            # LONG: Aroon > 50 (uptrend) + DMI crossover up + ADX > 25 + volume spike
+            if (aroon_osc[i] > 50 and 
+                dmi_cross_up[i] and 
+                adx_1d_aligned[i] > 25 and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # SHORT: Price at or above EMA50 in downtrend, RSI overbought, volume spike
-            elif (close[i] >= ema_50[i] and 
-                  close[i] < ema_50[i-1] and  # Ensure downtrend (price below prior EMA)
-                  rsi[i] > 70 and 
+            # SHORT: Aroon < -50 (downtrend) + DMI crossover down + ADX > 25 + volume spike
+            elif (aroon_osc[i] < -50 and 
+                  dmi_cross_down[i] and 
+                  adx_1d_aligned[i] > 25 and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
-        else:
-            bars_since_entry += 1
-            # Exit after 6 bars to limit exposure
-            if bars_since_entry >= 6:
+        elif position == 1:
+            # EXIT LONG: Aroon < 0 (trend weakening) or ADX < 20 (ranging)
+            if aroon_osc[i] < 0 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
-                # Hold position
-                signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: Aroon > 0 (trend weakening) or ADX < 20 (ranging)
+            if aroon_osc[i] > 0 or adx_1d_aligned[i] < 20:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
 
     return signals
