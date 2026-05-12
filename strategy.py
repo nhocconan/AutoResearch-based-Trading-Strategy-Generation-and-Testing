@@ -1,10 +1,9 @@
-#160968
-# 12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS
-# Hypothesis: 12h timeframe with daily Camarilla R1/S1 breakout + 1d trend filter + volume spike (1.5x avg) to reduce trade frequency. Targets 50-150 total trades over 4 years to avoid fee drag while capturing trend moves in both bull and bear markets.
-
 #!/usr/bin/env python3
-name = "12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS"
-timeframe = "12h"
+# 4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3
+# Hypothesis: Focus on high-probability breakouts with volume confirmation and trend filter. Uses daily Camarilla R1/S1 levels with volume spike (2x average) and daily EMA34 trend filter. Designed for fewer, higher-quality trades (target: 60-120 total over 4 years) to reduce fee drag while maintaining edge in bull/bear markets via trend alignment.
+
+name = "4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,7 +34,7 @@ def generate_signals(prices):
     r1 = close_1d + 1.1 * camarilla_range / 12
     s1 = close_1d - 1.1 * camarilla_range / 12
 
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
@@ -43,10 +42,10 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate 12h volume SMA20 for volume confirmation (with spike filter)
+    # Calculate 4h volume SMA20 for volume confirmation (with spike filter)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
+    volume_spike_threshold = volume_sma20 * 2.0  # Require 2x average volume for higher quality
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
