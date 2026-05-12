@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-# 1h RSI Mean Reversion + 4h Trend + Volume Confirmation
-# Hypothesis: In 1h timeframe, RSI extremes combined with 4h trend direction and volume spikes
-# provide high-probability mean reversion entries. Works in both bull and bear markets by
-# following the higher timeframe trend while buying dips in uptrends and selling rallies in downtrends.
-# Target: 15-30 trades/year by using strict RSI thresholds (RSI<25 for long, RSI>75 for short)
-# and requiring volume confirmation to avoid choppy markets.
-name = "1h_RSI_MeanReversion_4hTrend_Volume"
-timeframe = "1h"
+"""
+6h Weekly Pivot + Daily Trend Filter
+Hypothesis: Weekly pivot levels (PP, R1, S1) from 1w data act as major support/resistance.
+Breaking above weekly R1 with daily uptrend (price > EMA50) captures bullish momentum.
+Breaking below weekly S1 with daily downtrend (price < EMA50) captures bearish momentum.
+Designed for low trade frequency (~20-30/year) to minimize fee drag in 6h timeframe.
+Works in both bull and bear markets by following the daily trend direction.
+"""
+
+name = "6h_WeeklyPivot_DailyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,53 +18,59 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === 1h RSI(14) for mean reversion signals ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 4h EMA50 for trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # === Weekly Data for Pivot Points ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly pivot points from previous week's OHLC
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # === Volume spike confirmation (20-period) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)  # Moderate threshold for balance
+    # Standard pivot point calculation
+    PP = (weekly_high + weekly_low + weekly_close) / 3.0
+    R1 = 2 * PP - weekly_low
+    S1 = 2 * PP - weekly_high
+    
+    # Shift to get previous week's levels
+    PP_prev = np.roll(PP, 1)
+    R1_prev = np.roll(R1, 1)
+    S1_prev = np.roll(S1, 1)
+    PP_prev[0] = np.nan
+    R1_prev[0] = np.nan
+    S1_prev[0] = np.nan
+    
+    # Align to 6h timeframe
+    PP_6h = align_htf_to_ltf(prices, df_1w, PP_prev)
+    R1_6h = align_htf_to_ltf(prices, df_1w, R1_prev)
+    S1_6h = align_htf_to_ltf(prices, df_1w, S1_prev)
+    
+    # === Daily EMA50 for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    daily_close = df_1d['close'].values
+    ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure all indicators ready
+    start_idx = 100  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(R1_6h[i]) or np.isnan(S1_6h[i]) or 
+            np.isnan(ema_50_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,33 +79,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: RSI oversold + price above 4h EMA50 (uptrend) + volume spike
-            if (rsi[i] < 25 and 
-                close[i] > ema_50_4h_aligned[i] and
-                vol_spike[i]):
-                signals[i] = 0.20
+            # LONG: Price breaks above weekly R1 + price above daily EMA50 (uptrend)
+            if close[i] > R1_6h[i] and close[i] > ema_50_6h[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought + price below 4h EMA50 (downtrend) + volume spike
-            elif (rsi[i] > 75 and 
-                  close[i] < ema_50_4h_aligned[i] and
-                  vol_spike[i]):
-                signals[i] = -0.20
+            # SHORT: Price breaks below weekly S1 + price below daily EMA50 (downtrend)
+            elif close[i] < S1_6h[i] and close[i] < ema_50_6h[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: RSI overbought or trend reversal
-            if (rsi[i] > 70 or 
-                close[i] < ema_50_4h_aligned[i]):
+            # EXIT LONG: Price breaks below weekly PP (mean reversion to pivot)
+            if close[i] < PP_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold or trend reversal
-            if (rsi[i] < 30 or 
-                close[i] > ema_50_4h_aligned[i]):
+            # EXIT SHORT: Price breaks above weekly PP (mean reversion to pivot)
+            if close[i] > PP_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
