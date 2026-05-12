@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Camarilla R1/S1 breakouts with 1d EMA50 trend filter and volume confirmation.
-# The Camarilla levels provide institutional-grade support/resistance, while the 1d EMA50
-# ensures we trade with the daily trend. Volume filter reduces false breakouts.
-# Designed for ~20-40 trades/year on 1h to minimize fee drag. Works in both bull and bear
-# markets by filtering breakouts with higher timeframe trend and volume confirmation.
+# 6h_RSI_Trend_Confluence
+# Hypothesis: RSI momentum combined with 1w EMA trend and 1d volume confirmation
+# works in both bull and bear markets. RSI filters avoid extremes, while EMA
+# ensures trend alignment. Volume confirms conviction. Designed for ~15-25
+# trades/year to minimize fee drag.
 
-name = "1h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "1h"
+name = "6h_RSI_Trend_Confluence"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,52 +18,47 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla calculation and trend filter
+    # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
 
-    # Calculate Camarilla levels from previous day
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Previous day's values (shifted by 1 to avoid look-ahead)
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    
-    # Calculate Camarilla levels for each day
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 12
-    s1 = prev_close - camarilla_range * 1.1 / 12
-    
-    # Align Camarilla levels to 1h timeframe (1 day = 24 hours)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
 
-    # Get 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    close_1w = df_1w['close'].values
+    volume_1d = df_1d['volume'].values
 
-    # Volume confirmation: 1.5x 24-period SMA (approx 1 day)
-    volume_series = pd.Series(volume)
-    volume_sma24 = volume_series.rolling(window=24, min_periods=24).mean().values
-    volume_threshold = volume_sma24 * 1.5
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+
+    # 1w EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+
+    # 1d volume SMA20 for confirmation
+    volume_series = pd.Series(volume_1d)
+    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_sma20_aligned = align_htf_to_ltf(prices, df_1d, volume_sma20)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(24, n):  # Start after indicators need 24 bars
+    for i in range(50, n):  # Start after indicators need 50 bars
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_sma24[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema50_1w_aligned[i]) or
+            np.isnan(volume_sma20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,33 +67,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + volume + 1d uptrend
-            if (close[i] > r1_aligned[i] and
-                volume[i] > volume_threshold[i] and
-                close[i] > ema50_1d_aligned[i]):
-                signals[i] = 0.20
+            # LONG: RSI > 50 (bullish momentum) + price > 1w EMA50 + volume > 1.5x avg
+            if (rsi[i] > 50 and
+                close[i] > ema50_1w_aligned[i] and
+                volume[i] > volume_sma20_aligned[i] * 1.5):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + volume + 1d downtrend
-            elif (close[i] < s1_aligned[i] and
-                  volume[i] > volume_threshold[i] and
-                  close[i] < ema50_1d_aligned[i]):
-                signals[i] = -0.20
+            # SHORT: RSI < 50 (bearish momentum) + price < 1w EMA50 + volume > 1.5x avg
+            elif (rsi[i] < 50 and
+                  close[i] < ema50_1w_aligned[i] and
+                  volume[i] > volume_sma20_aligned[i] * 1.5):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S1 OR 1d trend turns down
-            if close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: RSI < 40 (loss of momentum) OR price < 1w EMA50
+            if rsi[i] < 40 or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R1 OR 1d trend turns up
-            if close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: RSI > 60 (loss of momentum) OR price > 1w EMA50
+            if rsi[i] > 60 or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
