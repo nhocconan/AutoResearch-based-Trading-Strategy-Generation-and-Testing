@@ -1,8 +1,5 @@
-#!/usr/bin/env python3
-"""
-4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeS
-Hypothesis: Price breaking above/below Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation captures strong trending moves while avoiding false breakouts. Works in bull/bear by following the higher timeframe trend direction. Uses 4h timeframe with 1d EMA34 trend filter for higher timeframe context.
-"""
+# 160063: 4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeS
+# Hypothesis: Price breaking above/below Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation captures strong trending moves while avoiding false breakouts. Works in bull/bear by following the higher timeframe trend direction. Uses 4h timeframe with 1d EMA34 trend filter for higher timeframe context.
 
 name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeS"
 timeframe = "4h"
