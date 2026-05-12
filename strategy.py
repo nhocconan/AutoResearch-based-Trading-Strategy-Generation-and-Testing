@@ -1,6 +1,11 @@
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Regime
+# Hypothesis: Use Camarilla R3/S3 breakouts on 12h timeframe with 1d EMA34 trend filter, volume confirmation, and volatility regime filter to reduce whipsaws. Works in bull/bear by requiring breakouts to align with higher timeframe trend and only trade in moderate volatility regimes.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay under 200 hard max.
+# Edge: Combines price action (Camarilla levels), trend (1d EMA34), volume confirmation, and volatility regime to filter false breakouts.
+
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,23 +37,22 @@ def generate_signals(prices):
     r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0
     s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Volume filter: current volume > 1.5x 30-period average (tightened from 1.8)
+    # Volume filter: current volume > 1.5x 30-period average
     vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_filter = volume > (1.5 * vol_avg)
     
-    # Price range filter: avoid choppy markets (ATR-based)
+    # Volatility regime filter: ATR-based to avoid choppy and excessively volatile markets
     tr1 = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
     tr2 = np.maximum(np.absolute(low[1:] - close[:-1]), tr1)
     tr = np.concatenate([[tr1[0]], tr2]) if len(tr1) > 0 else np.array([0.0])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Normalize ATR by price to get percentage
     atr_pct = atr / close
-    # Only trade when volatility is moderate (not too high, not too low)
-    vol_regime = (atr_pct > 0.015) & (atr_pct < 0.050)  # tightened range
+    # Only trade when volatility is moderate (not too low, not too high)
+    vol_regime = (atr_pct > 0.015) & (atr_pct < 0.050)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
