@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_1dTrend_Filter
-Hypothesis: Donchian channel breakouts on 4h capture medium-term trends, while daily EMA200 trend filter ensures alignment with higher timeframe momentum. Volume confirmation (1.5x average) filters false breakouts. This combination should work in both bull and bear markets by capturing strong moves while avoiding whipsaws. Target: 20-40 trades/year per symbol.
+4h_Keltner_Breakout_TrendFilter_VolumeConfirm
+Hypothesis: Price breaking above/below Keltner Channel (EMA20 + ATRx2) with EMA50 trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. Keltner adapts to volatility, EMA50 ensures trend alignment, and volume filter adds confirmation. Target: 20-40 trades/year per symbol. Works in bull/bear by following trend direction.
 """
 
-name = "4h_Donchian20_Breakout_1dTrend_Filter"
+name = "4h_Keltner_Breakout_TrendFilter_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,28 +22,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Keltner Channel: EMA20 ± ATR(10)*2
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    kc_upper = ema_20 + (2 * atr_10)
+    kc_lower = ema_20 - (2 * atr_10)
+    
     # Volume spike: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Daily data for EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # Donchian channel on 4h (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # EMA50 trend filter (same timeframe)
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        if np.isnan(ema_200_1d_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
+    for i in range(50, n):
+        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,32 +53,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high + above daily EMA200 + volume spike
-            if (close[i] > high_max[i] and 
-                close[i] > ema_200_1d_aligned[i] and 
+            # LONG: Price breaks above Keltner Upper + EMA50 uptrend + volume spike
+            if (close[i] > kc_upper[i] and 
+                close[i] > ema_50[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low + below daily EMA200 + volume spike
-            elif (close[i] < low_min[i] and 
-                  close[i] < ema_200_1d_aligned[i] and 
+            # SHORT: Price breaks below Keltner Lower + EMA50 downtrend + volume spike
+            elif (close[i] < kc_lower[i] and 
+                  close[i] < ema_50[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low OR closes below daily EMA200
-            if (close[i] < low_min[i]) or \
-               (close[i] < ema_200_1d_aligned[i]):
+            # EXIT LONG: Price closes below EMA20 (middle of Keltner)
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high OR closes above daily EMA200
-            if (close[i] > high_max[i]) or \
-               (close[i] > ema_200_1d_aligned[i]):
+            # EXIT SHORT: Price closes above EMA20 (middle of Keltner)
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
