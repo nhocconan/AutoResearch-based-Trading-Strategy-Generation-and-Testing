@@ -1,36 +1,15 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_Filter"
-timeframe = "1d"
+name = "6h_Keltner_Channel_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
-    """
-    Kaufman's Adaptive Moving Average (KAMA)
-    """
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    
-    # Efficiency Ratio
-    er = np.where(volatility != 0, change / volatility, 0)
-    
-    # Smoothing constant
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    
-    # KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -38,37 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data once for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data once for trend filter and ATR
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly KAMA for trend filter (10-period)
-    close_weekly = df_weekly['close'].values
-    kama_weekly = calculate_kama(close_weekly, er_period=10, fast_sc=2, slow_sc=30)
-    kama_weekly_aligned = align_htf_to_ltf(prices, df_weekly, kama_weekly)
+    # 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Daily RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate ATR(14) on 1d for Keltner channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # 6h EMA(20) for Keltner middle line
+    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume filter: current volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Keltner Channels: upper/lower = EMA(20) ± 2*ATR
+    kc_upper = ema20_6h + 2.0 * atr14_1d_aligned
+    kc_lower = ema20_6h - 2.0 * atr14_1d_aligned
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(kama_weekly_aligned[i]) or np.isnan(rsi[i]):
+        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,28 +66,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above weekly KAMA + RSI > 50 + volume filter
-            if (close[i] > kama_weekly_aligned[i] and 
-                rsi[i] > 50 and 
-                volume_filter[i]):
+            # Long: price breaks above upper KC + 1d trend up + volume spike
+            if (close[i] > kc_upper[i] and 
+                close[i] > ema50_1d_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly KAMA + RSI < 50 + volume filter
-            elif (close[i] < kama_weekly_aligned[i] and 
-                  rsi[i] < 50 and 
-                  volume_filter[i]):
+            # Short: price breaks below lower KC + 1d trend down + volume spike
+            elif (close[i] < kc_lower[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below weekly KAMA
-            if close[i] < kama_weekly_aligned[i]:
+            # Exit long: price closes below middle line (EMA20)
+            if close[i] < ema20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above weekly KAMA
-            if close[i] > kama_weekly_aligned[i]:
+            # Exit short: price closes above middle line (EMA20)
+            if close[i] > ema20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
