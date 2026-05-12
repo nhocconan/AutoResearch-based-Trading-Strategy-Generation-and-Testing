@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Use daily EMA50 for trend filter, and 4h Camarilla R1/S1 levels for breakout entries.
-# Long when price breaks above R1 with volume and daily trend up; short when breaks below S1 with volume and daily trend down.
-# Exit when price returns to 4h Pivot level. Designed for low frequency (20-40 trades/year) using 1d trend and 4h breakouts.
-# Works in bull markets by following uptrend, and in bear markets by following downtrend.
+# 1d_Alligator_WeeklyTrend
+# Hypothesis: Use Williams Alligator (jaw/teeth/lips) on daily chart for trend direction.
+# Enter long when price closes above lips (green) with price > jaw (blue) and teeth (red),
+# enter short when price closes below lips with price < jaw and teeth.
+# Exit when price crosses back into the Alligator's mouth (between jaw and teeth).
+# Weekly trend filter (SMA50) ensures we only trade in higher timeframe trend direction.
+# Designed for low frequency (10-20 trades/year) by using daily timeframe with weekly filter.
+# Works in both bull and bear markets by following higher timeframe trend and using Alligator's convergence/divergence.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Alligator_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,57 +18,54 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # === Daily data for trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # === Daily data for Williams Alligator ===
+    # Williams Alligator: SMAs shifted into the future
+    # Jaw (blue): 13-period SMMA, shifted 8 bars forward
+    # Teeth (red): 8-period SMMA, shifted 5 bars forward  
+    # Lips (green): 5-period SMMA, shifted 3 bars forward
+    # We calculate SMMA (smoothed moving average) as EMA with alpha = 1/period
+    
+    # Jaw: 13-period SMMA shifted 8 bars
+    jaw = pd.Series(close).ewm(alpha=1/13, adjust=False).mean().values
+    jaw = np.roll(jaw, 8)  # Shift forward 8 bars
+    jaw[:8] = np.nan  # First 8 values invalid after shift
+    
+    # Teeth: 8-period SMMA shifted 5 bars
+    teeth = pd.Series(close).ewm(alpha=1/8, adjust=False).mean().values
+    teeth = np.roll(teeth, 5)  # Shift forward 5 bars
+    teeth[:5] = np.nan  # First 5 values invalid after shift
+    
+    # Lips: 5-period SMMA shifted 3 bars
+    lips = pd.Series(close).ewm(alpha=1/5, adjust=False).mean().values
+    lips = np.roll(lips, 3)  # Shift forward 3 bars
+    lips[:3] = np.nan  # First 3 values invalid after shift
+    
+    # === Weekly data for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Daily EMA50 for trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === 4h data for Camarilla levels ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate Camarilla levels for previous 4h bar
-    typical_4h = (high_4h + low_4h + close_4h) / 3
-    pivot_4h = typical_4h
-    range_4h = high_4h - low_4h
-    r1_4h = close_4h + (range_4h * 1.1 / 12)
-    s1_4h = close_4h - (range_4h * 1.1 / 12)
-    
-    # Align Camarilla levels to 4h (wait for 4h bar to close)
-    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    
-    # Volume confirmation (20-period average on 4h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    close_1w = df_1w['close'].values
+    # Weekly SMA50 for trend filter
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 20  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(pivot_4h_aligned[i]) or np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(sma_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,32 +73,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Alligator conditions
+        lips_above_teeth = lips[i] > teeth[i]
+        teeth_above_jaw = teeth[i] > jaw[i]
+        lips_below_teeth = lips[i] < teeth[i]
+        teeth_below_jaw = teeth[i] < jaw[i]
         
-        # Volume filter
-        vol_ok = volume[i] > vol_ma_20[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > sma_50_1w_aligned[i]
+        weekly_downtrend = close[i] < sma_50_1w_aligned[i]
         
         if position == 0:
-            # LONG: Price breaks above R1 with volume, in uptrend
-            if close[i] > r1_4h_aligned[i] and vol_ok and trend_up:
+            # LONG: Lips above teeth > jaw (Alligator eating up) AND weekly uptrend
+            if lips_above_teeth and teeth_above_jaw and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with volume, in downtrend
-            elif close[i] < s1_4h_aligned[i] and vol_ok and trend_down:
+            # SHORT: Lips below teeth < jaw (Alligator eating down) AND weekly downtrend
+            elif lips_below_teeth and teeth_below_jaw and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price returns to pivot level or trend reverses
-            if close[i] <= pivot_4h_aligned[i] or not trend_up:
+            # EXIT LONG: Price crosses back into Alligator's mouth (between jaw and teeth)
+            # or weekly trend reverses
+            if (lips[i] <= teeth[i] and lips[i] >= jaw[i]) or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot level or trend reverses
-            if close[i] >= pivot_4h_aligned[i] or not trend_down:
+            # EXIT SHORT: Price crosses back into Alligator's mouth (between jaw and teeth)
+            # or weekly trend reverses
+            if (lips[i] >= teeth[i] and lips[i] <= jaw[i]) or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
