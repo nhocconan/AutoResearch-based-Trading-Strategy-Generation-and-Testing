@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_ChannelBreakout_Volume_Trend
-# Hypothesis: Price breaking out of a 20-bar Donchian channel on 12h with volume confirmation and 1d trend filter.
-# Works in bull markets via long entries on upward breaks and bear markets via short entries on downward breaks.
-# Volume spike confirms institutional participation. Target: 15-25 trades/year.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts above Camarilla R1 (long) or below S1 (short) from the prior 1d session,
+# filtered by 1d EMA34 trend direction and confirmed by volume spikes. Works in bull markets via long
+# entries in uptrends, and in bear markets via short entries in downtrends. Volume spike ensures
+# institutional participation. Target: 20-30 trades/year.
 
-name = "12h_ChannelBreakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -30,20 +31,25 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Donchian channel (20-period) on 12h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for prior 1d session
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].values
+    r1 = close_1d_prev + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d_prev - (high_1d - low_1d) * 1.1 / 12
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Volume spike: current > 2.0x average of last 6 bars (3 days)
+    # Volume spike: current > 2.0x average of last 6 bars (1 day)
     vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after Donchian warmup
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(34, n):  # Start after EMA34 warmup
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,14 +58,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above upper Donchian + 1d EMA34 uptrend + volume spike
-            if (close[i] > highest_high[i] and 
+            # LONG: Break above R1 + 1d EMA34 uptrend + volume spike
+            if (close[i] > r1_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian + 1d EMA34 downtrend + volume spike
-            elif (close[i] < lowest_low[i] and 
+            # SHORT: Break below S1 + 1d EMA34 downtrend + volume spike
+            elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -67,15 +73,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below lower Donchian or trend breaks
-            if close[i] < lowest_low[i] or close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: Close below S1 or trend breaks
+            if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above upper Donchian or trend breaks
-            if close[i] > highest_high[i] or close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: Close above R1 or trend breaks
+            if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
