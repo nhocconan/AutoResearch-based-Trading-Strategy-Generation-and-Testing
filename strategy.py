@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 6h_Aroon_Trend_Strength_1dTrend_Filter
-# Hypothesis: Aroon Up/Down identifies trend strength and direction. Combined with 1-day trend filter (price above/below 200-day EMA) to avoid counter-trend trades. Works in bull/bear by following the higher timeframe trend direction. Uses 6h timeframe with daily EMA200 trend filter for higher timeframe context.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS
+# Hypothesis: Price breaking above/below daily Camarilla R3/S3 levels with daily EMA34 trend filter and volume confirmation on 12h timeframe captures strong trending moves while avoiding false breakouts. Works in bull/bear by following the higher timeframe trend direction. Fewer trades expected due to higher timeframe, reducing fee drag.
 
-name = "6h_Aroon_Trend_Strength_1dTrend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,43 +12,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 40:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
 
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+
+    # Calculate daily high, low, close for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Aroon (25-period)
-    period = 25
-    aroon_up = np.full(n, np.nan)
-    aroon_down = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        # Periods since highest high
-        highest_high_idx = np.argmax(high[i-period+1:i+1]) + i - period + 1
-        periods_since_high = i - highest_high_idx
-        aroon_up[i] = ((period - 1 - periods_since_high) / (period - 1)) * 100
-        
-        # Periods since lowest low
-        lowest_low_idx = np.argmin(low[i-period+1:i+1]) + i - period + 1
-        periods_since_low = i - lowest_low_idx
-        aroon_down[i] = ((period - 1 - periods_since_low) / (period - 1)) * 100
+    # Calculate Camarilla levels: R3, S3
+    camarilla_range = high_1d - low_1d
+    r3_level = close_1d + 1.1 * camarilla_range / 2
+    s3_level = close_1d - 1.1 * camarilla_range / 2
 
-    # 1-day EMA200 trend filter
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align Camarilla levels to 12h timeframe
+    r3_level_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
+    s3_level_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
+
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(200, n):  # Start after EMA200 warmup
-        if (np.isnan(aroon_up[i]) or np.isnan(aroon_down[i]) or 
-            np.isnan(ema_200_1d_aligned[i])):
+    for i in range(34, n):  # Start after EMA34 warmup
+        if (np.isnan(r3_level_aligned[i]) or np.isnan(s3_level_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,28 +59,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Aroon Up > Aroon Down (uptrend) + price above 1d EMA200
-            if (aroon_up[i] > aroon_down[i] and 
-                close[i] > ema_200_1d_aligned[i]):
+            # LONG: Price breaks above R3 + EMA34 uptrend + volume confirmation
+            if (close[i] > r3_level_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Aroon Down > Aroon Up (downtrend) + price below 1d EMA200
-            elif (aroon_down[i] > aroon_up[i] and 
-                  close[i] < ema_200_1d_aligned[i]):
+            # SHORT: Price breaks below S3 + EMA34 downtrend + volume confirmation
+            elif (close[i] < s3_level_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Aroon Down > Aroon Up (trend weakening)
-            if aroon_down[i] > aroon_up[i]:
+            # EXIT LONG: Price closes below EMA34 (trend reversal)
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Aroon Up > Aroon Down (trend weakening)
-            if aroon_up[i] > aroon_down[i]:
+            # EXIT SHORT: Price closes above EMA34 (trend reversal)
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
