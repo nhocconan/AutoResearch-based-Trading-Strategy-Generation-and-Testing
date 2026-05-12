@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_1d_1w_Camarilla_R3_S3_Breakout_TrendVol_v2
+4h_1d_1w_Camarilla_R3_S3_Breakout_TrendVol_v1
 Hypothesis: 4-hour breakouts from Camarilla R3/S3 levels (based on 1-day price action) with 1-week trend filter and volume spike confirmation.
 Targets 4h timeframe to balance trade frequency while using proven 1d Camarilla levels and 1w trend filter.
 Only takes long when price breaks above R3 with volume spike and 1w uptrend, short when breaks below S3 with volume spike and 1w downtrend.
@@ -8,7 +8,7 @@ Designed to work in both bull and bear markets via trend filter and volume confi
 Focuses on stronger breakout levels (R3/S3) for higher quality signals.
 """
 
-name = "4h_1d_1w_Camarilla_R3_S3_Breakout_TrendVol_v2"
+name = "4h_1d_1w_Camarilla_R3_S3_Breakout_TrendVol_v1"
 timeframe = "4h"
 leverage = 1.0
 
