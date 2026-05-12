@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1h_4h_Camarilla_R3S3_Breakout_Trend_Volume
-# Hypothesis: Breakout at 4h Camarilla R3/S3 levels with volume confirmation and 4h trend filter.
-# Uses 4h for signal direction/trend and 1h for precise entry timing to reduce whipsaws.
-# Targets 15-35 trades/year (~60-140 total over 4 years) to avoid excessive fee drag.
-# Works in both bull and bear markets by requiring volume confirmation and trend alignment.
+# 4h_1D_Camarilla_R1S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Breakout at daily Camarilla R1/S1 levels (tighter than R3/S3) with volume confirmation and 1d EMA trend filter.
+# Uses tighter levels for higher probability entries in both bull and bear markets, targeting 20-50 trades/year on 4h.
+# Includes exit on trend reversal or price re-entering the range to limit drawdowns.
 
-name = "1h_4h_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "1h"
+name = "4h_1D_Camarilla_R1S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,38 +22,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 4h data for Camarilla levels and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Calculate Camarilla R3 and S3 levels from previous 4h OHLC
-    prev_close = df_4h['close'].shift(1).values
-    prev_high = df_4h['high'].shift(1).values
-    prev_low = df_4h['low'].shift(1).values
+    # Calculate Camarilla R1 and S1 levels from previous 1d OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
 
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
 
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
-    # Volume confirmation: current volume > 1.8x average of last 20 periods
+    # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.8 * vol_ma)
+    volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,34 +61,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter: price above/below 34-period EMA on 4h
-        bullish_trend = close[i] > ema_4h_aligned[i]
-        bearish_trend = close[i] < ema_4h_aligned[i]
+        # Trend filter: price above/below 34-period EMA on 1d
+        bullish_trend = close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_1d_aligned[i]
 
         if position == 0:
-            # LONG: Break above Camarilla R3 with bullish trend and volume confirmation
-            if (close[i] > camarilla_r3_aligned[i] and bullish_trend and volume_ok[i]):
-                signals[i] = 0.20
+            # LONG: Break above Camarilla R1 with bullish trend and volume confirmation
+            if close[i] > camarilla_r1_aligned[i] and bullish_trend and volume_ok[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Camarilla S3 with bearish trend and volume confirmation
-            elif (close[i] < camarilla_s3_aligned[i] and bearish_trend and volume_ok[i]):
-                signals[i] = -0.20
+            # SHORT: Break below Camarilla S1 with bearish trend and volume confirmation
+            elif close[i] < camarilla_s1_aligned[i] and bearish_trend and volume_ok[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R3 or trend turns bearish
-            if close[i] < camarilla_r3_aligned[i] or not bullish_trend:
+            # EXIT LONG: Price re-enters below R1 or trend turns bearish
+            if close[i] < camarilla_r1_aligned[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S3 or trend turns bullish
-            if close[i] > camarilla_s3_aligned[i] or not bearish_trend:
+            # EXIT SHORT: Price re-enters above S1 or trend turns bullish
+            if close[i] > camarilla_s1_aligned[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
