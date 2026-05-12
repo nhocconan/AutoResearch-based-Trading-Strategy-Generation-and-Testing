@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1w EMA trend filter and volume spike confirmation.
-# The 1w EMA provides long-term trend direction to avoid counter-trend trades, while volume spikes confirm breakout strength.
-# Uses 12h price action with weekly trend filter for better risk-adjusted returns in bull/bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# 4h_WilliamsVixFix_TrendFollow
+# Hypothesis: Williams Vix Fix volatility spike with 1d EMA trend filter and volume confirmation.
+# The Vix Fix identifies panic selling/buying climaxes; combined with trend filter avoids counter-trend trades.
+# Volume spike confirms institutional participation. Designed for 75-200 total trades over 4 years (19-50/year).
+# Works in bull/bear by following 1d trend direction. Uses Williams Vix Fix formula: (Highest Close - Low) / (Highest Close) * 100.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_WilliamsVixFix_TrendFollow"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,45 +23,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 12h data for price action
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for price action and Vix Fix calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 22:
         return np.zeros(n)
 
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
 
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
 
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    close_1d = df_1d['close'].values
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
 
-    # Calculate pivot points from previous 12h bar
-    pivot = (high_12h + low_12h + close_12h) / 3.0
-    r1 = 2 * pivot - low_12h
-    s1 = 2 * pivot - high_12h
+    # Calculate Williams Vix Fix: (Highest Close in period - Low) / (Highest Close) * 100
+    # Using 22-period lookback to match common Vix Fix settings
+    highest_close = pd.Series(close_4h).rolling(window=22, min_periods=22).max().values
+    vixfix = (highest_close - low_4h) / highest_close * 100
+    # Vix Fix values typically range 0-100, higher = more fear/volatility
 
-    # Align pivot levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    # Calculate EMA of Vix Fix for signal smoothing
+    vixfix_ema = pd.Series(vixfix).ewm(span=9, adjust=False, min_periods=9).mean().values
 
-    # Calculate 12h volume SMA20 for volume confirmation
+    # Align Vix Fix EMA to 4h timeframe
+    vixfix_ema_aligned = align_htf_to_ltf(prices, df_4h, vixfix_ema)
+
+    # Calculate 4h EMA20 for trend confirmation (additional filter)
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+
+    # Calculate 4h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
+    volume_spike_threshold = volume_sma20 * 1.8  # Require 1.8x average volume for significance
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(22, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(vixfix_ema_aligned[i]) or np.isnan(ema20_1d_aligned[i]) or
+            np.isnan(ema20_4h_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,26 +77,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Breakout above R1 in 1w uptrend with volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema20_1w_aligned[i] and volume[i] > volume_sma20[i]:
+            # LONG: Vix Fix spike (fear) in 1d uptrend with volume spike and price above EMA20
+            if (vixfix_ema_aligned[i] > 25 and  # Significant fear spike
+                close[i] > ema20_1d_aligned[i] and  # 1d uptrend
+                close[i] > ema20_4h_aligned[i] and  # 4h price above EMA20
+                volume[i] > volume_sma20[i]):       # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 in 1w downtrend with volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema20_1w_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: Vix Fix spike (fear) in 1d downtrend with volume spike and price below EMA20
+            elif (vixfix_ema_aligned[i] > 25 and   # Significant fear spike
+                  close[i] < ema20_1d_aligned[i] and  # 1d downtrend
+                  close[i] < ema20_4h_aligned[i] and  # 4h price below EMA20
+                  volume[i] > volume_sma20[i]):       # Volume confirmation
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S1 (reversal signal)
-            if close[i] < s1_aligned[i]:
+            # EXIT LONG: Vix Fix normalizes OR price closes below 4h EMA20 (trend change)
+            if (vixfix_ema_aligned[i] < 15 or  # Fear subsided
+                close[i] < ema20_4h_aligned[i]):  # Trend broken
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R1 (reversal signal)
-            if close[i] > r1_aligned[i]:
+            # EXIT SHORT: Vix Fix normalizes OR price closes above 4h EMA20 (trend change)
+            if (vixfix_ema_aligned[i] < 15 or  # Fear subsided
+                close[i] > ema20_4h_aligned[i]):  # Trend broken
                 signals[i] = 0.0
                 position = 0
             else:
