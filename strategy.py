@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 
-# 4h_1D_Camarilla_Pivot_Breakout
-# Hypothesis: Breakout above/below Camarilla pivot levels (R3/S3) derived from daily high/low/close, 
-# with 1-day EMA34 trend filter and volume confirmation. Camarilla levels provide precise intraday 
-# support/resistance derived from previous day's range, effective in both trending and ranging markets. 
-# Volume confirmation filters out false breakouts. Targets 20-30 trades/year.
+# 6h_1D_MarketFacets_DynamicSupportResistance
+# Hypothesis: Combines dynamic support/resistance from 6-period ATR-based channels with 1d market structure (Higher Highs/Lower Lows) to capture trend continuation while avoiding false breakouts in both bull and bear markets.
+# In bull markets: buy when price pulls back to dynamic support in uptrend structure. In bear markets: sell when price rallies to dynamic resistance in downtrend structure.
+# Uses volume confirmation to filter low-conviction moves. Targets 15-30 trades/year.
 
-name = "4h_1D_Camarilla_Pivot_Breakout"
-timeframe = "4h"
+name = "6h_1D_MarketFacets_DynamicSupportResistance"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,41 +23,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot calculation and trend filter
+    # Get 1d data for market structure
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
 
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-
-    # Calculate Camarilla pivot levels from previous day's OHLC
+    # Calculate 1d Higher Highs and Lower Lows for trend structure
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
-    pivot = (high_1d_prev + low_1d_prev + close_1d_prev) / 3
-    range_1d = high_1d_prev - low_1d_prev
+    
+    # Higher High: current high > previous high
+    higher_high = np.zeros(len(high_1d), dtype=bool)
+    higher_high[1:] = high_1d[1:] > high_1d[:-1]
+    
+    # Lower Low: current low < previous low
+    lower_low = np.zeros(len(low_1d), dtype=bool)
+    lower_low[1:] = low_1d[1:] < low_1d[:-1]
+    
+    # Uptrend structure: HH and HL (Higher Low)
+    higher_low = np.zeros(len(low_1d), dtype=bool)
+    higher_low[1:] = low_1d[1:] > low_1d[:-1]
+    uptrend_structure = higher_high & higher_low
+    
+    # Downtrend structure: LH and LL (Lower High)
+    lower_high = np.zeros(len(high_1d), dtype=bool)
+    lower_high[1:] = high_1d[1:] < high_1d[:-1]
+    downtrend_structure = lower_high & lower_low
+    
+    # Align structures to 6t
+    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend_structure.astype(int))
+    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend_structure.astype(int))
 
-    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    r3 = close_1d_prev + (range_1d * 1.1 / 4)
-    s3 = close_1d_prev - (range_1d * 1.1 / 4)
+    # Calculate 6-period ATR for dynamic channels
+    atr_period = 6
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    # Dynamic support/resistance channels
+    dynamic_support = close - (1.5 * atr)
+    dynamic_resistance = close + (1.5 * atr)
 
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-
-    # Volume confirmation: current volume > 1.5x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    # Volume confirmation: current volume > 1.3x average of last 24 periods
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_ok = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(24, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(dynamic_support[i]) or np.isnan(dynamic_resistance[i]) or
+            np.isnan(uptrend_aligned[i]) or np.isnan(downtrend_aligned[i]) or
+            np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,31 +88,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter: price above/below 34-period EMA on 1d
-        bullish_trend = close[i] > ema_1d_aligned[i]
-        bearish_trend = close[i] < ema_1d_aligned[i]
+        # Trend structure from 1d
+        is_uptrend = uptrend_aligned[i] > 0.5
+        is_downtrend = downtrend_aligned[i] > 0.5
 
         if position == 0:
-            # LONG: Price breaks above R3 with bullish trend and volume confirmation
-            if close[i] > r3_aligned[i] and bullish_trend and volume_ok[i]:
+            # LONG: Price at dynamic support in uptrend structure with volume
+            if close[i] <= dynamic_support[i] and is_uptrend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with bearish trend and volume confirmation
-            elif close[i] < s3_aligned[i] and bearish_trend and volume_ok[i]:
+            # SHORT: Price at dynamic resistance in downtrend structure with volume
+            elif close[i] >= dynamic_resistance[i] and is_downtrend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S3 or trend turns bearish
-            if close[i] < s3_aligned[i] or not bullish_trend:
+            # EXIT LONG: Price reaches dynamic resistance or trend structure breaks
+            if close[i] >= dynamic_resistance[i] or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R3 or trend turns bullish
-            if close[i] > r3_aligned[i] or not bearish_trend:
+            # EXIT SHORT: Price reaches dynamic support or trend structure breaks
+            if close[i] <= dynamic_support[i] or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
