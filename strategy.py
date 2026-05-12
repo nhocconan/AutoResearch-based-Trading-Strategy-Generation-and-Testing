@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-1h_RSI_MeanReversion_4hTrendFilter_v1
-Hypothesis: In 1h timeframe, RSI mean reversion combined with 4h trend filter (EMA50) and session filter (08-20 UTC) captures short-term reversals within the dominant trend, reducing false signals. Works in bull markets via pullbacks and in bear markets via bounces. Volume confirmation ensures legitimacy. Target: 20-40 trades/year per symbol.
+4h_VolumeWeighted_Camarilla_R1S1_Breakout
+Hypothesis: Combines volume-weighted price action with tighter confirmation
+to reduce false breakouts. Uses volume-weighted average price (VWAP) over
+the last 20 periods as dynamic filter, requiring price to be above/below
+VWAP by a margin proportional to ATR. This adds confluence without
+excessive conditions, targeting 25-35 trades/year per symbol. Designed
+to work in both trending and ranging markets by adapting to volatility.
 """
 
-name = "1h_RSI_MeanReversion_4hTrendFilter_v1"
-timeframe = "1h"
+name = "4h_VolumeWeighted_Camarilla_R1S1_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,37 +27,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI(14) for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(0).values
+    # ATR for dynamic threshold
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Volume-weighted average price (VWAP) over 20 periods
+    vwap_num = np.zeros(n)
+    vwap_den = np.zeros(n)
+    for i in range(n):
+        start = max(0, i - 19)
+        vwap_num[i] = np.sum(close[start:i+1] * volume[start:i+1])
+        vwap_den[i] = np.sum(volume[start:i+1])
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(close, np.nan), where=vwap_den!=0)
+    
+    # Daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Volume confirmation: >1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Session filter: 08-20 UTC (pre-compute hour from index)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
+    # Calculate Camarilla pivot levels
+    camarilla_r1 = close_1d + ((high_1d - low_1d) * 1.1 / 12)
+    camarilla_s1 = close_1d - ((high_1d - low_1d) * 1.1 / 12)
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(vwap[i]) or
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,39 +75,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if position == 0 and in_session:
-            # LONG: RSI < 30 (oversold) + price above 4h EMA50 (uptrend) + volume confirmation
-            if (rsi[i] < 30 and 
-                close[i] > ema_50_4h_aligned[i] and 
-                volume_confirm[i]):
-                signals[i] = 0.20
+        if position == 0:
+            # LONG: Price breaks above R1 AND is above VWAP by at least 0.5*ATR
+            if (close[i] > camarilla_r1_aligned[i] and
+                close[i] > vwap[i] + 0.5 * atr[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: RSI > 70 (overbought) + price below 4h EMA50 (downtrend) + volume confirmation
-            elif (rsi[i] > 70 and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  volume_confirm[i]):
-                signals[i] = -0.20
+            # SHORT: Price breaks below S1 AND is below VWAP by at least 0.5*ATR
+            elif (close[i] < camarilla_s1_aligned[i] and
+                  close[i] < vwap[i] - 0.5 * atr[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI > 50 (mean reversion complete) OR price below 4h EMA50 (trend change)
-            if (rsi[i] > 50) or (close[i] < ema_50_4h_aligned[i]):
+            # EXIT LONG: Price breaks below S1 OR falls below VWAP
+            if (close[i] < camarilla_s1_aligned[i]) or \
+               (close[i] < vwap[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI < 50 (mean reversion complete) OR price above 4h EMA50 (trend change)
-            if (rsi[i] < 50) or (close[i] > ema_50_4h_aligned[i]):
+            # EXIT SHORT: Price breaks above R1 OR rises above VWAP
+            if (close[i] > camarilla_r1_aligned[i]) or \
+               (close[i] > vwap[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
-        else:
-            signals[i] = 0.0
+                signals[i] = -0.25
     
     return signals
