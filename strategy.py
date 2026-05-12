@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
 timeframe = "12h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,47 +17,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla Pivot Levels ===
+    # === 1d Camarilla levels (pivot-based) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot and Camarilla levels
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1_1d = pivot_1d + (range_1d * 1.1 / 12)
-    s1_1d = pivot_1d - (range_1d * 1.1 / 12)
-    r2_1d = pivot_1d + (range_1d * 1.1 / 6)
-    s2_1d = pivot_1d - (range_1d * 1.1 / 6)
+    # Previous day's values for today's Camarilla
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # Pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # === 1w Trend Filter (EMA34) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Camarilla levels
+    r1 = pivot + (range_hl * 1.0 / 12)
+    s1 = pivot - (range_hl * 1.0 / 12)
     
-    # === Volume Spike Detection (12h) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20  # Current volume vs 20-period average
+    # Align to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === 1d Trend (EMA34) ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume spike (12h) ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 34)  # Ensure sufficient data for all indicators
+    start_idx = max(100, 34)  # Ensure enough data
     
     for i in range(start_idx, n):
-        # Skip if any data is not ready
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(r2_1d_aligned[i]) or 
-            np.isnan(s2_1d_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or
+        # Skip if data not ready
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
             np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,30 +69,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume spike filter: require at least 1.5x average volume
-        volume_ok = vol_ratio[i] >= 1.5
-        
         if position == 0:
-            # Long: Price breaks above S1 with volume spike, in uptrend
-            if (close[i] > s1_1d_aligned[i] and volume_ok and 
-                close[i] > ema34_1w_aligned[i]):
+            # Long: Break above R1 with volume spike and uptrend
+            if (close[i] > r1_aligned[i] and 
+                vol_ratio[i] > 2.0 and
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below R1 with volume spike, in downtrend
-            elif (close[i] < r1_1d_aligned[i] and volume_ok and 
-                  close[i] < ema34_1w_aligned[i]):
+            # Short: Break below S1 with volume spike and downtrend
+            elif (close[i] < s1_aligned[i] and 
+                  vol_ratio[i] > 2.0 and
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below S2 or trend breaks
-            if close[i] < s2_1d_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit long: Close below S1 (reversal) or trend breaks
+            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above R2 or trend breaks
-            if close[i] > r2_1d_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit short: Close above R1 (reversal) or trend breaks
+            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
