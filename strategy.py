@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume
 Hypothesis: Breakout above R1 or below S1 from daily Camarilla pivots with 12h EMA50 trend filter and volume confirmation. Designed for 20-50 trades/year on 4h timeframe to work in both bull and bear markets by using strong institutional levels and filtering with 12h trend and volume.
 """
 
-name = "4h_4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -81,21 +81,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below EMA50 or Camarilla S3 (strong reversal)
-            camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1/4  # S3 level
-            s3_aligned = align_htf_to_ltf(prices, df_1d, 
-                                np.full_like(close_1d, camarilla_s3))
-            if close[i] < ema50_val or close[i] < s3_aligned[i]:
+            # EXIT LONG: Close below EMA50 or below S1 (reversion to mean)
+            if close[i] < ema50_val or close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above EMA50 or Camarilla R3 (strong reversal)
-            camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1/4  # R3 level
-            r3_aligned = align_htf_to_ltf(prices, df_1d, 
-                                np.full_like(close_1d, camarilla_r3))
-            if close[i] > ema50_val or close[i] > r3_aligned[i]:
+            # EXIT SHORT: Close above EMA50 or above R1 (reversion to mean)
+            if close[i] > ema50_val or close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
