@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Use Camarilla pivot levels (R1, S1) from 1d timeframe as key support/resistance.
-# Long when price breaks above R1 with 1d uptrend and volume confirmation.
-# Short when price breaks below S1 with 1d downtrend and volume confirmation.
-# Exit when price returns to the Camarilla pivot point (PP) or trend reverses.
-# Designed for low frequency (12-37 trades/year) with strong edge in both bull and bear markets
-# by trading institutional levels with trend and volume filters.
+# 4h_TRIX_VolumeSpike_ChopRegime
+# Hypothesis: TRIX (12-period triple exponential smoothing) captures momentum with less whipsaw than MACD.
+# Long when TRIX crosses above zero with volume spike in choppy market (CHOP > 61.8), short when TRIX crosses below zero with volume spike in choppy market.
+# Chop regime filter prevents trending whipsaw; volume spike confirms momentum breakout.
+# Target: 20-40 trades/year on 4h timeframe for low fee drag and robustness in bull/bear markets.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChopRegime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,34 +23,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla pivot levels (R1, S1, PP) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # === TRIX (12,12,12) ===
+    # Single EMA
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Double EMA
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Triple EMA
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # TRIX = percent change of triple EMA
+    trix = np.zeros_like(close)
+    trix[12:] = (ema3[12:] - ema3[11:-1]) / ema3[11:-1] * 100
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Chopiness Index (14-period) ===
+    def true_range(h, l, c_prev):
+        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
     
-    # Calculate Camarilla levels for previous day
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    tr = np.zeros_like(close)
+    tr[0] = high[0] - low[0]
+    for i in range(1, len(close)):
+        tr[i] = true_range(high[i], low[i], close[i-1])
     
-    # Align to 12h timeframe (values update only after 1d bar closes)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # === 1d EMA34 for trend filter ===
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    chop = np.zeros_like(close)
+    denom = atr14 * 14
+    chop[13:] = np.where(denom[13:] > 0, 
+                         100 * np.log10(max_high[13:] - min_low[13:]) / np.log10(denom[13:]), 
+                         50)
     
-    # === Volume confirmation (24-period average for 12h timeframe) ===
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === Volume Spike (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,8 +63,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(trix[i]) or np.isnan(chop[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,32 +71,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
+        # Regime filter: choppy market (CHOP > 61.8 = ranging)
+        choppy = chop[i] > 61.8
         
-        # Volume filter
-        vol_ok = volume[i] > vol_ma_24[i]
+        # Volume confirmation
+        vol_spike = volume[i] > vol_ma_20[i] * 1.5  # 50% above average
+        
+        # TRIX signals
+        trix_cross_up = trix[i] > 0 and trix[i-1] <= 0
+        trix_cross_down = trix[i] < 0 and trix[i-1] >= 0
         
         if position == 0:
-            # LONG: Price breaks above R1 with uptrend and volume
-            if close[i] > r1_1d_aligned[i] and trend_up and vol_ok:
+            # LONG: TRIX crosses above zero in choppy market with volume spike
+            if trix_cross_up and choppy and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with downtrend and volume
-            elif close[i] < s1_1d_aligned[i] and trend_down and vol_ok:
+            # SHORT: TRIX crosses below zero in choppy market with volume spike
+            elif trix_cross_down and choppy and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price returns to pivot point or trend reversal
-            if close[i] <= pp_1d_aligned[i] or not trend_up:
+            # EXIT LONG: TRIX crosses below zero or chop breaks down (trending)
+            if trix_cross_down or chop[i] <= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot point or trend reversal
-            if close[i] >= pp_1d_aligned[i] or not trend_down:
+            # EXIT SHORT: TRIX crosses above zero or chop breaks down (trending)
+            if trix_cross_up or chop[i] <= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
