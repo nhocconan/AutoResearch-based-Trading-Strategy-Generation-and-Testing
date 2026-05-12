@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,13 +32,13 @@ def generate_signals(prices):
     r1 = prev_close + range_hl * 1.1 / 12
     s1 = prev_close - range_hl * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 12h timeframe
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
     
     # 1D EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,7 +51,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema34_1d_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(ema34_1d_12h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,27 +61,27 @@ def generate_signals(prices):
         
         if position == 0:
             # LONG: Break above R1 with volume, trend up
-            if (close[i] > r1_4h[i] and 
-                close[i] > ema34_1d_4h[i] and  # Uptrend filter
+            if (close[i] > r1_12h[i] and 
+                close[i] > ema34_1d_12h[i] and  # Uptrend filter
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
             # SHORT: Break below S1 with volume, trend down
-            elif (close[i] < s1_4h[i] and 
-                  close[i] < ema34_1d_4h[i] and  # Downtrend filter
+            elif (close[i] < s1_12h[i] and 
+                  close[i] < ema34_1d_12h[i] and  # Downtrend filter
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # EXIT LONG: Trend breaks down
-            if close[i] < ema34_1d_4h[i]:
+            if close[i] < ema34_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Trend breaks up
-            if close[i] > ema34_1d_4h[i]:
+            if close[i] > ema34_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
