@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_A"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,35 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # EMA(50) on 12h
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Daily data for Camarilla pivot levels
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for previous day
+    # EMA(34) on 1d for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate Weekly Pivot Points (Standard)
     # P = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    p = (high_1d + low_1d + close_1d) / 3
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # R2 = P + (H - L)
+    # S2 = P - (H - L)
+    p = (high_1w + low_1w + close_1w) / 3
+    r1 = 2 * p - low_1w
+    s1 = 2 * p - high_1w
+    r2 = p + (high_1w - low_1w)
+    s2 = p - (high_1w - low_1w)
     
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Weekly Pivot levels to 6h
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Volume spike on 4h: current volume > 1.5x 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)
+    # Volume spike on 6h: current volume > 2.0x 24-period average
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,8 +60,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,15 +71,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + 12h trend up + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema50_12h_aligned[i] and 
+            # Long: price breaks above R2 + 1d trend up + volume spike
+            if (close[i] > r2_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + 12h trend down + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
+            # Short: price breaks below S2 + 1d trend down + volume spike
+            elif (close[i] < s2_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
