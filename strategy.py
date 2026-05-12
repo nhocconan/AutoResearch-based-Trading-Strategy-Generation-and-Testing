@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3 = close_1d_vals + (high_1d - low_1d) * 1.1 * 3 / 4
     s3 = close_1d_vals - (high_1d - low_1d) * 1.1 * 3 / 4
     
-    # Align Camarilla levels to 12h (wait for daily close)
+    # Align Camarilla levels to 4h (wait for daily close)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
