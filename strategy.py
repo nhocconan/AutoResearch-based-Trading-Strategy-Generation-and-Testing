@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_BollingerBreakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,30 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA34
+    # 1d trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 12h Camarilla pivot levels from previous 12h bar
-    high_12h = pd.Series(high).rolling(window=2, min_periods=2).max().shift(1).values
-    low_12h = pd.Series(low).rolling(window=2, min_periods=2).min().shift(1).values
-    close_12h = pd.Series(close).rolling(window=2, min_periods=2).mean().shift(1).values
-    R3 = close_12h + (high_12h - low_12h) * 1.1 / 4
-    S3 = close_12h - (high_12h - low_12h) * 1.1 / 4
+    # Bollinger Bands with ATR-based deviation
+    # Calculate ATR(21)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Middle band: SMA(21)
+    close_pd = pd.Series(close)
+    sma21 = close_pd.rolling(window=21, min_periods=21).mean().values
+    
+    # Upper and lower bands: SMA ± 2*ATR
+    upper_band = sma21 + 2 * atr
+    lower_band = sma21 - 2 * atr
+    
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # need enough data for EMA34 and Camarilla
+    start_idx = 50  # need enough data for longest indicator
     
     for i in range(start_idx, n):
         # Skip if 1d trend data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(vol_ratio[i]):
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -49,31 +57,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 AND volume confirmation AND 1d uptrend
-            if (close[i] > R3[i] and 
-                vol_ratio[i] > 1.5 and 
-                close[i] > ema34_1d_aligned[i]):
-                signals[i] = 0.30
+            # Long: Price breaks above upper band AND volume spike AND 1d uptrend
+            if (close[i] > upper_band[i] and 
+                volume[i] > 1.5 * vol_ma[i] and 
+                close[i] > ema50_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 AND volume confirmation AND 1d downtrend
-            elif (close[i] < S3[i] and 
-                  vol_ratio[i] > 1.5 and 
-                  close[i] < ema34_1d_aligned[i]):
-                signals[i] = -0.30
+            # Short: Price breaks below lower band AND volume spike AND 1d downtrend
+            elif (close[i] < lower_band[i] and 
+                  volume[i] > 1.5 * vol_ma[i] and 
+                  close[i] < ema50_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below S3 OR opposite signal with volume
-            if (close[i] < S3[i] and vol_ratio[i] > 1.5):
+            # Exit long: Price breaks below lower band
+            if close[i] < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above R3 OR opposite signal with volume
-            if (close[i] > R3[i] and vol_ratio[i] > 1.5):
+            # Exit short: Price breaks above upper band
+            if close[i] > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
