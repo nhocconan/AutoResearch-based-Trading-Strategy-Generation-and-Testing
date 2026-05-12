@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-# 12h Donchian Breakout with Daily Trend and Volume Confirmation
-# Hypothesis: Donchian(20) breakouts capture strong momentum; daily EMA50 filters trend direction; volume spikes confirm breakout strength.
-# Works in both bull and bear markets by following breakout direction aligned with daily trend.
-# Designed for low trade frequency (~15-30/year) with clear entry/exit rules.
+#/usr/bin/env python3
+# 4h Donchian Breakout with Volume Confirmation and Daily EMA Trend Filter
+# Hypothesis: Donchian channel breakouts capture momentum, validated by volume spikes and aligned with daily trend.
+# Works in both bull and bear markets by only taking breakouts in the direction of the daily EMA50 trend.
+# Designed for low trade frequency (~20-40/year) with clear entry/exit rules.
 
-name = "12h_Donchian_Breakout_DailyTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_DailyTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Data for Trend Filter ===
+    # === Daily Data for EMA Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -31,13 +31,13 @@ def generate_signals(prices):
     
     # Daily EMA50 for trend filter
     ema_50_1d = pd.Series(daily_close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # === Donchian Channel (20-period) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === Volume Spike (20-period) ===
+    # === Volume Spike (20-period on 4h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 2.0)
     
@@ -49,7 +49,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_12h[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_50_4h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,28 +58,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high + volume spike + price above daily EMA50
+            # LONG: Break above upper Donchian + volume spike + price above daily EMA50
             if (close[i] > highest_high[i] and 
                 vol_spike[i] and
-                close[i] > ema_50_12h[i]):
+                close[i] > ema_50_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low + volume spike + price below daily EMA50
+            # SHORT: Break below lower Donchian + volume spike + price below daily EMA50
             elif (close[i] < lowest_low[i] and 
                   vol_spike[i] and
-                  close[i] < ema_50_12h[i]):
+                  close[i] < ema_50_4h[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low (reverse breakout)
-            if close[i] < lowest_low[i]:
+            # EXIT LONG: Price re-enters the Donchian channel (below midpoint)
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high (reverse breakout)
-            if close[i] > highest_high[i]:
+            # EXIT SHORT: Price re-enters the Donchian channel (above midpoint)
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
