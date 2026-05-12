@@ -1,15 +1,15 @@
+#%%
 #!/usr/bin/env python3
 """
-4h_TRIX_Volume_Spike_Chop_Filter
-Hypothesis: On 4h timeframe, TRIX (Triple Exponential Average) crossing above/below zero 
-with volume > 2x 20-period average and Choppiness Index > 61.8 (ranging market) 
-generates mean-reversion signals. TRIX captures momentum, volume confirms strength, 
-and Choppiness filters for ranging conditions where mean reversion works best.
-Targets 20-50 trades/year (80-200 total over 4 years) with moderate turnover.
-Works in both bull and bear markets by adapting to ranging conditions.
+4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+Hypothesis: On 4h timeframe, Camarilla R1/S1 levels from prior 12h act as strong support/resistance.
+Breaks above R1 with 12h EMA50 uptrend and volume > 1.8x 20-period average generate long signals;
+breaks below S1 with 12h EMA50 downtrend and volume surge generate shorts.
+Targets 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+12h trend filter helps avoid whipsaws in bear markets while capturing momentum in bull markets.
 """
 
-name = "4h_TRIX_Volume_Spike_Chop_Filter"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -27,59 +27,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Choppiness Index (call once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data (call once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
 
-    # Calculate TRIX (15-period)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
+    # Calculate 12h EMA50 for trend
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
 
-    # Calculate Choppiness Index (14-period) on daily data
-    atr_1d = []
-    tr_1d = []
-    for i in range(len(close_1d)):
-        if i == 0:
-            tr = high_1d[i] - low_1d[i]
-        else:
-            tr = max(high_1d[i] - low_1d[i], 
-                     abs(high_1d[i] - close_1d[i-1]), 
-                     abs(low_1d[i] - close_1d[i-1]))
-        tr_1d.append(tr)
-    
-    # Calculate ATR with smoothing
-    atr_1d = np.array(tr_1d)
-    for i in range(1, len(atr_1d)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + atr_1d[i]) / 14
-    
-    # Chop calculation
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    max_hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr_14 / (max_hh - min_ll)) / np.log10(14)
-    chop = np.where((max_hh - min_ll) == 0, 50, chop)  # Avoid division by zero
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate 12h ATR14 for volatility filter
+    tr1 = np.abs(high_12h[1:] - low_12h[:-1])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr14_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr14_12h)
 
-    # Volume confirmation: 2x 20-period average
+    # Calculate 12h ATR-based volatility filter: low volatility regime
+    atr_ratio_12h = atr14_12h / pd.Series(atr14_12h).rolling(window=50, min_periods=20).mean().values
+    atr_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio_12h)
+
+    # Calculate 12h Camarilla levels from previous 12h OHLC
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous 12h's HLC, so shift by 1
+    prev_close = np.roll(close_12h, 1)
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    # First value will be invalid, handled by alignment
+    camarilla_mult = 1.1 / 12
+    r1 = prev_close + (prev_high - prev_low) * camarilla_mult
+    s1 = prev_close - (prev_high - prev_low) * camarilla_mult
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+
+    # Volume confirmation: 1.8x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        # Get aligned values
-        chop_val = chop_aligned[i]
+    for i in range(60, n):
+        # Get aligned values for current 4h bar
+        ema50 = ema50_12h_aligned[i]
+        atr_ratio = atr_ratio_12h_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
         vol_avg_val = vol_avg_20[i]
 
         # Skip if any required data is NaN
-        if np.isnan(chop_val) or np.isnan(vol_avg_val):
+        if (np.isnan(ema50) or np.isnan(atr_ratio) or 
+            np.isnan(r1_level) or np.isnan(s1_level) or 
+            np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,8 +90,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Chop filter: only trade when market is ranging (Chop > 61.8)
-        if chop_val <= 61.8:
+        # Volatility filter: only trade when ATR ratio < 1.2 (low volatility regime)
+        if atr_ratio > 1.2:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -97,29 +100,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX crosses above zero + volume spike
-            if trix[i] > 0 and trix[i-1] <= 0 and volume[i] > vol_avg_val * 2.0:
+            # LONG: Price breaks above R1 + price above EMA50 + volume surge
+            if (close[i] > r1_level and 
+                close[i] > ema50 and 
+                volume[i] > vol_avg_val * 1.8):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero + volume spike
-            elif trix[i] < 0 and trix[i-1] >= 0 and volume[i] > vol_avg_val * 2.0:
+            # SHORT: Price breaks below S1 + price below EMA50 + volume surge
+            elif (close[i] < s1_level and 
+                  close[i] < ema50 and 
+                  volume[i] > vol_avg_val * 1.8):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero
-            if trix[i] < 0 and trix[i-1] >= 0:
+            # EXIT LONG: Price breaks below S1 or price below EMA50
+            if (close[i] < s1_level or close[i] < ema50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero
-            if trix[i] > 0 and trix[i-1] <= 0:
+            # EXIT SHORT: Price breaks above R1 or price above EMA50
+            if (close[i] > r1_level or close[i] > ema50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
 
     return signals
+#%%
