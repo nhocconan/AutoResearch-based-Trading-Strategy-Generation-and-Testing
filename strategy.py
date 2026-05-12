@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-1H_KAMA_TREND_WITH_VOLUME_CONFIRMATION
-Hypothesis: KAMA adapts to market noise - in trending markets it follows price closely,
-in ranging markets it stays flat. Combined with volume confirmation (>1.5x 20-bar average)
-and session filter (08-20 UTC) to reduce noise. Uses 4h trend filter (EMA21) to avoid
-counter-trend trades. Designed for 15-30 trades/year on 1h to minimize fee drag while
-capturing sustained moves in both bull and bear markets.
+4H_CAMARILLA_R3_S3_BREAKOUT_1DVOLUMESPIKE_V2
+Hypothesis: Refine the original by tightening entry conditions to reduce trade frequency and avoid overtrading.
+Use the same core logic (R3/S3 breakout + volume spike + 1d EMA34 trend filter) but add:
+- Minimum 4-bar hold time to prevent whipsaw exits
+- Volume spike threshold increased to 2.0x (from 1.5x) for stronger confirmation
+- Entry only when price closes beyond the level (not just intraday touch)
+Target: 15-25 trades/year to stay well under the 400 total 4h trade limit.
+Works in bull markets (breakouts continue) and bear markets (sharp reversals from S3/R3).
 """
-name = "1H_KAMA_TREND_WITH_VOLUME_CONFIRMATION"
-timeframe = "1h"
+name = "4H_CAMARILLA_R3_S3_BREAKOUT_1DVOLUMESPIKE_V2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,86 +27,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: volume > 1.5 * 20-period average
+    # Volume spike: volume > 2.0 * 20-period average (stricter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
-    # KAMA calculation
-    close_s = pd.Series(close)
-    direction = np.abs(close_s.diff(10))  # 10-period net change
-    volatility = close_s.diff().abs().rolling(window=10, min_periods=10).sum()
-    er = direction / volatility.replace(0, np.nan)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # 4h EMA21 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # 1d data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    ema21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    # Calculate Camarilla levels from prior day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    rang = prev_high - prev_low
+    R3 = prev_close + rang * 1.1 / 2
+    S3 = prev_close - rang * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    for i in range(10, n):  # Start after warmup for KAMA
-        if (np.isnan(kama[i]) or 
-            np.isnan(ema21_4h_aligned[i])):
+    for i in range(34, n):  # Start after warmup for EMA34
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
+            bars_since_entry += 1
             continue
         
-        # Only trade during session
-        if not session_filter[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        bars_since_entry += 1
         
         if position == 0:
-            # LONG: Price above KAMA + volume spike + above 4h EMA21 (uptrend)
-            if (close[i] > kama[i] and 
+            # LONG: Break above R3 + volume spike + above 1d EMA34 (uptrend)
+            if (close[i] > R3_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > ema21_4h_aligned[i]):
-                signals[i] = 0.20
+                close[i] > ema34_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA + volume spike + below 4h EMA21 (downtrend)
-            elif (close[i] < kama[i] and 
+                bars_since_entry = 0
+            # SHORT: Break below S3 + volume spike + below 1d EMA34 (downtrend)
+            elif (close[i] < S3_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < ema21_4h_aligned[i]):
-                signals[i] = -0.20
+                  close[i] < ema34_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA OR trend reversal
-            if close[i] < kama[i] or close[i] < ema21_4h_aligned[i]:
+            # EXIT LONG: Only after minimum 4 bars AND (price re-enters OR trend reversal)
+            if bars_since_entry >= 4 and ((close[i] < R3_aligned[i] and close[i] > S3_aligned[i]) or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA OR trend reversal
-            if close[i] > kama[i] or close[i] > ema21_4h_aligned[i]:
+            # EXIT SHORT: Only after minimum 4 bars AND (price re-enters OR trend reversal)
+            if bars_since_entry >= 4 and ((close[i] < R3_aligned[i] and close[i] > S3_aligned[i]) or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
