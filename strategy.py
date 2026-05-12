@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_VolumeSpike_Regime
-Hypothesis: TRIX (triple EMA) momentum confirms trend when crossing zero. 
-Long when TRIX crosses above zero with volume spike (>2x 20-bar average) and 
-choppiness regime indicates trend (CHOP < 38.2). Short when TRIX crosses below zero 
-with volume spike and CHOP < 38.2. Uses 1d trend filter (price > EMA50) for long 
-bias and (price < EMA50) for short bias to avoid counter-trend trades. 
-Designed for 4h timeframe to target 20-50 trades/year with low turnover.
-Works in bull via momentum continuation and bear via counter-trend bounces at extremes.
+1d_KAMA_Trend_RSI_200MA_Filter
+Hypothesis: On daily timeframe, KAMA (Kaufman Adaptive Moving Average) adapts to market volatility,
+providing robust trend identification. Combines with RSI(14) for momentum confirmation and
+200-period SMA for long-term trend filter. In bull markets, KAMA above SMA200 with RSI>50
+captures uptrends; in bear markets, KAMA below SMA200 with RSI<50 captures downtrends.
+Uses weekly ADX to filter ranging markets (ADX<20) and avoid whipsaws. Targets 7-25 trades/year
+(30-100 total over 4 years) with low turnover to minimize fee drag.
 """
 
-name = "4h_TRIX_VolumeSpike_Regime"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_200MA_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,59 +22,87 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
 
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data (call once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Get weekly data (call once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly ADX(14) for trend strength filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
 
-    # Calculate TRIX (15-period triple EMA) on close
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = ema3.pct_change() * 100  # Percentage change
-    trix = trix.fillna(0).values
+    # Directional Movement
+    up_move = high_1w[1:] - high_1w[:-1]
+    down_move = low_1w[:-1] - low_1w[1:]
+    up_move = np.concatenate([[np.nan], np.where((up_move > down_move) & (up_move > 0), up_move, 0)])
+    down_move = np.concatenate([[np.nan], np.where((down_move > up_move) & (down_move > 0), down_move, 0)])
 
-    # Calculate 40-period Choppiness Index
-    # CHOP = 100 * log15(sum(ATR(1)) / (max(high) - min(low))) / log15(period)
-    tr1 = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
-    tr1[0] = high[0] - low[0]  # First TR
-    atr1 = pd.Series(tr1).rolling(window=1, min_periods=1).sum().values
-    sum_tr1 = pd.Series(atr1).rolling(window=40, min_periods=40).sum().values
-    max_high = pd.Series(high).rolling(window=40, min_periods=40).max().values
-    min_low = pd.Series(low).rolling(window=40, min_periods=40).min().values
-    chop = 100 * (np.log10(sum_tr1) - np.log10(max_high - min_low)) / np.log10(40)
-    chop = np.where((max_high - min_low) > 0, chop, 50.0)  # Avoid division by zero
-    chop = np.nan_to_num(chop, nan=50.0)
+    # Directional Indicators
+    plus_di = 100 * pd.Series(up_move).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1w
+    minus_di = 100 * pd.Series(down_move).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1w
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1w = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
 
-    # Volume confirmation: 2.0x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.concatenate([[np.nan], np.diff(close)]))
+    volatility = np.sum(np.abs(np.concatenate([[np.nan], np.diff(close)])), axis=0) if False else None  # placeholder
+    # Proper volatility calculation: sum of absolute changes over 10 periods
+    volatility_sum = pd.Series(np.abs(np.concatenate([[np.nan], np.diff(close)])).rolling(window=10, min_periods=10).sum().values)
+    change_sum = pd.Series(change).rolling(window=10, min_periods=10).sum().values
+    er = np.where(volatility_sum.values != 0, change_sum / volatility_sum.values, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    kama_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama)  # dummy df for alignment
+
+    # Calculate RSI(14) on daily close
+    delta = np.concatenate([[np.nan], np.diff(close)])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), rsi)
+
+    # Calculate 200-period SMA on daily close
+    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    sma200_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), sma200)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
-        # Get aligned values for current 4h bar
-        ema50 = ema50_1d_aligned[i]
-        chop_val = chop[i]
-        vol_avg_val = vol_avg_20[i]
+        # Get aligned values for current daily bar
+        adx = adx_1w_aligned[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
+        sma200_val = sma200_aligned[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(ema50) or np.isnan(chop_val) or 
-            np.isnan(vol_avg_val)):
+        if (np.isnan(adx) or np.isnan(kama_val) or 
+            np.isnan(rsi_val) or np.isnan(sma200_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,8 +110,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Regime filter: only trade when CHOP < 38.2 (trending market)
-        if chop_val >= 38.2:
+        # Trend filter: only trade when ADX >= 20 (trending market)
+        if adx < 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,30 +120,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX crosses above zero + volume spike + price above 1d EMA50
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
-                volume[i] > vol_avg_val * 2.0 and 
-                close[i] > ema50):
+            # LONG: KAMA above SMA200 + RSI > 50
+            if (kama_val > sma200_val and rsi_val > 50):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero + volume spike + price below 1d EMA50
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
-                  volume[i] > vol_avg_val * 2.0 and 
-                  close[i] < ema50):
+            # SHORT: KAMA below SMA200 + RSI < 50
+            elif (kama_val < sma200_val and rsi_val < 50):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero or price below 1d EMA50
-            if (trix[i] < 0 and trix[i-1] >= 0) or close[i] < ema50:
+            # EXIT LONG: KAMA crosses below SMA200 or RSI < 40
+            if (kama_val < sma200_val or rsi_val < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero or price above 1d EMA50
-            if (trix[i] > 0 and trix[i-1] <= 0) or close[i] > ema50:
+            # EXIT SHORT: KAMA crosses above SMA200 or RSI > 60
+            if (kama_val > sma200_val or rsi_val > 60):
                 signals[i] = 0.0
                 position = 0
             else:
