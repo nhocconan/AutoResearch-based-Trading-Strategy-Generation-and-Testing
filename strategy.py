@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12H_CAMARILLA_R1_S1_BREAKOUT_1W_TREND_FILTER
-# Hypothesis: Camarilla pivot levels (R1/S1) from daily act as strong support/resistance.
-# In 1-week uptrend (EMA34), go long when price breaks above R1 with volume confirmation.
-# In 1-week downtrend (EMA34), go short when price breaks below S1 with volume confirmation.
-# Weekly trend filter ensures we only trade with the major trend, reducing whipsaw in both bull and bear markets.
-# Target: 15-25 trades/year on 12h timeframe.
+# 4H_RSI_MEAN_REVERSION_1D_TREND_FILTER
+# Hypothesis: RSI mean-reversion works best when aligned with the daily trend.
+# In 1d uptrend (price > EMA50), go long when RSI(14) < 30 (oversold).
+# In 1d downtrend (price < EMA50), go short when RSI(14) > 70 (overbought).
+# Trend filter prevents counter-trend trades, RSI captures reversals within trend.
+# Target: 20-40 trades/year on 4h timeframe.
 
-name = "12H_CAMARILLA_R1_S1_BREAKOUT_1W_TREND_FILTER"
-timeframe = "12h"
+name = "4H_RSI_MEAN_REVERSION_1D_TREND_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,50 +19,36 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Daily data for Camarilla levels
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # EMA34 for weekly trend filter
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # EMA50 for trend filter
+    ema50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # RSI(14) on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 12h timeframe (using previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (vol_ma * 1.5)
+    # Align daily EMA50 to 4h timeframe
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema50_aligned[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,32 +57,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Weekly uptrend + price breaks above R1 + volume confirmation
-            if (close[i] > ema34_1w_aligned[i] and 
-                close[i] > camarilla_r1_aligned[i] and 
-                volume_ok[i]):
+            # LONG: 1d uptrend + RSI oversold
+            if (close[i] > ema50_aligned[i] and 
+                rsi[i] < 30):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Weekly downtrend + price breaks below S1 + volume confirmation
-            elif (close[i] < ema34_1w_aligned[i] and 
-                  close[i] < camarilla_s1_aligned[i] and 
-                  volume_ok[i]):
+            # SHORT: 1d downtrend + RSI overbought
+            elif (close[i] < ema50_aligned[i] and 
+                  rsi[i] > 70):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal or price breaks below S1 (reversal signal)
-            if (close[i] <= ema34_1w_aligned[i] or 
-                close[i] < camarilla_s1_aligned[i]):
+            # EXIT LONG: Trend reversal or RSI overbought
+            if (close[i] <= ema50_aligned[i] or 
+                rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal or price breaks above R1 (reversal signal)
-            if (close[i] >= ema34_1w_aligned[i] or 
-                close[i] > camarilla_r1_aligned[i]):
+            # EXIT SHORT: Trend reversal or RSI oversold
+            if (close[i] >= ema50_aligned[i] or 
+                rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
