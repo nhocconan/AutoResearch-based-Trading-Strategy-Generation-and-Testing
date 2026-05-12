@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyTrend_DailyReversion
-Hypothesis: On 1d timeframe, take mean-reversion trades when price deviates from weekly trend (EMA21) with RSI confirmation. In bull markets, buy dips to weekly EMA; in bear markets, sell rallies to weekly EMA. Uses weekly EMA21 as dynamic support/resistance and daily RSI for entry timing. Designed for low trade frequency (10-30 trades/year) to minimize fee drag while capturing meaningful reversals in both bull and bear regimes.
+6h_Keltner_Channel_Trend_Reversal
+Hypothesis: Price tends to revert from extreme deviations in volatile markets.
+Uses Keltner Channel (2.0 ATR) on 6h with 1d trend filter: long when price touches lower band in uptrend, short when touches upper band in downtrend.
+Exit on middle band (EMA20) touch or opposite band touch. Designed for mean reversion in ranging markets and pullbacks in trends.
+Targets 15-30 trades/year to minimize fee impact.
 """
 
-name = "1d_WeeklyTrend_DailyReversion"
-timeframe = "1d"
+name = "6h_Keltner_Channel_Trend_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,38 +20,40 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
 
-    # Weekly EMA21 for trend direction (using weekly close)
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    # Align weekly EMA21 to daily timeframe
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    # Calculate ATR(10) for Keltner Channel
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
 
-    # Daily RSI for entry timing (14-period)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Keltner Channel: EMA20 ± 2*ATR
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper = ema20 + 2.0 * atr
+    lower = ema20 - 2.0 * atr
+
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(21, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema21_1w_aligned[i]) or np.isnan(rsi_values[i]):
+    for i in range(20, n):
+        # Skip if any required value is NaN
+        if (np.isnan(ema20[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,26 +62,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price below weekly EMA (dip in uptrend) + RSI oversold
-            if close[i] < ema21_1w_aligned[i] and rsi_values[i] < 30:
+            # LONG: Price touches lower band in 1d uptrend
+            if low[i] <= lower[i] and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price above weekly EMA (rally in downtrend) + RSI overbought
-            elif close[i] > ema21_1w_aligned[i] and rsi_values[i] > 70:
+            # SHORT: Price touches upper band in 1d downtrend
+            elif high[i] >= upper[i] and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back above weekly EMA OR RSI overbought
-            if close[i] > ema21_1w_aligned[i] or rsi_values[i] > 70:
+            # EXIT LONG: Price touches upper band or middle band (EMA20)
+            if high[i] >= upper[i] or abs(close[i] - ema20[i]) < 0.001 * close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back below weekly EMA OR RSI oversold
-            if close[i] < ema21_1w_aligned[i] or rsi_values[i] < 30:
+            # EXIT SHORT: Price touches lower band or middle band (EMA20)
+            if low[i] <= lower[i] or abs(close[i] - ema20[i]) < 0.001 * close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
