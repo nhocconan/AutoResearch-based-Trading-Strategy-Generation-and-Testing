@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
-# 6h_1D_ADX_DMI_Trend_Filter
-# Hypothesis: Use ADX(14) and +DI/-DI crossover on daily timeframe to filter 6h momentum entries.
-# In trending markets (ADX > 25), enter long when +DI crosses above -DI, short when -DI crosses above +DI.
-# Exit when ADX falls below 20 or reverse crossover occurs. This avoids whipsaws in ranging markets.
-# Works in both bull and bear by following the dominant trend on higher timeframe.
+# 4h_12h_KAMA_Direction_RSI_Filter_With_Trend
+# Hypothesis: Use KAMA on 4h for direction, RSI(14) for momentum confirmation, and 12h EMA50 as trend filter.
+# KAMA adapts to market noise, reducing whipsaws in sideways markets. RSI filters for momentum strength.
+# 12h EMA ensures alignment with higher timeframe trend. Designed for low frequency (<30 trades/year) to minimize fee drag.
+# Works in bull markets via trend-following and in bear via momentum exhaustion signals.
 
-name = "6h_1D_ADX_DMI_Trend_Filter"
-timeframe = "6h"
+name = "4h_12h_KAMA_Direction_RSI_Filter_With_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,65 +22,62 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
 
-    # Get daily data for ADX/DMI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
 
-    # Calculate True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.abs(high_1d[0] - low_1d[0])], tr])
+    # Calculate KAMA on 4h (ER = 10, fast = 2, slow = 30)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder for correct calc
+    # Recalculate volatility properly: sum of absolute changes over ER period
+    er_period = 10
+    change_arr = np.abs(np.diff(close, prepend=close[0]))
+    volatility_arr = np.zeros_like(change)
+    for i in range(len(change)):
+        if i < er_period:
+            volatility_arr[i] = np.nan
+        else:
+            volatility_arr[i] = np.sum(change_arr[i-er_period+1:i+1])
+    # Avoid division by zero
+    er = np.where(volatility_arr != 0, change_arr / volatility_arr, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
 
-    # Calculate Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-
-    # Smooth TR, DM+, DM- using Wilder's smoothing (EMA with alpha=1/period)
-    def wilder_smooth(data, period):
-        alpha = 1.0 / period
-        result = np.zeros_like(data)
-        result[0] = data[0]
-        for i in range(1, len(data)):
-            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
-
-    period = 14
-    tr_smooth = wilder_smooth(tr, period)
-    dm_plus_smooth = wilder_smooth(dm_plus, period)
-    dm_minus_smooth = wilder_smooth(dm_minus, period)
-
-    # Calculate DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-
-    # Calculate DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx = wilder_smooth(dx, period)
-
-    # Align to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    di_plus_aligned = align_htf_to_ltf(prices, df_1d, di_plus)
-    di_minus_aligned = align_htf_to_ltf(prices, df_1d, di_minus)
+    # Calculate RSI(14) on 4h
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
-        if (np.isnan(adx_aligned[i]) or np.isnan(di_plus_aligned[i]) or 
-            np.isnan(di_minus_aligned[i])):
+    for i in range(50, n):
+        # Skip if any required data is NaN
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,45 +85,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        adx_val = adx_aligned[i]
-        di_plus_val = di_plus_aligned[i]
-        di_minus_val = di_minus_aligned[i]
+        # KAMA direction: price above KAMA = bullish, below = bearish
+        bullish_kama = close[i] > kama[i]
+        bearish_kama = close[i] < kama[i]
 
-        # Previous values for crossover detection
-        if i > 0:
-            di_plus_prev = di_plus_aligned[i-1]
-            di_minus_prev = di_minus_aligned[i-1]
-        else:
-            di_plus_prev = di_plus_val
-            di_minus_prev = di_minus_val
+        # RSI filters: avoid overbought/oversold extremes
+        rsi_ok_long = rsi[i] < 70  # not overbought
+        rsi_ok_short = rsi[i] > 30  # not oversold
 
         if position == 0:
-            # ENTER LONG: ADX > 25 and +DI crosses above -DI
-            if (adx_val > 25 and 
-                di_plus_val > di_minus_val and 
-                di_plus_prev <= di_minus_prev):
+            # LONG: Price above KAMA with rising momentum and bullish 12h trend
+            if bullish_kama and rsi_ok_long and close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # ENTER SHORT: ADX > 25 and -DI crosses above +DI
-            elif (adx_val > 25 and 
-                  di_minus_val > di_plus_val and 
-                  di_minus_prev <= di_plus_prev):
+            # SHORT: Price below KAMA with falling momentum and bearish 12h trend
+            elif bearish_kama and rsi_ok_short and close[i] < ema_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: ADX < 20 or -DI crosses above +DI
-            if (adx_val < 20 or 
-                (di_minus_val > di_plus_val and di_minus_prev <= di_plus_prev)):
+            # EXIT LONG: Price crosses below KAMA or RSI overbought
+            if close[i] < kama[i] or rsi[i] >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: ADX < 20 or +DI crosses above -DI
-            if (adx_val < 20 or 
-                (di_plus_val > di_minus_val and di_plus_prev <= di_minus_prev)):
+            # EXIT SHORT: Price crosses above KAMA or RSI oversold
+            if close[i] > kama[i] or rsi[i] <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
