@@ -1,10 +1,12 @@
-# 4h_KAMA_Trend_RSI_MeanReversion
-# Hypothesis: On 4h timeframe, use KAMA to detect trend direction and RSI for mean-reversion entries.
-# In trending markets (KAMA slope aligned with price), buy RSI dips in uptrend, sell RSI rallies in downtrend.
-# In ranging markets (KAMA flat), fade RSI extremes. Volume filter ensures institutional participation.
-# Designed for low turnover: only trade when trend/momentum/volume align.
+# 4h_RSI_Trend_Reversal_1dADX_Filter
+# Hypothesis: RSI extremes combined with trend filter on 1d ADX and volume confirmation.
+# In bull markets, buy RSI<30 with 1d ADX>25 (trending) and volume spike.
+# In bear markets, sell RSI>70 with 1d ADX>25 and volume spike.
+# RSI mean reversion works in ranging markets, while ADX filter avoids chop.
+# Volume spike confirms institutional participation at turning points.
+# Designed for low turnover: only trade at extreme RSI with trend and volume confirmation.
 
-name = "4h_KAMA_Trend_RSI_MeanReversion"
+name = "4h_RSI_Trend_Reversal_1dADX_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,52 +19,69 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
 
     # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
 
-    # KAMA on daily close: trend detection
-    close_1d = df_1d['close'].values
-    # Calculate Efficiency Ratio (ER) and Smoothing Constants
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    er[1:] = change[1:] / (volatility[1:] + 1e-10)  # Avoid division by zero
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # Fast=2, Slow=30
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d = kama
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-
-    # KAMA slope (trend strength)
-    kama_slope = np.diff(kama_1d, prepend=0)
-    kama_slope_aligned = align_htf_to_ltf(prices, df_1d, kama_slope)
-
-    # RSI on 4h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
+    # RSI(14) on 4h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
 
-    # Volume spike: current > 1.5x average of last 6 bars (1 day on 4h)
+    # 1d ADX(14) for trend strength
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dpi_plus = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dpi_minus = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # DI and DX
+    di_plus = 100 * dpi_plus / atr
+    di_minus = 100 * dpi_minus / atr
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+
+    # Align ADX to 4h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+
+    # Volume spike: current > 2.0x average of last 6 bars (1 day on 4h)
     vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after RSI warmup
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(kama_slope_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(volume_spike[i])):
+    for i in range(50, n):  # Start after warmup
+        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,45 +90,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # Determine market regime
-            if abs(kama_slope_aligned[i]) > 0.001:  # Trending market
-                # LONG: uptrend (kama rising) + RSI oversold + volume spike
-                if (kama_slope_aligned[i] > 0 and 
-                    rsi[i] < 35 and 
-                    volume_spike[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # SHORT: downtrend (kama falling) + RSI overbought + volume spike
-                elif (kama_slope_aligned[i] < 0 and 
-                      rsi[i] > 65 and 
-                      volume_spike[i]):
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            else:  # Ranging market
-                # LONG: RSI deeply oversold + volume spike
-                if (rsi[i] < 30 and volume_spike[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # SHORT: RSI deeply overbought + volume spike
-                elif (rsi[i] > 70 and volume_spike[i]):
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # LONG: RSI < 30 (oversold) + ADX > 25 (trending) + volume spike
+            if (rsi[i] < 30 and 
+                adx_aligned[i] > 25 and 
+                volume_spike[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: RSI > 70 (overbought) + ADX > 25 (trending) + volume spike
+            elif (rsi[i] > 70 and 
+                  adx_aligned[i] > 25 and 
+                  volume_spike[i]):
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought or trend breaks
-            if (rsi[i] > 65 or 
-                kama_slope_aligned[i] < 0):
+            # EXIT LONG: RSI > 50 (mean reversion complete) or trend weakens
+            if (rsi[i] > 50 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold or trend breaks
-            if (rsi[i] < 35 or 
-                kama_slope_aligned[i] > 0):
+            # EXIT SHORT: RSI < 50 or trend weakens
+            if (rsi[i] < 50 or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
