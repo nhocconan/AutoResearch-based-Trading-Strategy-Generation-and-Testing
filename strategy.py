@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4H_RSI_TREND_WITH_VOLUME_CONFIRMATION
-Hypothesis: Use RSI(14) with 50 level crossovers for trend direction, confirmed by volume spike (2.0x 20-period) and filtered by 4h ADX > 25 to avoid ranging markets.
-Long when RSI crosses above 50 with volume spike and ADX > 25.
-Short when RSI crosses below 50 with volume spike and ADX > 25.
-Exit when RSI returns to 50 level or volume drops.
-Designed to capture trends in both bull and bear markets with controlled trade frequency.
+1D_KAMA_TREND_RSI_WITH_VOLUME_CONFIRMATION
+Hypothesis: Use 1d KAMA for trend direction, RSI for pullback entry, and volume spike for confirmation.
+KAMA adapts to market noise, reducing whipsaw in sideways markets. RSI identifies overextended pullbacks
+within the trend. Volume spike ensures institutional participation. Works in bull markets (buy pullbacks
+in uptrend) and bear markets (sell rallies in downtrend). Target: 15-25 trades/year (60-100 total) to
+stay within 1d limits and minimize fee drag.
 """
-name = "4H_RSI_TREND_WITH_VOLUME_CONFIRMATION"
-timeframe = "4h"
+name = "1D_KAMA_TREND_RSI_WITH_VOLUME_CONFIRMATION"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,50 +20,39 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI calculation
-    delta = pd.Series(close).diff()
+    # KAMA trend: 1d close, fast=2, slow=30
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(1))
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = [close[0]]
+    for i in range(1, n):
+        kama.append(kama[-1] + sc.iloc[i] * (close[i] - kama[-1]))
+    kama = np.array(kama)
+    
+    # RSI(14) for pullback
+    delta = close_s.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    rsi = rsi.values
     
     # Volume spike: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # ADX calculation for trend strength
-    plus_dm = pd.Series(high).diff()
-    minus_dm = pd.Series(low).diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    
-    tr1 = pd.Series(high) - pd.Series(low)
-    tr2 = abs(pd.Series(high) - pd.Series(close).shift())
-    tr3 = abs(pd.Series(low) - pd.Series(close).shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    plus_di = 100 * (plus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    adx_values = adx.values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
-        if (np.isnan(rsi_values[i]) or 
-            np.isnan(adx_values[i]) or 
-            np.isnan(volume_spike[i])):
+    for i in range(20, n):  # Start after warmup for volatility and volume MA
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,28 +61,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: RSI crosses above 50 with volume spike and strong trend
-            if (rsi_values[i] > 50 and rsi_values[i-1] <= 50 and 
-                volume_spike[i] and adx_values[i] > 25):
+            # LONG: Uptrend (close > KAMA) + RSI pullback (RSI < 30) + volume spike
+            if close[i] > kama[i] and rsi[i] < 30 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI crosses below 50 with volume spike and strong trend
-            elif (rsi_values[i] < 50 and rsi_values[i-1] >= 50 and 
-                  volume_spike[i] and adx_values[i] > 25):
+            # SHORT: Downtrend (close < KAMA) + RSI overextended (RSI > 70) + volume spike
+            elif close[i] < kama[i] and rsi[i] > 70 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to 50 or volume drops
-            if rsi_values[i] <= 50 or not volume_spike[i]:
+            # EXIT LONG: Trend reversal (close < KAMA) OR RSI overbought (RSI > 70)
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to 50 or volume drops
-            if rsi_values[i] >= 50 or not volume_spike[i]:
+            # EXIT SHORT: Trend reversal (close > KAMA) OR RSI oversold (RSI < 30)
+            if close[i] > kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
