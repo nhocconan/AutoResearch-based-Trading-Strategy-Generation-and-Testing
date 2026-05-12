@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakout above Camarilla R1 or below S1 on 4h timeframe, with daily trend filter and volume confirmation.
-# Camarilla pivot levels (R1/S1) are calculated from the previous 1d candle's high-low-close. Breakouts above R1 or below S1
-# indicate strong momentum. We require the daily close to be above/below the 50-period EMA to filter for trend alignment.
-# Volume must exceed 2x the 20-period SMA to avoid false breakouts. This strategy targets low trade frequency (20-40/year)
-# and works in both bull and bear markets by following the daily trend direction. Exit on opposite Camarilla level touch.
+# 4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume
+# Hypothesis: Camarilla R3/S3 breakout with 1-day EMA34 trend filter and volume spike confirmation on 4h timeframe.
+# Camarilla levels provide institutional-grade support/resistance. Breakouts above R3 or below S3 with volume
+# indicate strong momentum. EMA34 filter ensures trades align with daily trend, reducing whipsaw in chop.
+# Works in bull/bear markets by following daily trend direction. Targets 20-40 trades/year to minimize fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,30 +23,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot levels and trend filter
+    # Get 1d data for Camarilla levels and EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
 
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Camarilla pivot levels from previous 1d candle
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    cam_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    cam_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Calculate Camarilla levels for the previous day
+    # R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    # Using previous day's values (shifted by 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # First value has no previous
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
 
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
-    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
+    diff = prev_high - prev_low
+    camarilla_r3 = prev_close + (diff * 1.1 / 4)
+    camarilla_s3 = prev_close - (diff * 1.1 / 4)
 
-    # Daily trend filter: 50-period EMA
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
 
-    # Volume confirmation: 2x 20-period SMA
+    # Calculate EMA34 on daily close for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Calculate volume spike threshold (2.0x 20-period SMA)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 2.0
@@ -55,10 +62,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(cam_r1_aligned[i]) or np.isnan(cam_s1_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,30 +74,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Breakout above R1 with uptrend and volume spike
-            if (high[i] > cam_r1_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and 
+            # LONG: Price breaks above R3 with volume spike in uptrend
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 volume[i] > volume_sma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 with downtrend and volume spike
-            elif (low[i] < cam_s1_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
+            # SHORT: Price breaks below S3 with volume spike in downtrend
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   volume[i] > volume_sma20[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price touches S1 (opposite level) or closes below EMA50
-            if low[i] <= cam_s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price closes below EMA34 or reverses below R3
+            if close[i] < ema34_1d_aligned[i] or close[i] < r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price touches R1 (opposite level) or closes above EMA50
-            if high[i] >= cam_r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price closes above EMA34 or reverses above S3
+            if close[i] > ema34_1d_aligned[i] or close[i] > s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
