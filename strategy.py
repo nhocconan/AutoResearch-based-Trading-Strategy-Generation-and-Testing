@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
-Hypothesis: Uses Camarilla R3/S3 levels from daily chart with volume spike confirmation.
-Only takes breakouts on above-average volume to filter false signals and target
-institutional participation. Works in bull/bear by requiring volume confirmation.
-Designed for ~25-35 trades/year on 4h to minimize fee drag.
+12H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
+Hypothesis: 12h timeframe with daily Camarilla R3/S3 breakout and volume spike confirmation.
+Uses daily OHLC for robust pivot levels and daily volume > 1.5x 20-day average to filter false breakouts.
+Designed for ~15-30 trades/year on 12h to minimize fee drag and work in bull/bear markets.
 """
-name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
-timeframe = "4h"
+name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,7 +22,9 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate Camarilla levels from previous day
+    # Calculate daily Camarilla levels from previous day
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    # For 12h data, we need previous daily values
     camarilla_r3 = np.full(n, np.nan)
     camarilla_s3 = np.full(n, np.nan)
     
@@ -44,7 +45,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have previous day data
+    for i in range(1, n):
         if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
             np.isnan(vol_spike_aligned[i])):
             if position != 0:
