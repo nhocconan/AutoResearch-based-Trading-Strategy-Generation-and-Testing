@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_RSI40_60_With_Volume_Confirmation
-Hypothesis: In ranging markets (common in 2025), RSI between 40-60 indicates stability. 
-Breakouts from this range with volume confirmation capture new trends. 
-Uses 4h timeframe with 1d trend filter (EMA50) to avoid counter-trend trades. 
-Targets 20-40 trades/year by requiring volume > 1.5x average and RSI exit at extremes.
+1d_TRIX_ZeroCross_VolumeSpike_WeeklyTrend
+Hypothesis: TRIX zero-cross signals with volume confirmation and weekly trend filter capture momentum shifts with low frequency. Works in bull markets via upward crosses and in bear markets via downward crosses, avoiding chop via weekly trend alignment. Target: 10-20 trades/year.
 """
 
-name = "4h_RSI40_60_With_Volume_Confirmation"
-timeframe = "4h"
+name = "1d_TRIX_ZeroCross_VolumeSpike_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,41 +14,38 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # TRIX: 15-period EMA applied 3 times, then 1-period ROC
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = ema3.pct_change() * 100  # 1-period ROC in percent
+    trix_values = trix.values
     
-    # Volume confirmation: >1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
-    
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly trend: weekly EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Volume spike: >2.0x 50-period average (infrequent)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        if np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]):
+    for i in range(150, n):
+        if (np.isnan(trix_values[i]) or
+            np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,30 +54,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: RSI crosses above 40 + price above 1d EMA50 + volume spike
-            if (rsi[i] > 40 and rsi[i-1] <= 40 and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # LONG: TRIX crosses above zero + weekly uptrend + volume spike
+            if (trix_values[i] > 0 and trix_values[i-1] <= 0 and
+                close[i] > ema_50_1w_aligned[i] and
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI crosses below 60 + price below 1d EMA50 + volume spike
-            elif (rsi[i] < 60 and rsi[i-1] >= 60 and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # SHORT: TRIX crosses below zero + weekly downtrend + volume spike
+            elif (trix_values[i] < 0 and trix_values[i-1] >= 0 and
+                  close[i] < ema_50_1w_aligned[i] and
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI reaches 60 (overbought) or closes below 1d EMA50
-            if rsi[i] >= 60 or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: TRIX crosses below zero OR weekly downtrend
+            if (trix_values[i] < 0 and trix_values[i-1] >= 0) or \
+               (close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI reaches 40 (oversold) or closes above 1d EMA50
-            if rsi[i] <= 40 or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: TRIX crosses above zero OR weekly uptrend
+            if (trix_values[i] > 0 and trix_values[i-1] <= 0) or \
+               (close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
