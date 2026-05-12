@@ -1,13 +1,14 @@
-# 6h_Camarilla_R4_S4_Breakout_12hTrend_VolumeSpike
-# Hypothesis: Use 12h Camarilla pivot levels with breakout at R4/S4 levels, filtered by 12h EMA trend and volume spike.
-# Long when price breaks above R4 with price > 12h EMA and volume > 2x MA.
-# Short when price breaks below S4 with price < 12h EMA and volume > 2x MA.
-# Exit when price crosses back to R3/S3 levels (reversion to mean within range).
-# Targets 15-30 trades/year to minimize fee drag while capturing strong breakouts in both bull and bear markets.
-# Uses 12h timeframe for structure and trend, with 6h for entry timing.
+#!/usr/bin/env python3
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter
+# Hypothesis: Use Camarilla pivot levels from daily timeframe for breakout entries with trend filter and volume confirmation.
+# Long when price breaks above R1 with price above daily EMA34 and volume > 2x 20-period volume MA.
+# Short when price breaks below S1 with price below daily EMA34 and volume > 2x 20-period volume MA.
+# Exit when price reverts to the daily pivot point (PP).
+# Designed to capture strong intraday moves with multi-timeframe confirmation, works in both bull and bear markets by filtering with daily trend.
+# Targets 20-40 trades/year to minimize fee drag.
 
-name = "6h_Camarilla_R4_S4_Breakout_12hTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,34 +25,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Daily OHLC for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous 12h bar's high, low, close
-    ph = df_12h['high'].values
-    pl = df_12h['low'].values
-    pc = df_12h['close'].values
+    # Calculate Camarilla levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Camarilla calculations
-    range_ = ph - pl
-    r4 = pc + range_ * 1.1 / 2
-    r3 = pc + range_ * 1.1 / 4
-    s3 = pc - range_ * 1.1 / 4
-    s4 = pc - range_ * 1.1 / 2
+    # Camarilla formulas
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    PP = (prev_high + prev_low + prev_close) / 3
     
-    # Align to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    # Align daily levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
     
-    # 12h EMA for trend filter
-    ema12 = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema12_aligned = align_htf_to_ltf(prices, df_12h, ema12)
+    # Daily EMA for trend filter
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # Volume confirmation: 20-period moving average on 6h
+    # Volume confirmation: 20-period moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -61,9 +60,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema12_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(PP_aligned[i]) or np.isnan(daily_ema_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,26 +71,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R4 with price > 12h EMA and volume > 2x MA
-            if close[i] > r4_aligned[i] and close[i] > ema12_aligned[i] and volume[i] > vol_ma[i] * 2.0:
+            # LONG: Price breaks above R1 with price > daily EMA and volume > 2x MA
+            if close[i] > R1_aligned[i] and close[i] > daily_ema_aligned[i] and volume[i] > vol_ma[i] * 2.0:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S4 with price < 12h EMA and volume > 2x MA
-            elif close[i] < s4_aligned[i] and close[i] < ema12_aligned[i] and volume[i] > vol_ma[i] * 2.0:
+            # SHORT: Price breaks below S1 with price < daily EMA and volume > 2x MA
+            elif close[i] < S1_aligned[i] and close[i] < daily_ema_aligned[i] and volume[i] > vol_ma[i] * 2.0:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price moves back below R3 (mean reversion within range)
-            if close[i] < r3_aligned[i]:
+            # EXIT LONG: Price reverts to daily pivot point
+            if close[i] <= PP_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price moves back above S3 (mean reversion within range)
-            if close[i] > s3_aligned[i]:
+            # EXIT SHORT: Price reverts to daily pivot point
+            if close[i] >= PP_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
