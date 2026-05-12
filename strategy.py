@@ -1,22 +1,44 @@
 #!/usr/bin/env python3
-# 4h_Donchian20_Plus_Volume_Spike_and_KAMA_Direction
-# Hypothesis: Combine Donchian(20) breakout with volume confirmation and KAMA direction filter.
-# Donchian breakouts capture strong momentum moves; volume spikes confirm institutional participation.
-# KAMA adapts to market noise, filtering out false breakouts in choppy conditions.
-# Works in both bull and bear markets via adaptive trend filter and volatility-based position sizing.
-# Target: 20-50 trades/year per symbol, suitable for 4h timeframe.
+# 6h_Ichimoku_Cloud_Breakout_1dTrend
+# Hypothesis: Use Ichimoku cloud from daily timeframe as trend filter and support/resistance, with Tenkan-Kijun cross on 6h for entry.
+# In bull markets, price stays above cloud; in bear markets, price stays below cloud.
+# Tenkan-Kijun cross provides momentum signals aligned with the daily trend.
+# Cloud acts as dynamic support/resistance, reducing false breakouts.
+# Designed for 12-37 trades/year per symbol, works in both bull and bear via trend filter.
 
-name = "4h_Donchian20_Plus_Volume_Spike_and_KAMA_Direction"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Breakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components: Tenkan, Kijun, Senkou A, Senkou B"""
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max()
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max()
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max()
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min()
+    senkou_b = (period52_high + period52_low) / 2
+    
+    return tenkan, kijun, senkou_a, senkou_b
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 52:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,46 +46,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for KAMA trend filter
+    # Get daily data for Ichimoku trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 52:
         return np.zeros(n)
 
-    # KAMA parameters
-    er_len = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Calculate Ichimoku components on daily data
+    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = calculate_ichimoku(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values
+    )
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
 
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(df_1d['close'], prepend=df_1d['close'][0]))
-    volatility = np.abs(np.diff(df_1d['close'])).rolling(window=er_len, min_periods=1).sum()
-    er = change / (volatility + 1e-10)
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # Determine cloud boundaries (Senkou A and B)
+    upper_cloud = np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
+    lower_cloud = np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
+    
+    # Trend filter: price above cloud = uptrend, below cloud = downtrend
+    price_above_cloud = close > upper_cloud
+    price_below_cloud = close < lower_cloud
 
-    # Calculate KAMA
-    kama = np.zeros_like(df_1d['close'])
-    kama[0] = df_1d['close'][0]
-    for i in range(1, len(df_1d)):
-        kama[i] = kama[i-1] + sc[i] * (df_1d['close'][i] - kama[i-1])
-
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-
-    # Donchian channels (20-period) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-
-    # Volume confirmation: current volume > 2.0x average of last 4 periods
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_ok = volume > (2.0 * vol_ma)
+    # Tenkan-Kijun cross on 6h for entry signals
+    # Calculate Tenkan and Kijun on 6h data
+    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max()
+    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan_6h = (period9_high_6h + period9_low_6h) / 2
+    
+    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max()
+    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun_6h = (period26_high_6h + period26_low_6h) / 2
+    
+    # Tenkan-Kijun cross signals
+    tk_cross_up = (tenkan_6h > kijun_6h) & (tenkan_6h.shift(1) <= kijun_6h.shift(1))
+    tk_cross_down = (tenkan_6h < kijun_6h) & (tenkan_6h.shift(1) >= kijun_6h.shift(1))
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(60, n):
+    for i in range(52, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or 
+            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i]) or
+            np.isnan(tk_cross_up[i]) or np.isnan(tk_cross_down[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,31 +101,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter: price relative to KAMA
-        price_above_kama = close[i] > kama_aligned[i]
-        price_below_kama = close[i] < kama_aligned[i]
-
         if position == 0:
-            # LONG: Break above Donchian high + above KAMA + volume spike
-            if close[i] > donchian_high[i] and price_above_kama and volume_ok[i]:
+            # LONG: Tenkan crosses above Kijun AND price above daily cloud (uptrend)
+            if tk_cross_up[i] and price_above_cloud[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Donchian low + below KAMA + volume spike
-            elif close[i] < donchian_low[i] and price_below_kama and volume_ok[i]:
+            # SHORT: Tenkan crosses below Kijun AND price below daily cloud (downtrend)
+            elif tk_cross_down[i] and price_below_cloud[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low OR drops below KAMA
-            if close[i] < donchian_low[i] or not price_above_kama:
+            # EXIT LONG: Tenkan crosses below Kijun OR price falls below cloud
+            if tk_cross_down[i] or not price_above_cloud[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high OR rises above KAMA
-            if close[i] > donchian_high[i] or not price_below_kama:
+            # EXIT SHORT: Tenkan crosses above Kijun OR price rises above cloud
+            if tk_cross_up[i] or not price_below_cloud[i]:
                 signals[i] = 0.0
                 position = 0
             else:
