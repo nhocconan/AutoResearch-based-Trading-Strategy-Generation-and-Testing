@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 1h_4H_Trend_Signal_1D_Volume_Confirmation
-# Hypothesis: The 4h trend direction filters 1h entries to avoid counter-trend trades.
-# Long when 4h trend is up (close > EMA50) and 1h closes above the 1h EMA20 with volume confirmation.
-# Short when 4h trend is down (close < EMA50) and 1h closes below the 1h EMA20 with volume confirmation.
-# This reduces false breakouts and improves win rate in both bull and bear markets by aligning with higher timeframe momentum.
-# Volume confirmation ensures entries occur with conviction, reducing whipsaws.
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years).
+# 6h_Elder_Ray_Power_1wTrend_Volume
+# Hypothesis: Elder Ray (Bull/Bear Power) from 1d combined with weekly trend filter and volume spikes
+# identifies strong momentum moves in both bull and bear markets. Bull Power > 0 indicates bullish
+# momentum (price above EMA), Bear Power < 0 indicates bearish momentum (price below EMA).
+# Weekly trend ensures we trade with the higher timeframe direction, reducing whipsaws.
+# Volume spikes confirm institutional participation. Works in all market regimes by adapting
+# to the prevailing weekly trend while using 1d for precise entry/exit.
 
-name = "1h_4H_Trend_Signal_1D_Volume_Confirmation"
-timeframe = "1h"
+name = "6h_Elder_Ray_Power_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,28 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 10:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
 
-    # 4h EMA50 trend filter (needs only the completed 4h candle)
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Get daily data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
 
-    # 1h EMA20 for entry timing
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate EMA13 for Elder Ray (standard setting)
+    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
 
-    # Volume confirmation: current volume > 1.5x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    # Calculate Bull Power and Bear Power
+    bull_power = df_1d['high'].values - ema_13_1d  # High - EMA
+    bear_power = df_1d['low'].values - ema_13_1d   # Low - EMA
+
+    # Align Elder Ray to 6h timeframe (needs only completed daily candle)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+
+    # Weekly EMA34 trend filter (only needs completed weekly candle)
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+
+    # Volume confirmation: current volume > 2.0x average of last 50 periods
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_ok = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_20[i]) or np.isnan(volume_ok[i]):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,34 +68,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from 4h EMA50
-        trend_up = close[i] > ema_50_4h_aligned[i]
-        trend_down = close[i] < ema_50_4h_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_34_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_34_1w_aligned[i]
 
         if position == 0:
-            # LONG: 4h trend up, price above 1h EMA20, volume confirmation
-            if trend_up and close[i] > ema_20[i] and volume_ok[i]:
-                signals[i] = 0.20
+            # LONG: Bull Power > 0 (bullish momentum) + weekly uptrend + volume spike
+            if (bull_power_aligned[i] > 0 and 
+                weekly_uptrend and volume_ok[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 4h trend down, price below 1h EMA20, volume confirmation
-            elif trend_down and close[i] < ema_20[i] and volume_ok[i]:
-                signals[i] = -0.20
+            # SHORT: Bear Power < 0 (bearish momentum) + weekly downtrend + volume spike
+            elif (bear_power_aligned[i] < 0 and 
+                  weekly_downtrend and volume_ok[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 4h trend turns down or price crosses below 1h EMA20
-            if not trend_up or close[i] < ema_20[i]:
+            # EXIT LONG: Bear Power >= 0 (loss of bullish momentum) or weekly trend turns down
+            if (bear_power_aligned[i] >= 0) or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 4h trend turns up or price crosses above 1h EMA20
-            if not trend_down or close[i] > ema_20[i]:
+            # EXIT SHORT: Bull Power <= 0 (loss of bearish momentum) or weekly trend turns up
+            if (bull_power_aligned[i] <= 0) or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
