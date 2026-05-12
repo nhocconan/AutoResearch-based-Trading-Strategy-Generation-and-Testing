@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Bollinger_Bands_Reversion_With_Volume_Spice_and_Trend_Filter
-Hypothesis: Mean reversion at Bollinger Bands (20,2) with volume spike (>1.5x 20-period average) and trend filter (1d EMA50) captures reversals in both bull and bear markets. Bollinger Bands provide dynamic support/resistance, volume confirms conviction, and 1d EMA50 ensures trades align with higher-timeframe trend. Designed for low trade frequency (<50/year) to minimize fee drag.
+12h_PriceChannel_Breakout_1dTrend_VolumeSpike
+Hypothesis: Price breaking above/below 12h Donchian channels (20) with 1d EMA trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. Works in bull/bear by following 1d trend direction. Designed for low trade frequency (12-37/year) to minimize fee drag.
 """
 
-name = "4h_Bollinger_Bands_Reversion_With_Volume_Spice_and_Trend_Filter"
-timeframe = "4h"
+name = "12h_PriceChannel_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,28 +25,25 @@ def generate_signals(prices):
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
 
-    # Bollinger Bands (20, 2) on 4h
-    close_series = pd.Series(close)
-    basis = close_series.rolling(window=20, min_periods=20).mean()
-    dev = close_series.rolling(window=20, min_periods=20).std()
-    upper_band = (basis + 2 * dev).values
-    lower_band = (basis - 2 * dev).values
+    # Calculate 12h Donchian channels (20 periods)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
 
-    # 1d EMA50 trend filter
+    # Calculate 1d EMA34 trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Volume spike: >1.5x 20-period average (4h)
+    # Volume spike: >1.5x 20-period average (12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after Bollinger Bands warmup
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(20, n):  # Start after Donchian warmup
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,30 +52,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price touches lower Bollinger Band + 1d EMA50 uptrend + volume spike
-            if (close[i] <= lower_band[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # LONG: Price breaks above Donchian upper + 1d EMA34 uptrend + volume spike
+            if (close[i] > high_roll[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price touches upper Bollinger Band + 1d EMA50 downtrend + volume spike
-            elif (close[i] >= upper_band[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # SHORT: Price breaks below Donchian lower + 1d EMA34 downtrend + volume spike
+            elif (close[i] < low_roll[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above the basis (mean reversion complete)
-            if close[i] >= basis.iloc[i]:
+            # EXIT LONG: Price closes below Donchian lower (reversal level)
+            if close[i] < low_roll[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below the basis (mean reversion complete)
-            if close[i] <= basis.iloc[i]:
+            # EXIT SHORT: Price closes above Donchian upper (reversal level)
+            if close[i] > high_roll[i]:
                 signals[i] = 0.0
                 position = 0
             else:
