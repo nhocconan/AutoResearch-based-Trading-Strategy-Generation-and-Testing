@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_1D_Camarilla_R1S1_Breakout_Trend_VolumeS
-# Hypothesis: Trade breakouts from daily Camarilla R1/S1 levels on 12h timeframe in the direction of the daily trend, with volume confirmation requiring 1.5x average volume. Uses stricter entry conditions to target 50-150 total trades over 4 years, avoiding fee drag while maintaining edge in bull and bear markets by following higher-timeframe trend.
+# 4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3
+# Hypothesis: Further refined version with stricter volume confirmation (2.0x average volume) and tighter exit conditions (price must close below/above Camarilla S1/R1 levels) to reduce trade frequency and improve signal quality. Targets 50-150 total trades over 4 years to minimize fee drag while maintaining edge in both bull and bear markets by following higher-timeframe trend. Uses strict volume confirmation to avoid false breakouts and tighter exits to prevent whipsaws.
 
-name = "12h_1D_Camarilla_R1S1_Breakout_Trend_VolumeS"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,7 +34,7 @@ def generate_signals(prices):
     r1 = close_1d + 1.1 * camarilla_range / 12
     s1 = close_1d - 1.1 * camarilla_range / 12
 
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
@@ -42,10 +42,10 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate 12h volume SMA20 for volume confirmation (with spike filter)
+    # Calculate 4h volume SMA20 for volume confirmation (with spike filter)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
+    volume_spike_threshold = volume_sma20 * 2.0  # Require 2.0x average volume (stricter)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,15 +73,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below 1d EMA34 (trend change)
-            if close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price closes below Camarilla S1 level (stronger signal)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above 1d EMA34 (trend change)
-            if close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price closes above Camarilla R1 level (stronger signal)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
