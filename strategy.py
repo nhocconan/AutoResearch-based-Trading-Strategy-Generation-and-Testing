@@ -1,16 +1,32 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Filtered
-Hypothesis: On 12h timeframe, buy when price breaks above Camarilla R1 from previous 1d with volume >2x average and 1d EMA34 trending up; sell when price breaks below Camarilla S1 with volume >2x average and 1d EMA34 trending down. Added ADX(14) > 25 trend filter to reduce false breakouts in ranging markets. Targets 15-30 trades per year to reduce fee drag and improve generalization in bull/bear markets.
+12h_KAMA_Direction_With_Volume_Confirmation
+Hypothesis: On 12h timeframe, use Kaufman's Adaptive Moving Average (KAMA) to capture trend direction with reduced whipsaw. Enter long when price > KAMA and volume > 1.5x average, short when price < KAMA and volume > 1.5x average. Exit when price crosses back across KAMA. Uses 1d ADX > 20 to avoid ranging markets. Targets 20-40 trades per year to minimize fee drag while maintaining trend capture in both bull and bear markets.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Filtered"
+name = "12h_KAMA_Direction_With_Volume_Confirmation"
 timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_kama(close, er_length=10, fast_ema=2, slow_ema=30):
+    """Calculate Kaufman's Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0]))
+    for i in range(1, len(close)):
+        volatility[i] = np.sum(np.abs(np.diff(close[max(0, i-er_length+1):i+1])))
+    
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = np.power(er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1), 2)
+    
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,45 +38,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 1d data for ADX filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: R1 = close + (high - low) * 1.12/12, S1 = close - (high - low) * 1.12/12
-    range_1d = high_1d - low_1d
-    camarilla_r1 = close_1d + range_1d * 1.12 / 12
-    camarilla_s1 = close_1d - range_1d * 1.12 / 12
-
-    # Use previous 1d bar's levels (shift by 1)
-    camarilla_r1_prev = np.roll(camarilla_r1, 1)
-    camarilla_s1_prev = np.roll(camarilla_s1, 1)
-    camarilla_r1_prev[0] = np.nan
-    camarilla_s1_prev[0] = np.nan
-
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_prev)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_prev)
-
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate KAMA on close prices
+    kama = calculate_kama(close, er_length=10, fast_ema=2, slow_ema=30)
 
     # 1d ADX(14) for trend strength filter
-    # Calculate True Range
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # first value has no previous close
+    tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate +DM and -DM
     up_move = high_1d - np.roll(high_1d, 1)
     down_move = np.roll(low_1d, 1) - low_1d
     up_move[0] = 0
@@ -68,10 +65,11 @@ def generate_signals(prices):
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smoothed values
     def smooth_wilder(arr, period):
         result = np.zeros_like(arr)
-        result[period-1] = np.nansum(arr[:period])  # first value is sum
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])
         for i in range(period, len(arr)):
             result[i] = result[i-1] - (result[i-1] / period) + arr[i]
         return result
@@ -80,26 +78,26 @@ def generate_signals(prices):
     plus_dm_smooth = smooth_wilder(plus_dm, 14)
     minus_dm_smooth = smooth_wilder(minus_dm, 14)
     
-    # Calculate DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    # Avoid division by zero
+    plus_di = np.where(tr_smooth != 0, 100 * plus_dm_smooth / tr_smooth, 0)
+    minus_di = np.where(tr_smooth != 0, 100 * minus_dm_smooth / tr_smooth, 0)
     dx = np.where((plus_di + minus_di) != 0, 
                   100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 
                   0)
     adx = smooth_wilder(dx, 14)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_1d = adx  # already calculated on 1d data
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
 
-    # Volume confirmation: volume > 2x 24-period average (approx 12 hours)
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_avg_20 = np.convolve(volume, np.ones(20)/20, mode='same')
+    vol_avg_20[:10] = np.nan  # insufficient data at start
+    vol_avg_20[-10:] = np.nan
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required value is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_24[i]) or 
+        if (np.isnan(kama[i]) or np.isnan(vol_avg_20[i]) or 
             np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -109,32 +107,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 + 1d uptrend + volume spike + ADX > 25
-            if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume[i] > vol_avg_24[i] * 2.0 and
-                adx_aligned[i] > 25):
+            # LONG: Price above KAMA + volume spike + ADX > 20
+            if (close[i] > kama[i] and 
+                volume[i] > vol_avg_20[i] * 1.5 and
+                adx_aligned[i] > 20):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S1 + 1d downtrend + volume spike + ADX > 25
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > vol_avg_24[i] * 2.0 and
-                  adx_aligned[i] > 25):
+            # SHORT: Price below KAMA + volume spike + ADX > 20
+            elif (close[i] < kama[i] and 
+                  volume[i] > vol_avg_20[i] * 1.5 and
+                  adx_aligned[i] > 20):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S1 OR trend turns down OR ADX weakens
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i] or adx_aligned[i] < 20:
+            # EXIT LONG: Price crosses below KAMA
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R1 OR trend turns up OR ADX weakens
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i] or adx_aligned[i] < 20:
+            # EXIT SHORT: Price crosses above KAMA
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
