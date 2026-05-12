@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,29 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter and pivot levels
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
     # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
+    # Load daily data for Camarilla pivot levels
+    df_1d_piv = get_htf_data(prices, '1d')
+    high_1d_piv = df_1d_piv['high'].values
+    low_1d_piv = df_1d_piv['low'].values
+    close_1d_piv = df_1d_piv['close'].values
+    
     # Calculate Camarilla pivot levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_piv = df_1d['close'].values
+    pivot = (high_1d_piv + low_1d_piv + close_1d_piv) / 3
+    r1 = close_1d_piv + (high_1d_piv - low_1d_piv) * 1.1 / 12
+    s1 = close_1d_piv - (high_1d_piv - low_1d_piv) * 1.1 / 12
     
-    pivot = (high_1d + low_1d + close_1d_piv) / 3
-    r1 = close_1d_piv + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d_piv - (high_1d - low_1d) * 1.1 / 12
+    # Align pivot levels to 12h timeframe (use previous day's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d_piv, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d_piv, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d_piv, s1)
     
-    # Align pivot levels to 4h timeframe (use previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume filter: current volume > 2.0x 20-period average
+    # Volume filter: current volume > 2.0x 20-period average (stricter)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (2.0 * vol_avg)
     
