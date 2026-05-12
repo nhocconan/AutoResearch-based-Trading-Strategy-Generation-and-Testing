@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1w_Pivot_1d_EMA50_Volume_Trend"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for pivot calculation (using previous week's data to avoid look-ahead)
+    # Load weekly data for pivot calculation
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     high_1w = df_1w['high'].values
@@ -36,7 +36,7 @@ def generate_signals(prices):
     weekly_r1 = weekly_pivot + weekly_range * 1.1 / 12
     weekly_s1 = weekly_pivot - weekly_range * 1.1 / 12
     
-    # Align weekly levels to 4h timeframe
+    # Align weekly levels to daily timeframe
     weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
@@ -46,14 +46,14 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: current volume > 1.5x 24-period average (6 days of 4h data)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
