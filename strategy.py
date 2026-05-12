@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# 6H_DONCHIAN20_WEEKLY_PIVOT_BREAKOUT_VOLUME
-# Hypothesis: Donchian(20) breakout on 6h with weekly pivot direction filter.
-# In weekly uptrend (price above weekly pivot), go long on Donchian(20) breakout with volume confirmation.
-# In weekly downtrend (price below weekly pivot), go short on Donchian(20) breakdown with volume confirmation.
-# Weekly pivot acts as trend filter to avoid counter-trend trades, Donchian captures breakouts.
-# Volume confirmation reduces false breakouts. Works in both bull and bear markets.
-# Target: 15-25 trades/year on 6h timeframe.
+# 4H_CAMARILLA_R1S1_BREAKOUT_1D_TREND_FILTER
+# Hypothesis: Camarilla R1/S1 levels act as strong support/resistance. In 1d uptrend (price > EMA34), go long when price breaks above R1 with volume confirmation. In 1d downtrend (price < EMA34), go short when price breaks below S1 with volume confirmation. Uses volume spike (1.5x average) to confirm breakout strength. Trend filter avoids counter-trend trades. Designed for 4h timeframe to balance trade frequency and performance.
 
-name = "6H_DONCHIAN20_WEEKLY_PIVOT_BREAKOUT_VOLUME"
-timeframe = "6h"
+name = "4H_CAMARILLA_R1S1_BREAKOUT_1D_TREND_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,38 +20,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Daily data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly pivot points (using prior week's H, L, C)
-    wh = df_1w['high'].values
-    wl = df_1w['low'].values
-    wc = df_1w['close'].values
-    wp = (wh + wl + wc) / 3.0  # Weekly pivot
+    # Previous day's OHLC for Camarilla levels
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align weekly pivot to 6h
-    wp_aligned = align_htf_to_ltf(prices, df_1w, wp)
+    # Calculate Camarilla levels (R1, S1)
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
-    # Donchian(20) on 6h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # EMA34 for trend filter
+    ema34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume average (20-period) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    
+    # Align all to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Donchian lookback and volume MA
+    start_idx = 20  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(wp_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,33 +62,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Volume spike condition (1.5x average)
+        volume_spike = volume[i] > 1.5 * vol_ma_aligned[i]
+        
         if position == 0:
-            # LONG: weekly uptrend (price above weekly pivot) + Donchian breakout + volume
-            if (close[i] > wp_aligned[i] and 
-                high[i] > highest_high[i-1] and  # Breakout above prior Donchian high
-                vol_confirm[i]):
+            # LONG: 1d uptrend + price breaks above R1 + volume spike
+            if (close[i] > ema34_aligned[i] and 
+                high[i] > R1_aligned[i] and 
+                volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: weekly downtrend (price below weekly pivot) + Donchian breakdown + volume
-            elif (close[i] < wp_aligned[i] and 
-                  low[i] < lowest_low[i-1] and  # Breakdown below prior Donchian low
-                  vol_confirm[i]):
+            # SHORT: 1d downtrend + price breaks below S1 + volume spike
+            elif (close[i] < ema34_aligned[i] and 
+                  low[i] < S1_aligned[i] and 
+                  volume_spike):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low or weekly trend fails
-            if (low[i] < lowest_low[i-1] or 
-                close[i] < wp_aligned[i]):
+            # EXIT LONG: Price breaks below S1 or trend reversal
+            if (low[i] < S1_aligned[i] or 
+                close[i] <= ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high or weekly trend fails
-            if (high[i] > highest_high[i-1] or 
-                close[i] > wp_aligned[i]):
+            # EXIT SHORT: Price breaks above R1 or trend reversal
+            if (high[i] > R1_aligned[i] or 
+                close[i] >= ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
