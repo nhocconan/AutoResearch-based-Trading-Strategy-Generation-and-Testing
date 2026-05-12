@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_LiquiditySweep_Retest_1dTrend
-Hypothesis: In BTC/ETH, price often sweeps liquidity (equal highs/lows) before reversing. 
-Buy when price sweeps prior day's low then closes back above it with 1d uptrend and volume confirmation.
-Sell when price sweeps prior day's high then closes back below it with 1d downtrend and volume confirmation.
-Uses 1d trend filter to align with higher timeframe momentum. Targets 15-25 trades/year.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: In BTC/ETH, Camarilla R1/S1 levels act as strong support/resistance. 
+Price breaking above R1 or below S1 with 1d EMA trend alignment and volume expansion (>1.5x 20-period average) 
+captures momentum with low turnover. Targets 12-37 trades/year on 12h timeframe.
 """
 
-name = "6h_LiquiditySweep_Retest_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -27,25 +26,41 @@ def generate_signals(prices):
 
     # Get 1d data (call once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 60:
         return np.zeros(n)
 
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
 
-    # Calculate 1d EMA50 for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1d EMA34 for trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Previous day's high and low (for liquidity levels)
+    # Calculate 1d Bollinger Band width (20, 2) for squeeze filter
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma20_1d + 2 * std20_1d
+    lower_bb_1d = sma20_1d - 2 * std20_1d
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma20_1d
+    # Percentile rank of bb_width over lookback
+    bb_width_rank = pd.Series(bb_width_1d).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    bb_width_rank_aligned = align_htf_to_ltf(prices, df_1d, bb_width_rank)
+
+    # Calculate 1d Camarilla levels from previous 1d OHLC
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous day's HLC, so shift by 1
+    prev_close = np.roll(close_1d, 1)
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
-
-    # Align liquidity levels to 6h timeframe
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    # First value will be invalid, handled by alignment
+    camarilla_mult = 1.1 / 12
+    r1 = prev_close + (prev_high - prev_low) * camarilla_mult
+    s1 = prev_close - (prev_high - prev_low) * camarilla_mult
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
     # Volume confirmation: 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,16 +68,27 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        # Get aligned values for current 6h bar
-        ema50 = ema50_1d_aligned[i]
-        ph = prev_high_aligned[i]
-        pl = prev_low_aligned[i]
+    for i in range(60, n):
+        # Get aligned values for current 12h bar
+        ema34 = ema34_1d_aligned[i]
+        bb_rank = bb_width_rank_aligned[i]
+        r1_level = r1_aligned[i]
+        s1_level = s1_aligned[i]
         vol_avg_val = vol_avg_20[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(ema50) or np.isnan(ph) or 
-            np.isnan(pl) or np.isnan(vol_avg_val)):
+        if (np.isnan(ema34) or np.isnan(bb_rank) or 
+            np.isnan(r1_level) or np.isnan(s1_level) or 
+            np.isnan(vol_avg_val)):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        # Squeeze filter: only trade when BB width is in lower 50% (contraction)
+        if bb_rank > 0.5:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,31 +97,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Sweep prior day's low then close back above it
-            # Condition: low swept below pl AND close recovered above pl
-            if (low[i] < pl and close[i] > pl and 
-                close[i] > ema50 and 
+            # LONG: Price breaks above R1 + price above EMA34 + volume surge
+            if (close[i] > r1_level and 
+                close[i] > ema34 and 
                 volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Sweep prior day's high then close back below it
-            elif (high[i] > ph and close[i] < ph and 
-                  close[i] < ema50 and 
+            # SHORT: Price breaks below S1 + price below EMA34 + volume surge
+            elif (close[i] < s1_level and 
+                  close[i] < ema34 and 
                   volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below prior day's low or trend fails
-            if (close[i] < pl or close[i] < ema50):
+            # EXIT LONG: Price breaks below S1 or price below EMA34
+            if (close[i] < s1_level or close[i] < ema34):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above prior day's high or trend fails
-            if (close[i] > ph or close[i] > ema50):
+            # EXIT SHORT: Price breaks above R1 or price above EMA34
+            if (close[i] > r1_level or close[i] > ema34):
                 signals[i] = 0.0
                 position = 0
             else:
