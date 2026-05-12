@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v2"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -43,6 +43,18 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_avg)
     
+    # Choppiness filter: avoid high chop (range-bound) markets
+    # Calculate 14-period Chop using high/low/close
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.where(hh - ll != 0, 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14), 50)
+    chop_filter = chop < 61.8  # Only trade when NOT in chop (trending market)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -51,7 +63,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,17 +72,19 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + daily trend up + volume spike
+            # Long: price breaks above R1 + daily trend up + volume spike + not chop
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
-                vol_spike[i]):
-                signals[i] = 0.30
+                vol_spike[i] and 
+                chop_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + daily trend down + volume spike
+            # Short: price breaks below S1 + daily trend down + volume spike + not chop
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
-                  vol_spike[i]):
-                signals[i] = -0.30
+                  vol_spike[i] and 
+                  chop_filter[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price closes below S1
@@ -78,13 +92,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit short: price closes above R1
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
