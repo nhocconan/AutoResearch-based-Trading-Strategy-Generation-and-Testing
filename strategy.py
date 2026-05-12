@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+name = "12h_Keltner_Channel_1dTrend_VolumeSpike"
 timeframe = "12h"
 leverage = 1.0
 
@@ -27,24 +27,22 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === 1d Camarilla pivot levels ===
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range
-    range_1d = high_1d - low_1d
-    # Resistance and Support levels
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
-    r4_1d = close_1d + (range_1d * 1.1 / 2)
-    s4_1d = close_1d - (range_1d * 1.1 / 2)
+    # === Keltner Channel (12h) ===
+    # Typical price
+    tp = (high + low + close) / 3
+    # EMA of typical price (20)
+    ema_tp = pd.Series(tp).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # ATR (10)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align Camarilla levels to 12h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Upper and lower bands
+    upper = ema_tp + (2 * atr)
+    lower = ema_tp - (2 * atr)
     
     # === Volume spike detection (20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,13 +51,15 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 34)  # Ensure enough data for all indicators
+    start_idx = max(200, 34, 20, 10)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i])):
+            np.isnan(ema_tp[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(upper[i]) or
+            np.isnan(lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,28 +68,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 + volume spike + 1d trend up
-            if (close[i] > r1_1d_aligned[i] and 
-                volume_spike[i] and
-                close[i] > ema34_1d_aligned[i]):
+            # Long: Price touches lower band + 1d trend up + volume spike
+            if (close[i] <= lower[i] and 
+                close[i] > ema34_1d_aligned[i] and
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + volume spike + 1d trend down
-            elif (close[i] < s1_1d_aligned[i] and 
-                  volume_spike[i] and
-                  close[i] < ema34_1d_aligned[i]):
+            # Short: Price touches upper band + 1d trend down + volume spike
+            elif (close[i] >= upper[i] and 
+                  close[i] < ema34_1d_aligned[i] and
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below S1 or trend breaks
-            if close[i] < s1_1d_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Price crosses above EMA_TP or 1d trend breaks
+            if close[i] > ema_tp[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above R1 or trend breaks
-            if close[i] > r1_1d_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Price crosses below EMA_TP or 1d trend breaks
+            if close[i] < ema_tp[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
