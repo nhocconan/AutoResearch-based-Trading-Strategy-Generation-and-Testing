@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # 4h_1D_Camarilla_R1_S1_Breakout_TrendVol
 # Hypothesis: 4-hour breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
 # Only takes long when price breaks above R1 with volume spike and daily uptrend, short when breaks below S1 with volume spike and daily downtrend.
