@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WickReversal_With_TrendAndVolume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Trend Filter ===
+    # 1d Trend Filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # === Weekly Bias Filter (1w) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Camarilla pivot points from previous day (1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]
     
-    # === Wick Reversal Detection ===
-    body_size = np.abs(close - open_price) if 'open_price' in locals() else np.abs(close - np.roll(close, 1))
-    if 'open_price' not in locals():
-        open_price = prices['open'].values
-    body_size = np.abs(close - open_price)
-    upper_wick = high - np.maximum(close, open_price)
-    lower_wick = np.minimum(close, open_price) - low
-    total_range = high - low
-    # Avoid division by zero
-    total_range_safe = np.where(total_range == 0, 1e-10, total_range)
-    lower_wick_ratio = lower_wick / total_range_safe
-    upper_wick_ratio = upper_wick / total_range_safe
+    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
+    r1 = pivot + (high_1d - low_1d) * 1.1 / 12
+    s1 = pivot - (high_1d - low_1d) * 1.1 / 12
     
-    # === Volume Spike Filter ===
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume spike filter
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * vol_avg)
+    vol_spike = volume > (2.0 * vol_avg)
     
-    # === ATR for Filtering (not used in signal size) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # ATR for entry quality
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
@@ -61,9 +55,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(vol_spike[i]) or np.isnan(atr[i]) or
-            np.isnan(lower_wick_ratio[i]) or np.isnan(upper_wick_ratio[i])):
+        if (np.isnan(ema20_1d_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,34 +66,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bullish wick rejection at support + above 1d EMA20 + weekly bullish bias + volume spike
-            if (lower_wick_ratio[i] > 0.6 and
-                upper_wick_ratio[i] < 0.3 and
-                close[i] > open_price[i] and  # bullish close
+            # Long: Price touches S1 + above 1d EMA20 + volume spike + strong close
+            if (low[i] <= s1_aligned[i] and
                 close[i] > ema20_1d_aligned[i] and
-                close[i] > ema50_1w_aligned[i] and
-                vol_spike[i]):
+                vol_spike[i] and
+                (close[i] - low[i]) > 0.3 * atr[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish wick rejection at resistance + below 1d EMA20 + weekly bearish bias + volume spike
-            elif (upper_wick_ratio[i] > 0.6 and
-                  lower_wick_ratio[i] < 0.3 and
-                  close[i] < open_price[i] and  # bearish close
+            # Short: Price touches R1 + below 1d EMA20 + volume spike + strong close
+            elif (high[i] >= r1_aligned[i] and
                   close[i] < ema20_1d_aligned[i] and
-                  close[i] < ema50_1w_aligned[i] and
-                  vol_spike[i]):
+                  vol_spike[i] and
+                  (high[i] - close[i]) > 0.3 * atr[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Wick rejection fails or weekly trend turns bearish
-            if (upper_wick_ratio[i] > 0.5 and lower_wick_ratio[i] < 0.2) or close[i] < ema50_1w_aligned[i]:
+            # Exit long: Price reaches pivot or closes below EMA20
+            if high[i] >= pivot_aligned[i] or close[i] < ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Wick rejection fails or weekly trend turns bullish
-            if (lower_wick_ratio[i] > 0.5 and upper_wick_ratio[i] < 0.2) or close[i] > ema50_1w_aligned[i]:
+            # Exit short: Price reaches pivot or closes above EMA20
+            if low[i] <= pivot_aligned[i] or close[i] > ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
