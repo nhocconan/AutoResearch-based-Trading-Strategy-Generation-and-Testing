@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""
-1d_WilliamsAlligator_Trend_Confirmation_v1
-Hypothesis: Williams Alligator (SMAs of median price) on daily chart defines trend; enter long when price > Alligator Teeth and Lips > Jaw, short when opposite, on 1d timeframe. Uses weekly trend filter to avoid counter-trend trades. Targets 15-25 trades/year to minimize fee drag. Works in bull (trend-following) and bear (avoids false signals via weekly filter).
-"""
-
-name = "1d_WilliamsAlligator_Trend_Confirmation_v1"
-timeframe = "1d"
-leverage = 1.0
+# 6h_Donchian20_WeeklyPivotDirection_Volume
+# Hypothesis: Donchian(20) breakouts on 6h aligned with weekly pivot direction (from 1w) and volume confirmation.
+# Weekly pivot direction acts as trend filter (price above/below weekly pivot). Volume confirms breakout strength.
+# Works in bull (breakouts with trend) and bear (fades at extremes via pivot reversal logic implicitly via stops).
+# Target: 20-40 trades/year (~80-160 over 4 years) to stay within fee limits.
+# Long: Close > Donchian High(20) + close > weekly pivot + volume > 1.5x SMA20
+# Short: Close < Donchian Low(20) + close < weekly pivot + volume > 1.5x SMA20
+# Exit: Close crosses back inside Donchian channel (opposite side for symmetry)
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_Donchian20_WeeklyPivotDirection_Volume"
+timeframe = "6h"
+leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,37 +24,46 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Williams Alligator on daily: Jaw (13), Teeth (8), Lips (5) SMAs of median price
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-
-    median_1d = (df_1d['high'].values + df_1d['low'].values) / 2
-    jaw = pd.Series(median_1d).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(median_1d).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(median_1d).rolling(window=5, min_periods=5).mean().values
-
-    # Weekly trend filter: price > weekly EMA50 for uptrend, < for downtrend
+    # Get weekly data for pivot direction
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
-    weekly_close = df_1w['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
 
-    # Align all to 1d timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    # Calculate weekly pivot point (standard: (H+L+C)/3)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
+
+    # Get Donchian channel (20-period) on 6h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+
+    # Volume confirmation: 1.5x 20-period SMA
+    volume_series = pd.Series(volume)
+    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_threshold = volume_sma20 * 1.5
+
+    # Align weekly pivot to 6h (wait for weekly close)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # warmup for longest SMA
-        # Skip if any data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or np.isnan(weekly_ema50_aligned[i])):
+    for i in range(20, n):
+        # Get aligned values
+        pivot_aligned = weekly_pivot_aligned[i]
+        dh = donchian_high[i]
+        dl = donchian_low[i]
+        vol_thresh = volume_threshold[i]
+
+        # Skip if any required data is NaN
+        if (np.isnan(pivot_aligned) or np.isnan(dh) or np.isnan(dl) or 
+            np.isnan(vol_thresh)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,33 +71,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        weekly_trend = weekly_ema50_aligned[i]
-        price = close[i]
-
         if position == 0:
-            # LONG: Price above Teeth, Lips > Jaw (bullish alignment), and weekly uptrend
-            if (price > teeth_val and lips_val > jaw_val and price > weekly_trend):
+            # LONG: Breakout above Donchian high + above weekly pivot + volume spike
+            if (close[i] > dh and
+                close[i] > pivot_aligned and
+                volume[i] > vol_thresh):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below Teeth, Lips < Jaw (bearish alignment), and weekly downtrend
-            elif (price < teeth_val and lips_val < jaw_val and price < weekly_trend):
+            # SHORT: Breakdown below Donchian low + below weekly pivot + volume spike
+            elif (close[i] < dl and
+                  close[i] < pivot_aligned and
+                  volume[i] > vol_thresh):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below Teeth or weekly trend turns down
-            if price < teeth_val or price < weekly_trend:
+            # EXIT LONG: Price closes back inside Donchian channel (below low)
+            if close[i] < dl:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above Teeth or weekly trend turns up
-            if price > teeth_val or price > weekly_trend:
+            # EXIT SHORT: Price closes back inside Donchian channel (above high)
+            if close[i] > dh:
                 signals[i] = 0.0
                 position = 0
             else:
