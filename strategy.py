@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filtered"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA34 for trend filter
+    # 1d EMA34 for trend filter (stronger trend filter)
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
@@ -35,12 +35,12 @@ def generate_signals(prices):
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume filter: current volume > 2.0x 24-period average (24*12h = 12 days)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: current volume > 2.0x 30-period average (stricter)
+    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_filter = volume > (2.0 * vol_avg)
     
     # Price range filter: avoid choppy markets (ATR-based)
