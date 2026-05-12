@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,49 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivots and trend filter
+    # Load daily data for Camarilla pivot and trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA34 for trend filter (more stable than EMA50)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Camarilla levels from previous day (levels based on previous day's range)
+    # R1 = close_prev + (high_prev - low_prev) * 1.12 / 12
+    # S1 = close_prev - (high_prev - low_prev) * 1.12 / 12
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = close_1d[0]  # handle first element
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
     
-    # Previous day's Camarilla levels (R1, S1)
-    # Calculate from previous day's OHLC to avoid look-ahead
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = close_1d[0]  # First value fallback
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    R1 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.12 / 12
+    S1 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.12 / 12
     
-    # Camarilla calculation
-    range_prev = prev_high - prev_low
-    R1 = prev_close + range_prev * 1.1 / 12
-    S1 = prev_close - range_prev * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume filter: current volume > 1.5x 30-period average (more selective)
-    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or
-            np.isnan(S1_aligned[i]) or
-            np.isnan(vol_filter[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
