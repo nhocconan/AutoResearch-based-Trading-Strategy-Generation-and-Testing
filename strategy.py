@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyDonchian_Breakout_TrendFilter_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,39 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for Donchian breakout and trend filter
-    df_week = get_htf_data(prices, '1w')
+    # Load 1d data once for trend filter and Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly Donchian breakout levels (20-week high/low)
-    high_week = df_week['high'].values
-    low_week = df_week['low'].values
+    # 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate 20-week high and low
-    high_20w = pd.Series(high_week).rolling(window=20, min_periods=20).max().values
-    low_20w = pd.Series(low_week).rolling(window=20, min_periods=20).min().values
+    # Daily OHLC for Camarilla R1 and S1 (previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Weekly EMA(10) for trend filter
-    close_week = df_week['close'].values
-    ema10_week = pd.Series(close_week).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate Camarilla R1 and S1 for previous day
+    p = (high_1d + low_1d + close_1d_vals) / 3
+    r1 = close_1d_vals + (high_1d - low_1d) * 1.1 / 2
+    s1 = close_1d_vals - (high_1d - low_1d) * 1.1 / 2
     
-    # Align weekly indicators to daily timeframe
-    high_20w_aligned = align_htf_to_ltf(prices, df_week, high_20w)
-    low_20w_aligned = align_htf_to_ltf(prices, df_week, low_20w)
-    ema10_week_aligned = align_htf_to_ltf(prices, df_week, ema10_week)
+    # Align Camarilla levels to 12h (wait for daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Daily volume spike: current volume > 2.0x 20-day average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(high_20w_aligned[i]) or np.isnan(low_20w_aligned[i]) or 
-            np.isnan(ema10_week_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,28 +60,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above 20-week high + weekly uptrend + volume spike
-            if (close[i] > high_20w_aligned[i] and 
-                close[i] > ema10_week_aligned[i] and 
+            # Long: price breaks above R1 + 1d trend up + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-week low + weekly downtrend + volume spike
-            elif (close[i] < low_20w_aligned[i] and 
-                  close[i] < ema10_week_aligned[i] and 
+            # Short: price breaks below S1 + 1d trend down + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below 20-week low
-            if close[i] < low_20w_aligned[i]:
+            # Exit long: price closes below S1
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above 20-week high
-            if close[i] > high_20w_aligned[i]:
+            # Exit short: price closes above R1
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
