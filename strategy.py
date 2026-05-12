@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
-# 6H_ELDER_RAY_POWER_1D_TREND_VOLUME_FILTER
-# Hypothesis: On 6h timeframe, use daily Elder Ray (Bull/Bear Power) combined with 1d EMA trend filter and volume confirmation.
-# Elder Ray measures bull/bear strength by comparing daily high/low to EMA.
-# Enter long when Bull Power > 0 (bulls in control) AND price above 1d EMA34 (uptrend) AND volume spike.
-# Enter short when Bear Power < 0 (bears in control) AND price below 1d EMA34 (downtrend) AND volume spike.
-# Exit when Bull/Bear Power crosses zero (loss of momentum).
-# Designed to work in both bull and bear markets via trend alignment and momentum filtering.
+# 4H_CAMARILLA_R2_S2_BREAKOUT_1D_TREND_VOLUME_SPIKE
+# Hypothesis: On 4h timeframe, use daily Camarilla R2/S2 levels as breakout triggers.
+# Enter long when price breaks above R2 with volume spike and daily uptrend (close > EMA34).
+# Enter short when price breaks below S2 with volume spike and daily downtrend (close < EMA34).
+# Exit when price returns to the opposite level (S2 for longs, R2 for shorts).
+# Targets 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
+# Uses tighter R2/S2 levels vs R1/S1 to reduce false breakouts and overtrading.
+# Designed to work in both bull and bear markets via trend filter.
 
-name = "6H_ELDER_RAY_POWER_1D_TREND_VOLUME_FILTER"
-timeframe = "6h"
+name = "4H_CAMARILLA_R2_S2_BREAKOUT_1D_TREND_VOLUME_SPIKE"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,31 +20,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Elder Ray and trend filter
+    # Camarilla levels from daily timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:  # Need enough for EMA34
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend
-    close_1d = df_1d['close'].values
-    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Calculate Elder Ray components: Bull Power = High - EMA, Bear Power = Low - EMA
-    # Use the same EMA34 for consistency
+    # Calculate Camarilla levels: R2, S2
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    bull_power = high_1d - ema34
-    bear_power = low_1d - ema34
+    close_1d = df_1d['close'].values
     
-    # Align all daily indicators to 6h timeframe
+    # Camarilla formulas: R2 = C + (H-L)*1.1/4, S2 = C - (H-L)*1.1/4
+    R2 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    S2 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    
+    # 1d EMA for trend filter (34-period)
+    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # Volume spike detection (20-period volume MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,8 +58,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema34_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,26 +68,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Bull Power > 0 (bulls in control) AND price above EMA (uptrend) AND volume spike
-            if bull_power_aligned[i] > 0 and close[i] > ema34_aligned[i] and vol_spike[i]:
+            # LONG: Price breaks above R2 with volume spike and daily uptrend
+            if close[i] > R2_aligned[i] and vol_spike[i] and close[i] > ema34_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power < 0 (bears in control) AND price below EMA (downtrend) AND volume spike
-            elif bear_power_aligned[i] < 0 and close[i] < ema34_aligned[i] and vol_spike[i]:
+            # SHORT: Price breaks below S2 with volume spike and daily downtrend
+            elif close[i] < S2_aligned[i] and vol_spike[i] and close[i] < ema34_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power turns negative (loss of bullish momentum)
-            if bull_power_aligned[i] <= 0:
+            # EXIT LONG: Price returns to S2 level
+            if close[i] < S2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power turns positive (loss of bearish momentum)
-            if bear_power_aligned[i] >= 0:
+            # EXIT SHORT: Price returns to R2 level
+            if close[i] > R2_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
