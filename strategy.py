@@ -1,6 +1,6 @@
-# 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+#!/usr/bin/env python3
+name = "1d_KAMA_Direction_Trend_Momentum_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,51 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Load 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # KAMA direction on daily close (10-period ER)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Camarilla pivot levels (R1, S1)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # 14-period RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume filter: current volume > 1.3x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.3 * vol_avg)
-    
-    # ATR-based volatility filter
-    tr1 = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
-    tr2 = np.maximum(np.absolute(low[1:] - close[:-1]), tr1)
-    tr = np.concatenate([[tr1[0]], tr2]) if len(tr1) > 0 else np.array([0.0])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_pct = atr / close
-    vol_regime = (atr_pct > 0.012) & (atr_pct < 0.045)
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(vol_filter[i]) or np.isnan(vol_regime[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,24 +65,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R1 + above 12h EMA50 + volume filter + vol regime
-            if high[i] > r1_1d_aligned[i] and close[i] > ema_50_12h_aligned[i] and vol_filter[i] and vol_regime[i]:
+            # Long: price above KAMA + above 1w EMA34 + RSI > 50 + volume filter
+            if close[i] > kama[i] and close[i] > ema_34_1w_aligned[i] and rsi[i] > 50 and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below S1 + below 12h EMA50 + volume filter + vol regime
-            elif low[i] < s1_1d_aligned[i] and close[i] < ema_50_12h_aligned[i] and vol_filter[i] and vol_regime[i]:
+            # Short: price below KAMA + below 1w EMA34 + RSI < 50 + volume filter
+            elif close[i] < kama[i] and close[i] < ema_34_1w_aligned[i] and rsi[i] < 50 and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: breakdown below S1 or below 12h EMA50
-            if low[i] < s1_1d_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Exit long: price below KAMA or below 1w EMA34
+            if close[i] < kama[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: breakout above R1 or above 12h EMA50
-            if high[i] > r1_1d_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Exit short: price above KAMA or above 1w EMA34
+            if close[i] > kama[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
