@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Supertrend_1dVWAP_MeanReversion
-Hypothesis: In mean-reverting markets (BTC/ETH), price reverts to VWAP after extreme deviations. Supertrend on 4h determines regime: long when price < VWAP in uptrend, short when price > VWAP in downtrend. Uses 1d VWAP for institutional reference and avoids overtrading with strict entry conditions. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend).
+4h_1d_Trix_VolumeSpike_ChopRegime
+Hypothesis: 4-hour TRIX momentum with volume spike confirmation and 1-day chop regime filter.
+Long when TRIX crosses above zero with volume spike in trending market (CHOP < 38.2).
+Short when TRIX crosses below zero with volume spike in trending market.
+Works in both bull and bear markets via regime filter that avoids whipsaw in ranging conditions.
 """
 
-name = "4h_Supertrend_1dVWAP_MeanReversion"
+name = "4h_1d_Trix_VolumeSpike_ChopRegime"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,78 +25,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Supertrend on 4h: ATR(10), factor=3.0
-    atr_period = 10
-    factor = 3.0
+    # TRIX on close (4h): EMA(EMA(EMA(close,12),12),12) - 1 period ROC
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.pct_change() * 100  # percentage change
+    trix_values = trix.values
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Volume spike: >1.8x 20-period average (on 4h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Supertrend calculation
-    hl2 = (high + low) / 2
-    upper_band = hl2 + factor * atr
-    lower_band = hl2 - factor * atr
-    
-    # Initialize bands
-    upper_band_final = np.full_like(upper_band, np.nan)
-    lower_band_final = np.full_like(lower_band, np.nan)
-    supertrend = np.full_like(close, np.nan)
-    trend = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-    
-    upper_band_final[0] = upper_band[0]
-    lower_band_final[0] = lower_band[0]
-    supertrend[0] = upper_band_final[0]
-    trend[0] = 1
-    
-    for i in range(1, n):
-        if close[i-1] > upper_band_final[i-1]:
-            trend[i] = -1
-        elif close[i-1] < lower_band_final[i-1]:
-            trend[i] = 1
-        else:
-            trend[i] = trend[i-1]
-        
-        if trend[i] == 1:
-            upper_band_final[i] = min(upper_band[i], upper_band_final[i-1])
-            lower_band_final[i] = lower_band[i]
-            supertrend[i] = lower_band_final[i]
-        else:
-            upper_band_final[i] = upper_band[i]
-            lower_band_final[i] = max(lower_band[i], lower_band_final[i-1])
-            supertrend[i] = upper_band_final[i]
-    
-    # 1d data for VWAP calculation
+    # 1d data for chop regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Typical price and VWAP
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_values = vwap.values
+    # Chopping index: 100 * log10(SUM(ATR,14) / (HHV - LLV)) / log10(14)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14, min_periods=14).mean()
+    hhvl = df_1d['high'].rolling(window=14, min_periods=14).max()
+    llvl = df_1d['low'].rolling(window=14, min_periods=14).min()
+    chop = 100 * (np.log10(atr.rolling(window=14, min_periods=14).sum()) - 
+                  np.log10(hhvl - llvl)) / np.log10(14)
+    chop_values = chop.values
     
-    # Align 1d VWAP to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_values)
+    # Trending regime: CHOP < 38.2
+    trending_regime = chop_values < 38.2
     
-    # Volume filter: >1.5x 20-period average (avoid chop)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Align 1d data to 4h timeframe
+    trending_regime_aligned = align_htf_to_ltf(prices, df_1d, trending_regime)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(supertrend[i]) or 
-            np.isnan(vwap_aligned[i]) or
-            np.isnan(trend[i])):
+        if (np.isnan(trix_values[i]) or 
+            np.isnan(trending_regime_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -102,30 +74,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price below VWAP in uptrend (buy the dip)
-            if (close[i] < vwap_aligned[i] and 
-                trend[i] == 1 and 
-                volume_filter[i]):
+            # LONG: TRIX crosses above zero + volume spike + trending regime
+            if (trix_values[i] > 0 and trix_values[i-1] <= 0 and 
+                volume_spike[i] and 
+                trending_regime_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price above VWAP in downtrend (sell the rally)
-            elif (close[i] > vwap_aligned[i] and 
-                  trend[i] == -1 and 
-                  volume_filter[i]):
+            # SHORT: TRIX crosses below zero + volume spike + trending regime
+            elif (trix_values[i] < 0 and trix_values[i-1] >= 0 and 
+                  volume_spike[i] and 
+                  trending_regime_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above VWAP or trend turns down
-            if close[i] > vwap_aligned[i] or trend[i] == -1:
+            # EXIT LONG: TRIX crosses below zero OR chop regime shifts to ranging
+            if (trix_values[i] < 0 and trix_values[i-1] >= 0) or \
+               not trending_regime_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below VWAP or trend turns up
-            if close[i] < vwap_aligned[i] or trend[i] == 1:
+            # EXIT SHORT: TRIX crosses above zero OR chop regime shifts to ranging
+            if (trix_values[i] > 0 and trix_values[i-1] <= 0) or \
+               not trending_regime_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
