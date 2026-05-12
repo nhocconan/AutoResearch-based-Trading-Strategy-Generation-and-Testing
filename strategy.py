@@ -1,12 +1,12 @@
-# 4h Camarilla R1/S1 Breakout + Volume Spike + Daily Trend Filter
-# Hypothesis: Using tighter R1/S1 levels from daily data with volume confirmation and daily trend filter
-# provides higher probability entries with lower frequency than R3/S3, reducing whipsaw in ranging markets.
-# The R1/S1 levels are closer to price, capturing earlier momentum while the volume spike and trend filter
-# ensure we only trade strong moves. Designed for 15-25 trades/year to minimize fee decay.
-# Works in bull markets (breakouts continue) and bear markets (breakdowns continue) when aligned with trend.
-
-name = "4h_Camarilla_R1S1_Breakout_DailyTrend_Volume_v2"
-timeframe = "4h"
+#!/usr/bin/env python3
+# 1h RSI Mean Reversion + 4h Trend + Volume Confirmation
+# Hypothesis: In 1h timeframe, RSI extremes combined with 4h trend direction and volume spikes
+# provide high-probability mean reversion entries. Works in both bull and bear markets by
+# following the higher timeframe trend while buying dips in uptrends and selling rallies in downtrends.
+# Target: 15-30 trades/year by using strict RSI thresholds (RSI<25 for long, RSI>75 for short)
+# and requiring volume confirmation to avoid choppy markets.
+name = "1h_RSI_MeanReversion_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,37 +23,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Data for Camarilla Levels and Trend ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === 1h RSI(14) for mean reversion signals ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === 4h EMA50 for trend filter ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from daily data (previous day's HLC)
-    daily_high_1d = df_1d['high'].values
-    daily_low_1d = df_1d['low'].values
-    daily_close_1d = df_1d['close'].values
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    rng = daily_high_1d - daily_low_1d
-    R1 = daily_close_1d + rng * 1.1 / 12  # R1 = C + (H-L)*1.1/12
-    S1 = daily_close_1d - rng * 1.1 / 12  # S1 = C - (H-L)*1.1/12
-    
-    # Shift to get previous day's levels (today's R1/S1 based on yesterday's HLC)
-    R1_prev = np.roll(R1, 1)
-    S1_prev = np.roll(S1, 1)
-    R1_prev[0] = np.nan
-    S1_prev[0] = np.nan
-    
-    # Align to 4h timeframe
-    R1_4h = align_htf_to_ltf(prices, df_1d, R1_prev)
-    S1_4h = align_htf_to_ltf(prices, df_1d, S1_prev)
-    
-    # === Daily EMA34 for trend filter ===
-    ema_34_1d = pd.Series(daily_close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # === Volume Spike (20-period on 4h) ===
+    # === Volume spike confirmation (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)  # Higher threshold for fewer trades
+    vol_spike = volume > (vol_ma * 1.5)  # Moderate threshold for balance
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,8 +60,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or 
-            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,31 +70,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + volume spike + price above daily EMA34 (uptrend)
-            if (close[i] > R1_4h[i] and 
-                vol_spike[i] and
-                close[i] > ema_34_4h[i]):
-                signals[i] = 0.25
+            # LONG: RSI oversold + price above 4h EMA50 (uptrend) + volume spike
+            if (rsi[i] < 25 and 
+                close[i] > ema_50_4h_aligned[i] and
+                vol_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below S1 + volume spike + price below daily EMA34 (downtrend)
-            elif (close[i] < S1_4h[i] and 
-                  vol_spike[i] and
-                  close[i] < ema_34_4h[i]):
-                signals[i] = -0.25
+            # SHORT: RSI overbought + price below 4h EMA50 (downtrend) + volume spike
+            elif (rsi[i] > 75 and 
+                  close[i] < ema_50_4h_aligned[i] and
+                  vol_spike[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 (reversal)
-            if close[i] < S1_4h[i]:
+            # EXIT LONG: RSI overbought or trend reversal
+            if (rsi[i] > 70 or 
+                close[i] < ema_50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 (reversal)
-            if close[i] > R1_4h[i]:
+            # EXIT SHORT: RSI oversold or trend reversal
+            if (rsi[i] < 30 or 
+                close[i] > ema_50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
