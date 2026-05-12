@@ -1,32 +1,21 @@
 #/usr/bin/env python3
-# 12h_WilliamsAlligator_Trend_Confirmation
-# Hypothesis: Williams Alligator identifies trend direction and strength through smoothed moving averages (Jaw, Teeth, Lips).
-# Combines with 1-week trend filter and volume confirmation to capture trends in both bull and bear markets.
-# Designed for 12h timeframe to target 12-37 trades per year, minimizing fee drag.
-# Williams Alligator is effective in trending markets and avoids whipsaws during consolidation.
+# 4h_Vortex_Trend_Confirmation_v2
+# Hypothesis: Vortex Indicator identifies trend direction and strength. Combined with volume confirmation
+# and daily EMA trend filter, it provides high-probability entries in both bull and bear markets.
+# Reduced trading frequency by increasing volume threshold and adding hysteresis to avoid whipsaws.
+# Designed for 4h timeframe to target 25-40 trades per year, minimizing fee drag.
 
-name = "12h_WilliamsAlligator_Trend_Confirmation"
-timeframe = "12h"
+name = "4h_Vortex_Trend_Confirmation_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(arr, period):
-    """Smoothed Moving Average (SMMA)"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan, dtype=float)
-    result = np.full_like(arr, np.nan, dtype=float)
-    sma = np.nansum(arr[:period]) / period
-    result[period-1] = sma
-    for i in range(period, len(arr)):
-        result[i] = (result[i-1] * (period-1) + arr[i]) / period
-    return result
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -34,49 +23,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get daily data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
 
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate Williams Alligator on 12h data
-    # Jaw (13-period SMMA, shifted 8 bars forward)
-    # Teeth (8-period SMMA, shifted 5 bars forward)
-    # Lips (5-period SMMA, shifted 3 bars forward)
-    median_price = (high + low) / 2
+    # Calculate Vortex Indicator (VI) on 4h data
+    # VI+ = |current high - prior low|, VI- = |current low - prior high|
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
     
-    jaw_raw = smma(median_price, 13)
-    teeth_raw = smma(median_price, 8)
-    lips_raw = smma(median_price, 5)
+    # True Range
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Apply shifts (Williams Alligator specific)
-    jaw = np.roll(jaw_raw, 8)
-    teeth = np.roll(teeth_raw, 5)
-    lips = np.roll(lips_raw, 3)
+    # Set first values to avoid roll issues
+    vm_plus[0] = 0
+    vm_minus[0] = 0
+    tr[0] = tr1[0]
     
-    # Set initial values to NaN to avoid roll artifacts
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    # Smooth using 14-period sums (standard Vortex)
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # VI+ and VI- (normalized)
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
 
-    # Get weekly EMA34 for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Get daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Volume confirmation: 1.5x 20-period SMA
+    # Volume confirmation: 2.0x 30-period SMA (higher threshold to reduce trades)
     volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_threshold = volume_sma20 * 1.5
+    volume_sma30 = volume_series.rolling(window=30, min_periods=30).mean().values
+    volume_threshold = volume_sma30 * 2.0
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(13, n):  # Start after Alligator needs 13 bars
+    for i in range(14, n):  # Start after VI needs 14 bars
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,30 +79,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Lips > Teeth > Jaw (bullish alignment) with volume confirmation and weekly uptrend
-            if (lips[i] > teeth[i] > jaw[i] and
+            # LONG: VI+ > VI- (bullish trend) with volume confirmation and uptrend
+            if (vi_plus[i] > vi_minus[i] and
                 volume[i] > volume_threshold[i] and
-                close[i] > ema34_1w_aligned[i]):
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Jaw > Teeth > Lips (bearish alignment) with volume confirmation and weekly downtrend
-            elif (jaw[i] > teeth[i] > lips[i] and
+            # SHORT: VI- > VI+ (bearish trend) with volume confirmation and downtrend
+            elif (vi_minus[i] > vi_plus[i] and
                   volume[i] > volume_threshold[i] and
-                  close[i] < ema34_1w_aligned[i]):
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Loss of bullish alignment (Lips <= Teeth)
-            if lips[i] <= teeth[i]:
+            # EXIT LONG: Trend weakness (VI- > VI+) OR price below EMA
+            if vi_minus[i] > vi_plus[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Loss of bearish alignment (Teeth <= Jaw)
-            if teeth[i] <= jaw[i]:
+            # EXIT SHORT: Trend weakness (VI+ > VI-) OR price above EMA
+            if vi_plus[i] > vi_minus[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
