@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filtered"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,7 +23,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA34 for trend filter (stronger trend filter)
+    # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
@@ -35,13 +35,13 @@ def generate_signals(prices):
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume filter: current volume > 2.0x 30-period average (stricter)
-    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_filter = volume > (2.0 * vol_avg)
+    # Volume filter: current volume > 1.8x 20-period average (moderate filter)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.8 * vol_avg)
     
     # Price range filter: avoid choppy markets (ATR-based)
     tr1 = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
@@ -51,12 +51,12 @@ def generate_signals(prices):
     # Normalize ATR by price to get percentage
     atr_pct = atr / close
     # Only trade when volatility is moderate (not too high, not too low)
-    vol_regime = (atr_pct > 0.01) & (atr_pct < 0.05)  # 1% to 5% ATR
+    vol_regime = (atr_pct > 0.008) & (atr_pct < 0.04)  # 0.8% to 4% ATR
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
