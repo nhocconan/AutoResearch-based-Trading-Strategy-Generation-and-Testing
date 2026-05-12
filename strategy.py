@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12h_1d_1w_Camarilla_R3_S3_Breakout_Trend_Filter
-# Hypothesis: Uses daily Camarilla pivot levels (R3/S3) as structural support/resistance on 12h timeframe.
-# Enters on breakouts of R3 (long) or S3 (short) only when aligned with weekly trend (EMA34).
-# Weekly trend filter ensures we trade with the dominant higher timeframe momentum.
-# Volume confirmation (>1.5x 20-period average) filters for institutional participation.
-# Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
-# Works in bull/bear markets by following weekly trend while using 12h breakouts for precise entries.
+# 4h_KAMA_Trend_With_Volume_And_Chop_Filter
+# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) on 4h for trend direction,
+# enters in trend direction on pullbacks with volume confirmation (>1.5x 20-period average),
+# and uses Choppiness Index (14-period) to avoid ranging markets (CHOP > 61.8 = range, avoid).
+# Designed for low trade frequency (<150 total 4h trades) to minimize fee drag.
+# Works in bull/bear markets by following adaptive trend while filtering noise.
 
-name = "12h_1d_1w_Camarilla_R3_S3_Breakout_Trend_Filter"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_Volume_And_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,47 +24,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-period average (on 12h timeframe)
+    # Volume spike: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Daily data for Camarilla pivot levels (R3, S3)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # KAMA (ER=10, FAST=2, SLOW=30) on close
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # This is incorrect, need rolling sum
+    # Recompute volatility properly
+    volatility = pd.Series(close).rolling(window=10, min_periods=10).apply(lambda x: np.sum(np.abs(np.diff(x))), raw=True).values
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Choppiness Index (14-period)
+    atr = np.zeros_like(close)
+    tr1 = high - low
+    tr2 = np.abs(np.roll(high, 1) - close)
+    tr2[0] = tr1[0]
+    tr3 = np.abs(np.roll(low, 1) - close)
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels for each day
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    rng = high_1d - low_1d
-    camarilla_r3 = close_1d + 1.1 * rng
-    camarilla_s3 = close_1d - 1.1 * rng
+    sum_high_low = pd.Series(high - low).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    # Align daily Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    chop = np.where((highest_high - lowest_low) != 0,
+                    100 * np.log10(sum_high_low / (highest_high - lowest_low)) / np.log10(14),
+                    50)
     
-    # Weekly trend filter: EMA34 on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_uptrend = close_1w > ema_34_1w
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    # Trend filter: avoid ranging markets (CHOP > 61.8 = range)
+    chop_filter = chop < 61.8  # Trending market
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(weekly_uptrend_aligned[i])):
+    for i in range(30, n):
+        if np.isnan(kama[i]) or np.isnan(chop[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,32 +74,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Weekly uptrend + price breaks above R3 + volume spike
-            if (weekly_uptrend_aligned[i] and 
-                close[i] > r3_aligned[i] and 
-                volume_spike[i]):
+            # LONG: Price > KAMA + volume spike + trending market
+            if close[i] > kama[i] and volume_spike[i] and chop_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Weekly downtrend + price breaks below S3 + volume spike
-            elif ((not weekly_uptrend_aligned[i]) and 
-                  close[i] < s3_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: Price < KAMA + volume spike + trending market
+            elif close[i] < kama[i] and volume_spike[i] and chop_filter[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 OR weekly trend turns down
-            if (close[i] < s3_aligned[i]) or \
-               (not weekly_uptrend_aligned[i]):
+            # EXIT LONG: Price < KAMA OR chop > 61.8 (ranging)
+            if close[i] < kama[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 OR weekly trend turns up
-            if (close[i] > r3_aligned[i]) or \
-               weekly_uptrend_aligned[i]:
+            # EXIT SHORT: Price > KAMA OR chop > 61.8 (ranging)
+            if close[i] > kama[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
