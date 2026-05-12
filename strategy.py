@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""
-6h_ElderRay_1dTrend_Filtered
-Hypothesis: Elder Ray Index (bull/bear power) confirms institutional buying/selling pressure.
-In bull markets: buy when bull power > 0 and rising, EMA13 > EMA34, price above EMA13.
-In bear markets: sell when bear power < 0 and falling, EMA13 < EMA34, price below EMA13.
-Uses 1d EMA34 as trend filter to avoid counter-trend trades. Targets 15-25 trades/year.
-Works in both bull (captures rallies) and bear (captures rallies within downtrend).
-"""
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Filtered_v2
+# Hypothesis: On 12h timeframe, buy when price breaks above Camarilla R1 from previous 1d with volume >1.5x average and 1d EMA34 trending up; sell when price breaks below Camarilla S1 with volume >1.5x average and 1d EMA34 trending down. Added ADX(14) > 22 trend filter to reduce false breakouts. Uses discrete position sizing (0.25) to minimize churn. Targets 20-30 trades per year to reduce fee drag and improve generalization in bull/bear markets. Focus on BTC/ETH with volume confirmation to avoid false signals.
 
-name = "6h_ElderRay_1dTrend_Filtered"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Filtered_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,45 +20,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA trend filter
+    # Get 1d data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate 13-period EMA for Elder Ray (using Wilder's smoothing)
-    def ema_wilder(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value: simple average
-        result[period-1] = np.mean(arr[:period])
-        # Wilder smoothing: today = (yesterday * (period-1) + today) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: R1 = close + (high - low) * 1.12/12, S1 = close - (high - low) * 1.12/12
+    range_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + range_1d * 1.12 / 12
+    camarilla_s1 = close_1d - range_1d * 1.12 / 12
 
-    ema13 = ema_wilder(close, 13)
-    ema34 = ema_wilder(close, 34)
+    # Use previous 1d bar's levels (shift by 1)
+    camarilla_r1_prev = np.roll(camarilla_r1, 1)
+    camarilla_s1_prev = np.roll(camarilla_s1, 1)
+    camarilla_r1_prev[0] = np.nan
+    camarilla_s1_prev[0] = np.nan
 
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_prev)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_prev)
 
     # 1d EMA34 for trend filter
-    ema34_1d = ema_wilder(close_1d, 34)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # 1d ADX(14) for trend strength filter
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # first value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Calculate +DM and -DM
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    def smooth_wilder(arr, period):
+        result = np.zeros_like(arr)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])  # first value is sum
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    tr_smooth = smooth_wilder(tr, 14)
+    plus_dm_smooth = smooth_wilder(plus_dm, 14)
+    minus_dm_smooth = smooth_wilder(minus_dm, 14)
+    
+    # Calculate DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    # Avoid division by zero
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 
+                  0)
+    adx = smooth_wilder(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+
+    # Volume confirmation: volume > 1.5x 24-period average (approx 12 hours)
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema13[i]) or np.isnan(ema34[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_24[i]) or 
+            np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,36 +109,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Bull power positive AND rising, price > EMA13, 1d uptrend
-            if (bull_power[i] > 0 and 
-                i > 34 and bull_power[i] > bull_power[i-1] and
-                close[i] > ema13[i] and
-                close[i] > ema34_1d_aligned[i]):
+            # LONG: Price breaks above Camarilla R1 + 1d uptrend + volume spike + ADX > 22
+            if (close[i] > camarilla_r1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume[i] > vol_avg_24[i] * 1.5 and
+                adx_aligned[i] > 22):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear power negative AND falling, price < EMA13, 1d downtrend
-            elif (bear_power[i] < 0 and 
-                  i > 34 and bear_power[i] < bear_power[i-1] and
-                  close[i] < ema13[i] and
-                  close[i] < ema34_1d_aligned[i]):
+            # SHORT: Price breaks below Camarilla S1 + 1d downtrend + volume spike + ADX > 22
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume[i] > vol_avg_24[i] * 1.5 and
+                  adx_aligned[i] > 22):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull power turns negative OR price < EMA13 OR 1d trend turns down
-            if (bull_power[i] <= 0 or 
-                close[i] < ema13[i] or
-                close[i] < ema34_1d_aligned[i]):
+            # EXIT LONG: Price breaks below Camarilla S1 OR trend turns down OR ADX weakens
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i] or adx_aligned[i] < 18:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear power turns positive OR price > EMA13 OR 1d trend turns up
-            if (bear_power[i] >= 0 or 
-                close[i] > ema13[i] or
-                close[i] > ema34_1d_aligned[i]):
+            # EXIT SHORT: Price breaks above Camarilla R1 OR trend turns up OR ADX weakens
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i] or adx_aligned[i] < 18:
                 signals[i] = 0.0
                 position = 0
             else:
