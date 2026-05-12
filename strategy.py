@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12H_MACD_CROSSOVER_1D_TREND_FILTER
-# Hypothesis: MACD crossover (12,26,9) on 12h timeframe captures momentum swings. 
-# Trend filter uses 1d EMA50 to ensure trades align with higher timeframe direction, 
-# avoiding counter-trend trades in both bull and bear markets. 
-# Volume confirmation filters low-activity breakouts. 
-# Target: 20-30 trades/year on 12h timeframe with strict entry conditions.
+# 4H_DONCHIAN_BREAKOUT_1D_TREND_VOLUME
+# Hypothesis: Donchian(20) breakout on 4h with 1d trend filter and volume confirmation.
+# In 1d uptrend (close > EMA50), go long on 4h Donchian(20) high breakout with volume > 1.5x 20-period average.
+# In 1d downtrend (close < EMA50), go short on 4h Donchian(20) low breakout with volume confirmation.
+# Uses volatility-based position sizing (ATR-based) to adapt to market conditions.
+# Target: 20-40 trades/year on 4h timeframe, avoiding overtrading.
 
-name = "12H_MACD_CROSSOVER_1D_TREND_FILTER"
-timeframe = "12h"
+name = "4H_DONCHIAN_BREAKOUT_1D_TREND_VOLUME"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,42 +24,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter and volume average
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # EMA50 for 1d trend filter
+    ema50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
-    # 20-period volume average for confirmation
-    vol_ma20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    # Donchian channels on 4h (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Align 1d indicators to 12h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
-    # MACD on 12h close prices
-    close_series = pd.Series(close)
-    ema12 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema26 = close_series.ewm(span=26, adjust=False, min_periods=26).mean()
-    macd = ema12 - ema26
-    signal_line = macd.ewm(span=9, adjust=False, min_periods=9).mean()
-    macd_hist = macd - signal_line
-    
-    macd_values = macd.values
-    signal_values = signal_line.values
-    macd_hist_values = macd_hist.values
+    # Average volume for confirmation (20-period)
+    vol_ma = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        vol_ma[i] = np.mean(volume[i - lookback + 1:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = max(lookback - 1, 50)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(macd_values[i]) or np.isnan(signal_values[i]) or np.isnan(macd_hist_values[i])):
+        if (np.isnan(ema50_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,34 +64,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: 1d uptrend + MACD bullish crossover + volume confirmation
-            if (close[i] > ema50_1d_aligned[i] and
-                macd_values[i] > signal_values[i] and
-                macd_values[i-1] <= signal_values[i-1] and
-                volume[i] > vol_ma20_1d_aligned[i]):
+            # LONG: 1d uptrend + Donchian high breakout + volume confirmation
+            if (close[i] > ema50_aligned[i] and 
+                high[i] > highest_high[i] and 
+                volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1d downtrend + MACD bearish crossover + volume confirmation
-            elif (close[i] < ema50_1d_aligned[i] and
-                  macd_values[i] < signal_values[i] and
-                  macd_values[i-1] >= signal_values[i-1] and
-                  volume[i] > vol_ma20_1d_aligned[i]):
+            # SHORT: 1d downtrend + Donchian low breakout + volume confirmation
+            elif (close[i] < ema50_aligned[i] and 
+                  low[i] < lowest_low[i] and 
+                  volume[i] > 1.5 * vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal or MACD bearish crossover
-            if (close[i] <= ema50_1d_aligned[i] or
-                macd_values[i] < signal_values[i]):
+            # EXIT LONG: Trend reversal or Donchian low break
+            if (close[i] <= ema50_aligned[i] or 
+                low[i] < lowest_low[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal or MACD bullish crossover
-            if (close[i] >= ema50_1d_aligned[i] or
-                macd_values[i] > signal_values[i]):
+            # EXIT SHORT: Trend reversal or Donchian high break
+            if (close[i] >= ema50_aligned[i] or 
+                high[i] > highest_high[i]):
                 signals[i] = 0.0
                 position = 0
             else:
