@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-# Hypothesis: Donchian breakouts capture momentum, weekly pivot provides directional bias
-# from higher timeframe structure, and volume confirmation filters false breakouts.
-# Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
-# Designed for low trade frequency (~15-25/year) to avoid fee drag.
-name = "6h_Donchian20_WeeklyPivot_Volume"
-timeframe = "6h"
+# 4h Vortex Indicator + Volume Spike + Daily Trend Filter
+# Hypothesis: Vortex Indicator identifies trend direction (VI+ > VI- for uptrend, VI- > VI+ for downtrend).
+# Combined with volume spikes to confirm institutional participation and daily EMA trend filter,
+# this strategy captures strong momentum moves while avoiding chop. Designed for low trade frequency (~20-30/year).
+# Works in both bull and bear markets by following the trend as defined by higher timeframe.
+
+name = "4h_Vortex_Volume_DailyTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,44 +23,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Data for Pivot Direction ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === Daily Data for EMA Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    daily_close_1d = df_1d['close'].values
     
-    # Weekly Pivot Points (standard calculation)
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(daily_close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Weekly trend: price above/below pivot
-    weekly_trend = np.where(weekly_close > pivot, 1, -1)  # 1=uptrend, -1=downtrend
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    # === Vortex Indicator on 4h (period=14) ===
+    # True Range
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # === Donchian Channel (20-period) on 6h ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # +VM and -VM
+    vm_plus = np.abs(high[1:] - low[:-1])
+    vm_minus = np.abs(low[1:] - high[:-1])
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
     
-    # === Volume Confirmation (20-period) ===
+    # Sum of last 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    # VI+ and VI-
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
+    
+    # === Volume Spike (20-period on 4h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)  # 1.5x average volume
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, lookback)  # Ensure all indicators ready
+    start_idx = 50  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(weekly_trend_aligned[i])):
+        if (np.isnan(tr_sum[i]) or np.isnan(vm_plus_sum[i]) or np.isnan(vm_minus_sum[i]) or
+            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,28 +77,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high + weekly uptrend + volume spike
-            if (close[i] > highest_high[i] and 
-                weekly_trend_aligned[i] > 0 and
-                vol_spike[i]):
+            # LONG: VI+ > VI- (uptrend) + volume spike + price above daily EMA34 (uptrend)
+            if (vi_plus[i] > vi_minus[i] and 
+                vol_spike[i] and
+                close[i] > ema_34_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low + weekly downtrend + volume spike
-            elif (close[i] < lowest_low[i] and 
-                  weekly_trend_aligned[i] < 0 and
-                  vol_spike[i]):
+            # SHORT: VI- > VI+ (downtrend) + volume spike + price below daily EMA34 (downtrend)
+            elif (vi_minus[i] > vi_plus[i] and 
+                  vol_spike[i] and
+                  close[i] < ema_34_4h[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price re-enters Donchian channel (breakout failed)
-            if close[i] < highest_high[i]:
+            # EXIT LONG: Trend turns down (VI- > VI+)
+            if vi_minus[i] >= vi_plus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters Donchian channel (breakdown failed)
-            if close[i] > lowest_low[i]:
+            # EXIT SHORT: Trend turns up (VI+ > VI-)
+            if vi_plus[i] >= vi_minus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
