@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1D_WEEKLY_CAMARILLA_R3_S3_BREAKOUT_VOLUME
-Hypothesis: Weekly Cambria R3/S3 breakout with daily volume spike confirmation.
-Trades weekly breakouts on daily timeframe with volume confirmation to capture
-institutional participation. Designed for low trade frequency (<25/year) to
-minimize fee drag and work in both bull and bear markets.
+4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
+Hypothesis: Camarilla R3/S3 breakout with 1-day volume spike confirmation.
+Works in bull/bear markets by only taking breakouts with above-average volume,
+which filters out false breakouts and targets institutional participation.
+Designed for ~20-40 trades/year on 4h to minimize fee drag.
 """
-name = "1D_WEEKLY_CAMARILLA_R3_S3_BREAKOUT_VOLUME"
-timeframe = "1d"
+name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,31 +16,30 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate weekly Camarilla levels from previous week
+    # Calculate Camarilla levels from previous day
     # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    # We need previous week's OHLC
-    weekly_high = np.full(n, np.nan)
-    weekly_low = np.full(n, np.nan)
-    weekly_close = np.full(n, np.nan)
+    # We need previous day's OHLC
+    prev_day_close = close
+    prev_day_high = high
+    prev_day_low = low
+    
+    # Shift to get previous day's values (since we're on 4h timeframe)
+    # For 4h data, we need to look back to previous daily candle
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
     
     for i in range(1, n):
-        weekly_high[i] = high[i-1]
-        weekly_low[i] = low[i-1]
-        weekly_close[i] = close[i-1]
+        camarilla_r3[i] = prev_day_close[i-1] + (prev_day_high[i-1] - prev_day_low[i-1]) * 1.1 / 2
+        camarilla_s3[i] = prev_day_close[i-1] - (prev_day_high[i-1] - prev_day_low[i-1]) * 1.1 / 2
     
-    # Calculate weekly Camarilla levels
-    weekly_range = weekly_high - weekly_low
-    camarilla_r3 = weekly_close + weekly_range * 1.1 / 2
-    camarilla_s3 = weekly_close - weekly_range * 1.1 / 2
-    
-    # Daily data for volume spike confirmation
+    # 1d data for volume spike confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -53,7 +52,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(1, n):  # Start from 1 to have previous day data
         if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
             np.isnan(vol_spike_aligned[i])):
             if position != 0:
@@ -64,12 +63,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above weekly R3 with volume spike
+            # LONG: Break above R3 with volume spike
             if (high[i] > camarilla_r3[i] and 
                 vol_spike_aligned[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below weekly S3 with volume spike
+            # SHORT: Break below S3 with volume spike
             elif (low[i] < camarilla_s3[i] and 
                   vol_spike_aligned[i] > 1.5):
                 signals[i] = -0.25
@@ -77,14 +76,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below weekly S3 (reversion to mean)
+            # EXIT LONG: Price crosses below S3 (reversion to mean)
             if close[i] < camarilla_s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above weekly R3 (reversion to mean)
+            # EXIT SHORT: Price crosses above R3 (reversion to mean)
             if close[i] > camarilla_r3[i]:
                 signals[i] = 0.0
                 position = 0
