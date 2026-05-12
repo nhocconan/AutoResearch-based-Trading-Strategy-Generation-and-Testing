@@ -1,14 +1,6 @@
-# 1h_4D_Trend_Filter_v1: 1h entries with 4h/1d trend confirmation
-# Uses 4h EMA20 for trend, 1d EMA50 for trend filter, and volume spike on 1h
-# Entry: price crosses EMA20(4h) in direction of EMA50(1d) with volume confirmation
-# Exit: price crosses back or trend changes
-# Target: 15-37 trades/year per symbol, total 60-150 over 4 years
-# Session filter: 08-20 UTC to avoid low liquidity periods
-# Position size: 0.20 (20% of capital)
-
 #!/usr/bin/env python3
-name = "1h_4D_Trend_Filter_v1"
-timeframe = "1h"
+name = "6h_Trix_Signal_With_Volume_Spike_And_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,29 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4H DATA FOR TREND DIRECTION ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # === TRIX CALCULATION (15-period EMA of EMA of EMA) ===
+    # TRIX is a momentum oscillator that filters out insignificant price movements
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
     
-    # EMA20 on 4h for trend direction
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Calculate TRIX: percentage change in triple-smoothed EMA
+    trix = ema3.pct_change() * 100
+    trix_values = trix.values
     
-    # === 1D DATA FOR TREND FILTER ===
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_signal = pd.Series(trix_values).ewm(span=9, adjust=False, min_periods=9).mean().values
+    
+    # === 1D TREND FILTER (EMA50) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    
-    # EMA50 on 1d for trend filter (stronger filter)
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === VOLUME CONFIRMATION (1h) ===
+    # === VOLUME CONFIRMATION ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)  # Moderate volume spike
-    
-    # === SESSION FILTER (08-20 UTC) ===
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    volume_spike = volume > (vol_ma * 1.8)  # Strong volume spike
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,9 +46,9 @@ def generate_signals(prices):
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or not in_session[i]):
+        # Skip if data not ready
+        if (np.isnan(trix_values[i]) or np.isnan(trix_signal[i]) or 
+            np.isnan(ema50_1d_6h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,31 +57,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: price above EMA20(4h) AND above EMA50(1d) + volume confirmation
-            if (close[i] > ema20_4h_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and
+            # LONG: TRIX crosses above signal line AND price above 1d EMA50 AND volume spike
+            if (trix_values[i] > trix_signal[i] and 
+                trix_values[i-1] <= trix_signal[i-1] and  # confirmed crossover
+                close[i] > ema50_1d_6h[i] and
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: price below EMA20(4h) AND below EMA50(1d) + volume confirmation
-            elif (close[i] < ema20_4h_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and
+            # SHORT: TRIX crosses below signal line AND price below 1d EMA50 AND volume spike
+            elif (trix_values[i] < trix_signal[i] and 
+                  trix_values[i-1] >= trix_signal[i-1] and  # confirmed crossover
+                  close[i] < ema50_1d_6h[i] and
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: price crosses below EMA20(4h) OR below EMA50(1d)
-            if close[i] < ema20_4h_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: TRIX crosses below signal line OR price breaks below 1d EMA50
+            if (trix_values[i] < trix_signal[i] and 
+                trix_values[i-1] >= trix_signal[i-1]) or \
+               close[i] < ema50_1d_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above EMA20(4h) OR above EMA50(1d)
-            if close[i] > ema20_4h_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: TRIX crosses above signal line OR price breaks above 1d EMA50
+            if (trix_values[i] > trix_signal[i] and 
+                trix_values[i-1] <= trix_signal[i-1]) or \
+               close[i] > ema50_1d_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
