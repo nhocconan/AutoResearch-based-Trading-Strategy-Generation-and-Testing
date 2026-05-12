@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_WeeklyTrend_Volume
-Hypothesis: On daily timeframe, go long when KAMA indicates up-trend, price is above weekly EMA50, and volume spike confirms; go short when KAMA indicates down-trend, price below weekly EMA50, and volume spike. Exit when KAMA reverses. Uses weekly trend filter to avoid counter-trend trades and volume spike to ensure commitment. Designed for low trade frequency (<25/year) to minimize fee drag in both bull and bear markets.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 12h timeframe when aligned with 1d EMA50 trend and confirmed by volume spike. This strategy targets 12-37 trades/year by requiring confluence of price level breakout, trend alignment, and volume confirmation. Works in both bull and bear markets by using trend-following entries and mean-reversion exits at the daily pivot point.
+Timeframe: 12h
 """
 
-name = "1d_KAMA_Direction_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,44 +15,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla levels ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
 
-    # KAMA (Kaufman Adaptive Moving Average) on daily close
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close)).cumsum() - np.abs(np.diff(close, prepend=close[0])).cumsum()
-    volatility = np.concatenate([[0], volatility[1:]])  # avoid shift issues
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2 / (2 + 1) - 2 / (30 + 1)) + 2 / (30 + 1)) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    kama_dir = np.where(kama > np.roll(kama, 1), 1, -1)  # 1=up, -1=down
-    kama_dir[0] = 1  # initialize
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    ph = df_1d['high'].shift(1).values  # prior day high
+    pl = df_1d['low'].shift(1).values   # prior day low
+    pc = df_1d['close'].shift(1).values # prior day close
+    r1 = pc + (ph - pl) * 1.1 / 12
+    s1 = pc - (ph - pl) * 1.1 / 12
+    # Align to 12h: daily Camarilla values are constant through the day
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Volume spike: current > 2.0x average of last 10 days
-    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Get 1d data ONCE before loop for EMA50 trend filter
+    df_1d_for_ema = df_1d  # reuse same daily data
+    close_1d = df_1d_for_ema['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d_for_ema, ema_50_1d)
+
+    # Volume spike: current > 2.0x average of last 2 bars (1 day on 12h)
+    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after EMA50 warmup
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama_dir[i]) or 
-            np.isnan(volume_spike[i])):
+    for i in range(60, n):  # Start after EMA50 warmup
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,30 +62,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: KAMA up + price > weekly EMA50 + volume spike
-            if (kama_dir[i] == 1 and 
-                close[i] > ema_50_1w_aligned[i] and 
+            # LONG: close > daily R1 + price > 1d EMA50 + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA down + price < weekly EMA50 + volume spike
-            elif (kama_dir[i] == -1 and 
-                  close[i] < ema_50_1w_aligned[i] and 
+            # SHORT: close < daily S1 + price < 1d EMA50 + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA turns down
-            if kama_dir[i] == -1:
+            # EXIT LONG: close < daily pivot P
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA turns up
-            if kama_dir[i] == 1:
+            # EXIT SHORT: close > daily pivot P
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
