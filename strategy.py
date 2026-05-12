@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakout from Camarilla R1/S1 levels with 1d EMA trend filter and volume confirmation.
-# R1/S1 are tighter than R3/S3, providing earlier entry in trends while avoiding excessive whipsaws.
-# 1d EMA50 ensures alignment with daily trend, reducing false breakouts in chop.
-# Volume confirmation adds conviction. Designed for 12-37 trades/year per symbol.
+# 4h_TRIX_VolumeSpike_Trend_Regime
+# Hypothesis: Use TRIX momentum (12-period) with volume spike confirmation and trend regime filter.
+# TRIX > 0 indicates bullish momentum, TRIX < 0 bearish. Volume spike adds conviction.
+# Trend regime: price above/below 50-period EMA on 4h timeframe.
+# Designed for 20-50 trades/year per symbol, works in both bull and bear via trend filter.
+# Uses 1d timeframe for additional regime filter (ADX) to avoid ranging markets.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_Trend_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -23,40 +24,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get 1d data for ADX regime filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
 
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate TRIX on 4h close
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1-period rate of change
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.pct_change(1) * 100  # percentage change
+    trix_values = trix.values
 
-    # Calculate Camarilla levels from previous 1d bar
-    # R1 = C + 1.1*(H-L)/12, S1 = C - 1.1*(H-L)/12
-    prev_1d_high = df_1d['high'].shift(1).values
-    prev_1d_low = df_1d['low'].shift(1).values
-    prev_1d_close = df_1d['close'].shift(1).values
+    # 4h EMA50 trend filter
+    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
 
-    # Calculate R1 and S1 levels
-    r1 = prev_1d_close + 1.1 * (prev_1d_high - prev_1d_low) / 12
-    s1 = prev_1d_close - 1.1 * (prev_1d_high - prev_1d_low) / 12
-
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-
-    # Volume confirmation: current volume > 1.5x average of last 4 periods (2 days)
+    # Volume confirmation: current volume > 2.0x average of last 4 periods
     vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    volume_ok = volume > (2.0 * vol_ma)
+
+    # ADX calculation on 1d for regime filter
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] > minus_dm[i]:
+                minus_dm[i] = 0
+            elif minus_dm[i] > plus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
+        
+        # Smoothed values
+        atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        
+        # Initial values
+        atr[period] = np.mean(tr[1:period+1])
+        plus_dm_sum = np.sum(plus_dm[1:period+1])
+        minus_dm_sum = np.sum(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_sum = plus_dm_sum - plus_dm_sum/period + plus_dm[i]
+            minus_dm_sum = minus_dm_sum - minus_dm_sum/period + minus_dm[i]
+            plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
+        
+        dx = np.zeros_like(high)
+        for i in range(period*2, len(high)):
+            if plus_di[i] + minus_di[i] != 0:
+                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
+
+    # Calculate ADX on 1d
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+
+    # Align TRIX and EMA50 to 4h (already calculated on 4h, but ensure alignment)
+    trix_aligned = trix_values  # Already on 4h timeframe
+    ema_50_4h_aligned = ema_50_4h  # Already on 4h timeframe
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after warmup
+    for i in range(60, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(volume_ok[i]) or np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,31 +116,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from 1d EMA50
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # Regime filter: only trade when ADX > 25 (trending market)
+        trending_market = adx_1d_aligned[i] > 25
+
+        # Trend filter from 4h EMA50
+        price_above_ema = close[i] > ema_50_4h_aligned[i]
+        price_below_ema = close[i] < ema_50_4h_aligned[i]
 
         if position == 0:
-            # LONG: Close breaks above R1 AND uptrend AND volume
-            if close[i] > r1_aligned[i] and price_above_ema and volume_ok[i]:
+            # LONG: TRIX > 0 (bullish momentum) AND price above EMA50 AND volume spike AND trending market
+            if trix_aligned[i] > 0 and price_above_ema and volume_ok[i] and trending_market:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S1 AND downtrend AND volume
-            elif close[i] < s1_aligned[i] and price_below_ema and volume_ok[i]:
+            # SHORT: TRIX < 0 (bearish momentum) AND price below EMA50 AND volume spike AND trending market
+            elif trix_aligned[i] < 0 and price_below_ema and volume_ok[i] and trending_market:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close falls back below R1 OR trend turns down
-            if close[i] < r1_aligned[i] or not price_above_ema:
+            # EXIT LONG: TRIX turns negative OR price falls below EMA50
+            if trix_aligned[i] <= 0 or not price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close rises back above S1 OR trend turns up
-            if close[i] > s1_aligned[i] or not price_below_ema:
+            # EXIT SHORT: TRIX turns positive OR price rises above EMA50
+            if trix_aligned[i] >= 0 or not price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
