@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_RSI_2_Timeframe_Confluence
-Hypothesis: Combining RSI(2) mean reversion on 6h with weekly trend filter (EMA200) and volume confirmation creates high-probability mean-reversion trades. RSI(2) captures extreme short-term reversals, while weekly EMA200 ensures alignment with longer-term trend. Volume spike confirms institutional participation. Works in both bull and bear markets by following the weekly trend direction.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+Hypothesis: Price breaking above/below Camarilla R1/S1 levels (derived from 1d high-low-close) with 1d EMA50 trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. R1/S1 levels provide timely entries with good risk-reward. Works in bull/bear by following 1d trend direction.
 """
 
-name = "6h_RSI_2_Timeframe_Confluence"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,47 +14,53 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
 
-    # Weekly EMA200 trend filter
-    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate Camarilla levels from 1d data
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C = close, H = high, L = low of previous day
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
 
-    # RSI(2) on 6h timeframe
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[1] = np.mean(gain[:2]) if len(gain) >= 2 else gain[0] if len(gain) >= 1 else 0
-    avg_loss[1] = np.mean(loss[:2]) if len(loss) >= 2 else loss[0] if len(loss) >= 1 else 0
-    
-    for i in range(2, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
-        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_2 = 100 - (100 / (1 + rs))
+    # Shift by 1 to use previous day's data
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = np.nan
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
 
-    # Volume spike: >1.8x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    camarilla_upper = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
+    camarilla_lower = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
+
+    # Align Camarilla levels to 4h timeframe
+    camarilla_upper_aligned = align_htf_to_ltf(prices, df_1d, camarilla_upper)
+    camarilla_lower_aligned = align_htf_to_ltf(prices, df_1d, camarilla_lower)
+
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+
+    # Volume spike: >1.5x 20-period average (4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after sufficient warmup
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(rsi_2[i]) or 
-            np.isnan(volume_spike[i])):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,30 +69,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI(2) oversold + price above weekly EMA200 + volume spike
-            if (rsi_2[i] < 15 and 
-                close[i] > ema_200_1w_aligned[i] and 
+            # LONG: Price breaks above Camarilla R1 + 1d EMA50 uptrend + volume spike
+            if (close[i] > camarilla_upper_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI(2) overbought + price below weekly EMA200 + volume spike
-            elif (rsi_2[i] > 85 and 
-                  close[i] < ema_200_1w_aligned[i] and 
+            # SHORT: Price breaks below Camarilla S1 + 1d EMA50 downtrend + volume spike
+            elif (close[i] < camarilla_lower_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI(2) overbought or price crosses below weekly EMA200
-            if (rsi_2[i] > 70 or close[i] < ema_200_1w_aligned[i]):
+            # EXIT LONG: Price closes below Camarilla S1 (reversal level)
+            if close[i] < camarilla_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI(2) oversold or price crosses above weekly EMA200
-            if (rsi_2[i] < 30 or close[i] > ema_200_1w_aligned[i]):
+            # EXIT SHORT: Price closes above Camarilla R1 (reversal level)
+            if close[i] > camarilla_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
