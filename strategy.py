@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Price breakout above Camarilla R1 or below S1 on 12h, filtered by 1d EMA34 trend and volume spikes.
-# Uses price channel breakouts (proven structure) with trend and volume confirmation.
-# Works in bull markets via R1 breakouts in uptrends, and in bear markets via S1 breakdowns in downtrends.
-# Target: 20-30 trades/year on 12h timeframe.
+# 1h_CCI_OverboughtOversold_4hTrend_Filter
+# Hypothesis: Use 1-hour CCI for overbought/oversold reversal signals, filtered by 4-hour trend direction.
+# In trending markets (4h), counter-trend CCI reversals offer high-probability mean-reversion entries.
+# Works in bull markets via long entries on 4h uptrend + CCI oversold.
+# Works in bear markets via short entries on 4h downtrend + CCI overbought.
+# Added 4h volume spike filter to confirm institutional participation and reduce whipsaws.
+# Target: 20-50 trades/year by using strict CCI thresholds and trend alignment.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_CCI_OverboughtOversold_4hTrend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -23,38 +25,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
 
-    # Calculate 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 4h EMA50 trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
 
-    # Calculate Camarilla levels for 12h using previous day's OHLC
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    # We use previous day's values to avoid look-ahead
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    rang = prev_high - prev_low
-    r1 = prev_close + 1.1 * rang / 12
-    s1 = prev_close - 1.1 * rang / 12
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate 4h volume spike: current > 1.8x average of last 6 bars (~1 day)
+    volume_4h = df_4h['volume'].values
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=6, min_periods=6).mean().values
+    volume_spike_4h = volume_4h > (1.8 * vol_ma_4h)
+    volume_spike_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_spike_4h)
 
-    # Volume spike: current > 2.0x average of last 24 bars (12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # CCI (20-period) on 1h
+    tp = (high + low + close) / 3.0  # typical price
+    ma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(np.abs(tp - ma_tp)).rolling(window=20, min_periods=20).mean().values
+    cci = (tp - ma_tp) / (0.015 * mad)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):  # Start after EMA34 warmup
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(20, n):  # Start after CCI warmup
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(cci[i]) or 
+            np.isnan(volume_spike_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,33 +59,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above R1 + 1d EMA34 uptrend + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_spike[i]):
-                signals[i] = 0.25
+            # LONG: 4h UPTREND + CCI OVERSOLD (< -100) + 4h VOLUME SPIKE
+            if (close[i] > ema_50_4h_aligned[i] and 
+                cci[i] < -100 and 
+                volume_spike_4h_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Close breaks below S1 + 1d EMA34 downtrend + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_spike[i]):
-                signals[i] = -0.25
+            # SHORT: 4h DOWNTREND + CCI OVERBOUGHT (> 100) + 4h VOLUME SPIKE
+            elif (close[i] < ema_50_4h_aligned[i] and 
+                  cci[i] > 100 and 
+                  volume_spike_4h_aligned[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below S1 or trend breaks
-            if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: CCI crosses above zero or trend breaks
+            if cci[i] > 0 or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Close crosses above R1 or trend breaks
-            if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: CCI crosses below zero or trend breaks
+            if cci[i] < 0 or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
