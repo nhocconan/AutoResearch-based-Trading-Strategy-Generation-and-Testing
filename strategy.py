@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_RSI50_Cross_ADX20_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,43 +17,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d data for Camarilla pivot levels ===
+    # === 1d RSI(14) for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R1, S1 levels
-    rango = high_1d - low_1d
-    camarilla_r1 = close_1d + (rango * 1.1 / 12)
-    camarilla_s1 = close_1d - (rango * 1.1 / 12)
+    # Calculate RSI(14) on daily
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Wilder's smoothing (alpha = 1/14)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # === 1w trend filter (EMA34) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # === 1d volume spike filter ===
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_1d = np.where(avg_loss == 0, 100, rsi_14_1d)  # Handle no loss case
+    
+    # Align RSI to 6h
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    
+    # === 6h ADX(14) for trend strength ===
+    # Calculate +DM, -DM, TR
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    up_move = np.insert(up_move, 0, 0)
+    down_move = np.insert(down_move, 0, 0)
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high[0] - low[0]  # First TR
+    
+    # Smooth with Wilder's method (period=14)
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[1:period+1]) if len(data) >= period+1 else 0
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    plus_di = 100 * wilder_smooth(plus_dm, 14) / np.where(atr != 0, atr, 1)
+    minus_di = 100 * wilder_smooth(minus_dm, 14) / np.where(atr != 0, atr, 1)
+    dx = np.divide(np.abs(plus_di - minus_di), (plus_di + minus_di), out=np.zeros_like(plus_di), where=(plus_di + minus_di)!=0) * 100
+    adx = wilder_smooth(dx, 14)
+    
+    # === 6h RSI(14) for entry signal ===
+    delta_6h = np.diff(close, prepend=close[0])
+    gain_6h = np.where(delta_6h > 0, delta_6h, 0)
+    loss_6h = np.where(delta_6h < 0, -delta_6h, 0)
+    
+    avg_gain_6h = np.zeros_like(gain_6h)
+    avg_loss_6h = np.zeros_like(loss_6h)
+    if len(gain_6h) >= 14:
+        avg_gain_6h[13] = np.mean(gain_6h[1:14])
+        avg_loss_6h[13] = np.mean(loss_6h[1:14])
+        for i in range(14, len(gain_6h)):
+            avg_gain_6h[i] = (avg_gain_6h[i-1] * 13 + gain_6h[i]) / 14
+            avg_loss_6h[i] = (avg_loss_6h[i-1] * 13 + loss_6h[i]) / 14
+    
+    rs_6h = np.divide(avg_gain_6h, avg_loss_6h, out=np.zeros_like(avg_gain_6h), where=avg_loss_6h!=0)
+    rsi_14_6h = 100 - (100 / (1 + rs_6h))
+    rsi_14_6h = np.where(avg_loss_6h == 0, 100, rsi_14_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema34_1w_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(rsi_14_1d_aligned[i]) or 
+            np.isnan(adx[i]) or
+            np.isnan(rsi_14_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,28 +109,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above R1 + above weekly EMA34 + volume spike
-            if (close[i] > camarilla_r1_aligned[i] and
-                close[i] > ema34_1w_aligned[i] and
-                vol_spike_1d_aligned[i] > 0.5):
+            # Long: Daily RSI > 50 (bullish trend) + ADX > 20 (trending) + 6h RSI crosses above 50
+            if (rsi_14_1d_aligned[i] > 50 and
+                adx[i] > 20 and
+                rsi_14_6h[i] > 50 and
+                rsi_14_6h[i-1] <= 50):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 + below weekly EMA34 + volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and
-                  close[i] < ema34_1w_aligned[i] and
-                  vol_spike_1d_aligned[i] > 0.5):
+            # Short: Daily RSI < 50 (bearish trend) + ADX > 20 (trending) + 6h RSI crosses below 50
+            elif (rsi_14_1d_aligned[i] < 50 and
+                  adx[i] > 20 and
+                  rsi_14_6h[i] < 50 and
+                  rsi_14_6h[i-1] >= 50):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below S1 or below weekly EMA34
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit long: Daily RSI < 50 or 6h RSI < 40
+            if rsi_14_1d_aligned[i] < 50 or rsi_14_6h[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above R1 or above weekly EMA34
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit short: Daily RSI > 50 or 6h RSI > 60
+            if rsi_14_1d_aligned[i] > 50 or rsi_14_6h[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
