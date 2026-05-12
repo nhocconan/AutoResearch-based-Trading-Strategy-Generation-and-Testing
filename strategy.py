@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 with price > daily EMA34 and volume spike (>2x 20-period MA).
-# Enter short when price breaks below Camarilla S1 with price < daily EMA34 and volume spike.
-# Exit when price crosses back below R1 (for longs) or above S1 (for shorts).
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R3 with price > daily EMA34 and volume spike (>2x 20-period MA).
+# Enter short when price breaks below Camarilla S3 with price < daily EMA34 and volume spike.
+# Exit when price crosses back below R3 (for longs) or above S3 (for shorts).
 # Uses daily timeframe for trend filter and weekly for volatility regime filter to avoid false breakouts in low volatility.
-# Targets 15-30 trades/year for low fee drag and works in both bull and bear markets by fading extreme daily levels with institutional levels.
+# Targets 20-40 trades/year for low fee drag and works in both bull and bear markets by fading extreme daily levels with institutional levels.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -41,10 +41,10 @@ def generate_signals(prices):
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Camarilla R1 and S1 levels
+    # Camarilla R3 and S3 levels
     camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 6
-    s1 = prev_close - camarilla_range * 1.1 / 6
+    r3 = prev_close + camarilla_range * 1.1 / 4
+    s3 = prev_close - camarilla_range * 1.1 / 4
     
     # Daily EMA34 for trend filter
     daily_ema34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -69,12 +69,12 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     weekly_atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: 20-period moving average on 12h data
+    # Volume confirmation: 20-period moving average on 4h data
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align all to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
     weekly_atr_aligned = align_htf_to_ltf(prices, df_1w, weekly_atr)
     
@@ -85,7 +85,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(daily_ema34_aligned[i]) or np.isnan(weekly_atr_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -95,8 +95,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
         daily_trend = daily_ema34_aligned[i]
         vol_ma_val = vol_ma[i]
         atr_val = weekly_atr_aligned[i]
@@ -111,26 +111,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 with price > daily EMA34 and volume > 2x MA
-            if close[i] > r1_val and close[i] > daily_trend and volume[i] > vol_ma_val * 2.0:
+            # LONG: Price breaks above R3 with price > daily EMA34 and volume > 2x MA
+            if close[i] > r3_val and close[i] > daily_trend and volume[i] > vol_ma_val * 2.0:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with price < daily EMA34 and volume > 2x MA
-            elif close[i] < s1_val and close[i] < daily_trend and volume[i] > vol_ma_val * 2.0:
+            # SHORT: Price breaks below S3 with price < daily EMA34 and volume > 2x MA
+            elif close[i] < s3_val and close[i] < daily_trend and volume[i] > vol_ma_val * 2.0:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below R1 (failed breakout)
-            if close[i] < r1_val:
+            # EXIT LONG: Price crosses back below R3 (failed breakout)
+            if close[i] < r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above S1 (failed breakout)
-            if close[i] > s1_val:
+            # EXIT SHORT: Price crosses back above S3 (failed breakout)
+            if close[i] > s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
