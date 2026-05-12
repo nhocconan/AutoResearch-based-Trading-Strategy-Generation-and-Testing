@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_True_Strength_Index_Momentum
-# Hypothesis: Use True Strength Index (TSI) to capture momentum with reduced whipsaw, confirmed by 1d trend (EMA34) and volume spikes (>1.8x 20-period average). Enter long when TSI crosses above its signal line and price > 1d EMA34 with volume spike; short when TSI crosses below signal line and price < 1d EMA34 with volume spike. Exit on opposite TSI crossover. Targets 20-40 trades/year to minimize fee decay while capturing momentum in both bull and bear markets via trend filter.
+# 1D_Donchian_Breakout_Volume_Trend
+# Hypothesis: Use weekly trend (EMA200) as primary filter and daily Donchian channel breakouts for entry, confirmed by volume spikes (>2x 20-day average). Long when price breaks above upper Donchian(20) with price > weekly EMA200 and volume spike; short when price breaks below lower Donchian(20) with price < weekly EMA200 and volume spike. Exit when price crosses the Donchian midline (average of upper/lower). Designed for low trade frequency (~15-25/year) to minimize fee drag and work in both bull/bear markets via weekly trend filter.
 
-name = "4h_True_Strength_Index_Momentum"
-timeframe = "4h"
+name = "1D_Donchian_Breakout_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,54 +19,32 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_ = prices['open'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
 
-    # True Strength Index (TSI) calculation
-    # Step 1: Price change and absolute price change
-    price_change = close - np.roll(close, 1)
-    abs_price_change = np.abs(price_change)
-    price_change[0] = 0  # First value has no previous close
-    abs_price_change[0] = 0
+    # Calculate daily Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2.0
 
-    # Step 2: Double smoothed EMA of price change and abs price change
-    # First smoothing (25-period EMA)
-    pc_smoothed1 = pd.Series(price_change).ewm(span=25, adjust=False, min_periods=25).mean().values
-    apc_smoothed1 = pd.Series(abs_price_change).ewm(span=25, adjust=False, min_periods=25).mean().values
-    # Second smoothing (13-period EMA)
-    pc_smoothed2 = pd.Series(pc_smoothed1).ewm(span=13, adjust=False, min_periods=13).mean().values
-    apc_smoothed2 = pd.Series(apc_smoothed1).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Weekly EMA200 for trend filter
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
 
-    # Avoid division by zero
-    apc_smoothed2_safe = np.where(apc_smoothed2 == 0, 1e-10, apc_smoothed2)
-    tsi = (pc_smoothed2 / apc_smoothed2_safe) * 100
-
-    # Signal line (7-period EMA of TSI)
-    tsi_signal = pd.Series(tsi).ewm(span=7, adjust=False, min_periods=7).mean().values
-
-    # TSI crossover signals
-    tsi_cross_up = (tsi > tsi_signal) & (np.roll(tsi, 1) <= np.roll(tsi_signal, 1))
-    tsi_cross_down = (tsi < tsi_signal) & (np.roll(tsi, 1) >= np.roll(tsi_signal, 1))
-
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 2x 20-day average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(25, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(tsi[i]) or np.isnan(tsi_signal[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,30 +53,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TSI crosses above signal line + price > 1d EMA34 + volume spike
-            if (tsi_cross_up[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.8):
+            # LONG: Price breaks above upper Donchian + price > weekly EMA200 + volume spike
+            if (close[i] > high_20[i] and 
+                close[i] > ema200_1w_aligned[i] and
+                volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TSI crosses below signal line + price < 1d EMA34 + volume spike
-            elif (tsi_cross_down[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.8):
+            # SHORT: Price breaks below lower Donchian + price < weekly EMA200 + volume spike
+            elif (close[i] < low_20[i] and 
+                  close[i] < ema200_1w_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TSI crosses below signal line
-            if tsi_cross_down[i]:
+            # EXIT LONG: Price crosses below Donchian midline
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TSI crosses above signal line
-            if tsi_cross_up[i]:
+            # EXIT SHORT: Price crosses above Donchian midline
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
