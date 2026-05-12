@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_VolumeBreakout_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     open_ = prices['open'].values
@@ -18,28 +18,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA34 on 1d close
+    # 12h EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # 12h volume average for spike detection
+    vol_12h = df_12h['volume'].values
+    vol_avg_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    vol_avg_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_avg_12h)
+    
+    # Daily high/low for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume expansion: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_expansion = volume > (2.0 * vol_ma)
+    # Camarilla R1 and S1: (H+L+C)/3 +/- (H-L)*1.1
+    camarilla_base = (high_1d + low_1d + close_1d) / 3.0
+    r1 = camarilla_base + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = camarilla_base - (high_1d - low_1d) * 1.1 / 12.0
     
-    # 12h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume spike: current 4h volume > 2.0 * 12h average volume
+    vol_spike = volume > (2.0 * vol_avg_12h_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # ensure EMA34 has enough data
+    start_idx = 50  # ensure EMA50 has enough data
     
     for i in range(start_idx, n):
-        # Skip if EMA data not ready
-        if np.isnan(ema34_1d_aligned[i]):
+        # Skip if data not ready
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -48,24 +62,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above Donchian upper + above daily EMA34 + volume expansion
-            if (close[i] > high_max[i]) and (close[i] > ema34_1d_aligned[i]) and vol_expansion[i]:
+            # Long: break above R1 + uptrend + volume spike
+            if (close[i] > r1_aligned[i]) and (close[i] > ema50_12h_aligned[i]) and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below Donchian lower + below daily EMA34 + volume expansion
-            elif (close[i] < low_min[i]) and (close[i] < ema34_1d_aligned[i]) and vol_expansion[i]:
+            # Short: break below S1 + downtrend + volume spike
+            elif (close[i] < s1_aligned[i]) and (close[i] < ema50_12h_aligned[i]) and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below daily EMA34
-            if close[i] < ema34_1d_aligned[i]:
+            # Exit long: price crosses below S1
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above daily EMA34
-            if close[i] > ema34_1d_aligned[i]:
+            # Exit short: price crosses above R1
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
