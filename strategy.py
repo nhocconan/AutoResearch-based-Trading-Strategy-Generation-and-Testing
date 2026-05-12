@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Reversal_With_Volume_Confirmation
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing timely trend reversals. Combined with volume spikes and a 1-day ADX trend filter, it captures mean-reversion moves in ranging markets and avoids whipsaws in strong trends. Target: 15-25 trades/year per symbol.
+4h_RSI40_60_With_Volume_Confirmation
+Hypothesis: In ranging markets (common in 2025), RSI between 40-60 indicates stability. 
+Breakouts from this range with volume confirmation capture new trends. 
+Uses 4h timeframe with 1d trend filter (EMA50) to avoid counter-trend trades. 
+Targets 20-40 trades/year by requiring volume > 1.5x average and RSI exit at extremes.
 """
 
-name = "12h_KAMA_Reversal_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_RSI40_60_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,68 +17,41 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.6x 30-period average (to reduce frequency)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.6 * vol_ma)
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # KAMA calculation (ER = Efficiency Ratio, SC = Smoothing Constant)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Daily data for ADX trend filter
+    # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # ADX calculation (14-period)
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(np.abs(high_1d[1:] - high_1d[:-1]), 
-                               np.abs(low_1d[1:] - low_1d[:-1])))
-    # Pad to match length
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Align indicators to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, prices, kama)  # same timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after KAMA warmup
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+    for i in range(20, n):
+        if np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,32 +60,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price crosses above KAMA + low ADX (ranging market) + volume spike
-            if (close[i] > kama_aligned[i] and 
-                close[i-1] <= kama_aligned[i-1] and 
-                adx_aligned[i] < 25 and 
+            # LONG: RSI crosses above 40 + price above 1d EMA50 + volume spike
+            if (rsi[i] > 40 and rsi[i-1] <= 40 and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below KAMA + low ADX + volume spike
-            elif (close[i] < kama_aligned[i] and 
-                  close[i-1] >= kama_aligned[i-1] and 
-                  adx_aligned[i] < 25 and 
+            # SHORT: RSI crosses below 60 + price below 1d EMA50 + volume spike
+            elif (rsi[i] < 60 and rsi[i-1] >= 60 and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA OR ADX rises (trend developing)
-            if (close[i] < kama_aligned[i]) or (adx_aligned[i] > 30):
+            # EXIT LONG: RSI reaches 60 (overbought) or closes below 1d EMA50
+            if rsi[i] >= 60 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA OR ADX rises
-            if (close[i] > kama_aligned[i]) or (adx_aligned[i] > 30):
+            # EXIT SHORT: RSI reaches 40 (oversold) or closes above 1d EMA50
+            if rsi[i] <= 40 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
