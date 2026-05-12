@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "4h_Donchian_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,45 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== 1d Camarilla Pivot Levels (R3, S3) =====
-    # Pivot points based on previous day
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]  # avoid NaN on first bar
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
+    # ===== Donchian(20) Breakout =====
+    donchian_high = np.zeros(n)
+    donchian_low = np.zeros(n)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_ = prev_high - prev_low
-    r3 = pivot + (range_ * 1.1 / 2)  # R3 level
-    s3 = pivot - (range_ * 1.1 / 2)  # S3 level
-    
-    # ===== 1w Trend Filter (HTF) =====
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
-    
-    # ===== 1d Volume Spike Filter =====
+    # ===== Daily Trend (HTF) =====
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # ===== Volume Spike Filter (1d) =====
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (1.5 * vol_avg_1d)  # Reduced threshold for more signals
+    vol_spike_1d = vol_1d > (1.8 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
-    # ===== Session Filter: 00-24 UTC (full day for 1d) =====
-    # For daily timeframe, we can use all hours
+    # ===== Choppiness Regime Filter =====
+    # Chop > 61.8 = range (mean revert), Chop < 38.2 = trending (trend follow)
+    # We want trending for breakouts, so Chop < 38.2
+    atr_period = 14
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.inf], tr])
+    atr = np.zeros(n)
+    for i in range(atr_period, n):
+        atr[i] = np.mean(tr[i-atr_period+1:i+1])
+    
+    max_hh = np.zeros(n)
+    min_ll = np.zeros(n)
+    for i in range(atr_period, n):
+        max_hh[i] = np.max(high[i-atr_period+1:i+1])
+        min_ll[i] = np.min(low[i-atr_period+1:i+1])
+    
+    chop = np.zeros(n)
+    for i in range(atr_period, n):
+        if max_hh[i] > min_ll[i]:
+            chop[i] = 100 * np.log10(np.sum(tr[i-atr_period+1:i+1]) / np.log10(atr_period) / (max_hh[i] - min_ll[i]))
+        else:
+            chop[i] = 50  # neutral
+    
+    chop_filter = chop < 38.2  # trending regime
+    
+    # ===== Session Filter: 08-20 UTC =====
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for SMA50 warmup
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(sma50_1w_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i]) or
+            np.isnan(chop[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,28 +95,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close breaks above R3 + above weekly SMA50 + volume spike
-            if (close[i] > r3[i] and
-                close[i] > sma50_1w_aligned[i] and
-                vol_spike_1d_aligned[i] > 0.5):
+            # Long: Price breaks above Donchian high + daily uptrend + volume spike + trending regime
+            if (close[i] > donchian_high[i] and
+                close[i] > ema34_1d_aligned[i] and
+                vol_spike_1d_aligned[i] > 0.5 and
+                chop_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 + below weekly SMA50 + volume spike
-            elif (close[i] < s3[i] and
-                  close[i] < sma50_1w_aligned[i] and
-                  vol_spike_1d_aligned[i] > 0.5):
+            # Short: Price breaks below Donchian low + daily downtrend + volume spike + trending regime
+            elif (close[i] < donchian_low[i] and
+                  close[i] < ema34_1d_aligned[i] and
+                  vol_spike_1d_aligned[i] > 0.5 and
+                  chop_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close breaks below S3 (reversal) or weekly trend fails
-            if (close[i] < s3[i] or close[i] < sma50_1w_aligned[i]):
+            # Exit long: Price closes below Donchian median or trend changes
+            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] < donchian_mid or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close breaks above R3 (reversal) or weekly trend fails
-            if (close[i] > r3[i] or close[i] > sma50_1w_aligned[i]):
+            # Exit short: Price closes above Donchian median or trend changes
+            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] > donchian_mid or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
