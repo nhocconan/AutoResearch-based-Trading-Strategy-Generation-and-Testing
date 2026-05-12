@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Direction_1wTrend_VolumeFilter"
-timeframe = "1d"
+name = "6h_ParabolicSAR_Trend_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,45 +17,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load daily data for trend filter and Parabolic SAR
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # KAMA on daily prices
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, n=10))  # 10-period volatility
-    volatility_sum = pd.Series(volatility).rolling(window=10, min_periods=1).sum().values
-    er = np.divide(change, volatility_sum, out=np.zeros_like(change), where=volatility_sum!=0)
+    # Parabolic SAR on 6h data
+    sar = np.zeros(n)
+    trend = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    af = 0.02
+    max_af = 0.2
+    ep = high[0]  # extreme point
+    sar[0] = low[0]
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
     for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        sar[i] = sar[i-1] + af * (ep - sar[i-1])
+        if trend[i-1] == 1:  # uptrend
+            if low[i] < sar[i]:
+                trend[i] = -1
+                sar[i] = ep
+                ep = low[i]
+                af = 0.02
+            else:
+                trend[i] = 1
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + 0.02, max_af)
+        else:  # downtrend
+            if high[i] > sar[i]:
+                trend[i] = 1
+                sar[i] = ep
+                ep = high[i]
+                af = 0.02
+            else:
+                trend[i] = -1
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + 0.02, max_af)
     
-    # Volume filter: current volume > 1.5x 20-day average
+    # Volume filter: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_avg)
+    vol_filter = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(kama[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(sar[i]) or
             np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,24 +82,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above KAMA + above weekly EMA34 + volume filter
-            if close[i] > kama[i] and close[i] > ema_34_1w_aligned[i] and vol_filter[i]:
+            # Long: price above SAR (uptrend) + above daily EMA50 + volume spike
+            if close[i] > sar[i] and close[i] > ema_50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + below weekly EMA34 + volume filter
-            elif close[i] < kama[i] and close[i] < ema_34_1w_aligned[i] and vol_filter[i]:
+            # Short: price below SAR (downtrend) + below daily EMA50 + volume spike
+            elif close[i] < sar[i] and close[i] < ema_50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below KAMA or below weekly EMA34
-            if close[i] < kama[i] or close[i] < ema_34_1w_aligned[i]:
+            # Exit long: price below SAR or below daily EMA50
+            if close[i] < sar[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above KAMA or above weekly EMA34
-            if close[i] > kama[i] or close[i] > ema_34_1w_aligned[i]:
+            # Exit short: price above SAR or above daily EMA50
+            if close[i] > sar[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
