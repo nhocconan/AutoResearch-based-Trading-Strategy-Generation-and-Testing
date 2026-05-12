@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_CCI_Bounce_1dTrend_VolumeFilter
-Hypothesis: Uses Keltner Channel mean reversion combined with CCI momentum and daily trend filter.
-Buys near lower Keltner band when CCI indicates oversold and daily trend is bullish.
-Sells near upper Keltner band when CCI indicates overbought and daily trend is bearish.
-Designed for 4h timeframe to capture mean-reversion moves with low trade frequency.
-Works in both bull and bear markets by adapting to daily trend context.
+1d_Weekly_Pivot_R1_S1_Breakout_Trend
+Hypothesis: Uses weekly Camarilla pivot levels (R1/S1) for breakout entries on the daily timeframe,
+confirmed by weekly EMA20 trend and volume surge. Designed to capture multi-week moves with low trade frequency.
+Works in both bull and bear markets by adapting to weekly trend context.
 """
 
-name = "4h_Keltner_CCI_Bounce_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_R1_S1_Breakout_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -26,41 +24,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter (call once before loop)
-    df_d = get_htf_data(prices, '1d')
-    if len(d_d) < 20:
+    # Get weekly data for Camarilla pivot points and EMA20 (call once before loop)
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 20:
         return np.zeros(n)
 
-    # Calculate daily EMA20 for trend filter
-    close_d = pd.Series(df_d['close'].values)
-    ema20_d = close_d.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly Camarilla pivot levels (standard formula)
+    hh_w = df_w['high'].values
+    ll_w = df_w['low'].values
+    cc_w = df_w['close'].values
 
-    # Keltner Channel (20, 1.5) - using 20-period EMA and ATR
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr = pd.Series(np.abs(high - low)).rolling(window=20, min_periods=20).mean().values
-    keltner_upper = ema20 + 1.5 * atr
-    keltner_lower = ema20 - 1.5 * atr
+    # Camarilla levels
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    r1_w = cc_w + (hh_w - ll_w) * 1.1 / 12
+    s1_w = cc_w - (hh_w - ll_w) * 1.1 / 12
 
-    # CCI (20) - Commodity Channel Index
-    typical_price = (high + low + close) / 3
-    ma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    mean_dev = pd.Series(np.abs(typical_price - ma_tp)).rolling(window=20, min_periods=20).mean().values
-    # Avoid division by zero
-    cci = np.where(mean_dev != 0, (typical_price - ma_tp) / (0.015 * mean_dev), 0)
+    # Calculate weekly EMA20 for trend filter
+    close_w = pd.Series(cc_w)
+    ema20_w = close_w.ewm(span=20, adjust=False, min_periods=20).mean().values
 
-    # Volume confirmation: 4-period average (half day of 4h data)
-    vol_avg_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Volume confirmation: 5-period average (1 week of daily data)
+    vol_avg_5 = pd.Series(volume).rolling(window=5, min_periods=5).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start from 20 to have enough data for indicators
-        # Get aligned values for current 4h bar
-        ema20_d_aligned = align_htf_to_ltf(prices, df_d, ema20_d)[i]
+    for i in range(5, n):  # Start from 5 to have enough data for volume average
+        # Get aligned values for current daily bar
+        r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)[i]
+        s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)[i]
+        ema20_w_aligned = align_htf_to_ltf(prices, df_w, ema20_w)[i]
+        vol_avg_val = vol_avg_5[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(ema20_d_aligned) or np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or np.isnan(cci[i]) or np.isnan(vol_avg_4[i])):
+        if (np.isnan(r1_w_aligned) or np.isnan(s1_w_aligned) or 
+            np.isnan(ema20_w_aligned) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,32 +68,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price near lower Keltner band + CCI oversold + bullish daily trend + volume
-            if (close[i] <= keltner_lower[i] * 1.01 and  # Near lower band
-                cci[i] < -100 and  # Oversold
-                close[i] > ema20_d_aligned and  # Bullish daily trend
-                volume[i] > vol_avg_4[i] * 1.5):  # Volume confirmation
+            # LONG: Break above weekly R1 with bullish weekly trend and volume surge
+            if (close[i] > r1_w_aligned and 
+                close[i] > ema20_w_aligned and 
+                volume[i] > vol_avg_val * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price near upper Keltner band + CCI overbought + bearish daily trend + volume
-            elif (close[i] >= keltner_upper[i] * 0.99 and  # Near upper band
-                  cci[i] > 100 and  # Overbought
-                  close[i] < ema20_d_aligned and  # Bearish daily trend
-                  volume[i] > vol_avg_4[i] * 1.5):  # Volume confirmation
+            # SHORT: Break below weekly S1 with bearish weekly trend and volume surge
+            elif (close[i] < s1_w_aligned and 
+                  close[i] < ema20_w_aligned and 
+                  volume[i] > vol_avg_val * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches middle Keltner band or CCI turns negative
-            if (close[i] >= ema20[i] or cci[i] > 0):
+            # EXIT LONG: Price falls below weekly S1 or EMA20 (reversal signal)
+            if (close[i] < s1_w_aligned or close[i] < ema20_w_aligned):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches middle Keltner band or CCI turns positive
-            if (close[i] <= ema20[i] or cci[i] < 0):
+            # EXIT SHORT: Price rises above weekly R1 or EMA20 (reversal signal)
+            if (close[i] > r1_w_aligned or close[i] > ema20_w_aligned):
                 signals[i] = 0.0
                 position = 0
             else:
