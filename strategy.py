@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Use Camarilla pivot levels (R3/S3) from 1d for breakout entries, confirmed by 1d EMA trend and volume spikes (>2x 20-period average). Enter long at R3 break with uptrend, short at S3 break with downtrend. Exit at close crossing 1d EMA. Targets 15-25 trades/year on 6h to minimize fee drag and work in both bull/bear via trend filter. R3/S3 are stronger breakout levels than R1/S1, reducing false signals.
+# 6h_ElderRay_EMA13_EMA34_Rotation
+# Hypothesis: Use Elder Ray (Bull/Bear Power) with EMA13/EMA34 crossover on 6h to detect trend rotation.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Enter long when Bull Power > 0 and EMA13 crosses above EMA34 (bullish rotation).
+# Enter short when Bear Power > 0 and EMA13 crosses below EMA34 (bearish rotation).
+# Exit when EMA13 crosses back in opposite direction.
+# Uses EMA13/EMA34 to avoid whipsaw, Elder Ray to filter false crossovers.
+# Designed for 6h timeframe with low trade frequency (15-25/year) to minimize fee drag.
+# Works in bull/bear via dynamic trend following with momentum confirmation.
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "6h_ElderRay_EMA13_EMA34_Rotation"
 timeframe = "6h"
 leverage = 1.0
 
@@ -18,42 +25,22 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA13 and EMA34 on 6h
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
 
-    # Calculate Camarilla pivot levels (R3, S3) from previous 1d candle
-    # PP = (H + L + C) / 3
-    # R3 = C + (H - L) * 1.1 / 4
-    # S3 = C - (H - L) * 1.1 / 4
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4.0
-    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4.0
-
-    # Align Camarilla levels to 6h timeframe (available after 1d candle closes)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # Volume confirmation: volume > 2x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = ema13 - low   # Bear Power: EMA13 - Low
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(34, n):
         # Skip if any required value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema13[i]) or np.isnan(ema34[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,30 +49,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above R3 + price > 1d EMA50 + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 2.0):
+            # LONG: Bull Power > 0 and EMA13 crosses above EMA34
+            if (bull_power[i] > 0 and 
+                ema13[i] > ema34[i] and 
+                ema13[i-1] <= ema34[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S3 + price < 1d EMA50 + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 2.0):
+            # SHORT: Bear Power > 0 and EMA13 crosses below EMA34
+            elif (bear_power[i] > 0 and 
+                  ema13[i] < ema34[i] and 
+                  ema13[i-1] >= ema34[i-1]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below 1d EMA50
-            if close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: EMA13 crosses below EMA34
+            if ema13[i] < ema34[i] and ema13[i-1] >= ema34[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses above 1d EMA50
-            if close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: EMA13 crosses above EMA34
+            if ema13[i] > ema34[i] and ema13[i-1] <= ema34[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
