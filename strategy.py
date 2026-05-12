@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S4_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Chop_Adapted_Donchian_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,41 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D DATA FOR CAMARILLA PIVOTS AND TREND ===
+    # === 1D DATA FOR REGIME FILTER (CHOP) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (R3, S4) from previous day
-    # PP = (H + L + C) / 3
-    # R3 = PP + 2 * (H - L) / 2 = PP + (H - L)
-    # S4 = PP - 3 * (H - L) / 2
-    pp_1d = (high_1d + low_1d + close_1d) / 3
-    r3_1d = pp_1d + (high_1d - low_1d)
-    s4_1d = pp_1d - 1.5 * (high_1d - low_1d)
+    # Calculate Chop Index (14-period)
+    # True Range for 1d
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First value
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align Camarilla levels to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4_1d)
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
     
-    # 1D EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    chop = 100 * np.log10(atr14.sum() / (highest_high_14 - lowest_low_14)) / np.log10(14)
+    chop = np.where((highest_high_14 - lowest_low_14) != 0, chop, 50)  # Avoid division by zero
+    chop_4h = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # === 4H DATA FOR DONCHIAN BREAKOUT ===
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)  # Moderate volume spike
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = 100  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_12h[i]) or np.isnan(s4_12h[i]) or 
-            np.isnan(ema34_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(chop_4h[i]) or np.isnan(highest_high_20[i]) or 
+            np.isnan(lowest_low_20[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,29 +65,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Regime filter: Chop > 61.8 = ranging (mean revert), Chop < 38.2 = trending (trend follow)
+        is_ranging = chop_4h[i] > 61.8
+        is_trending = chop_4h[i] < 38.2
+        
         if position == 0:
-            # LONG: Price breaks above R3 + uptrend + volume confirmation
-            if (close[i] > r3_12h[i] and 
-                close[i] > ema34_12h[i] and
-                volume_spike[i]):
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Price breaks below S4 + downtrend + volume confirmation
-            elif (close[i] < s4_12h[i] and 
-                  close[i] < ema34_12h[i] and
-                  volume_spike[i]):
-                signals[i] = -0.25
-                position = -1
+            # In ranging market: mean reversion at Donchian extremes
+            if is_ranging:
+                if low[i] <= lowest_low_20[i] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif high[i] >= highest_high_20[i] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # In trending market: breakout in direction of trend
+            elif is_trending:
+                if high[i] > highest_high_20[i] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif low[i] < lowest_low_20[i] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below S4 (reversal level) OR trend fails
-            if close[i] < s4_12h[i] or close[i] < ema34_12h[i]:
+            # Exit long: price reaches opposite Donchian band or volatility drops
+            if high[i] >= highest_high_20[i] or chop_4h[i] > 50:  # Exit at upper band or when ranging
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 (reversal level) OR trend fails
-            if close[i] > r3_12h[i] or close[i] > ema34_12h[i]:
+            # Exit short: price reaches opposite Donchian band or volatility drops
+            if low[i] <= lowest_low_20[i] or chop_4h[i] > 50:  # Exit at lower band or when ranging
                 signals[i] = 0.0
                 position = 0
             else:
