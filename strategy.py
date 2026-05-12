@@ -1,65 +1,71 @@
 #!/usr/bin/env python3
-# 4H_VOLATILITY_BREAKOUT_VOLUME_CONFIRMATION_1D_TREND_FILTER
-# Hypothesis: Volatility breakouts capture sharp directional moves, which occur in both bull and bear markets.
-# Uses 10-period ATR-based breakout from close, confirmed by volume spike and 1d trend filter.
-# In 1d uptrend, go long on upward volatility breakout; in downtrend, go short on downward breakout.
-# Volatility breakouts tend to be fewer but higher quality trades, reducing fee drag.
-# Target: 20-40 trades/year on 4h timeframe.
+# 1D_KAMA_TREND_WITH_RSI_FILTER
+# Hypothesis: KAMA adapts to market noise, providing a reliable trend filter in both bull and bear markets.
+# In uptrend (price > KAMA), go long when RSI(14) pulls back from overbought (>50 and rising).
+# In downtrend (price < KAMA), go short when RSI(14) bounces from oversold (<50 and falling).
+# Uses 1d timeframe to minimize trade frequency and fee drag, targeting 10-25 trades/year.
+# KAMA's adaptive nature reduces whipsaws during sideways markets, improving survival in chop.
 
-name = "4H_VOLATILITY_BREAKOUT_VOLUME_CONFIRMATION_1D_TREND_FILTER"
-timeframe = "4h"
+name = "1D_KAMA_TREND_WITH_RSI_FILTER"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
-        return np.zeros(n)
+    # KAMA (Kaufman Adaptive Moving Average) parameters
+    fast_ema = 2
+    slow_ema = 30
+    lookback = 10  # ER lookback period
     
-    # EMA34 for trend filter
-    ema34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=lookback))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smooth ER with simple moving average for stability
+    er = pd.Series(er).rolling(window=lookback, min_periods=1).mean().values
+    # Calculate smoothing constant SC
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[lookback] = close[lookback]  # Initialize
+    for i in range(lookback + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # ATR for volatility breakout (10-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros_like(close)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * 9 + tr[i]) / 10  # Wilder's smoothing
+    # RSI(14) calculation
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Pad first value
+    rsi = np.concatenate([[50], rsi])  # Start with neutral RSI
     
-    # Volume spike: current volume > 1.5 * 20-period average volume
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_ma[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-        else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
-    volume_spike = volume > (1.5 * vol_ma)
+    # RSI momentum (1-bar change)
+    rsi_rising = rsi > np.roll(rsi, 1)
+    rsi_falling = rsi < np.roll(rsi, 1)
+    rsi_rising[0] = False
+    rsi_falling[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure indicators are stable
+    start_idx = max(lookback, 14) + 1  # Ensure indicators are stable
     
     for i in range(start_idx, n):
-        # Skip if any critical data is not ready
-        if np.isnan(ema34_aligned[i]) or np.isnan(atr[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,32 +74,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: 1d uptrend + upward volatility breakout + volume spike
-            if (close[i] > ema34_aligned[i] and 
-                close[i] > close[i-1] + 0.5 * atr[i] and  # Upward breakout
-                volume_spike[i]):
+            # LONG: Uptrend (price > KAMA) + RSI > 50 and rising
+            if (close[i] > kama[i] and 
+                rsi[i] > 50 and 
+                rsi_rising[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1d downtrend + downward volatility breakout + volume spike
-            elif (close[i] < ema34_aligned[i] and 
-                  close[i] < close[i-1] - 0.5 * atr[i] and  # Downward breakout
-                  volume_spike[i]):
+            # SHORT: Downtrend (price < KAMA) + RSI < 50 and falling
+            elif (close[i] < kama[i] and 
+                  rsi[i] < 50 and 
+                  rsi_falling[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal or volatility contraction
-            if (close[i] <= ema34_aligned[i] or 
-                close[i] < close[i-1] + 0.25 * atr[i]):  # Loss of upward momentum
+            # EXIT LONG: Trend reversal or RSI overbought
+            if (close[i] <= kama[i] or 
+                rsi[i] >= 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal or volatility contraction
-            if (close[i] >= ema34_aligned[i] or 
-                close[i] > close[i-1] - 0.25 * atr[i]):  # Loss of downward momentum
+            # EXIT SHORT: Trend reversal or RSI oversold
+            if (close[i] >= kama[i] or 
+                rsi[i] <= 30):
                 signals[i] = 0.0
                 position = 0
             else:
