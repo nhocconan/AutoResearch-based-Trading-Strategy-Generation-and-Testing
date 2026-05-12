@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 4h timeframe when aligned with 1d EMA50 trend and confirmed by volume spike. This strategy targets 20-50 trades/year by requiring confluence of price level breakout, trend alignment, and volume confirmation. Works in both bull and bear markets by using trend-following entries and mean-reversion exits at the daily pivot point.
+4h_Camarilla_Pivot_Reversal_1dTrend_Volume
+Hypothesis: Trade reversals at daily Camarilla pivot points (R1/S1) on 4h timeframe when aligned with 1d EMA50 trend and confirmed by volume spike. Uses limit orders at pivot levels for precision entries. Works in both bull and bear markets by fading extreme moves toward the daily value area. Target: 20-50 trades/year via tight confluence of price, trend, and volume.
 Timeframe: 4h
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_Pivot_Reversal_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,9 +34,12 @@ def generate_signals(prices):
     pc = df_1d['close'].shift(1).values # prior day close
     r1 = pc + (ph - pl) * 1.1 / 12
     s1 = pc - (ph - pl) * 1.1 / 12
-    # Align to 4h: daily Camarilla values are constant through the day
+    # Pivot point (not used for entry but for exit reference)
+    pp = (ph + pl + pc) / 3.0
+    # Align to 4h: daily values are constant through the day
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
 
     # Get daily data for EMA50 trend filter ONCE before loop
     close_1d = df_1d['close'].values
@@ -52,7 +55,8 @@ def generate_signals(prices):
 
     for i in range(80, n):  # Start after EMA50 warmup
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(pp_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,14 +65,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: close > daily R1 + price > 1d EMA50 + volume spike
-            if (close[i] > r1_aligned[i] and 
+            # LONG: price touches or crosses below S1 (support) + uptrend + volume spike
+            if (low[i] <= s1_aligned[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: close < daily S1 + price < 1d EMA50 + volume spike
-            elif (close[i] < s1_aligned[i] and 
+            # SHORT: price touches or crosses above R1 (resistance) + downtrend + volume spike
+            elif (high[i] >= r1_aligned[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -76,19 +80,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: close < daily pivot P
-            pp = (ph + pl + pc) / 3.0
-            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-            if close[i] < pp_aligned[i]:
+            # EXIT LONG: price reaches or crosses above pivot point (mean reversion to value area)
+            if high[i] >= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: close > daily pivot P
-            pp = (ph + pl + pc) / 3.0
-            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-            if close[i] > pp_aligned[i]:
+            # EXIT SHORT: price reaches or crosses below pivot point (mean reversion to value area)
+            if low[i] <= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
