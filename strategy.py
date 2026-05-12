@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 160084: 1d_Weekly_Trend_Filter_Daily_Price_Action
-# Hypothesis: Use weekly trend (price above/below weekly EMA20) as filter for daily price action entries.
-# Long when daily close > weekly EMA20 and daily range closes in upper 50% of its range.
-# Short when daily close < weekly EMA20 and daily range closes in lower 50% of its range.
-# Exit when price crosses back over weekly EMA20. This captures momentum in the direction of higher timeframe trend.
-# Weekly trend filter reduces whipsaws, daily price action provides timely entries. Works in bull/bear by following weekly trend.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Price breaking above/below Camarilla R1/S1 levels (1-day) with 1-day EMA34 trend filter and volume confirmation captures strong trending moves while avoiding false breakouts. Designed for 12h timeframe to capture fewer, higher-quality trades (target: 20-50 trades/year). Works in both bull and bear markets by following the higher timeframe trend direction.
 
-name = "1d_Weekly_Trend_Filter_Daily_Price_Action"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,29 +15,44 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    close_weekly = df_weekly['close'].values
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
 
-    # Calculate weekly EMA20
-    ema_20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
+    # Calculate 1-day high, low, close for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Daily price action: close position in daily range (0=bottom, 1=top)
-    daily_range = high - low
-    # Avoid division by zero
-    daily_range = np.where(daily_range == 0, 1e-10, daily_range)
-    close_position = (close - low) / daily_range  # 0 at low, 1 at high
+    # Calculate Camarilla levels: R1, S1
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    camarilla_range = high_1d - low_1d
+    r1_level = close_1d + 1.1 * camarilla_range / 12
+    s1_level = close_1d - 1.1 * camarilla_range / 12
+
+    # Align Camarilla levels to 12h timeframe
+    r1_level_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
+    s1_level_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
+
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+
+    # Volume confirmation: >1.3x 20-period average (using 12h volume)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after weekly EMA20 warmup
-        if np.isnan(ema_20_weekly_aligned[i]):
+    for i in range(35, n):  # Start after EMA34 warmup
+        if (np.isnan(r1_level_aligned[i]) or np.isnan(s1_level_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -50,26 +61,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Above weekly EMA20 and closing in upper half of daily range
-            if close[i] > ema_20_weekly_aligned[i] and close_position[i] > 0.5:
+            # LONG: Price breaks above R1 + EMA34 uptrend + volume confirmation
+            if (close[i] > r1_level_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Below weekly EMA20 and closing in lower half of daily range
-            elif close[i] < ema_20_weekly_aligned[i] and close_position[i] < 0.5:
+            # SHORT: Price breaks below S1 + EMA34 downtrend + volume confirmation
+            elif (close[i] < s1_level_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below weekly EMA20
-            if close[i] < ema_20_weekly_aligned[i]:
+            # EXIT LONG: Price closes below EMA34 (trend reversal)
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above weekly EMA20
-            if close[i] > ema_20_weekly_aligned[i]:
+            # EXIT SHORT: Price closes above EMA34 (trend reversal)
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
