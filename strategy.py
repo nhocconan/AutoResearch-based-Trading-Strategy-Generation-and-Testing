@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Extreme_Reversion_With_Volume
-Hypothesis: Extreme RSI readings (RSI<20 or RSI>80) with volume confirmation and 1d trend filter.
-Mean reversion works in both bull and bear markets when price is overextended.
-Volume confirms institutional interest in the move. Trend filter avoids fighting strong trends.
-Designed for ~20-30 trades/year to stay within fee limits.
+6h_ElderRay_Power_1wTrend
+Hypothesis: Elder Ray (Bull/Bear Power) with 1-week trend filter on 6h timeframe.
+Bull Power = High - EMA13, Bear Power = EMA13 - Low. 
+Long when Bull Power > 0 and 1w uptrend; Short when Bear Power > 0 and 1w downtrend.
+Uses 13-period EMA for responsiveness. Weekly trend avoids whipsaws in sideways markets.
+Designed for low trade frequency (~20-40/year) to minimize fee impact. Works in bull/bear via trend filter.
 """
 
-name = "4h_RSI_Extreme_Reversion_With_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_Power_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,45 +24,33 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
 
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    # Weekly EMA34 for trend filter (slow enough to avoid whipsaws)
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
 
-    # Calculate RSI (14) with proper min_periods
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate EMA13 for Elder Ray (using 6h data)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
 
-    # Get 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # Volume confirmation: 2x 20-period SMA
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_threshold = volume_sma20 * 2.0
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = ema13 - low   # Bear Power = EMA13 - Low
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
-        # Get aligned values for current 4h bar (only uses completed daily bars)
-        ema50_aligned = ema50_1d_aligned[i]
-        vol_threshold_val = volume_threshold[i]
+    for i in range(13, n):
+        # Get aligned weekly trend (only uses completed weekly bars)
+        ema34_aligned = ema34_1w_aligned[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(ema50_aligned) or np.isnan(vol_threshold_val) or 
-            np.isnan(rsi[i])):
+        if np.isnan(ema34_aligned) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,30 +59,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Extreme oversold (RSI<20) + volume spike (2x) + 1d uptrend
-            if (rsi[i] < 20 and
-                volume[i] > vol_threshold_val and
-                close[i] > ema50_aligned):
+            # LONG: Bull Power positive (strong buying pressure) + weekly uptrend
+            if bull_power[i] > 0 and close[i] > ema34_aligned:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Extreme overbought (RSI>80) + volume spike (2x) + 1d downtrend
-            elif (rsi[i] > 80 and
-                  volume[i] > vol_threshold_val and
-                  close[i] < ema50_aligned):
+            # SHORT: Bear Power positive (strong selling pressure) + weekly downtrend
+            elif bear_power[i] > 0 and close[i] < ema34_aligned:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (above 40) or trend fails
-            if rsi[i] > 40 or close[i] < ema50_aligned:
+            # EXIT LONG: Bear Power becomes positive (selling pressure takes over) OR weekly trend turns down
+            if bear_power[i] > 0 or close[i] < ema34_aligned:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (below 60) or trend fails
-            if rsi[i] < 60 or close[i] > ema50_aligned:
+            # EXIT SHORT: Bull Power becomes positive (buying pressure takes over) OR weekly trend turns up
+            if bull_power[i] > 0 or close[i] > ema34_aligned:
                 signals[i] = 0.0
                 position = 0
             else:
