@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
-"""
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla pivot breakouts on 4h with daily trend filter and volume spike confirmation.
-Enters long when price breaks above R1 with daily uptrend and volume > 1.5x average.
-Enters short when price breaks below S1 with daily downtrend and volume > 1.5x average.
-Uses daily trend to avoid counter-trend trades and volume spike to confirm institutional interest.
-Designed for low trade frequency (20-50/year) to minimize fee drag in BTC/ETH markets.
-"""
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Combines Camarilla pivot breakouts on 4h with daily trend filter and volume spike confirmation.
+# Uses strict entry conditions to limit trades (target: 20-50/year) and avoid fee drag.
+# Works in bull markets via breakout momentum and in bear markets via counter-trend reversals at pivot levels.
+# Daily trend filter prevents counter-trend trades during strong trends.
+# Volume spike confirms institutional participation, reducing false breakouts.
 
 name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
@@ -44,7 +41,6 @@ def generate_signals(prices):
         return np.zeros(n)
 
     # Calculate Camarilla levels on 4h data (using previous bar's HLC)
-    # Shift by 1 to avoid look-ahead (use previous bar to calculate levels for current bar)
     prev_high = np.concatenate([[np.nan], high[:-1]]) if len(high) > 1 else np.full_like(high, np.nan)
     prev_low = np.concatenate([[np.nan], low[:-1]]) if len(low) > 1 else np.full_like(low, np.nan)
     prev_close = np.concatenate([[np.nan], close[:-1]]) if len(close) > 1 else np.full_like(close, np.nan)
@@ -57,19 +53,22 @@ def generate_signals(prices):
     # Volume average (20-period) for spike detection
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Pre-compute daily EMA50 alignment
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(1, n):  # Start from 1 to have previous bar data
-        # Get aligned values for current 4h bar
+    for i in range(1, n):
+        # Get values for current bar
         r1_val = r1[i]
         s1_val = s1[i]
-        ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)[i]
+        ema50_val = ema50_aligned[i]
         vol_avg_val = vol_avg_20[i]
         
         # Skip if any required data is NaN
         if (np.isnan(r1_val) or np.isnan(s1_val) or 
-            np.isnan(ema50_aligned) or np.isnan(vol_avg_val)):
+            np.isnan(ema50_val) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,13 +79,13 @@ def generate_signals(prices):
         if position == 0:
             # LONG: Price breaks above R1 + daily uptrend + volume spike
             if (close[i] > r1_val and 
-                close[i] > ema50_aligned and 
+                close[i] > ema50_val and 
                 volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
             # SHORT: Price breaks below S1 + daily downtrend + volume spike
             elif (close[i] < s1_val and 
-                  close[i] < ema50_aligned and 
+                  close[i] < ema50_val and 
                   volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
@@ -94,14 +93,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # EXIT LONG: Price re-enters below R1 or trend turns down
-            if (close[i] < r1_val or close[i] < ema50_aligned):
+            if (close[i] < r1_val or close[i] < ema50_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Price re-enters above S1 or trend turns up
-            if (close[i] > s1_val or close[i] > ema50_aligned):
+            if (close[i] > s1_val or close[i] > ema50_val):
                 signals[i] = 0.0
                 position = 0
             else:
