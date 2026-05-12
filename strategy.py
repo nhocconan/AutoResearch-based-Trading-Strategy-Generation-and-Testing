@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_LiquidityVoid_RSI_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,31 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla pivot levels and trend
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    # Daily data for liquidity void detection and RSI
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate weekly Camarilla pivot levels (R1, S1)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    r1_1w = pivot_1w + (range_1w * 1.1 / 12)
-    s1_1w = pivot_1w - (range_1w * 1.1 / 12)
+    # RSI(14) on daily
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
     
-    # Weekly EMA(34) for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Daily body size (close - open) to detect momentum direction
+    open_1d = df_1d['open'].values
+    body_size = close_1d - open_1d
+    # Bullish body: positive and large; Bearish body: negative and large
+    bullish_body = body_size > 0
+    bearish_body = body_size < 0
     
-    # Weekly volume spike: current volume > 1.5x 20-period average
-    vol_avg_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1w = volume_1w > (1.5 * vol_avg_1w)
+    # Liquidity void detection: gaps between daily candles
+    # Bullish void: today's low > yesterday's high (gap up)
+    # Bearish void: today's high < yesterday's low (gap down)
+    bullish_void = low_1d > np.concatenate([[high_1d[0]], high_1d[:-1]])
+    bearish_void = high_1d < np.concatenate([[low_1d[0]], low_1d[:-1]])
     
-    # Align weekly indicators to daily
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
+    # Align all to 6h
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    bullish_void_aligned = align_htf_to_ltf(prices, df_1d, bullish_void.astype(float))
+    bearish_void_aligned = align_htf_to_ltf(prices, df_1d, bearish_void.astype(float))
+    bullish_body_aligned = align_htf_to_ltf(prices, df_1d, bullish_body.astype(float))
+    bearish_body_aligned = align_htf_to_ltf(prices, df_1d, bearish_body.astype(float))
+    
+    # Volume spike on 6h: current volume > 2.0x 20-period average (strict)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,8 +63,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_spike_1w_aligned[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(bullish_void_aligned[i]) or 
+            np.isnan(bearish_void_aligned[i]) or np.isnan(bullish_body_aligned[i]) or
+            np.isnan(bearish_body_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,28 +74,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above weekly EMA34 + weekly volume spike
-            if (close[i] > r1_1w_aligned[i] and 
-                close[i] > ema34_1w_aligned[i] and 
-                vol_spike_1w_aligned[i]):
+            # Long: bullish liquidity void + bullish daily body + RSI > 55 + volume spike
+            if (bullish_void_aligned[i] > 0.5 and 
+                bullish_body_aligned[i] > 0.5 and 
+                rsi_1d_aligned[i] > 55 and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below weekly EMA34 + weekly volume spike
-            elif (close[i] < s1_1w_aligned[i] and 
-                  close[i] < ema34_1w_aligned[i] and 
-                  vol_spike_1w_aligned[i]):
+            # Short: bearish liquidity void + bearish daily body + RSI < 45 + volume spike
+            elif (bearish_void_aligned[i] > 0.5 and 
+                  bearish_body_aligned[i] > 0.5 and 
+                  rsi_1d_aligned[i] < 45 and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S1
-            if close[i] < s1_1w_aligned[i]:
+            # Exit long: bearish void appears or RSI < 40
+            if bearish_void_aligned[i] > 0.5 or rsi_1d_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above R1
-            if close[i] > r1_1w_aligned[i]:
+            # Exit short: bullish void appears or RSI > 60
+            if bullish_void_aligned[i] > 0.5 or rsi_1d_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
