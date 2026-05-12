@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_WeeklyPivot_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Keltner_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,30 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Pivot Points ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot: P = (H + L + C)/3
-    pivot = (high_1w + low_1w + close_1w) / 3
-    # Weekly R1 = 2*P - L, S1 = 2*P - H
-    weekly_r1 = 2 * pivot - low_1w
-    weekly_s1 = 2 * pivot - high_1w
-    
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
-    # === Weekly EMA34 Trend Filter ===
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # === Daily Volume Spike Filter ===
+    # === 1d ATR for Keltner channels ===
     df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # True Range for ATR
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 20-period EMA of close
+    ema20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Channels (20, 2)
+    keltner_upper = ema20 + 2 * atr
+    keltner_lower = ema20 - 2 * atr
+    
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower)
+    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
+    
+    # === 1d Volume spike filter ===
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (2.0 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
@@ -50,9 +55,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or
-            np.isnan(ema34_1w_aligned[i]) or
+        if (np.isnan(keltner_upper_aligned[i]) or 
+            np.isnan(keltner_lower_aligned[i]) or
+            np.isnan(ema20_aligned[i]) or
             np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,28 +67,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above weekly R1 + above weekly EMA34 + volume spike
-            if (close[i] > weekly_r1_aligned[i] and
-                close[i] > ema34_1w_aligned[i] and
+            # Long: Close above Keltner upper + volume spike
+            if (close[i] > keltner_upper_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below weekly S1 + below weekly EMA34 + volume spike
-            elif (close[i] < weekly_s1_aligned[i] and
-                  close[i] < ema34_1w_aligned[i] and
+            # Short: Close below Keltner lower + volume spike
+            elif (close[i] < keltner_lower_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below weekly S1 or below weekly EMA34
-            if close[i] < weekly_s1_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit long: Close below EMA20
+            if close[i] < ema20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above weekly R1 or above weekly EMA34
-            if close[i] > weekly_r1_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit short: Close above EMA20
+            if close[i] > ema20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
