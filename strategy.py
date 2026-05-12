@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_Volume_Confirmation
-Hypothesis: On 12h timeframe, KAMA (Kaufman Adaptive Moving Average) adapts to market noise, 
-providing a reliable trend signal. Long when price > KAMA with volume > 1.5x 20-period average, 
-short when price < KAMA with volume surge. Uses 1d Bollinger Band width < 50th percentile to 
-filter choppy regimes, ensuring trades occur in trending markets. Targets 12-37 trades/year 
-(50-150 total over 4 years) with low turnover to minimize fee flood. Works in bull via 
-momentum continuation and bear via mean-reversion at extremes with trend filter.
+6h_KeltnerChannel_RSI_Filter
+Hypothesis: On 6h timeframe, price reversion to the mean occurs when price touches the Keltner Channel (KC) bands with RSI showing exhaustion. 
+We use 20-period EMA as KC middle, ATR(10) for bands, and RSI(14) to confirm overbought/oversold conditions. 
+Trend filter from 12h EMA50 ensures we only trade in direction of higher timeframe trend to avoid counter-trend whipsaws. 
+Volume confirmation (>1.5x 20-period average) increases reliability of reversals. 
+Designed for low turnover (12-37 trades/year) to minimize fee drag in both bull and bear markets.
 """
 
-name = "12h_KAMA_Trend_With_Volume_Confirmation"
-timeframe = "12h"
+name = "6h_KeltnerChannel_RSI_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -27,44 +26,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data (call once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Get 12h data for trend filter (call once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
 
-    # Calculate 1d KAMA for trend
-    def calculate_kama(close, length=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
-        er = np.where(volatility != 0, change / volatility, 0)
-        # Smoothing constant
-        sc = np.power(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1), 2)
-        # KAMA
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
 
-    kama_1d = calculate_kama(close_1d, length=10, fast=2, slow=30)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Calculate Keltner Channel components on 6h
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    kc_upper = ema20 + 2 * atr10
+    kc_lower = ema20 - 2 * atr10
 
-    # Calculate 1d Bollinger Band width (20, 2) for squeeze filter
-    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma20_1d + 2 * std20_1d
-    lower_bb_1d = sma20_1d - 2 * std20_1d
-    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma20_1d
-    # Percentile rank of bb_width over lookback
-    bb_width_rank = pd.Series(bb_width_1d).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
-    bb_width_rank_aligned = align_htf_to_ltf(prices, df_1d, bb_width_rank)
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    # Prepend NaN for first element
+    rsi = np.concatenate([[np.nan], rsi])
 
     # Volume confirmation: 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,23 +64,17 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(60, n):
-        # Get aligned values for current 12h bar
-        kama = kama_1d_aligned[i]
-        bb_rank = bb_width_rank_aligned[i]
+    for i in range(50, n):
+        # Get aligned values for current 6h bar
+        ema50 = ema50_12h_aligned[i]
+        kc_up = kc_upper[i]
+        kc_low = kc_lower[i]
+        rsi_val = rsi[i]
         vol_avg_val = vol_avg_20[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(kama) or np.isnan(bb_rank) or np.isnan(vol_avg_val)):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Squeeze filter: only trade when BB width is in lower 50% (contraction)
-        if bb_rank > 0.5:
+        if (np.isnan(ema50) or np.isnan(kc_up) or np.isnan(kc_low) or 
+            np.isnan(rsi_val) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -97,26 +83,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above KAMA + volume surge
-            if (close[i] > kama and volume[i] > vol_avg_val * 1.5):
+            # LONG: Price at or below KC lower + RSI oversold (<30) + price above 12h EMA50 + volume surge
+            if (close[i] <= kc_low and 
+                rsi_val < 30 and 
+                close[i] > ema50 and 
+                volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA + volume surge
-            elif (close[i] < kama and volume[i] > vol_avg_val * 1.5):
+            # SHORT: Price at or above KC upper + RSI overbought (>70) + price below 12h EMA50 + volume surge
+            elif (close[i] >= kc_up and 
+                  rsi_val > 70 and 
+                  close[i] < ema50 and 
+                  volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price below KAMA
-            if close[i] < kama:
+            # EXIT LONG: Price crosses back above KC middle or RSI > 50
+            if (close[i] >= ema20 or rsi_val > 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above KAMA
-            if close[i] > kama:
+            # EXIT SHORT: Price crosses back below KC middle or RSI < 50
+            if (close[i] <= ema20 or rsi_val < 50):
                 signals[i] = 0.0
                 position = 0
             else:
