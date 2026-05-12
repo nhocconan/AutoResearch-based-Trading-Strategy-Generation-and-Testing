@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_RSI_Trend_Range_Adaptive"
-timeframe = "6h"
+name = "4h_RSI_Overbought_Oversold_With_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,51 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter and chop regime
-    df_1d = get_htf_data(prices, '1d')
+    # RSI(14) with proper Wilder smoothing
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    # Daily EMA(50) for trend filter
+    # Wilder smoothing: alpha = 1/period
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:14] = np.nan  # Not enough data
+    
+    # Load 1d data for trend filter (EMA 50)
+    df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Daily ATR(14) for chop regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    tr1 = np.maximum(high_1d - low_1d, 
-                     np.absolute(high_1d - np.roll(close_1d_arr, 1)),
-                     np.absolute(low_1d - np.roll(close_1d_arr, 1)))
-    tr1[0] = high_1d[0] - low_1d[0]
-    atr14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
-    
-    # Daily range for chop calculation
-    daily_range = high_1d - low_1d
-    daily_range_aligned = align_htf_to_ltf(prices, df_1d, daily_range)
-    
-    # Chop ratio: ATR(14) / daily range (lower = trending, higher = ranging)
-    chop_ratio = atr14_1d_aligned / daily_range_aligned
-    
-    # 6h RSI(14) for entry signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(chop_ratio[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,57 +60,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Regime detection: chop_ratio < 0.6 = trending, chop_ratio >= 0.6 = ranging
-        is_trending = chop_ratio[i] < 0.6
-        
         if position == 0:
-            if is_trending:
-                # Trend following: RSI pullback in trend direction
-                if rsi[i] < 40 and close[i] > ema50_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi[i] > 60 and close[i] < ema50_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-            else:
-                # Mean reversion: RSI extremes
-                if rsi[i] < 30:
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi[i] > 70:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: RSI oversold (<30) + price above 1d EMA50 + volume spike
+            if (rsi[i] < 30 and 
+                close[i] > ema50_1d_aligned[i] and 
+                vol_spike[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: RSI overbought (>70) + price below 1d EMA50 + volume spike
+            elif (rsi[i] > 70 and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  vol_spike[i]):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit conditions
-            if is_trending:
-                # Exit trend: RSI overbought or price below EMA
-                if rsi[i] > 70 or close[i] < ema50_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit long: RSI crosses above 50 (momentum shift)
+            if rsi[i] > 50:
+                signals[i] = 0.0
+                position = 0
             else:
-                # Exit mean reversion: RSI returns to neutral
-                if rsi[i] > 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         elif position == -1:
-            # Exit conditions
-            if is_trending:
-                # Exit trend: RSI oversold or price above EMA
-                if rsi[i] < 30 or close[i] > ema50_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit short: RSI crosses below 50 (momentum shift)
+            if rsi[i] < 50:
+                signals[i] = 0.0
+                position = 0
             else:
-                # Exit mean reversion: RSI returns to neutral
-                if rsi[i] < 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
