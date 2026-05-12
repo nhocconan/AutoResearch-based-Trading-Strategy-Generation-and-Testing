@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_Pivot_Breakout_12hTrend_Volume
-# Hypothesis: Trade 4h breakouts of daily Camarilla pivot levels (R1/S1) aligned with 12h EMA trend and volume confirmation.
-# Daily Camarilla provides intraday support/resistance levels; 12h EMA filters higher timeframe trend; volume confirms breakout momentum.
-# Designed for low frequency (20-50 trades/year) to survive both bull and bear markets by following higher timeframe structure.
+# 1h_Camarilla_Pivot_Breakout_4hTrend_Volume
+# Hypothesis: Trade 1h breakouts of daily Camarilla pivot levels (R1/S1) aligned with 4h EMA50 trend and volume confirmation.
+# Daily Camarilla provides intraday support/resistance levels; 4h EMA filters higher timeframe trend; volume confirms breakout momentum.
+# Designed for low frequency (15-37 trades/year) to survive both bull and bear markets by following higher timeframe structure.
 
-name = "4h_Camarilla_Pivot_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_Pivot_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,14 +22,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 12h EMA50 for trend filter ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # === 4h EMA50 for trend filter ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # === Daily Camarilla pivot levels (R1, S1) ===
     # Calculate from daily OHLC (previous completed day)
@@ -55,7 +55,7 @@ def generate_signals(prices):
     r1 = pivot + (range_ * 1.1 / 12)
     s1 = pivot - (range_ * 1.1 / 12)
     
-    # Align daily levels to 4h timeframe
+    # Align daily levels to 1h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -69,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -78,9 +78,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        trend_up = close[i] > ema_50_12h_aligned[i]
-        trend_down = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price above/below 4h EMA50
+        trend_up = close[i] > ema_50_4h_aligned[i]
+        trend_down = close[i] < ema_50_4h_aligned[i]
         
         # Breakout conditions
         breakout_up = close[i] > r1_aligned[i]
@@ -92,11 +92,11 @@ def generate_signals(prices):
         if position == 0:
             # LONG: breakout above R1, uptrend, volume confirmation
             if breakout_up and trend_up and vol_ok:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # SHORT: breakout below S1, downtrend, volume confirmation
             elif breakout_down and trend_down and vol_ok:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # EXIT LONG: breakdown below S1 or trend reversal
@@ -104,13 +104,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # EXIT SHORT: breakout above R1 or trend reversal
             if breakout_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
