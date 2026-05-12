@@ -1,14 +1,10 @@
-#!/usr/bin/env python3
-"""
-12h_Camarilla_R3S3_Breakout_1wTrend_1dVolumeSpike
-Hypothesis: 12h timeframe reduces trade frequency while maintaining signal quality. 
-Long when price breaks above weekly Camarilla R3 + weekly uptrend + daily volume spike.
-Short when price breaks below weekly Camarilla S3 + weekly downtrend + daily volume spike.
-Weekly trend filter provides robustness across market regimes, reducing whipsaws.
-"""
+# 1d_AroonOscillator_WeeklyTrend_VolumeSpike
+# Hypothesis: Aroon Oscillator (25) identifies strong trends (|Aroon|>70) with weekly trend filter (price > weekly EMA20) and volume confirmation (>2x 20-period average).
+# Works in bull markets (strong uptrends) and bear markets (strong downtrends). Uses daily timeframe with weekly trend filter to avoid counter-trend trades.
+# Target: 20-60 trades over 4 years (5-15/year) to minimize fee drag.
 
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_1dVolumeSpike"
-timeframe = "12h"
+name = "1d_AroonOscillator_WeeklyTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,40 +21,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend and Camarilla levels (call once before loop)
+    # Get weekly data for trend filter (call once before loop)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-
     # Weekly EMA20 for trend filter
     ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
 
-    # Weekly Camarilla pivot levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_R3_1w = close_1w + (high_1w - low_1w) * 1.1 / 4
-    camarilla_S3_1w = close_1w - (high_1w - low_1w) * 1.1 / 4
+    # Aroon Oscillator (25 period) - measures trend strength
+    period = 25
+    aroon_up = np.full(n, np.nan)
+    aroon_down = np.full(n, np.nan)
+    
+    for i in range(period - 1, n):
+        # Find highest high and lowest low in the lookback period
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
+        
+        # Find periods since highest high and lowest low
+        if highest_high == high[i]:
+            periods_since_high = 0
+        else:
+            # Look backward from i-1 to find highest high
+            lookback_high = high[i - period + 1:i]
+            periods_since_high = period - 1 - np.argmax(lookback_high[::-1]) if len(lookback_high) > 0 else period - 1
+            
+        if lowest_low == low[i]:
+            periods_since_low = 0
+        else:
+            # Look backward from i-1 to find lowest low
+            lookback_low = low[i - period + 1:i]
+            periods_since_low = period - 1 - np.argmin(lookback_low[::-1]) if len(lookback_low) > 0 else period - 1
+            
+        aroon_up[i] = ((period - periods_since_high) / period) * 100
+        aroon_down[i] = ((period - periods_since_low) / period) * 100
+    
+    aroon_osc = aroon_up - aroon_down  # Range: -100 to +100
 
-    # Align weekly Camarilla levels to 12h timeframe
-    camarilla_R3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_R3_1w)
-    camarilla_S3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_S3_1w)
-
-    # Get daily data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Volume confirmation: volume > 2x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        if np.isnan(camarilla_R3_1w_aligned[i]) or np.isnan(camarilla_S3_1w_aligned[i]) or \
-           np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]):
+    for i in range(25, n):
+        if np.isnan(aroon_osc[i]) or np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,26 +76,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above weekly Camarilla R3 + weekly uptrend + daily volume spike
-            if close[i] > camarilla_R3_1w_aligned[i] and close[i] > ema20_1w_aligned[i] and volume[i] > vol_avg_20_1d_aligned[i] * 2:
+            # LONG: Strong uptrend (Aroon > 70) + price above weekly EMA20 + volume spike
+            if aroon_osc[i] > 70 and close[i] > ema20_1w_aligned[i] and volume[i] > vol_avg_20[i] * 2:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below weekly Camarilla S3 + weekly downtrend + daily volume spike
-            elif close[i] < camarilla_S3_1w_aligned[i] and close[i] < ema20_1w_aligned[i] and volume[i] > vol_avg_20_1d_aligned[i] * 2:
+            # SHORT: Strong downtrend (Aroon < -70) + price below weekly EMA20 + volume spike
+            elif aroon_osc[i] < -70 and close[i] < ema20_1w_aligned[i] and volume[i] > vol_avg_20[i] * 2:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below weekly Camarilla S3 or weekly trend turns down
-            if close[i] < camarilla_S3_1w_aligned[i] or close[i] < ema20_1w_aligned[i]:
+            # EXIT LONG: Trend weakens (Aroon < 30) or price breaks below weekly EMA20
+            if aroon_osc[i] < 30 or close[i] < ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses above weekly Camarilla R3 or weekly trend turns up
-            if close[i] > camarilla_R3_1w_aligned[i] or close[i] > ema20_1w_aligned[i]:
+            # EXIT SHORT: Trend weakens (Aroon > -30) or price breaks above weekly EMA20
+            if aroon_osc[i] > -30 or close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
