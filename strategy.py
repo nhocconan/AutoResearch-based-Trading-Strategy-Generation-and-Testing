@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_WeeklyPivot_Breakout_VolumeTrend
-Hypothesis: 6-hour breakouts from weekly pivot levels (calculated from 1d data) with 12h trend filter and volume confirmation.
-Targets 6h timeframe to reduce trade frequency (target: 15-35 trades/year) while using proven weekly pivot structure.
-Only takes long when price breaks above weekly R1 with volume spike and 12h uptrend, short when breaks below weekly S1 with volume spike and 12h downtrend.
-Uses weekly pivots for stronger support/resistance that works in both bull and bear markets via trend filter and volume confirmation.
+4h_1d_CCI_BullBear_Divergence_Trend
+Hypothesis: Use CCI(20) on daily timeframe to identify bullish/bearish divergences.
+In bull markets: Buy when CCI forms higher low while price forms lower low (bullish divergence) with volume confirmation.
+In bear markets: Sell when CCI forms lower high while price forms higher high (bearish divergence) with volume confirmation.
+Uses 4h timeframe for execution with 1d CCI divergence signals, reducing trade frequency while capturing major reversals.
+Works in both bull and bear markets by adapting to trend context via price action relative to 200-period SMA.
 """
 
-name = "6h_12h_1d_WeeklyPivot_Breakout_VolumeTrend"
-timeframe = "6h"
+name = "4h_1d_CCI_BullBear_Divergence_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,50 +26,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >2.0x 30-period average (on 6h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Volume confirmation: >1.8x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.8 * vol_ma)
     
-    # 1d data for weekly pivot calculation
+    # Get daily data for CCI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from previous week's data
-    # Weekly high/low/close from previous 5 trading days
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values
-    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(1).values
+    # Calculate CCI(20) on daily timeframe
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    tp_ma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
+    # Avoid division by zero
+    tp_std = np.where(tp_std == 0, 1e-10, tp_std)
+    cci = (typical_price - tp_ma) / (0.015 * tp_std)
     
-    # Weekly pivot point and support/resistance levels
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
+    # Identify bullish and bearish divergences
+    # Bullish divergence: price makes lower low, CCI makes higher low
+    # Bearish divergence: price makes higher high, CCI makes lower high
     
-    # Align weekly pivot levels to 6h timeframe (wait for weekly bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Find price swing points (simplified: local minima/maxima over 3 periods)
+    price_lows = np.zeros(len(df_1d), dtype=bool)
+    price_highs = np.zeros(len(df_1d), dtype=bool)
+    cci_lows = np.zeros(len(df_1d), dtype=bool)
+    cci_highs = np.zeros(len(df_1d), dtype=bool)
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    for i in range(2, len(df_1d) - 2):
+        # Price low: lower than neighbors
+        if (df_1d['low'].iloc[i] < df_1d['low'].iloc[i-1] and 
+            df_1d['low'].iloc[i] < df_1d['low'].iloc[i-2] and
+            df_1d['low'].iloc[i] < df_1d['low'].iloc[i+1] and
+            df_1d['low'].iloc[i] < df_1d['low'].iloc[i+2]):
+            price_lows[i] = True
+        # Price high: higher than neighbors
+        if (df_1d['high'].iloc[i] > df_1d['high'].iloc[i-1] and 
+            df_1d['high'].iloc[i] > df_1d['high'].iloc[i-2] and
+            df_1d['high'].iloc[i] > df_1d['high'].iloc[i+1] and
+            df_1d['high'].iloc[i] > df_1d['high'].iloc[i+2]):
+            price_highs[i] = True
+        # CCI low: lower than neighbors
+        if (cci.iloc[i] < cci.iloc[i-1] and 
+            cci.iloc[i] < cci.iloc[i-2] and
+            cci.iloc[i] < cci.iloc[i+1] and
+            cci.iloc[i] < cci.iloc[i+2]):
+            cci_lows[i] = True
+        # CCI high: higher than neighbors
+        if (cci.iloc[i] > cci.iloc[i-1] and 
+            cci.iloc[i] > cci.iloc[i-2] and
+            cci.iloc[i] > cci.iloc[i+1] and
+            cci.iloc[i] > cci.iloc[i+2]):
+            cci_highs[i] = True
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Initialize divergence signals
+    bullish_div = np.zeros(len(df_1d), dtype=bool)
+    bearish_div = np.zeros(len(df_1d), dtype=bool)
+    
+    # Track recent swing points for divergence detection
+    last_price_low = -1
+    last_price_high = -1
+    last_cci_low = -1
+    last_cci_high = -1
+    
+    for i in range(len(df_1d)):
+        if price_lows[i]:
+            if last_price_low != -1:
+                # Check if current price low is lower than previous price low
+                if df_1d['low'].iloc[i] < df_1d['low'].iloc[last_price_low]:
+                    # Check if CCI made a higher low
+                    if last_cci_low != -1 and cci.iloc[i] > cci.iloc[last_cci_low]:
+                        bullish_div[i] = True
+            last_price_low = i
+            if cci_lows[i]:
+                last_cci_low = i
+        
+        if price_highs[i]:
+            if last_price_high != -1:
+                # Check if current price high is higher than previous price high
+                if df_1d['high'].iloc[i] > df_1d['high'].iloc[last_price_high]:
+                    # Check if CCI made a lower high
+                    if last_cci_high != -1 and cci.iloc[i] < cci.iloc[last_cci_high]:
+                        bearish_div[i] = True
+            last_price_high = i
+            if cci_highs[i]:
+                last_cci_high = i
+    
+    # Align divergence signals to 4h timeframe
+    bullish_div_aligned = align_htf_to_ltf(prices, df_1d, bullish_div.astype(float))
+    bearish_div_aligned = align_htf_to_ltf(prices, df_1d, bearish_div.astype(float))
+    
+    # Trend filter: price relative to 200-period SMA on 4h
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i])):
+    for i in range(100, n):
+        if np.isnan(sma_200[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,32 +132,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + volume spike + price above 12h EMA50
-            if (close[i] > r1_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > ema_50_12h_aligned[i]):
+            # LONG: Bullish divergence on daily + price above 200 SMA (bullish context) + volume confirmation
+            if (bullish_div_aligned[i] > 0.5 and 
+                close[i] > sma_200[i] and 
+                volume_confirmed[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + volume spike + price below 12h EMA50
-            elif (close[i] < s1_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema_50_12h_aligned[i]):
+            # SHORT: Bearish divergence on daily + price below 200 SMA (bearish context) + volume confirmation
+            elif (bearish_div_aligned[i] > 0.5 and 
+                  close[i] < sma_200[i] and 
+                  volume_confirmed[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters between S1 and R1 OR closes below 12h EMA50
-            if (close[i] > s1_aligned[i] and close[i] < r1_aligned[i]) or \
-               close[i] < ema_50_12h_aligned[i]:
+            # EXIT LONG: Bearish divergence appears OR price drops below 200 SMA
+            if (bearish_div_aligned[i] > 0.5) or (close[i] < sma_200[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters between S1 and R1 OR closes above 12h EMA50
-            if (close[i] > s1_aligned[i] and close[i] < r1_aligned[i]) or \
-               close[i] > ema_50_12h_aligned[i]:
+            # EXIT SHORT: Bullish divergence appears OR price rises above 200 SMA
+            if (bullish_div_aligned[i] > 0.5) or (close[i] > sma_200[i]):
                 signals[i] = 0.0
                 position = 0
             else:
