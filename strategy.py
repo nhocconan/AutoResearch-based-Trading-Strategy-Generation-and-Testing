@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_Trend_Filter
-# Hypothesis: Use Camarilla pivot levels (R1/S1) from 1d combined with 1w EMA trend filter and volume confirmation (>2x 20-period average).
-# Enter long when price breaks above R1 with bullish trend and volume spike; short when price breaks below S1 with bearish trend and volume spike.
-# Exit when price returns to the 1d VWAP level or on trend reversal. Designed for 20-50 trades/year to minimize fee drag and work in both bull/bear markets via trend filter.
+# 4h_ADX_Strength_Breakout
+# Hypothesis: Use ADX to filter trending markets (ADX > 25) and breakouts from 20-period Donchian channels for entry.
+# In trending markets, breakouts are more likely to continue; in ranging markets (ADX < 20), avoid false breakouts.
+# Volume confirmation (>1.5x 20-period average) ensures institutional participation.
+# Designed for low trade frequency to minimize fee drag and work in both bull/bear markets via ADX trend filter.
 
-name = "4h_Camarilla_R1_S1_Breakout_Trend_Filter"
+name = "4h_ADX_Strength_Breakout"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,39 +23,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate ADX (14-period) for trend strength filter
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[:1] = 0  # First value has no previous close
 
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
 
-    # Calculate Camarilla pivot levels for 1d
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    rang = high_1d - low_1d
-    r1_1d = close_1d + rang * 1.1 / 12
-    s1_1d = close_1d - rang * 1.1 / 12
-    # VWAP-like level: (H+L+C)/3
-    vwap_1d = (high_1d + low_1d + close_1d) / 3
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])  # First value is simple average
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
 
-    # Align 1d levels to 4h
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    period = 14
+    tr_sum = wilder_smooth(tr, period)
+    plus_dm_sum = wilder_smooth(plus_dm, period)
+    minus_dm_sum = wilder_smooth(minus_dm, period)
 
-    # 1w EMA20 for trend filter
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Avoid division by zero
+    tr_sum_safe = np.where(tr_sum == 0, 1e-10, tr_sum)
+    plus_di = 100 * plus_dm_sum / tr_sum_safe
+    minus_di = 100 * minus_dm_sum / tr_sum_safe
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = wilder_smooth(dx, period)
 
-    # Volume confirmation: volume > 2x 20-period average
+    # Donchian channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
@@ -62,9 +69,8 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(vwap_1d_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(adx[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,32 +79,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + price > 1w EMA20 (bullish trend) + volume spike
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > ema20_1w_aligned[i] and
-                volume[i] > vol_avg_20[i] * 2.0):
+            # LONG: ADX > 25 (trending) + price breaks above upper Donchian + volume surge
+            if (adx[i] > 25 and 
+                close[i] > highest_high[i] and
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + price < 1w EMA20 (bearish trend) + volume spike
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < ema20_1w_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 2.0):
+            # SHORT: ADX > 25 (trending) + price breaks below lower Donchian + volume surge
+            elif (adx[i] > 25 and 
+                  close[i] < lowest_low[i] and
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to VWAP or trend turns bearish
-            if (close[i] < vwap_1d_aligned[i] or 
-                close[i] < ema20_1w_aligned[i]):
+            # EXIT LONG: Price re-enters Donchian channel (below midpoint) OR ADX weakens (< 20)
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] < midpoint or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to VWAP or trend turns bullish
-            if (close[i] > vwap_1d_aligned[i] or 
-                close[i] > ema20_1w_aligned[i]):
+            # EXIT SHORT: Price re-enters Donchian channel (above midpoint) OR ADX weakens (< 20)
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] > midpoint or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
