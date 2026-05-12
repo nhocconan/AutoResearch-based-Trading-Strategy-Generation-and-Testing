@@ -1,10 +1,10 @@
-# 1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
-# Hypothesis: Price breaking above/below weekly Camarilla R3/S3 levels with 1-week trend filter and volume confirmation
-# captures strong multi-week moves while avoiding false breakouts. Weekly trend filter ensures alignment with higher timeframe momentum.
-# Volume spike (2x average) confirms institutional interest. Works in bull/bear by following 1-week trend direction.
-# Target: 15-25 trades/year per symbol (<100 total over 4 years) to minimize fee drag.
+#!/usr/bin/env python3
+"""
+1d_VWAP_Range_Reversal_1wTrend
+Hypothesis: Price reverting to 1w VWAP from daily extremes works in both bull and bear markets. Uses 1w VWAP as dynamic mean, with 1d high/low as reversal zones. Trend filter ensures we only take reversals in direction of weekly trend, avoiding counter-trend whipsaws. Low-frequency signals reduce fee drag.
+"""
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+name = "1d_VWAP_Range_Reversal_1wTrend"
 timeframe = "1d"
 leverage = 1.0
 
@@ -22,44 +22,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data ONCE before loop
+    # Get 1w data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
 
-    # Calculate weekly Camarilla levels (R3/S3)
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1w VWAP
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    vwap_numerator = (typical_price * df_1w['volume']).cumsum()
+    vwap_denominator = df_1w['volume'].cumsum()
+    vwap = vwap_numerator / vwap_denominator
+    vwap = vwap.replace([np.inf, -np.inf], np.nan).ffill().bfill().values
 
-    # Shift by 1 to use previous week's data
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w[0] = np.nan
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
+    # Align 1w VWAP to daily
+    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
 
-    # Weekly Camarilla R3 and S3
-    camarilla_upper_1w = prev_close_1w + (prev_high_1w - prev_low_1w) * 1.1 / 4
-    camarilla_lower_1w = prev_close_1w - (prev_high_1w - prev_low_1w) * 1.1 / 4
+    # 1d high/low for reversal zones
+    daily_high = high
+    daily_low = low
 
-    # Align weekly Camarilla levels to daily timeframe
-    camarilla_upper_aligned = align_htf_to_ltf(prices, df_1w, camarilla_upper_1w)
-    camarilla_lower_aligned = align_htf_to_ltf(prices, df_1w, camarilla_lower_1w)
-
-    # Weekly EMA34 trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-
-    # Volume spike: >2.0x 20-day average (daily)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # 1w trend: EMA50
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):  # Start after EMA34 warmup
-        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(50, n):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +56,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above weekly Camarilla R3 + weekly uptrend + volume spike
-            if (close[i] > camarilla_upper_aligned[i] and 
-                close[i] > ema_34_1w_aligned[i] and 
-                volume_spike[i]):
+            # LONG: Price at daily low + below VWAP + weekly uptrend
+            if (low[i] <= daily_low[i] and 
+                close[i] < vwap_aligned[i] and 
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly Camarilla S3 + weekly downtrend + volume spike
-            elif (close[i] < camarilla_lower_aligned[i] and 
-                  close[i] < ema_34_1w_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: Price at daily high + above VWAP + weekly downtrend
+            elif (high[i] >= daily_high[i] and 
+                  close[i] > vwap_aligned[i] and 
+                  close[i] < ema_50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below weekly Camarilla S3 (reversal level)
-            if close[i] < camarilla_lower_aligned[i]:
+            # EXIT LONG: Price crosses above VWAP
+            if close[i] > vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above weekly Camarilla R3 (reversal level)
-            if close[i] > camarilla_upper_aligned[i]:
+            # EXIT SHORT: Price crosses below VWAP
+            if close[i] < vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
