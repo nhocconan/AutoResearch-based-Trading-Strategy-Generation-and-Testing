@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_WeeklyKeltnerBreakout_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,59 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla levels (based on previous day)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    # Camarilla calculation: based on previous day's range
-    range_1d = high_1d - low_1d
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # first value
-    high_prev = np.roll(high_1d, 1)
-    high_prev[0] = high_1d[0]
-    low_prev = np.roll(low_1d, 1)
-    low_prev[0] = low_1d[0]
-    range_prev = high_prev - low_prev
-    
-    # Camarilla levels: based on previous day
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    r1 = close_prev + (range_prev * 1.1 / 12)
-    s1 = close_prev - (range_prev * 1.1 / 12)
-    r2 = close_prev + (range_prev * 1.1 / 6)
-    s2 = close_prev - (range_prev * 1.1 / 6)
-    r3 = close_prev + (range_prev * 1.1 / 4)
-    s3 = close_prev - (range_prev * 1.1 / 4)
-    r4 = close_prev + (range_prev * 1.1 / 2)
-    s4 = close_prev - (range_prev * 1.1 / 2)
-    
-    # Weekly trend filter (1w EMA34)
+    # Weekly ATR for Keltner channels (20-period EMA)
     df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_trend_up = close_1w > ema34_1w
-    weekly_trend_down = close_1w < ema34_1w
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
+    
+    # Calculate True Range for weekly
+    tr1 = high_w - low_w
+    tr2 = np.abs(high_w - np.concatenate([[close_w[0]], close_w[:-1]]))
+    tr3 = np.abs(low_w - np.concatenate([[close_w[0]], close_w[:-1]]))
+    tr_w = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_w = pd.Series(tr_w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Weekly EMA (middle of Keltner)
+    ema_w = pd.Series(close_w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Weekly Keltner channels
+    upper_w = ema_w + 2.0 * atr_w
+    lower_w = ema_w - 2.0 * atr_w
+    
+    # Align to daily
+    ema_w_aligned = align_htf_to_ltf(prices, df_1w, ema_w)
+    upper_w_aligned = align_htf_to_ltf(prices, df_1w, upper_w)
+    lower_w_aligned = align_htf_to_ltf(prices, df_1w, lower_w)
+    
+    # Weekly trend (price above/below EMA)
+    weekly_trend_up = close_w > ema_w
+    weekly_trend_down = close_w < ema_w
     weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
     weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
     
-    # Align Camarilla levels (based on previous day, so align as-is)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Volume filter: 4h volume > 20-period average
+    # Daily volume filter: volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # ensure weekly EMA has enough data
+    start_idx = 20  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(weekly_trend_up_aligned[i]) or np.isnan(weekly_trend_down_aligned[i]) or np.isnan(volume_filter[i]):
+        if np.isnan(ema_w_aligned[i]) or np.isnan(upper_w_aligned[i]) or np.isnan(lower_w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,28 +67,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: weekly trend up + price breaks above R1 + volume filter
+            # Long: weekly uptrend + price breaks above upper Keltner + volume filter
             if (weekly_trend_up_aligned[i] and 
-                close[i] > r1_aligned[i] and 
-                volume_filter[i]):
+                close[i] > upper_w_aligned[i] and 
+                volume[i] > vol_ma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly trend down + price breaks below S1 + volume filter
+            # Short: weekly downtrend + price breaks below lower Keltner + volume filter
             elif (weekly_trend_down_aligned[i] and 
-                  close[i] < s1_aligned[i] and 
-                  volume_filter[i]):
+                  close[i] < lower_w_aligned[i] and 
+                  volume[i] > vol_ma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below S1 OR weekly trend changes to down
-            if close[i] < s1_aligned[i] or weekly_trend_down_aligned[i]:
+            # Exit long: price crosses below weekly EMA OR trend changes
+            if close[i] < ema_w_aligned[i] or not weekly_trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above R1 OR weekly trend changes to up
-            if close[i] > r1_aligned[i] or weekly_trend_up_aligned[i]:
+            # Exit short: price crosses above weekly EMA OR trend changes
+            if close[i] > ema_w_aligned[i] or not weekly_trend_down_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
