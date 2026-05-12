@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== Donchian(20) Breakout =====
-    donchian_high = np.zeros(n)
-    donchian_low = np.zeros(n)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # === 12h Camarilla R1/S1 levels (from prior 12h bar) ===
+    # Calculate from previous 12h bar's OHLC
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # ===== Daily Trend (HTF) =====
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + 0.115 * camarilla_range
+    s1 = prev_close - 0.115 * camarilla_range
+    
+    # === 1d Trend Filter (EMA34) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # ===== Volume Spike Filter (1d) =====
+    # === 1d Volume Spike Filter ===
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (1.8 * vol_avg_1d)
+    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
-    
-    # ===== Choppiness Regime Filter =====
-    # Chop > 61.8 = range (mean revert), Chop < 38.2 = trending (trend follow)
-    # We want trending for breakouts, so Chop < 38.2
-    atr_period = 14
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.inf], tr])
-    atr = np.zeros(n)
-    for i in range(atr_period, n):
-        atr[i] = np.mean(tr[i-atr_period+1:i+1])
-    
-    max_hh = np.zeros(n)
-    min_ll = np.zeros(n)
-    for i in range(atr_period, n):
-        max_hh[i] = np.max(high[i-atr_period+1:i+1])
-        min_ll[i] = np.min(low[i-atr_period+1:i+1])
-    
-    chop = np.zeros(n)
-    for i in range(atr_period, n):
-        if max_hh[i] > min_ll[i]:
-            chop[i] = 100 * np.log10(np.sum(tr[i-atr_period+1:i+1]) / np.log10(atr_period) / (max_hh[i] - min_ll[i]))
-        else:
-            chop[i] = 50  # neutral
-    
-    chop_filter = chop < 38.2  # trending regime
-    
-    # ===== Session Filter: 08-20 UTC =====
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 40  # Need enough data for EMA34 and previous bar
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i]) or
-            np.isnan(chop[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,32 +58,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high + daily uptrend + volume spike + trending regime
-            if (close[i] > donchian_high[i] and
+            # Long: Close breaks above R1 + above 1d EMA34 + volume spike
+            if (close[i] > r1[i] and
                 close[i] > ema34_1d_aligned[i] and
-                vol_spike_1d_aligned[i] > 0.5 and
-                chop_filter[i]):
+                vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + daily downtrend + volume spike + trending regime
-            elif (close[i] < donchian_low[i] and
+            # Short: Close breaks below S1 + below 1d EMA34 + volume spike
+            elif (close[i] < s1[i] and
                   close[i] < ema34_1d_aligned[i] and
-                  vol_spike_1d_aligned[i] > 0.5 and
-                  chop_filter[i]):
+                  vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price closes below Donchian median or trend changes
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
-            if close[i] < donchian_mid or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Close below S1 or trend reverses
+            if close[i] < s1[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price closes above Donchian median or trend changes
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
-            if close[i] > donchian_mid or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Close above R1 or trend reverses
+            if close[i] > r1[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
