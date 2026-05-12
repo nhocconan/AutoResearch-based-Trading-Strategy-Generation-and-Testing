@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 with price > daily EMA34 and volume spike (>2x 20-period MA).
-# Enter short when price breaks below Camarilla S1 with price < daily EMA34 and volume spike.
-# Exit when price crosses back below R1 (for longs) or above S1 (for shorts).
-# Uses daily timeframe for trend filter and weekly for volatility regime filter to avoid false breakouts in low volatility.
-# Targets 12-37 trades/year (50-150 total over 4 years) for low fee drag and works in both bull and bear markets by fading extreme daily levels with institutional levels.
+# 1d_RSI_2Period_MeanReversion_with_ADX_TrendFilter
+# Hypothesis: On 1d timeframe, enter long when 2-period RSI < 10 and price > 200-day EMA (bullish trend), 
+# enter short when 2-period RSI > 90 and price < 200-day EMA (bearish trend).
+# Use weekly ADX > 25 to ensure trending market (avoid chop). Exit when RSI crosses 50.
+# Targets 10-20 trades/year for low fee drift. Works in bull/bear by fading extremes only in trend.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_RSI_2Period_MeanReversion_with_ADX_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,78 +15,75 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day (using daily data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Daily 2-period RSI for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Wilder's smoothing (alpha = 1/period)
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(daily_high, 1)
-    prev_low = np.roll(daily_low, 1)
-    prev_close = np.roll(daily_close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Daily 200 EMA for trend filter
+    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Camarilla R1 and S1 levels
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 12
-    s1 = prev_close - camarilla_range * 1.1 / 12
-    
-    # Daily EMA34 for trend filter
-    daily_ema34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Weekly ATR for volatility regime filter (avoid low volatility breakouts)
+    # Weekly ADX for trend strength filter (avoid chop)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    wh = df_1w['high'].values
+    wl = df_1w['low'].values
+    wc = df_1w['close'].values
     
-    # True Range calculation for weekly ATR
-    tr1 = weekly_high - weekly_low
-    tr2 = np.abs(weekly_high - np.roll(weekly_close, 1))
-    tr3 = np.abs(weekly_low - np.roll(weekly_close, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    
+    # True Range
+    tr1 = wh - wl
+    tr2 = np.abs(wh - np.roll(wc, 1))
+    tr3 = np.abs(wl - np.roll(wc, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    weekly_atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: 20-period moving average on 12h data
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Directional Movement
+    up = wh - np.roll(wh, 1)
+    down = np.roll(wl, 1) - wl
+    up[0] = down[0] = np.nan
+    up = np.where((up > down) & (up > 0), up, 0)
+    down = np.where((down > up) & (down > 0), down, 0)
     
-    # Align all to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
-    weekly_atr_aligned = align_htf_to_ltf(prices, df_1w, weekly_atr)
+    # Smoothed DM and TR
+    tr_period = 14
+    atr = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    up_smooth = pd.Series(up).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    down_smooth = pd.Series(down).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * up_smooth / (atr + 1e-10)
+    minus_di = 100 * down_smooth / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # Align weekly ADX to daily
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 200  # Ensure EMA200 and indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(daily_ema34_aligned[i]) or np.isnan(weekly_atr_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema200[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -95,14 +91,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        daily_trend = daily_ema34_aligned[i]
-        vol_ma_val = vol_ma[i]
-        atr_val = weekly_atr_aligned[i]
+        rsi_val = rsi[i]
+        ema200_val = ema200[i]
+        adx_val = adx_aligned[i]
         
-        # Avoid trading in extremely low volatility (choppy) markets
-        if atr_val < 0.5 * np.nanmedian(weekly_atr_aligned[max(0, i-50):i+1]):
+        # Only trade in trending markets (ADX > 25)
+        if adx_val < 25:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -111,26 +105,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 with price > daily EMA34 and volume > 2x MA
-            if close[i] > r1_val and close[i] > daily_trend and volume[i] > vol_ma_val * 2.0:
+            # LONG: RSI < 10 (extreme oversold) and price > EMA200 (bullish trend)
+            if rsi_val < 10 and close[i] > ema200_val:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with price < daily EMA34 and volume > 2x MA
-            elif close[i] < s1_val and close[i] < daily_trend and volume[i] > vol_ma_val * 2.0:
+            # SHORT: RSI > 90 (extreme overbought) and price < EMA200 (bearish trend)
+            elif rsi_val > 90 and close[i] < ema200_val:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below R1 (failed breakout)
-            if close[i] < r1_val:
+            # EXIT LONG: RSI crosses above 50 (mean reversion complete)
+            if rsi_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above S1 (failed breakout)
-            if close[i] > s1_val:
+            # EXIT SHORT: RSI crosses below 50 (mean reversion complete)
+            if rsi_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
