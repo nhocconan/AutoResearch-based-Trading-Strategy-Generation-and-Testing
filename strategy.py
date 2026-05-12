@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Stochastic_14_3_3_Bollinger_20_2_Trend_1dEMA50
-# Hypothesis: Stochastic oscillator (14,3,3) identifies overbought/oversold conditions, 
-# Bollinger Bands (20,2) provide volatility context and dynamic support/resistance,
-# 1-day EMA50 establishes trend direction. Long when Stochastic crosses above 20 from below 
-# in uptrend near lower Bollinger Band; short when Stochastic crosses below 80 from above 
-# in downtrend near upper Bollinger Band. Designed for low-frequency, high-conviction trades 
-# in both bull and bear markets by combining mean reversion with trend filter.
+# 12h_MedianReversion_VolumeSpike
+# Hypothesis: Mean reversion at 12h extremes using median price vs SMA deviation, with volume spike confirmation and 1d trend filter.
+# Works in both bull/bear markets: in uptrend, buy dips below median; in downtrend, sell rallies above median.
+# Median is more robust to outliers than mean. Volume spike confirms institutional interest at extremes.
+# Trend filter ensures we trade with higher timeframe momentum to avoid counter-trend whipsaws.
+# Targets low trade frequency (<50/year) with high conviction entries.
 
-name = "6h_Stochastic_14_3_3_Bollinger_20_2_Trend_1dEMA50"
-timeframe = "6h"
+name = "12h_MedianReversion_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,50 +20,43 @@ def generate_signals(prices):
         return np.zeros(n)
 
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for trend filter and median calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    
+
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
 
-    # Calculate Bollinger Bands (20,2) on 6h data
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate 1d median price (more robust than mean)
+    median_price_1d = np.nanmedian(np.column_stack([high_1d, low_1d, close_1d]), axis=1)
+    
+    # Calculate 1d SMA(50) for trend filter
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    
+    # Calculate price deviation from median as percentage
+    deviation_pct = (close_1d - median_price_1d) / median_price_1d * 100
+    
+    # Calculate volume spike threshold (2.5x 20-period SMA on 12h)
+    volume_series = pd.Series(volume)
+    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike_threshold = volume_sma20 * 2.5
 
-    # Calculate Stochastic Oscillator (14,3,3) on 6h data
-    # %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    k_percent = np.where((highest_high - lowest_low) == 0, 50, k_percent)
-    
-    # %D = 3-period SMA of %K
-    k_series = pd.Series(k_percent)
-    d_percent = k_series.rolling(window=3, min_periods=3).mean().values
-    
-    # Slow %K = 3-period SMA of %K (same as %D in standard settings)
-    slow_k = d_percent.copy()
-    # Slow %D = 3-period SMA of slow %K
-    slow_d = pd.Series(slow_k).rolling(window=3, min_periods=3).mean().values
+    # Align 1d indicators to 12h timeframe
+    median_price_1d_aligned = align_htf_to_ltf(prices, df_1d, median_price_1d)
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    deviation_pct_aligned = align_htf_to_ltf(prices, df_1d, deviation_pct)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(slow_k[i]) or np.isnan(slow_d[i])):
+        if (np.isnan(median_price_1d_aligned[i]) or np.isnan(sma50_1d_aligned[i]) or 
+            np.isnan(deviation_pct_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,38 +65,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Stochastic crosses above 20 from below in uptrend near lower BB
-            if (slow_k[i] > 20 and slow_k[i-1] <= 20 and 
-                slow_d[i] > slow_d[i-1] and  # Stochastic momentum up
-                close[i] > ema50_1d_aligned[i] and  # Uptrend filter
-                close[i] <= bb_lower[i] * 1.02):  # Near lower Bollinger Band (within 2%)
+            # LONG: Price below median (-1.5% deviation) in uptrend with volume spike
+            if (deviation_pct_aligned[i] < -1.5 and 
+                close[i] > sma50_1d_aligned[i] and 
+                volume[i] > volume_sma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Stochastic crosses below 80 from above in downtrend near upper BB
-            elif (slow_k[i] < 80 and slow_k[i-1] >= 80 and 
-                  slow_d[i] < slow_d[i-1] and  # Stochastic momentum down
-                  close[i] < ema50_1d_aligned[i] and  # Downtrend filter
-                  close[i] >= bb_upper[i] * 0.98):  # Near upper Bollinger Band (within 2%)
+            # SHORT: Price above median (+1.5% deviation) in downtrend with volume spike
+            elif (deviation_pct_aligned[i] > 1.5 and 
+                  close[i] < sma50_1d_aligned[i] and 
+                  volume[i] > volume_sma20[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Stochastic crosses above 80 (overbought) or trend change
-            if slow_k[i] > 80 and slow_k[i-1] <= 80:
-                signals[i] = 0.0
-                position = 0
-            elif close[i] < ema50_1d_aligned[i]:  # Trend breakdown
+            # EXIT LONG: Price returns to median or trend breaks
+            if (deviation_pct_aligned[i] > -0.5 or close[i] < sma50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Stochastic crosses below 20 (oversold) or trend change
-            if slow_k[i] < 20 and slow_k[i-1] >= 20:
-                signals[i] = 0.0
-                position = 0
-            elif close[i] > ema50_1d_aligned[i]:  # Trend reversal
+            # EXIT SHORT: Price returns to median or trend breaks
+            if (deviation_pct_aligned[i] < 0.5 or close[i] > sma50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
