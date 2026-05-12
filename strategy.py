@@ -1,134 +1,102 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_RSI_Filter_Volume
-# Hypothesis: Use KAMA trend direction on 1d combined with RSI(14) mean reversion and volume confirmation.
-# Enter long when KAMA trend is up, RSI < 30 (oversold), and volume > 20-period average.
-# Enter short when KAMA trend is down, RSI > 70 (overbought), and volume > 20-period average.
-# Exit when RSI crosses back to neutral (40-60 range) or trend fails.
-# Designed for low frequency (7-25 trades/year) to avoid fee drag. Works in bull (buy dips in uptrend)
-# and bear (sell rallies in downtrend) with trend filter and mean reversion.
+# 6h_Ichimoku_TenkanKijun_Cross_1dTrend
+# Hypothesis: Use Ichimoku Cloud on 6h for trend confirmation and entry signals,
+# filtered by 1d Kumo (cloud) direction. Enter long when Tenkan-sen crosses above Kijun-sen
+# and price is above 1d Kumo, short when Tenkan crosses below Kijun and price below 1d Kumo.
+# Exit on opposite cross or Kumo failure. Designed for low frequency (15-35 trades/year)
+# to avoid fee drag. Ichimoku works in trending markets (bull/bear) and avoids sideways chop
+# via cloud filter, making it robust across regimes.
 
-name = "1d_KAMA_Trend_RSI_Filter_Volume"
-timeframe = "1d"
+name = "6h_Ichimoku_TenkanKijun_Cross_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def kama(close, er_fast=2, er_slow=30):
+def calculate_ichimoku(high, low, close):
     """
-    Kaufman Adaptive Moving Average (KAMA).
-    Returns KAMA array.
+    Calculate Ichimoku components: Tenkan-sen, Kijun-sen, Senkou Span A, Senkou Span B.
+    Returns tenkan, kijun, senkou_a, senkou_b arrays.
     """
-    n = len(close)
-    kama_arr = np.zeros(n)
-    er = np.zeros(n)
-    sc = np.zeros(n)
+    n = len(high)
+    tenkan = np.full(n, np.nan)
+    kijun = np.full(n, np.nan)
+    senkou_a = np.full(n, np.nan)
+    senkou_b = np.full(n, np.nan)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if n > 1 else np.zeros(n-1)
-    # Simplified volatility calculation for efficiency
-    vol = np.zeros(n)
-    for i in range(1, n):
-        vol[i] = vol[i-1] + np.abs(close[i] - close[i-1])
-        if i >= 10:
-            vol[i] -= np.abs(close[i-10] - close[i-11])
-    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9 = 9
     for i in range(n):
-        if i >= 10:
-            ch = np.abs(close[i] - close[i-10])
-            vol_sum = vol[i] - (vol[i-10] if i >= 10 else 0)
-            er[i] = ch / vol_sum if vol_sum != 0 else 0
-        else:
-            er[i] = 0
+        if i >= period9 - 1:
+            high9 = np.max(high[i - period9 + 1:i + 1])
+            low9 = np.min(low[i - period9 + 1:i + 1])
+            tenkan[i] = (high9 + low9) / 2
     
-    # Smoothing constant
-    fast_sc = 2 / (er_fast + 1)
-    slow_sc = 2 / (er_slow + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26 = 26
+    for i in range(n):
+        if i >= period26 - 1:
+            high26 = np.max(high[i - period26 + 1:i + 1])
+            low26 = np.min(low[i - period26 + 1:i + 1])
+            kijun[i] = (high26 + low26) / 2
     
-    # Initialize KAMA
-    kama_arr[0] = close[0]
-    for i in range(1, n):
-        kama_arr[i] = kama_arr[i-1] + sc[i] * (close[i] - kama_arr[i-1])
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    for i in range(n):
+        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
+            senkou_a[i] = (tenkan[i] + kijun[i]) / 2
     
-    return kama_arr
-
-def rsi(close, period=14):
-    """
-    Relative Strength Index (RSI).
-    Returns RSI array.
-    """
-    n = len(close)
-    rsi_arr = np.full(n, 50.0)  # Initialize to neutral
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52 = 52
+    for i in range(n):
+        if i >= period52 - 1:
+            high52 = np.max(high[i - period52 + 1:i + 1])
+            low52 = np.min(low[i - period52 + 1:i + 1])
+            senkou_b[i] = (high52 + low52) / 2
     
-    if n < period + 1:
-        return rsi_arr
-    
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    # Initial average
-    avg_gain[period] = np.mean(gain[1:period+1])
-    avg_loss[period] = np.mean(loss[1:period+1])
-    
-    # Wilder's smoothing
-    for i in range(period+1, n):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-    
-    # Calculate RSI
-    for i in range(period+1, n):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi_arr[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi_arr[i] = 100
-    
-    return rsi_arr
+    return tenkan, kijun, senkou_a, senkou_b
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Get weekly data for trend filter (more stable than daily for long-term trend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for Kumo (cloud) filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate KAMA on weekly data for trend filter
-    kama_1w = kama(close_1w, er_fast=2, er_slow=30)
+    # Calculate Ichimoku on 6h data
+    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
     
-    # Calculate RSI on daily price
-    rsi_14 = rsi(close, period=14)
+    # Calculate 1d Ichimoku components for Kumo filter
+    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = calculate_ichimoku(high_1d, low_1d, df_1d['close'].values)
     
-    # Volume confirmation: 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Kumo (cloud) boundaries: Senkou Span A and B
+    kumo_top_1d = np.maximum(senkou_a_1d, senkou_b_1d)
+    kumo_bottom_1d = np.minimum(senkou_a_1d, senkou_b_1d)
     
-    # Align weekly KAMA to daily timeframe
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Align daily Kumo to 6h timeframe
+    kumo_top_aligned = align_htf_to_ltf(prices, df_1d, kumo_top_1d)
+    kumo_bottom_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Ensure indicators are stable (14 RSI + 20 vol + buffer)
+    start_idx = 52  # Ensure Ichimoku is stable (needs 52 periods for Senkou B)
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(kama_1w_aligned[i]) or np.isnan(rsi_14[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(kumo_top_aligned[i]) or np.isnan(kumo_bottom_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -136,37 +104,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly KAMA
-        trend_up = close[i] > kama_1w_aligned[i]
-        trend_down = close[i] < kama_1w_aligned[i]
+        # Ichimoku signals: Tenkan/Kijun cross
+        tenkan_cross_above = tenkan[i] > kijun[i]
+        tenkan_cross_below = tenkan[i] < kijun[i]
         
-        # Volume filter
-        vol_ok = volume[i] > vol_ma_20[i]
-        
-        # RSI conditions
-        rsi_oversold = rsi_14[i] < 30
-        rsi_overbought = rsi_14[i] > 70
-        rsi_neutral = (rsi_14[i] >= 40) and (rsi_14[i] <= 60)
+        # Kumo filter: price above/below cloud
+        price_above_kumo = close[i] > kumo_top_aligned[i]
+        price_below_kumo = close[i] < kumo_bottom_aligned[i]
         
         if position == 0:
-            # LONG: KAMA trend up, RSI oversold, volume confirmation
-            if trend_up and rsi_oversold and vol_ok:
+            # LONG: Tenkan crosses above Kijun AND price above 1d Kumo
+            if tenkan_cross_above and price_above_kumo:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA trend down, RSI overbought, volume confirmation
-            elif trend_down and rsi_overbought and vol_ok:
+            # SHORT: Tenkan crosses below Kijun AND price below 1d Kumo
+            elif tenkan_cross_below and price_below_kumo:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral or trend fails
-            if rsi_neutral or not trend_up:
+            # EXIT LONG: Tenkan crosses below Kijun OR price falls below Kumo
+            if tenkan_cross_below or not price_above_kumo:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral or trend fails
-            if rsi_neutral or not trend_down:
+            # EXIT SHORT: Tenkan crosses above Kijun OR price rises above Kumo
+            if tenkan_cross_above or not price_below_kumo:
                 signals[i] = 0.0
                 position = 0
             else:
