@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R1 and S1 levels act as intraday support/resistance. Buy when price breaks above R1 with volume confirmation and daily uptrend; sell when price breaks below S1 with volume confirmation and daily downtrend. Designed for 4h timeframe to capture intraday extremes while avoiding overtrading. Works in bull markets via breakouts in uptrends and in bear markets via breakdowns in downtrends.
+# 4h_TRIX_Trend_Reversal_1dTrend_Volume
+# Hypothesis: TRIX detects momentum reversals; long when TRIX crosses above zero with volume spike and daily uptrend, short when TRIX crosses below zero with volume spike and daily downtrend. Uses TRIX(12) for momentum signal, daily EMA50 for trend filter, and volume > 1.5x 20-period average for confirmation. Designed for 4h timeframe to avoid overtrading and capture reversals in both bull and bear markets.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_TRIX_Trend_Reversal_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,28 +20,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for pivot calculation and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
-
-    # Calculate Camarilla levels from previous day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C, H, L are from previous daily bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    rang = prev_high - prev_low
-    r1 = prev_close + rang * 1.1 / 12
-    s1 = prev_close - rang * 1.1 / 12
-
-    # Align Camarilla levels to 4h timeframe (available after previous day's close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
     # Daily EMA50 trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+
+    # TRIX: Triple Exponential Moving Average (12-period)
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - then percentage change
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.pct_change() * 100  # Convert to percentage
+    trix_values = trix.values
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,8 +46,7 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(trix_values[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,26 +59,26 @@ def generate_signals(prices):
         price_below_daily_ema = close[i] < ema_50_1d_aligned[i]
 
         if position == 0:
-            # LONG: Price breaks above R1 with volume confirmation and daily uptrend
-            if close[i] > r1_aligned[i] and volume_ok[i] and price_above_daily_ema:
+            # LONG: TRIX crosses above zero with volume spike and daily uptrend
+            if i > 0 and not np.isnan(trix_values[i-1]) and trix_values[i-1] <= 0 and trix_values[i] > 0 and volume_ok[i] and price_above_daily_ema:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with volume confirmation and daily downtrend
-            elif close[i] < s1_aligned[i] and volume_ok[i] and price_below_daily_ema:
+            # SHORT: TRIX crosses below zero with volume spike and daily downtrend
+            elif i > 0 and not np.isnan(trix_values[i-1]) and trix_values[i-1] >= 0 and trix_values[i] < 0 and volume_ok[i] and price_below_daily_ema:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below S1 or trend turns down
-            if close[i] < s1_aligned[i] or not price_above_daily_ema:
+            # EXIT LONG: TRIX crosses below zero or trend turns down
+            if i > 0 and not np.isnan(trix_values[i-1]) and trix_values[i-1] >= 0 and trix_values[i] < 0 or not price_above_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above R1 or trend turns up
-            if close[i] > r1_aligned[i] or not price_below_daily_ema:
+            # EXIT SHORT: TRIX crosses above zero or trend turns up
+            if i > 0 and not np.isnan(trix_values[i-1]) and trix_values[i-1] <= 0 and trix_values[i] > 0 or not price_below_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
