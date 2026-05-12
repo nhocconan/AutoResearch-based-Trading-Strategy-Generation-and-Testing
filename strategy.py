@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_StochasticRSI_1dTrend_Volume
-# Hypothesis: Use Stochastic RSI (14,14,3,3) to identify oversold/overbought conditions on 6h,
-# filtered by 1d EMA50 for trend direction and volume confirmation. Designed for low frequency
-# (15-30 trades/year) with clear entry/exit rules to avoid whipsaws in both bull and bear markets.
-# Stochastic RSI helps identify turning points while respecting higher timeframe trend.
+# 12h_1w_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Trade 12h breakouts of weekly Camarilla R3/S3 levels with daily trend and volume confirmation.
+# Weekly Camarilla levels provide strong support/resistance; daily EMA50 filters trend direction.
+# Volume confirms breakout momentum. Designed for low frequency (15-30 trades/year) to survive
+# both bull and bear markets by following higher timeframe structure.
 
-name = "6h_StochasticRSI_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_1w_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,30 +32,32 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Stochastic RSI on 6h (14,14,3,3) ===
-    rsi_period = 14
-    stoch_period = 14
-    k_period = 3
-    d_period = 3
+    # === Weekly Camarilla levels (R3, S3) ===
+    # Calculate from weekly OHLC (previous completed week)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
     
-    # Calculate RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Use previous week's OHLC for current week's Camarilla
+    wk_high = df_1w['high'].values
+    wk_low = df_1w['low'].values
+    wk_close = df_1w['close'].values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Shift by 1 to use previous week's data
+    wk_high_prev = np.roll(wk_high, 1)
+    wk_low_prev = np.roll(wk_low, 1)
+    wk_close_prev = np.roll(wk_close, 1)
+    wk_high_prev[0] = np.nan
+    wk_low_prev[0] = np.nan
+    wk_close_prev[0] = np.nan
     
-    # Calculate Stochastic RSI
-    rsi_min = pd.Series(rsi).rolling(window=stoch_period, min_periods=stoch_period).min().values
-    rsi_max = pd.Series(rsi).rolling(window=stoch_period, min_periods=stoch_period).max().values
-    stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min + 1e-10) * 100
+    pivot = (wk_high_prev + wk_low_prev + wk_close_prev) / 3.0
+    r3 = wk_high_prev + 1.1 * (wk_high_prev - wk_low_prev)
+    s3 = wk_low_prev - 1.1 * (wk_high_prev - wk_low_prev)
     
-    # Calculate %K and %D
-    k = pd.Series(stoch_rsi).rolling(window=k_period, min_periods=k_period).mean().values
-    d = pd.Series(k).rolling(window=d_period, min_periods=d_period).mean().values
+    # Align weekly levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     # === Volume confirmation (24-period average) ===
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -63,11 +65,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(rsi_period + stoch_period + k_period + d_period, 50) + 24
+    start_idx = 100  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(k[i]) or np.isnan(d[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -80,32 +82,32 @@ def generate_signals(prices):
         trend_up = close[i] > ema_50_1d_aligned[i]
         trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Stochastic RSI conditions
-        oversold = k[i] < 20 and d[i] < 20
-        overbought = k[i] > 80 and d[i] > 80
+        # Breakout conditions
+        breakout_up = close[i] > r3_aligned[i]
+        breakout_down = close[i] < s3_aligned[i]
         
         # Volume filter: above average
         vol_ok = volume[i] > vol_ma_24[i]
         
         if position == 0:
-            # LONG: oversold reversal in uptrend with volume
-            if oversold and trend_up and vol_ok:
+            # LONG: breakout above R3, uptrend, volume confirmation
+            if breakout_up and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: overbought reversal in downtrend with volume
-            elif overbought and trend_down and vol_ok:
+            # SHORT: breakout below S3, downtrend, volume confirmation
+            elif breakout_down and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: overbought condition or trend reversal
-            if overbought or not trend_up:
+            # EXIT LONG: breakdown below S3 or trend reversal
+            if breakout_down or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: oversold condition or trend reversal
-            if oversold or not trend_down:
+            # EXIT SHORT: breakout above R3 or trend reversal
+            if breakout_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
