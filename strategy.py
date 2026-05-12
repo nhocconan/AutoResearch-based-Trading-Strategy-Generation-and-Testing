@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R4S4_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -47,13 +47,13 @@ def generate_signals(prices):
     prev_high_1d = np.concatenate([[high_1d[0]], high_1d[:-1]])
     prev_low_1d = np.concatenate([[low_1d[0]], low_1d[:-1]])
     
-    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
-    camarilla_r4_1d = prev_close_1d + ((prev_high_1d - prev_low_1d) * 1.1 / 2)
-    camarilla_s4_1d = prev_close_1d - ((prev_high_1d - prev_low_1d) * 1.1 / 2)
+    # Camarilla levels: R1 = C + ((H-L) * 1.1/12), S1 = C - ((H-L) * 1.1/12)
+    camarilla_r1_1d = prev_close_1d + ((prev_high_1d - prev_low_1d) * 1.1 / 12)
+    camarilla_s1_1d = prev_close_1d - ((prev_high_1d - prev_low_1d) * 1.1 / 12)
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_1d)
-    camarilla_s4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_1d)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
     # Volume spike detection: current volume > 2x average volume
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,8 +66,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r4_1d_aligned[i]) or 
-            np.isnan(camarilla_s4_1d_aligned[i]) or np.isnan(atr10_1d_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1_1d_aligned[i]) or 
+            np.isnan(camarilla_s1_1d_aligned[i]) or np.isnan(atr10_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,28 +76,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R4 + uptrend + volume spike
-            if (close[i] > camarilla_r4_1d_aligned[i] and 
+            # Long: price breaks above R1 + uptrend + volume spike
+            if (close[i] > camarilla_r1_1d_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S4 + downtrend + volume spike
-            elif (close[i] < camarilla_s4_1d_aligned[i] and 
+            # Short: price breaks below S1 + downtrend + volume spike
+            elif (close[i] < camarilla_s1_1d_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below EMA(34) or below S4 (reversal signal)
-            if close[i] < ema34_1d_aligned[i] or close[i] < camarilla_s4_1d_aligned[i]:
+            # Exit long: price closes below EMA(34) or below S1 (reversal signal)
+            if close[i] < ema34_1d_aligned[i] or close[i] < camarilla_s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above EMA(34) or above R4 (reversal signal)
-            if close[i] > ema34_1d_aligned[i] or close[i] > camarilla_r4_1d_aligned[i]:
+            # Exit short: price closes above EMA(34) or above R1 (reversal signal)
+            if close[i] > ema34_1d_aligned[i] or close[i] > camarilla_r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
