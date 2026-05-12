@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 
-# 12h_1D_Camarilla_R1S1_Breakout_Trend_Volume
-# Hypothesis: Buy when price breaks above daily Camarilla R1 with 12h bullish trend and volume confirmation, 
-# sell when price breaks below daily Camarilla S1 with 12h bearish trend and volume confirmation.
-# Uses 12h timeframe for low-frequency trading (target 12-37 trades/year) to minimize fee drag.
-# Daily Camarilla levels provide precise entry/exit levels. 12h trend filter ensures alignment with intermediate trend.
-# Volume confirmation filters false breakouts. Designed to work in both bull and bear markets by following the trend.
+# 6h_1W_Camarilla_R3S3_Breakout_Trend
+# Hypothesis: Long when price breaks above weekly R3 with bullish 1d trend (EMA34 > EMA89), short when breaks below weekly S3 with bearish 1d trend.
+# Weekly R3/S3 act as strong support/resistance; 1d EMA crossover filters for trend alignment. Low frequency to avoid fee drag.
 
-name = "12h_1D_Camarilla_R1S1_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "6h_1W_Camarilla_R3S3_Breakout_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,42 +20,50 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels and trend filter
+    # Get weekly data for Camarilla levels (based on previous week)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+
+    # Calculate weekly high, low, close for Camarilla
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+
+    # Previous week's OHLC for current week's Camarilla levels
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_high_1w[0] = high_1w[0]
+    prev_low_1w[0] = low_1w[0]
+    prev_close_1w[0] = close_1w[0]
+
+    rang_1w = prev_high_1w - prev_low_1w
+    R3 = prev_close_1w + rang_1w * 1.1 / 4
+    S3 = prev_close_1w - rang_1w * 1.1 / 4
+
+    # Get daily data for trend filter (EMA34 > EMA89 = bullish, < = bearish)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate daily EMA for trend filter (34-period)
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
 
-    # Calculate daily Camarilla levels (based on previous day)
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    rang = prev_high - prev_low
-    R1 = prev_close + rang * 1.1 / 12
-    S1 = prev_close - rang * 1.1 / 12
-
-    # Volume confirmation: current volume > 1.3x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.3 * vol_ma)
+    bullish_trend = ema34_1d_aligned > ema89_1d_aligned
+    bearish_trend = ema34_1d_aligned < ema89_1d_aligned
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or
-            np.isnan(volume_ok[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(bullish_trend[i]) or
+            np.isnan(bearish_trend[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,31 +71,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Daily trend filter using 12h close vs daily EMA
-        bullish_trend = close[i] > ema_1d_aligned[i]
-        bearish_trend = close[i] < ema_1d_aligned[i]
-
         if position == 0:
-            # LONG: Price crosses above R1 with bullish daily trend and volume confirmation
-            if close[i] > R1[i] and close[i-1] <= R1[i-1] and bullish_trend and volume_ok[i]:
+            # LONG: Price crosses above weekly R3 with bullish 1d trend
+            if close[i] > R3[i] and close[i-1] <= R3[i-1] and bullish_trend[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below S1 with bearish daily trend and volume confirmation
-            elif close[i] < S1[i] and close[i-1] >= S1[i-1] and bearish_trend and volume_ok[i]:
+            # SHORT: Price crosses below weekly S3 with bearish 1d trend
+            elif close[i] < S3[i] and close[i-1] >= S3[i-1] and bearish_trend[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 or daily trend turns bearish
-            if close[i] < S1[i] and close[i-1] >= S1[i-1] or not bullish_trend:
+            # EXIT LONG: Price crosses below weekly S3 or trend turns bearish
+            if close[i] < S3[i] and close[i-1] >= S3[i-1] or not bullish_trend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 or daily trend turns bullish
-            if close[i] > R1[i] and close[i-1] <= R1[i-1] or not bearish_trend:
+            # EXIT SHORT: Price crosses above weekly R3 or trend turns bullish
+            if close[i] > R3[i] and close[i-1] <= R3[i-1] or not bearish_trend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
