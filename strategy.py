@@ -1,32 +1,20 @@
 #!/usr/bin/env python3
-# 12H_WILLIAMS_ALLIGATOR_1W_TREND_VOLUME_CONFIRMATION
-# Hypothesis: Williams Alligator on weekly timeframe defines trend direction (jaw-teeth-lips alignment), 
-# 12h price crosses the Alligator's teeth (8-period SMMA) with volume confirmation for entry.
-# Exit when price crosses the Alligator's jaw (13-period SMMA). 
-# Uses weekly trend filter to avoid counter-trend trades, reducing whipsaw in sideways markets.
-# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
+# 4H_WILLIAMS_ALLIGATOR_1D_TREND_VOLUME_CONFIRMATION
+# Hypothesis: Williams Alligator (3 SMAs) combined with daily trend and volume confirmation captures trends in both bull and bear markets.
+# Uses Alligator's jaw/teeth/lips alignment for trend direction, filters by 1d EMA50 trend, and requires volume spike (1.5x 20-bar avg).
+# Target: 15-25 trades/year (60-100 total) to minimize fee drag while maintaining edge.
 
-name = "12H_WILLIAMS_ALLIGATOR_1W_TREND_VOLUME_CONFIRMATION"
-timeframe = "12h"
+name = "4H_WILLIAMS_ALLIGATOR_1D_TREND_VOLUME_CONFIRMATION"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(source, length):
-    """Smoothed Moving Average (SMMA) - same as Wilder's smoothing"""
-    if length < 1:
-        return source.copy()
-    smma = np.full_like(source, np.nan, dtype=np.float64)
-    smma[length-1] = np.mean(source[:length])
-    for i in range(length, len(source)):
-        smma[i] = (smma[i-1] * (length-1) + source[i]) / length
-    return smma
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -34,37 +22,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Alligator from weekly timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    # Williams Alligator: 13, 8, 5 period SMAs with future shift
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values  # 13-period, shifted 8
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values   # 8-period, shifted 5
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values    # 5-period, shifted 3
+    
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Alligator lines: Jaw (13), Teeth (8), Lips (5) - all SMMA of median price
-    median_price = (df_1w['high'].values + df_1w['low'].values) / 2
-    jaw = smma(median_price, 13)  # Blue line
-    teeth = smma(median_price, 8)   # Red line
-    lips = smma(median_price, 5)    # Green line
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
-    
-    # Volume spike detection (20-period volume MA)
-    vol_ma = np.full_like(volume, np.nan, dtype=np.float64)
-    for i in range(20-1, len(volume)):
-        vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    vol_spike = volume > vol_ma * 2.0  # Volume > 2x average
+    # Volume spike: 1.5x 20-period volume MA
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 60  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,28 +56,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price crosses above Teeth with volume spike, Alligator aligned bullish (Lips > Teeth > Jaw)
-            if (close[i] > teeth_aligned[i] and vol_spike[i] and 
-                lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]):
+            # LONG: Lips > Teeth > Jaw (bullish alignment) + daily uptrend + volume spike
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
+                close[i] > ema50_1d_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below Teeth with volume spike, Alligator aligned bearish (Lips < Teeth < Jaw)
-            elif (close[i] < teeth_aligned[i] and vol_spike[i] and 
-                  lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]):
+            # SHORT: Lips < Teeth < Jaw (bearish alignment) + daily downtrend + volume spike
+            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
+                  close[i] < ema50_1d_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below Jaw
-            if close[i] < jaw_aligned[i]:
+            # EXIT LONG: Bearish alignment (Lips < Teeth < Jaw)
+            if lips[i] < teeth[i] and teeth[i] < jaw[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above Jaw
-            if close[i] > jaw_aligned[i]:
+            # EXIT SHORT: Bullish alignment (Lips > Teeth > Jaw)
+            if lips[i] > teeth[i] and teeth[i] > jaw[i]:
                 signals[i] = 0.0
                 position = 0
             else:
