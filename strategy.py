@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3_S3_Fade_1dTrend_Volume
-# Hypothesis: Fade extreme Camarilla levels (R3/S3) in direction of daily trend with volume confirmation.
-# In ranging markets (60% of time), price reverts from R3/S3. In trending markets, avoid fading.
-# Daily EMA50 filter ensures we only take mean-reversion trades when higher timeframe is ranging.
-# Volume spike confirms institutional interest at extremes. Designed for low frequency (~15-25/year).
+# 12h Donchian Breakout + Volume Spike + Daily Trend Filter
+# Hypothesis: 12h Donchian breakouts capture medium-term trends in BTC/ETH/SOL.
+# Volume spike confirms institutional participation.
+# Daily EMA50 filter ensures alignment with longer-term trend, reducing whipsaw in choppy markets.
+# Designed for low trade frequency (12-37/year) with clear entry/exit rules to minimize fee drag.
 
-name = "6h_Camarilla_R3_S3_Fade_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_DonchianBreakout_Volume_DailyTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,39 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Data for Trend Filter ===
+    # === Daily Data for EMA Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     daily_close_1d = df_1d['close'].values
-    daily_high_1d = df_1d['high'].values
-    daily_low_1d = df_1d['low'].values
     
-    # Daily EMA50 for trend filter (ranging vs trending)
+    # Daily EMA50 for trend filter
     ema_50_1d = pd.Series(daily_close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Camarilla Levels from Previous Day ===
-    # Calculate from previous day's OHLC (shifted by 1 to avoid lookahead)
-    prev_close = np.roll(daily_close_1d, 1)
-    prev_high = np.roll(daily_high_1d, 1)
-    prev_low = np.roll(daily_low_1d, 1)
-    # First value remains 0 (no previous day)
-    prev_close[0] = 0
-    prev_high[0] = 0
-    prev_low[0] = 0
+    # === 12h Donchian Channel (20-period) ===
+    # Donchian Upper = max(high, lookback=20)
+    # Donchian Lower = min(low, lookback=20)
+    lookback = 20
+    donchian_upper = np.full(n, np.nan)
+    donchian_lower = np.full(n, np.nan)
     
-    # Camarilla multipliers
-    R3 = prev_close + (prev_high - prev_low) * 1.1000
-    S3 = prev_close - (prev_high - prev_low) * 1.1000
+    for i in range(lookback - 1, n):
+        donchian_upper[i] = np.max(high[i - lookback + 1:i + 1])
+        donchian_lower[i] = np.min(low[i - lookback + 1:i + 1])
     
-    # Align to 6h (these levels are fixed for the entire day)
-    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # === Volume Spike (24-period on 6h = 6 days) ===
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === Volume Spike (20-period on 12h) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
@@ -65,8 +56,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_6h[i]) or np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_12h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,30 +66,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # FADE LONG: Price at S3 support + ranging market (price near daily EMA) + volume spike
-            # Ranging condition: price within 1% of daily EMA50
-            near_ema = abs(close[i] - ema_50_6h[i]) / ema_50_6h[i] < 0.01
-            at_s3 = close[i] <= S3_6h[i] * 1.001  # Allow small buffer
-            
-            if at_s3 and near_ema and vol_spike[i]:
+            # LONG: Price breaks above Donchian upper + volume spike + price above daily EMA50
+            if (close[i] > donchian_upper[i] and 
+                vol_spike[i] and
+                close[i] > ema_50_12h[i]):
                 signals[i] = 0.25
                 position = 1
-            # FADE SHORT: Price at R3 resistance + ranging market + volume spike
-            elif close[i] >= R3_6h[i] * 0.999 and near_ema and vol_spike[i]:
+            # SHORT: Price breaks below Donchian lower + volume spike + price below daily EMA50
+            elif (close[i] < donchian_lower[i] and 
+                  vol_spike[i] and
+                  close[i] < ema_50_12h[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price reaches midpoint or opposite extreme
-            midpoint = (R3_6h[i] + S3_6h[i]) / 2
-            if close[i] >= midpoint:
+            # EXIT LONG: Price closes below Donchian lower (reversal signal)
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches midpoint or opposite extreme
-            midpoint = (R3_6h[i] + S3_6h[i]) / 2
-            if close[i] <= midpoint:
+            # EXIT SHORT: Price closes above Donchian upper (reversal signal)
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
