@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
 # Hypothesis: Breakouts at daily Camarilla R1/S1 levels with volume confirmation and 4h trend filter on 4h timeframe.
 # Targets 20-40 trades/year to stay within fee limits. Uses daily for structure and 4h for trend filter.
