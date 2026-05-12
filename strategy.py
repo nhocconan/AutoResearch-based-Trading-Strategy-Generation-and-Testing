@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_Filter_1dTrend_Volume
-# Hypothesis: KAMA adapts to market volatility, providing smooth trend direction. Long when price crosses above KAMA with volume spike and daily uptrend, short when price crosses below KAMA with volume spike and daily downtrend. Designed for 4h timeframe to avoid overtrading. Works in bull markets via trend continuation and in bear markets via trend reversals.
+# 1d_KAMA_Trend_With_Weekly_Trend_Filter
+# Hypothesis: KAMA adapts to market noise, providing a smooth trend line that reduces whipsaw. In trending markets (weekly trend aligned), we take KAMA crossovers with volume confirmation. In ranging markets (weekly trend weak), we avoid trades. Designed for 1d timeframe to capture major swings with low trade frequency, suitable for both bull and bear markets via trend-following logic.
 
-name = "4h_KAMA_Trend_Filter_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_Weekly_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -20,36 +20,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
 
-    # Daily EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly EMA20 trend filter (smoothed trend)
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
 
-    # KAMA (10-period ER, 2 and 30 for fast/slow SC)
-    close_s = pd.Series(close)
-    change = abs(close_s.diff(10)).values
-    volatility = close_s.diff(1).abs().rolling(window=10, min_periods=10).sum().values
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
+    # KAMA (adaptive moving average) parameters
+    er_len = 10
+    fast_ema = 2
+    slow_ema = 30
+
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly below
+    # Recompute volatility properly: sum of absolute changes over er_len period
+    volatility = np.zeros_like(change)
+    for i in range(er_len, len(close)):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-er_len:i])))
+
+    # Avoid division by zero
+    er = np.zeros_like(close)
+    er[er_len:] = change / np.where(volatility[er_len:] == 0, 1, volatility[er_len:])
+    er = np.where(er > 1, 1, er)  # cap at 1
+
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan)
+    kama[er_len] = close[er_len]  # start with first valid close
+
+    # Calculate KAMA
+    for i in range(er_len + 1, len(close)):
         kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
 
-    # Volume confirmation: current volume > 1.5x average of last 20 periods
+    # Volume confirmation: current volume > 1.3x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    volume_ok = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(10, n):
+    for i in range(er_len + 1, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,31 +74,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from daily EMA50
-        price_above_daily_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_daily_ema = close[i] < ema_50_1d_aligned[i]
+        # Trend filter from weekly EMA20
+        price_above_weekly_ema = close[i] > ema_20_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_20_1w_aligned[i]
 
         if position == 0:
-            # LONG: Price crosses above KAMA with volume spike and daily uptrend
-            if i > 0 and not np.isnan(kama[i-1]) and close[i-1] <= kama[i-1] and close[i] > kama[i] and volume_ok[i] and price_above_daily_ema:
+            # LONG: Price crosses above KAMA with volume and weekly uptrend
+            if i > 0 and not np.isnan(kama[i-1]) and close[i-1] <= kama[i-1] and close[i] > kama[i] and volume_ok[i] and price_above_weekly_ema:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below KAMA with volume spike and daily downtrend
-            elif i > 0 and not np.isnan(kama[i-1]) and close[i-1] >= kama[i-1] and close[i] < kama[i] and volume_ok[i] and price_below_daily_ema:
+            # SHORT: Price crosses below KAMA with volume and weekly downtrend
+            elif i > 0 and not np.isnan(kama[i-1]) and close[i-1] >= kama[i-1] and close[i] < kama[i] and volume_ok[i] and price_below_weekly_ema:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA or trend turns down
-            if i > 0 and not np.isnan(kama[i-1]) and close[i-1] >= kama[i-1] and close[i] < kama[i] or not price_above_daily_ema:
+            # EXIT LONG: Price crosses below KAMA or weekly trend turns down
+            if i > 0 and not np.isnan(kama[i-1]) and close[i-1] >= kama[i-1] and close[i] < kama[i] or not price_above_weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA or trend turns up
-            if i > 0 and not np.isnan(kama[i-1]) and close[i-1] <= kama[i-1] and close[i] > kama[i] or not price_below_daily_ema:
+            # EXIT SHORT: Price crosses above KAMA or weekly trend turns up
+            if i > 0 and not np.isnan(kama[i-1]) and close[i-1] <= kama[i-1] and close[i] > kama[i] or not price_below_weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
