@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels from daily provide strong support/resistance.
-Breakout above R1 or below S1 with volume confirmation and daily trend filter.
-Designed for 12-37 trades/year on 12h timeframe to work in both bull and bear markets.
+4h_4H_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Breakout above R1 or below S1 from daily Camarilla pivots with daily trend filter and volume confirmation. Designed for 20-50 trades/year on 4h timeframe to work in both bull and bear markets by using strong institutional levels and filtering with trend and volume.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_4H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -39,7 +37,7 @@ def generate_signals(prices):
     r1_1d = close_1d + hl_range * 1.1 / 12
     s1_1d = close_1d - hl_range * 1.1 / 12
 
-    # Align to 12h timeframe (values from previous day's close)
+    # Align to 4h timeframe (values from previous day's close)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
 
@@ -47,7 +45,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Volume confirmation: 12h volume > 1.5x 20-period average
+    # Volume confirmation: 4h volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
