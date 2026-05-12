@@ -1,19 +1,40 @@
 #!/usr/bin/env python3
-# 12h_Donchian_Breakout_1dTrend_Volume
-# Hypothesis: Use 12h Donchian channel breakout with 1d EMA50 trend filter and volume spike.
-# Long when price breaks above Donchian upper band and price > 1d EMA50 with volume > 1.5x average.
-# Short when price breaks below Donchian lower band and price < 1d EMA50 with volume > 1.5x average.
-# Exit when price crosses back through Donchian middle (20-period average of high/low).
-# Designed for low frequency (15-35 trades/year) to avoid fee drag. Works in bull (catch breakouts)
-# and bear (catch breakdowns) with trend filter and volume confirmation.
+# 6h_Momentum_Pullback_12hTrend
+# Hypothesis: Momentum pullback strategy for 6h timeframe. Uses 12h EMA trend filter,
+# 6h RSI pullback to EMA, and volume confirmation. Enters long in uptrend when RSI
+# pulls back from overbought to neutral, short in downtrend when RSI pulls back
+# from oversold to neutral. Designed for low frequency (15-35 trades/year) to avoid
+# fee drag. Works in bull markets by catching uptrend continuations and in bear
+# markets by catching downtrend continuations after pullbacks.
 
-name = "12h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_Momentum_Pullback_12hTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    
+    # Wilder's smoothing
+    avg_gain[period-1] = np.mean(gain[:period])
+    avg_loss[period-1] = np.mean(loss[:period])
+    
+    for i in range(period, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,45 +46,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian channels (20-period) on 12h data
-    period = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    for i in range(n):
-        if i >= period - 1:
-            highest_high[i] = np.max(high[i - period + 1:i + 1])
-            lowest_low[i] = np.min(low[i - period + 1:i + 1])
+    # Calculate 6h RSI
+    rsi_6h = rsi(close, 14)
     
-    # Middle band (average of upper and lower)
-    middle_band = (highest_high + lowest_low) / 2
+    # Calculate 6h EMA20 for pullback target
+    ema_20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume confirmation: 1.5x 20-period average
+    # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma_20 * 1.5
     
-    # Align daily data to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 12h EMA to 6h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, period)  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(rsi_6h[i]) or 
+            np.isnan(ema_20_6h[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,40 +84,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA50
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
         # Volume filter
-        vol_ok = volume[i] > vol_threshold[i]
+        vol_ok = volume[i] > vol_ma_20[i]
         
-        # Donchian breakout signals
-        buy_breakout = close[i] > highest_high[i]
-        sell_breakout = close[i] < lowest_low[i]
+        # RSI conditions for pullback entry
+        rsi_value = rsi_6h[i]
+        rsi_overbought = rsi_value > 70
+        rsi_oversold = rsi_value < 30
+        rsi_neutral = (rsi_value >= 40) & (rsi_value <= 60)
         
-        # Exit signals: price crosses back through middle band
-        exit_long = close[i] < middle_band[i]
-        exit_short = close[i] > middle_band[i]
+        # Price near EMA20 (within 1%)
+        price_near_ema = abs(close[i] - ema_20_6h[i]) / ema_20_6h[i] < 0.01
         
         if position == 0:
-            # LONG: price breaks above Donchian upper band, price > daily EMA50, volume confirmation
-            if buy_breakout and trend_up and vol_ok:
+            # LONG: Uptrend + RSI pullback from overbought to neutral near EMA
+            if trend_up and vol_ok and rsi_neutral and price_near_ema and rsi_overbought:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below Donchian lower band, price < daily EMA50, volume confirmation
-            elif sell_breakout and trend_down and vol_ok:
+            # SHORT: Downtrend + RSI pullback from oversold to neutral near EMA
+            elif trend_down and vol_ok and rsi_neutral and price_near_ema and rsi_oversold:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: price crosses below Donchian middle band
-            if exit_long:
+            # EXIT LONG: Trend failure or RSI re-enters overbought
+            if not trend_up or rsi_overbought:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above Donchian middle band
-            if exit_short:
+            # EXIT SHORT: Trend failure or RSI re-enters oversold
+            if not trend_down or rsi_oversold:
                 signals[i] = 0.0
                 position = 0
             else:
