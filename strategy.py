@@ -1,89 +1,28 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_RSI_Filter_Volume
-# Hypothesis: Use KAMA to determine trend direction on 4h, filtered by RSI and volume spike.
-# Enter long when KAMA shows upward trend, RSI < 70 (not overbought), and volume > 1.5x average.
-# Enter short when KAMA shows downward trend, RSI > 30 (not oversold), and volume > 1.5x average.
-# Exit when trend reverses or volume drops. Designed for 15-30 trades/year to avoid fee drag.
-# Works in bull markets (catching trends) and bear markets (catching corrections/trends).
+# 6h_Donchian_WeeklyPivot_Volume
+# Hypothesis: Use 6h Donchian(20) breakout confirmed by weekly pivot direction (from 1w data)
+# and volume spike. Enter long when price breaks above Donchian upper band and weekly pivot
+# shows bullish bias (price above weekly pivot point). Enter short when price breaks below
+# Donchian lower band and weekly pivot shows bearish bias (price below weekly pivot point).
+# Weekly pivot provides multi-day context to filter false breakouts, working in both bull
+# (catch breakouts in uptrend) and bear (catch breakdowns in downtrend) markets.
+# Volume spike ensures breakouts have conviction. Target: 12-37 trades/year.
 
-name = "4h_KAMA_Trend_RSI_Filter_Volume"
-timeframe = "4h"
+name = "6h_Donchian_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def kama(close, er_length=10, fast=2, slow=30):
+def calculate_weekly_pivot(high, low, close):
     """
-    Kaufman Adaptive Moving Average.
-    Returns KAMA array.
+    Calculate weekly pivot point and support/resistance levels.
+    Pivot Point (PP) = (High + Low + Close) / 3
+    Returns pivot point array.
     """
-    n = len(close)
-    if n == 0:
-        return np.array([])
-    
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, prepend=close[0]))
-    abs_change = np.abs(np.diff(close))
-    
-    # Sum of absolute changes over er_length period
-    er_numerator = np.zeros(n)
-    er_denominator = np.zeros(n)
-    
-    for i in range(n):
-        start_idx = max(0, i - er_length + 1)
-        er_numerator[i] = np.sum(change[start_idx:i+1])
-        er_denominator[i] = np.sum(abs_change[start_idx:i+1])
-    
-    er = np.where(er_denominator > 0, er_numerator / er_denominator, 0)
-    
-    # Smoothing constants
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    
-    # KAMA calculation
-    kama_vals = np.zeros(n)
-    kama_vals[0] = close[0]
-    
-    for i in range(1, n):
-        kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
-    
-    return kama_vals
-
-def rsi(close, length=14):
-    """
-    Relative Strength Index.
-    Returns RSI array.
-    """
-    n = len(close)
-    if n < 2:
-        return np.full(n, 50.0)
-    
-    # Price changes
-    delta = np.diff(close, prepend=close[0])
-    
-    # Gains and losses
-    gains = np.where(delta > 0, delta, 0)
-    losses = np.where(delta < 0, -delta, 0)
-    
-    # Smoothed averages
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    # Initial average
-    avg_gain[length-1] = np.mean(gains[1:length]) if length > 1 else 0
-    avg_loss[length-1] = np.mean(losses[1:length]) if length > 1 else 0
-    
-    # Wilder smoothing
-    for i in range(length, n):
-        avg_gain[i] = (avg_gain[i-1] * (length-1) + gains[i]) / length
-        avg_loss[i] = (avg_loss[i-1] * (length-1) + losses[i]) / length
-    
-    # RSI calculation
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi_vals = 100 - (100 / (1 + rs))
-    
-    return rsi_vals
+    return (high + low + close) / 3.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -95,23 +34,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA for trend (10,2,30)
-    kama_vals = kama(close, er_length=10, fast=2, slow=30)
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # RSI for momentum filter
-    rsi_vals = rsi(close, length=14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly pivot point
+    weekly_pivot = calculate_weekly_pivot(high_1w, low_1w, close_1w)
+    
+    # Donchian channels on 6h (20-period)
+    period = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(n):
+        if i < period:
+            highest_high[i] = np.max(high[max(0, i-period+1):i+1])
+            lowest_low[i] = np.min(low[max(0, i-period+1):i+1])
+        else:
+            highest_high[i] = max(highest_high[i-1], high[i])
+            lowest_low[i] = min(lowest_low[i-1], low[i])
+            if i >= period:
+                highest_high[i] = max(highest_high[i], high[i-period+1])
+                lowest_low[i] = min(lowest_low[i], low[i-period+1])
     
     # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Align weekly data to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure indicators are stable
+    start_idx = max(20, 20)  # Donchian period and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -119,36 +84,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to KAMA
-        trend_up = close[i] > kama_vals[i]
-        trend_down = close[i] < kama_vals[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i]
+        breakout_down = close[i] < lowest_low[i]
         
-        # RSI filter: not extreme
-        rsi_not_overbought = rsi_vals[i] < 70
-        rsi_not_oversold = rsi_vals[i] > 30
+        # Weekly pivot bias
+        price_above_pivot = close[i] > weekly_pivot_aligned[i]
+        price_below_pivot = close[i] < weekly_pivot_aligned[i]
         
-        # Volume filter: spike above average
-        vol_spike = volume[i] > vol_ma_20[i] * 1.5
+        # Volume filter
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: Upward trend, not overbought, volume spike
-            if trend_up and rsi_not_overbought and vol_spike:
+            # LONG: Donchian breakout up + price above weekly pivot + volume
+            if breakout_up and price_above_pivot and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downward trend, not oversold, volume spike
-            elif trend_down and rsi_not_oversold and vol_spike:
+            # SHORT: Donchian breakout down + price below weekly pivot + volume
+            elif breakout_down and price_below_pivot and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Trend reverses or volume drops
-            if not trend_up or not vol_spike:
+            # EXIT LONG: Price re-enters Donchian channel or pivot bias fails
+            if close[i] < highest_high[i] or not price_above_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reverses or volume drops
-            if not trend_down or not vol_spike:
+            # EXIT SHORT: Price re-enters Donchian channel or pivot bias fails
+            if close[i] > lowest_low[i] or not price_below_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
