@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-# 6h Williams Fractal Breakout with Volume Confirmation and Trend Filter
-# Hypothesis: Williams fractals identify key support/resistance levels. 
-# Breakout above bearish fractal (resistance) or below bullish fractal (support)
-# with volume confirmation and 12h EMA50 trend filter captures momentum moves.
-# Works in bull markets via upward breakouts and in bear markets via downward breakdowns.
-# Williams fractals require 2-bar confirmation, so we use additional_delay_bars=2.
+# 4h Donchian(20) Breakout + 1d EMA34 Trend + Volume Spike
+# Hypothesis: Donchian breakout captures directional momentum, filtered by daily EMA trend and volume spikes.
+# Works in bull markets via upper band breakouts and in bear markets via lower band breakouts.
+# Low trade frequency expected due to strict confluence requirements (trend + volatility + volume).
 
-name = "6h_WilliamsFractal_Breakout_Volume_Trend"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,38 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Data for Williams Fractals and Trend Filter ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
+    # === 1d Data for EMA Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Fractals require 5-bar window (2 bars each side)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_12h, low_12h)
-    # Fractals need 2 additional bars for confirmation (total 3-bar delay from center)
-    bearish_fractal_6h = align_htf_to_ltf(prices, df_12h, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_6h = align_htf_to_ltf(prices, df_12h, bullish_fractal, additional_delay_bars=2)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_6h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === Donchian Channel (20-period) ===
+    # Upper band: highest high of last 20 periods
+    # Lower band: lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume spike detection (20-period)
+    # === Volume Spike (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure all indicators ready (50 EMA + fractal delays)
+    start_idx = 50  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_6h[i]) or np.isnan(bearish_fractal_6h[i]) or 
-            np.isnan(bullish_fractal_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_4h[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,32 +61,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above bearish fractal (resistance) with volume + uptrend
-            if (close[i] > bearish_fractal_6h[i] and 
-                bearish_fractal_6h[i] > 0 and  # Valid fractal level
-                vol_spike[i] and 
-                close[i] > ema_50_6h[i]):
+            # LONG: Price breaks above Donchian upper + above 1d EMA34 + volume spike
+            if close[i] > donchian_upper[i] and close[i] > ema_34_4h[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below bullish fractal (support) with volume + downtrend
-            elif (close[i] < bullish_fractal_6h[i] and 
-                  bullish_fractal_6h[i] > 0 and  # Valid fractal level
-                  vol_spike[i] and 
-                  close[i] < ema_50_6h[i]):
+            # SHORT: Price breaks below Donchian lower + below 1d EMA34 + volume spike
+            elif close[i] < donchian_lower[i] and close[i] < ema_34_4h[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price falls back below bullish fractal (support) or trend change
-            if (close[i] < bullish_fractal_6h[i] and bullish_fractal_6h[i] > 0) or \
-               close[i] < ema_50_6h[i]:
+            # EXIT LONG: Price breaks below Donchian lower or trend change
+            if close[i] < donchian_lower[i] or close[i] < ema_34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises back above bearish fractal (resistance) or trend change
-            if (close[i] > bearish_fractal_6h[i] and bearish_fractal_6h[i] > 0) or \
-               close[i] > ema_50_6h[i]:
+            # EXIT SHORT: Price breaks above Donchian upper or trend change
+            if close[i] > donchian_upper[i] or close[i] > ema_34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
