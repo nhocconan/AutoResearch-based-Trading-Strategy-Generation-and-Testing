@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1d_KAMA_Trend_RSI_Reversal
-# Hypothesis: KAMA determines 4h trend direction (bullish/bearish), RSI identifies overbought/oversold conditions for mean reversion entries in the direction of the trend. Works in both bull and bear markets by following the trend filter.
-# Uses 1d timeframe for trend confirmation and RSI calculation to reduce noise and avoid overtrading. Designed for 20-50 trades/year.
+# 12h_1W_Camarilla_R3S3_Breakout_Volume_Trend
+# Hypothesis: 12-hour breakouts above weekly R3 or below weekly S3 with volume confirmation and weekly trend filter.
+# Uses weekly timeframe for trend and pivot levels to reduce noise and avoid overtrading. Designed for 12-37 trades/year.
+# Weekly trend filter avoids whipsaws in range markets; volume confirms institutional interest.
+# Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by following the weekly trend.
 
-name = "4h_1d_KAMA_Trend_RSI_Reversal"
-timeframe = "4h"
+name = "12h_1W_Camarilla_R3S3_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,46 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter and RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter and Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
 
-    # Calculate daily KAMA for trend filter
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly below
-    # Recompute volatility as sum of absolute changes over 10 periods
-    volatility = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i < 10:
-            volatility[i] = np.sum(np.abs(np.diff(close_1d[:i+1]))) if i > 0 else 0
-        else:
-            volatility[i] = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d = kama
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
 
-    # Calculate daily RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_1d = rsi
+    # Calculate weekly Camarilla levels (R3 and S3) based on previous week
+    prev_high = np.roll(df_1w['high'].values, 1)
+    prev_low = np.roll(df_1w['low'].values, 1)
+    prev_close = np.roll(df_1w['close'].values, 1)
+    prev_high[0] = df_1w['high'].values[0]
+    prev_low[0] = df_1w['low'].values[0]
+    prev_close[0] = df_1w['close'].values[0]
+    
+    rang = prev_high - prev_low
+    R3 = prev_close + rang * 1.1 / 4
+    S3 = prev_close - rang * 1.1 / 4
 
-    # Align KAMA and RSI to 4h timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align weekly levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,7 +58,7 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
             np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -80,31 +67,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Determine trend based on price vs KAMA
-        bullish_trend = close[i] > kama_1d_aligned[i]
-        bearish_trend = close[i] < kama_1d_aligned[i]
+        # Weekly trend filter
+        bullish_trend = close[i] > ema_1w_aligned[i]
+        bearish_trend = close[i] < ema_1w_aligned[i]
 
         if position == 0:
-            # LONG: Oversold RSI (<30) in bullish trend with volume confirmation
-            if rsi_1d_aligned[i] < 30 and bullish_trend and volume_ok[i]:
+            # LONG: Price closes above R3 with bullish weekly trend and volume confirmation
+            if close[i] > R3_aligned[i] and close[i-1] <= R3_aligned[i-1] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Overbought RSI (>70) in bearish trend with volume confirmation
-            elif rsi_1d_aligned[i] > 70 and bearish_trend and volume_ok[i]:
+            # SHORT: Price closes below S3 with bearish weekly trend and volume confirmation
+            elif close[i] < S3_aligned[i] and close[i-1] >= S3_aligned[i-1] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought (>70) or trend turns bearish
-            if rsi_1d_aligned[i] > 70 or not bullish_trend:
+            # EXIT LONG: Price closes below S3 or weekly trend turns bearish
+            if close[i] < S3_aligned[i] and close[i-1] >= S3_aligned[i-1] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold (<30) or trend turns bullish
-            if rsi_1d_aligned[i] < 30 or not bearish_trend:
+            # EXIT SHORT: Price closes above R3 or weekly trend turns bullish
+            if close[i] > R3_aligned[i] and close[i-1] <= R3_aligned[i-1] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
