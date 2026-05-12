@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Ratio"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,13 +35,14 @@ def generate_signals(prices):
     r1 = close_1d_vals + (high_1d - low_1d) * 1.1 / 2
     s1 = close_1d_vals - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to 12h (wait for daily close)
+    # Align Camarilla levels to 4h (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume ratio: current volume / 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)
+    vol_ratio = volume / vol_avg
+    vol_ratio[vol_ratio == np.inf] = 0  # handle division by zero
     
     # EMA slope: positive when current EMA > previous EMA
     ema_slope = ema34_1d_aligned > np.roll(ema34_1d_aligned, 1)
@@ -50,7 +51,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -64,17 +65,17 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + daily trend up + volume spike + EMA slope up
+            # Long: price breaks above R1 + daily trend up + volume ratio > 1.5 + EMA slope up
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
-                vol_spike[i] and 
+                vol_ratio[i] > 1.5 and 
                 ema_slope[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + daily trend down + volume spike + EMA slope down
+            # Short: price breaks below S1 + daily trend down + volume ratio > 1.5 + EMA slope down
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
-                  vol_spike[i] and 
+                  vol_ratio[i] > 1.5 and 
                   not ema_slope[i]):
                 signals[i] = -0.25
                 position = -1
