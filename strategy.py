@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
-# Hypothesis: Camarilla pivot levels (R3/S3) from daily timeframe identify institutional support/resistance.
-# Breakouts above R3 or below S3 with volume confirmation (volume > 1.5x 20-period average) capture
-# institutional breakout moves. Trend filter uses 50-period EMA on 1d to avoid counter-trend trades.
-# Works in bull markets (breakouts above R3 in uptrend) and bear markets (breakdowns below S3 in downtrend).
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years).
+# 12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER
+# Hypothesis: Camarilla pivot levels (R3, S3) from daily timeframe act as strong support/resistance.
+# Price breaking above R3 with bullish daily trend (close > EMA34) signals long.
+# Price breaking below S3 with bearish daily trend (close < EMA34) signals short.
+# Uses volume confirmation to avoid false breakouts. Designed for fewer, high-quality trades.
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
 
-name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
-timeframe = "4h"
+name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,6 +19,8 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -31,30 +33,29 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's close for Camarilla calculation
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
-    prev_close[0] = np.nan  # First day has no previous close
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate Camarilla levels for each day
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    rang = high_1d - low_1d
-    r3 = close_1d + rang * 1.1 / 2
-    s3 = close_1d - rang * 1.1 / 2
+    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
+    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # EMA50 for trend filter
-    ema50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # EMA34 for trend filter
+    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 4h timeframe
+    # Volume average (20-period) for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
-    
-    # Volume spike: volume > 1.5x 20-period average
-    vol_ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values  # Using price as proxy for volume calculation
-    vol_ratio = volume / np.where(pd.Series(close).rolling(window=20, min_periods=1).mean().values > 0, 
-                                  pd.Series(close).rolling(window=20, min_periods=20).mean().values, 1)
-    volume_spike = volume > (1.5 * pd.Series(volume).rolling(window=20, min_periods=20).mean().values)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,7 +65,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,32 +74,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above R3 with volume spike in uptrend
+            # LONG: Price breaks above R3 with bullish trend and volume confirmation
             if (close[i] > r3_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > ema50_aligned[i]):
+                close[i] > ema34_aligned[i] and 
+                volume[i] > vol_ma_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S3 with volume spike in downtrend
+            # SHORT: Price breaks below S3 with bearish trend and volume confirmation
             elif (close[i] < s3_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema50_aligned[i]):
+                  close[i] < ema34_aligned[i] and 
+                  volume[i] > vol_ma_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R3 or trend reversal
-            if (close[i] < r3_aligned[i] or 
-                close[i] < ema50_aligned[i]):
+            # EXIT LONG: Price falls below S3 or trend reversal
+            if (close[i] < s3_aligned[i] or 
+                close[i] < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S3 or trend reversal
-            if (close[i] > s3_aligned[i] or 
-                close[i] > ema50_aligned[i]):
+            # EXIT SHORT: Price rises above R3 or trend reversal
+            if (close[i] > r3_aligned[i] or 
+                close[i] > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
