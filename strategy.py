@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Price_Action_With_1dVWAP_and_Volume
-# Hypothesis: Price returning to the previous day's VWAP acts as a mean-reversion signal in ranging markets, while breaks above/below VWAP with volume and trend alignment indicate momentum in trending markets. This dual-regime approach works in both bull and bear markets by adapting to price action around the 1-day VWAP, filtered by 1-week EMA trend and volume confirmation. Designed for low trade frequency and high edge.
+# 1d_WilliamsAlligator_ElderRay_Vortex_Volume
+# Hypothesis: Williams Alligator (JAW/TEETH/LIPS) identifies trend direction, Elder Ray measures bull/bear power,
+# Vortex confirms trend strength, and volume spike filters for institutional participation.
+# Works in bull markets via long when bull power > 0 and price above teeth; in bear markets via short when bear power > 0 and price below teeth.
+# Uses 1d timeframe with 1w trend filter to reduce noise and false signals.
 
-name = "4h_Price_Action_With_1dVWAP_and_Volume"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_ElderRay_Vortex_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,32 +23,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1-week EMA for Trend Filter ===
+    # === 1w Data for Trend Filter ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Williams Alligator on weekly: SMMA(13,8), SMMA(8,5), SMMA(5,3)
+    # Using EMA as proxy for SMMA with same period
+    jaw_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    teeth_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
+    lips_1w = pd.Series(close_1w).ewm(span=5, adjust=False, min_periods=5).mean().values
     
-    # === 1-day VWAP ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    jaw_1d = align_htf_to_ltf(prices, df_1w, jaw_1w)
+    teeth_1d = align_htf_to_ltf(prices, df_1w, teeth_1w)
+    lips_1d = align_htf_to_ltf(prices, df_1w, lips_1w)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # === Elder Ray Power (13-period EMA) ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # Calculate typical price and VWAP
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_1d = (typical_price_1d * volume_1d).cumsum() / volume_1d.cumsum()
-    vwap_1d_array = vwap_1d.values
+    # === Vortex Indicator (14-period) ===
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], tr])
     
-    # Align VWAP to 4h
-    vwap_4h = align_htf_to_ltf(prices, df_1d, vwap_1d_array)
+    vm_plus = np.abs(high - low[1:])
+    vm_plus = np.concatenate([[vm_plus[0]], vm_plus])
+    vm_minus = np.abs(low - high[1:])
+    vm_minus = np.concatenate([[vm_minus[0]], vm_minus])
+    
+    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    sum_vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    sum_vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    vi_plus = sum_vm_plus14 / sum_tr14
+    vi_minus = sum_vm_minus14 / sum_tr14
     
     # === Volume Spike (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,7 +71,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_4h[i]) or np.isnan(vwap_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_1d[i]) or np.isnan(teeth_1d[i]) or np.isnan(lips_1d[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,24 +82,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price crosses above VWAP with volume and uptrend
-            if close[i] > vwap_4h[i] and close[i-1] <= vwap_4h[i-1] and ema_20_4h[i] > ema_20_4h[i-1] and vol_spike[i]:
+            # LONG: Bull power > 0, price above teeth, VI+ > VI-, and volume spike
+            if bull_power[i] > 0 and close[i] > teeth_1d[i] and vi_plus[i] > vi_minus[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below VWAP with volume and downtrend
-            elif close[i] < vwap_4h[i] and close[i-1] >= vwap_4h[i-1] and ema_20_4h[i] < ema_20_4h[i-1] and vol_spike[i]:
+            # SHORT: Bear power > 0, price below teeth, VI- > VI+, and volume spike
+            elif bear_power[i] > 0 and close[i] < teeth_1d[i] and vi_minus[i] > vi_plus[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price crosses below VWAP or trend turns down
-            if close[i] < vwap_4h[i] and close[i-1] >= vwap_4h[i-1] or ema_20_4h[i] < ema_20_4h[i-1]:
+            # EXIT LONG: Bull power <= 0 or price below lips or trend change (VI- > VI+)
+            if bull_power[i] <= 0 or close[i] < lips_1d[i] or vi_minus[i] > vi_plus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above VWAP or trend turns up
-            if close[i] > vwap_4h[i] and close[i-1] <= vwap_4h[i-1] or ema_20_4h[i] > ema_20_4h[i-1]:
+            # EXIT SHORT: Bear power <= 0 or price above lips or trend change (VI+ > VI-)
+            if bear_power[i] <= 0 or close[i] > lips_1d[i] or vi_plus[i] > vi_minus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
