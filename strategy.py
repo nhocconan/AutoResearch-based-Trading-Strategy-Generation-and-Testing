@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Use Camarilla pivot levels (R1/S1) from 4h for breakout direction, filtered by 1d EMA trend and volume spikes on 1h for entry timing.
-# Camarilla levels provide precise intraday support/resistance, while 1d EMA filters counter-trend trades and volume confirms breakout strength.
-# Designed for 60-150 total trades over 4 years (15-37/year) to minimize fee drag. Works in bull/bear by following 1d trend.
-# Uses 4h OHLC for Camarilla calculation and 1h volume for spike detection.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: 12h Camarilla pivot breakout with 1d EMA trend filter and volume spike confirmation.
+# Uses 1d EMA for trend direction to avoid counter-trend trades, and volume spikes to confirm breakout strength.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag on 12h timeframe.
+# Works in bull/bear markets by following 1d trend direction, reducing false breakouts.
 
-name = "1h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,14 +23,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 4h data for Camarilla pivot calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 12h data for price action and Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
         return np.zeros(n)
 
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
 
     # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -41,25 +41,17 @@ def generate_signals(prices):
     ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
 
-    # Calculate Camarilla levels for 4h: R1, S1 based on previous 4h bar
-    # Camarilla formulas: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
-    # We use the previous completed 4h bar's OHLC
-    prev_close_4h = np.roll(close_4h, 1)
-    prev_high_4h = np.roll(high_4h, 1)
-    prev_low_4h = np.roll(low_4h, 1)
-    prev_close_4h[0] = close_4h[0]  # First value
-    prev_high_4h[0] = high_4h[0]
-    prev_low_4h[0] = low_4h[0]
+    # Calculate Camarilla levels for R1 and S1 (12h timeframe)
+    # Camarilla: R1 = C + 1.1*(H-L)/12, S1 = C - 1.1*(H-L)/12
+    camarilla_range = high_12h - low_12h
+    camarilla_r1 = close_12h + 1.1 * camarilla_range / 12
+    camarilla_s1 = close_12h - 1.1 * camarilla_range / 12
 
-    range_4h = prev_high_4h - prev_low_4h
-    camarilla_r1 = prev_close_4h + range_4h * 1.1 / 12
-    camarilla_s1 = prev_close_4h - range_4h * 1.1 / 12
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
 
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
-
-    # Calculate 1h volume SMA20 for volume confirmation
+    # Calculate 12h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
@@ -81,27 +73,27 @@ def generate_signals(prices):
         if position == 0:
             # LONG: Breakout above Camarilla R1 in 1d uptrend with volume spike
             if close[i] > camarilla_r1_aligned[i] and close[i] > ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # SHORT: Breakdown below Camarilla S1 in 1d downtrend with volume spike
             elif close[i] < camarilla_s1_aligned[i] and close[i] < ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Camarilla S1 (reversal to support)
+            # EXIT LONG: Price closes below Camarilla S1 (reversal signal)
             if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Camarilla R1 (reversal to resistance)
+            # EXIT SHORT: Price closes above Camarilla R1 (reversal signal)
             if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
