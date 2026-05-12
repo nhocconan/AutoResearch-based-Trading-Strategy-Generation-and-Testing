@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_Direction_RSI_Chop"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,57 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1W DATA FOR TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # === DAILY CAMARILLA PIVOTS ===
+    # === 1D DATA FOR TREND FILTER ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    camarilla_high = np.zeros_like(high_1d)
-    camarilla_low = np.zeros_like(low_1d)
-    r3 = np.zeros_like(high_1d)
-    s3 = np.zeros_like(low_1d)
+    # Daily KAMA for trend direction
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    direction = np.abs(np.diff(close_1d, k=10, prepend=close_1d[:10]))
+    er = np.where(direction != 0, change / direction, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    for i in range(len(close_1d)):
-        if i == 0 or np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
-            camarilla_high[i] = np.nan
-            camarilla_low[i] = np.nan
-            r3[i] = np.nan
-            s3[i] = np.nan
-        else:
-            # Camarilla pivot calculations
-            pivot = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
-            range_val = high_1d[i] - low_1d[i]
-            camarilla_high[i] = close_1d[i] + range_val * 1.1 / 4  # R3
-            camarilla_low[i] = close_1d[i] - range_val * 1.1 / 4   # S3
-            r3[i] = camarilla_high[i]
-            s3[i] = camarilla_low[i]
+    # === RSI(14) FOR MOMENTUM ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # === VOLUME CONFIRMATION (20-period) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # === CHOPPINESS INDEX (14) FOR REGIME ===
+    atr = np.zeros(n)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(np.sum(tr, axis=0) / (max_high - min_low)) / np.log10(14) if False else \
+           100 * np.log10(pd.Series(tr).rolling(window=14, min_periods=14).sum().values / (max_high - min_low)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(50, 14)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,28 +71,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 with volume spike and weekly uptrend
-            if (close[i] > r3_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > ema50_1w_aligned[i]):
+            # LONG: Price above daily KAMA, RSI > 50, Chop < 61.8 (trending)
+            if (close[i] > kama_1d_aligned[i] and 
+                rsi[i] > 50 and 
+                chop[i] < 61.8):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with volume spike and weekly downtrend
-            elif (close[i] < s3_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema50_1w_aligned[i]):
+            # SHORT: Price below daily KAMA, RSI < 50, Chop < 61.8 (trending)
+            elif (close[i] < kama_1d_aligned[i] and 
+                  rsi[i] < 50 and 
+                  chop[i] < 61.8):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price closes below S3 or weekly trend turns down
-            if (close[i] < s3_aligned[i]) or (close[i] < ema50_1w_aligned[i]):
+            # EXIT LONG: Price crosses below daily KAMA OR RSI < 40
+            if (close[i] < kama_1d_aligned[i]) or (rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R3 or weekly trend turns up
-            if (close[i] > r3_aligned[i]) or (close[i] > ema50_1w_aligned[i]):
+            # EXIT SHORT: Price crosses above daily KAMA OR RSI > 60
+            if (close[i] > kama_1d_aligned[i]) or (rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
