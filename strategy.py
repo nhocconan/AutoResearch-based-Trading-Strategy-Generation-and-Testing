@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WoodiesCCI_CCIZeroCross_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Keltner_Channel_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,25 +17,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 12h EMA20 for trend filter (fast EMA for better trend detection)
+    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
-    # Woodies CCI on 1d (20-period, typical price)
-    typical_price = (high + low + close) / 3.0
-    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (typical_price - sma_tp) / (0.015 * mad)
+    # Load 1d data for Keltner Channel components
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # Calculate ATR(10) for Keltner Channel
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Keltner Channel: EMA(20) ± 2 * ATR(10)
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_20_1d + 2 * atr_10
+    lower_keltner = ema_20_1d - 2 * atr_10
+    
+    # Align Keltner levels to 6h timeframe
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    
+    # Volume filter: current volume > 1.8x 20-period average (stricter to reduce trades)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.3 * vol_avg)
+    vol_filter = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -44,8 +58,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(cci[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_20_12h_aligned[i]) or 
+            np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,24 +69,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: CCI crosses above zero + above 1w EMA34 + volume filter
-            if cci[i] > 0 and cci[i-1] <= 0 and close[i] > ema_34_1w_aligned[i] and vol_filter[i]:
+            # Long: breakout above upper Keltner + above 12h EMA20 + volume filter
+            if high[i] > upper_keltner_aligned[i] and close[i] > ema_20_12h_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: CCI crosses below zero + below 1w EMA34 + volume filter
-            elif cci[i] < 0 and cci[i-1] >= 0 and close[i] < ema_34_1w_aligned[i] and vol_filter[i]:
+            # Short: breakdown below lower Keltner + below 12h EMA20 + volume filter
+            elif low[i] < lower_keltner_aligned[i] and close[i] < ema_20_12h_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: CCI crosses below zero or below 1w EMA34
-            if cci[i] < 0 or close[i] < ema_34_1w_aligned[i]:
+            # Exit long: breakdown below lower Keltner or below 12h EMA20
+            if low[i] < lower_keltner_aligned[i] or close[i] < ema_20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: CCI crosses above zero or above 1w EMA34
-            if cci[i] > 0 or close[i] > ema_34_1w_aligned[i]:
+            # Exit short: breakout above upper Keltner or above 12h EMA20
+            if high[i] > upper_keltner_aligned[i] or close[i] > ema_20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
