@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_KAMA_Trend_200MA_Filter_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,44 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Data for Camarilla pivot calculation ===
+    # === 1d data for trend and volume ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # === Calculate Camarilla levels (R1, S1) from previous day ===
-    # Typical price = (H + L + C) / 3
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # === 1d KAMA for trend direction ===
+    # Efficiency ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d, dtype=np.float64)
+    for i in range(1, len(close_1d)):
+        er[i] = change[i] / (volatility[i] + 1e-10) if volatility[i] > 0 else 0
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close_1d, dtype=np.float64)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_1d = kama
     
-    # Camarilla levels
-    R1 = typical_price_1d + (range_1d * 1.1 / 12)
-    S1 = typical_price_1d - (range_1d * 1.1 / 12)
+    # === 1d 200-period MA for filter ===
+    ma200_1d = np.full_like(close_1d, np.nan, dtype=np.float64)
+    for i in range(199, len(close_1d)):
+        ma200_1d[i] = np.mean(close_1d[i-199:i+1])
     
-    # Align to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # === 1d volume spike detection ===
+    vol_ma_1d = np.full_like(volume_1d, np.nan, dtype=np.float64)
+    for i in range(19, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-19:i+1])
+    volume_spike_1d = volume_1d > (vol_ma_1d * 2.0)
     
-    # === 1d EMA34 for trend filter ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === Align 1d indicators to 4h timeframe ===
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    ma200_1d_aligned = align_htf_to_ltf(prices, df_1d, ma200_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(np.float64))
     
-    # === Volume spike detection (20-period) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # === 4h KAMA for entry timing ===
+    # Efficiency ratio
+    change_4h = np.abs(np.diff(close, prepend=close[0]))
+    volatility_4h = np.abs(np.diff(close))
+    er_4h = np.zeros_like(close, dtype=np.float64)
+    for i in range(1, len(close)):
+        er_4h[i] = change_4h[i] / (volatility_4h[i] + 1e-10) if volatility_4h[i] > 0 else 0
+    # Smoothing constants
+    sc_4h = (er_4h * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama_4h = np.zeros_like(close, dtype=np.float64)
+    kama_4h[0] = close[0]
+    for i in range(1, len(close)):
+        kama_4h[i] = kama_4h[i-1] + sc_4h[i] * (close[i] - kama_4h[i-1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34, 20)
+    start_idx = max(100, 30, 200, 20)  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama_1d_aligned[i]) or 
+            np.isnan(ma200_1d_aligned[i]) or
+            np.isnan(volume_spike_1d_aligned[i]) or
+            np.isnan(kama_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +86,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 + above 1d EMA34 + volume spike
-            if (close[i] > R1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume_spike[i]):
+            # Long: price above 1d KAMA AND above 1d MA200 AND volume spike
+            if (close[i] > kama_1d_aligned[i] and 
+                close[i] > ma200_1d_aligned[i] and
+                volume_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + below 1d EMA34 + volume spike
-            elif (close[i] < S1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume_spike[i]):
+            # Short: price below 1d KAMA AND below 1d MA200 AND volume spike
+            elif (close[i] < kama_1d_aligned[i] and 
+                  close[i] < ma200_1d_aligned[i] and
+                  volume_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price falls below S1 or below 1d EMA34
-            if close[i] < S1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: price below 4h KAMA or volume spike disappears
+            if close[i] < kama_4h[i] or volume_spike_1d_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price rises above R1 or above 1d EMA34
-            if close[i] > R1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: price above 4h KAMA or volume spike disappears
+            if close[i] > kama_4h[i] or volume_spike_1d_aligned[i] <= 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
