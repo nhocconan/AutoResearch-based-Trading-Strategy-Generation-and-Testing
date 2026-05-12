@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R3 with price > daily EMA34 and volume spike (>2x 20-period MA).
+# 6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: On 6h timeframe, enter long when price breaks above Camarilla R3 with price > daily EMA34 and volume spike (>2x 20-period MA).
 # Enter short when price breaks below Camarilla S3 with price < daily EMA34 and volume spike.
 # Exit when price crosses back below R3 (for longs) or above S3 (for shorts).
 # Uses daily timeframe for trend filter and weekly for volatility regime filter to avoid false breakouts in low volatility.
 # Targets 20-40 trades/year for low fee drag and works in both bull and bear markets by fading extreme daily levels with institutional levels.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -69,10 +68,10 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     weekly_atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Volume confirmation: 20-period moving average on 4h data
+    # Volume confirmation: 20-period moving average on 6h data
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 4h timeframe
+    # Align all to 6h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
