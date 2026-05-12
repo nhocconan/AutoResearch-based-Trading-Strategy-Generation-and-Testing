@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_ThreeLevelBreakout_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "1d_Vortex_T1_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,34 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly trend filter: EMA34
+    df_1w = get_htf_data(prices, '1w')
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # 1d volume filter: volume > 1.5x 20-period average
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Weekly volume filter: volume > 1.5x 20-period average
+    vol_ma_20_1w = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
     
-    # 4h price data for Three Level breakout
-    high_4h = high
-    low_4h = low
-    close_4h = close
+    # Daily price data for Vortex Indicator (14-period)
+    tr1 = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.inf], tr1])
+    vm = np.abs(high - np.roll(low, 1))
+    vi = np.abs(low - np.roll(high, 1))
     
-    # Calculate Three Level (similar to Camarilla but different multipliers)
-    # Using 4h bars for the levels
-    range_4h = high_4h - low_4h
-    tlevel_h3 = close_4h + range_4h * 1.1 / 4  # H3 level
-    tlevel_l3 = close_4h - range_4h * 1.1 / 4  # L3 level
+    # VI+ and VI- calculation
+    vi_plus = pd.Series(vm).rolling(window=14, min_periods=14).sum().values / pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vi_minus = pd.Series(vi).rolling(window=14, min_periods=14).sum().values / pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need enough data for indicators
+    start_idx = 14  # need enough data for Vortex
     
     for i in range(start_idx, n):
-        # Skip if daily trend or volume data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
+        # Skip if weekly trend or volume data not ready
+        if np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_20_1w_aligned[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume filter: daily volume > weekly average volume
+        if volume[i] <= vol_ma_20_1w_aligned[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,32 +61,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above Tlevel H3 with daily uptrend and volume confirmation
-            if (high[i] > tlevel_h3[i] and 
-                close[i] > tlevel_h3[i] and
-                close[i] > ema34_1d_aligned[i] and  # daily uptrend
-                volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
+            # Long: VI+ > VI- (bullish trend) and price above weekly EMA
+            if vi_plus[i] > vi_minus[i] and close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below Tlevel L3 with daily downtrend and volume confirmation
-            elif (low[i] < tlevel_l3[i] and 
-                  close[i] < tlevel_l3[i] and
-                  close[i] < ema34_1d_aligned[i] and  # daily downtrend
-                  volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
+            # Short: VI- > VI+ (bearish trend) and price below weekly EMA
+            elif vi_minus[i] > vi_plus[i] and close[i] < ema34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price breaks below Tlevel L3 or reverses against trend
-            if (low[i] < tlevel_l3[i] or 
-                close[i] < ema34_1d_aligned[i]):
+            # Exit long when trend turns bearish or price crosses below EMA
+            if vi_minus[i] > vi_plus[i] or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price breaks above Tlevel H3 or reverses against trend
-            if (high[i] > tlevel_h3[i] or 
-                close[i] > ema34_1d_aligned[i]):
+            # Exit short when trend turns bullish or price crosses above EMA
+            if vi_plus[i] > vi_minus[i] or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
