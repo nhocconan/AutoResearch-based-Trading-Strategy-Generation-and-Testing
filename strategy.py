@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Keltner_Breakout_Volume
-# Hypothesis: Keltner Channel breakout with volume confirmation and 1d EMA50 trend filter.
-# Uses 20-period ATR(10) for channel width. Long when price breaks above upper KC with
-# volume > 1.5x 20-period average and price above 1d EMA50; short when breaks below lower
-# KC with volume confirmation and price below 1d EMA50. Designed for 15-25 trades/year
-# per symbol, works in bull via trend continuation and bear via mean reversion at extremes.
+# 4h_Williams_Alligator_1DTrend
+# Hypothesis: Williams Alligator (Jaw: SMA13, Teeth: SMA8, Lips: SMA5) crossover signals direction. 
+# Long when Lips cross above Teeth AND price above 1-day EMA50 trend; short when Lips cross below Teeth AND price below EMA50.
+# Uses volume confirmation (volume > 1.5x 20-period average) to filter false signals.
+# Designed for 20-35 trades/year with clear trend and volume to avoid false signals.
+# Works in bull via trend continuation and bear via reversals at extremes.
 
-name = "6h_Keltner_Breakout_Volume"
-timeframe = "6h"
+name = "4h_Williams_Alligator_1DTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,32 +24,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter
+    # Load 1D data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1D EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate ATR(10) for Keltner Channel
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0  # First bar has no previous close
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
-    
-    # Calculate EMA20 for KC middle line
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channel: 2 * ATR above/below EMA20
-    kc_upper = ema20 + 2.0 * atr
-    kc_lower = ema20 - 2.0 * atr
+    # Calculate Williams Alligator components (SMA based)
+    # Jaw: SMA13, Teeth: SMA8, Lips: SMA5
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,13 +48,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema20[i]) or 
-            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(jaw[i]) or 
+            np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,32 +62,32 @@ def generate_signals(prices):
             continue
         
         ema50_val = ema50_1d_aligned[i]
-        ema20_val = ema20[i]
-        kc_upper_val = kc_upper[i]
-        kc_lower_val = kc_lower[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
         vol_confirm = volume_confirm[i]
         
         if position == 0:
-            # LONG: price breaks above upper KC with volume confirmation and above 1d EMA50 trend
-            if close[i] > kc_upper_val and close[i] > ema50_val and vol_confirm:
+            # LONG: Lips cross above Teeth AND price above 1D EMA50 trend, with volume confirmation
+            if lips_val > teeth_val and lips[i-1] <= teeth[i-1] and close[i] > ema50_val and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below lower KC with volume confirmation and below 1d EMA50 trend
-            elif close[i] < kc_lower_val and close[i] < ema50_val and vol_confirm:
+            # SHORT: Lips cross below Teeth AND price below 1D EMA50 trend, with volume confirmation
+            elif lips_val < teeth_val and lips[i-1] >= teeth[i-1] and close[i] < ema50_val and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below EMA20 (middle of KC)
-            if close[i] < ema20_val:
+            # EXIT LONG: Lips cross below Teeth OR price breaks below 1D EMA50
+            if lips_val < teeth_val or close[i] < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above EMA20 (middle of KC)
-            if close[i] > ema20_val:
+            # EXIT SHORT: Lips cross above Teeth OR price breaks above 1D EMA50
+            if lips_val > teeth_val or close[i] > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
