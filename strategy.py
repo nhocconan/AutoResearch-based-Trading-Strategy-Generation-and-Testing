@@ -1,12 +1,9 @@
-#/usr/bin/env python3
-# 4h_1d_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume spike confirmation (1.5x average volume).
-# The 12h EMA50 provides trend direction to avoid counter-trend trades, while volume spikes confirm breakout strength.
-# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag. Works in bull/bear by following 12h trend.
-# Uses Camarilla pivot levels (R1/S1) from daily data for precise entry/exit levels.
+#!/usr/bin/env python3
+# 6h_1w_1d_RSI_Divergence_Pullback
+# Hypothesis: On 6h timeframe, enter long when RSI shows bullish divergence (price makes lower low, RSI makes higher low) during pullback to 21-period EMA in a weekly uptrend; enter short on bearish divergence during pullback to EMA in weekly downtrend. Uses daily EMA200 as additional trend filter. Designed for low frequency (15-35 trades/year) to avoid fee drag. Works in bull/bear by following weekly trend and using mean-reversion entries during pullbacks.
 
-name = "4h_1d_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "6h_1w_1d_RSI_Divergence_Pullback"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,56 +12,53 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot levels (R1, S1)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend direction
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+
+    # Get daily data for EMA200 filter and RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Daily EMA200 for additional trend filter
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
 
-    # Calculate Camarilla pivot levels for each 1d bar
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate RSI on 6h close
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
 
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-
-    # Calculate 4h volume SMA20 for volume confirmation
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
+    # Calculate 6h EMA21 for pullback entries
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(ema21[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,27 +66,76 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Determine weekly trend
+        weekly_uptrend = close[i] > ema50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+
+        # Additional daily trend filter
+        daily_filter_long = close[i] > ema200_1d_aligned[i]
+        daily_filter_short = close[i] < ema200_1d_aligned[i]
+
         if position == 0:
-            # LONG: Breakout above R1 in 12h uptrend with volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema50_12h_aligned[i] and volume[i] > volume_sma20[i]:
+            # Check for bullish RSI divergence: price lower low, RSI higher low
+            bullish_div = False
+            if i >= 20:  # Need lookback for divergence
+                # Find recent swing low in price
+                lookback = 20
+                price_lows = []
+                rsi_lows = []
+                for j in range(i - lookback, i):
+                    if j >= 1 and j < n-1:
+                        if low[j] <= low[j-1] and low[j] <= low[j+1]:
+                            price_lows.append((j, low[j]))
+                            rsi_lows.append((j, rsi[j]))
+                # Check for at least two lows where price makes lower low but RSI makes higher low
+                if len(price_lows) >= 2:
+                    price_lows.sort(key=lambda x: x[0])  # Sort by time
+                    rsi_lows.sort(key=lambda x: x[0])
+                    # Compare last two lows
+                    if (price_lows[-1][1] < price_lows[-2][1] and 
+                        rsi_lows[-1][1] > rsi_lows[-2][1]):
+                        bullish_div = True
+
+            # Check for bearish RSI divergence: price higher high, RSI lower high
+            bearish_div = False
+            if i >= 20:
+                lookback = 20
+                price_highs = []
+                rsi_highs = []
+                for j in range(i - lookback, i):
+                    if j >= 1 and j < n-1:
+                        if high[j] >= high[j-1] and high[j] >= high[j+1]:
+                            price_highs.append((j, high[j]))
+                            rsi_highs.append((j, rsi[j]))
+                if len(price_highs) >= 2:
+                    price_highs.sort(key=lambda x: x[0])
+                    rsi_highs.sort(key=lambda x: x[0])
+                    if (price_highs[-1][1] > price_highs[-2][1] and 
+                        rsi_highs[-1][1] < rsi_highs[-2][1]):
+                        bearish_div = True
+
+            # LONG: Bullish divergence during pullback to EMA21 in weekly uptrend + daily filter
+            if (bullish_div and weekly_uptrend and daily_filter_long and 
+                close[i] <= ema21[i] * 1.005):  # Allow small buffer above EMA
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 in 12h downtrend with volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema50_12h_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: Bearish divergence during pullback to EMA21 in weekly downtrend + daily filter
+            elif (bearish_div and weekly_downtrend and daily_filter_short and 
+                  close[i] >= ema21[i] * 0.995):  # Allow small buffer below EMA
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S1 (reversal signal)
-            if close[i] < s1_aligned[i]:
+            # EXIT LONG: Price closes above EMA21 (momentum) or RSI > 70 (overbought)
+            if close[i] > ema21[i] * 1.01 or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R1 (reversal signal)
-            if close[i] > r1_aligned[i]:
+            # EXIT SHORT: Price closes below EMA21 (momentum) or RSI < 30 (oversold)
+            if close[i] < ema21[i] * 0.99 or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
