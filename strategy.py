@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,30 +23,26 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate Camarilla pivot levels for previous day
+    # Pivot = (H + L + C) / 3
+    # R3 = C + (H - L) * 1.1 / 2
+    # S3 = C - (H - L) * 1.1 / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 2
+    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    camarilla_range = prev_high - prev_low
-    R1 = prev_close + 1.1 * camarilla_range / 12
-    S1 = prev_close - 1.1 * camarilla_range / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    # Align Camarilla levels to 6h timeframe (use previous day's values)
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     # 1D EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema34_1d_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.8)  # Strong volume spike
+    volume_spike = volume > (vol_ma * 2.0)  # Strong volume spike for confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or 
-            np.isnan(ema34_1d_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(ema34_1d_6h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,28 +61,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + above trend + volume confirmation
-            if (close[i] > R1_4h[i] and 
-                close[i] > ema34_1d_4h[i] and
+            # LONG: Break above R3 with volume + price above 1d EMA34 (uptrend)
+            if (close[i] > r3_6h[i] and 
+                ema34_1d_6h[i] > 0 and  # Ensure EMA is valid
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + below trend + volume confirmation
-            elif (close[i] < S1_4h[i] and 
-                  close[i] < ema34_1d_4h[i] and
+            # SHORT: Break below S3 with volume + price below 1d EMA34 (downtrend)
+            elif (close[i] < s3_6h[i] and 
+                  ema34_1d_6h[i] > 0 and  # Ensure EMA is valid
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 OR below trend
-            if close[i] < S1_4h[i] or close[i] < ema34_1d_4h[i]:
+            # EXIT LONG: Price falls back below R3 or trend weakens
+            if close[i] < r3_6h[i] or ema34_1d_6h[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 OR above trend
-            if close[i] > R1_4h[i] or close[i] > ema34_1d_4h[i]:
+            # EXIT SHORT: Price rises back above S3 or trend weakens
+            if close[i] > s3_6h[i] or ema34_1d_6h[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
