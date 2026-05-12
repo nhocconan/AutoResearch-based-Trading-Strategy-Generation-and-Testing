@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 12h_1D_Camarilla_R3S3_Breakout_Trend_Volume
-# Hypothesis: Breakouts above daily R3 or below daily S3 on 12h timeframe with volume confirmation and daily EMA34 trend filter. Uses daily timeframe for both trend and pivot levels to reduce noise and avoid overtrading. Designed for 12-37 trades/year to minimize fee drift while capturing strong momentum moves in both bull and bear markets.
+# 12h_1D_Camarilla_R3S3_Breakout_Volume_Trend
+# Hypothesis: Breakouts above daily R3 or below daily S3 on 12h timeframe with volume confirmation and 1d EMA34 trend filter. Designed for low trade frequency (12-37/year) to minimize fee drift while capturing strong momentum moves in both bull and bear markets. Uses only daily timeframe for trend and pivot levels to reduce noise.
 
-name = "12h_1D_Camarilla_R3S3_Breakout_Trend_Volume"
+name = "12h_1D_Camarilla_R3S3_Breakout_Volume_Trend"
 timeframe = "12h"
 leverage = 1.0
 
