@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_RSI_MeanReversion_with_VolumeFilter"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,42 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once for RSI and volume context
+    # Load 1d data once for Camarilla pivots and EMA trend
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily RSI(14) for trend filter
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Daily OHLC for Camarilla R3 and S3 (previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # 4h RSI(14) for mean reversion signals
-    delta_4h = np.diff(close, prepend=close[0])
-    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
-    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
-    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs_4h))
+    # Calculate Camarilla R3 and S3 for previous day
+    p = (high_1d + low_1d + close_1d_vals) / 3
+    r3 = close_1d_vals + (high_1d - low_1d) * 1.1 / 4
+    s3 = close_1d_vals - (high_1d - low_1d) * 1.1 / 4
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Align Camarilla levels to 6h (wait for daily close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d_vals).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_avg)
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # ensure RSI has enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(rsi_4h[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,24 +59,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: 4h RSI oversold (<30) + daily RSI not overbought (<70) + volume filter
-            if (rsi_4h[i] < 30 and rsi_1d_aligned[i] < 70 and vol_filter[i]):
+            # Long: price breaks above R3 + above 1d EMA34 + volume spike
+            if (close[i] > r3_aligned[i] and close[i] > ema_34_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: 4h RSI overbought (>70) + daily RSI not oversold (>30) + volume filter
-            elif (rsi_4h[i] > 70 and rsi_1d_aligned[i] > 30 and vol_filter[i]):
+            # Short: price breaks below S3 + below 1d EMA34 + volume spike
+            elif (close[i] < s3_aligned[i] and close[i] < ema_34_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 4h RSI returns to neutral (>50) or daily RSI overbought
-            if (rsi_4h[i] > 50 or rsi_1d_aligned[i] > 70):
+            # Exit long: price closes below S3
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: 4h RSI returns to neutral (<50) or daily RSI oversold
-            if (rsi_4h[i] < 50 or rsi_1d_aligned[i] < 30):
+            # Exit short: price closes above R3
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
