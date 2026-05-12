@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3S3_Breakout_12hTrend_VolumeSpike
-# Hypothesis: 6-hour breakouts above 12-hour R3 or below 12-hour S3 with volume confirmation and 12-hour trend filter.
-# Uses 12-hour timeframe for trend and pivot levels to balance signal quality and trade frequency.
-# Designed for 50-150 total trades over 4 years (12-37/year). Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by following the 12-hour trend.
+# 4H_1D_1W_Camarilla_R1S1_Breakout_Volume_Trend
+# Hypothesis: 4h breakouts above daily R1 or below daily S1 with volume confirmation and weekly trend filter.
+# Uses daily pivot levels for entry timing and weekly trend to filter noise. Designed for 20-50 trades/year.
+# Weekly trend filter avoids whipsaws in range markets; volume confirms institutional interest.
+# Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by following the weekly trend.
 
-name = "6h_Camarilla_R3S3_Breakout_12hTrend_VolumeSpike"
-timeframe = "6h"
+name = "4H_1D_1W_Camarilla_R1S1_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -22,42 +23,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 12-hour data for trend filter and Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get daily data for pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate 12-hour EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
 
-    # Calculate 12-hour Camarilla levels (R3 and S3) based on previous 12-hour bar
-    prev_high = np.roll(df_12h['high'].values, 1)
-    prev_low = np.roll(df_12h['low'].values, 1)
-    prev_close = np.roll(df_12h['close'].values, 1)
-    prev_high[0] = df_12h['high'].values[0]
-    prev_low[0] = df_12h['low'].values[0]
-    prev_close[0] = df_12h['close'].values[0]
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+
+    # Calculate daily Camarilla levels (R1 and S1) based on previous day
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
     
     rang = prev_high - prev_low
-    R3 = prev_close + rang * 1.1 / 4
-    S3 = prev_close - rang * 1.1 / 4
+    R1 = prev_close + rang * 1.1 / 12
+    S1 = prev_close - rang * 1.1 / 12
 
-    # Align 12-hour levels to 6-hour timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
+    # Align daily levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
 
-    # Volume confirmation: current volume > 2.0x average of last 20 periods
+    # Volume confirmation: current volume > 1.8x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (2.0 * vol_ma)
+    volume_ok = volume > (1.8 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
             np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,31 +72,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # 12-hour trend filter
-        bullish_trend = close[i] > ema_12h_aligned[i]
-        bearish_trend = close[i] < ema_12h_aligned[i]
+        # Weekly trend filter
+        bullish_trend = close[i] > ema_1w_aligned[i]
+        bearish_trend = close[i] < ema_1w_aligned[i]
 
         if position == 0:
-            # LONG: Price closes above R3 with bullish 12h trend and volume confirmation
-            if close[i] > R3_aligned[i] and close[i-1] <= R3_aligned[i-1] and bullish_trend and volume_ok[i]:
+            # LONG: Price closes above R1 with bullish weekly trend and volume confirmation
+            if close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below S3 with bearish 12h trend and volume confirmation
-            elif close[i] < S3_aligned[i] and close[i-1] >= S3_aligned[i-1] and bearish_trend and volume_ok[i]:
+            # SHORT: Price closes below S1 with bearish weekly trend and volume confirmation
+            elif close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S3 or 12h trend turns bearish
-            if close[i] < S3_aligned[i] and close[i-1] >= S3_aligned[i-1] or not bullish_trend:
+            # EXIT LONG: Price closes below S1 or weekly trend turns bearish
+            if close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R3 or 12h trend turns bullish
-            if close[i] > R3_aligned[i] and close[i-1] <= R3_aligned[i-1] or not bearish_trend:
+            # EXIT SHORT: Price closes above R1 or weekly trend turns bullish
+            if close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
