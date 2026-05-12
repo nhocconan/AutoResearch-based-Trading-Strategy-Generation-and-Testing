@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+name = "6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,22 +25,19 @@ def generate_signals(prices):
     
     # Calculate Camarilla pivot levels from previous day
     # P = (H + L + C) / 3
-    # R3 = C + (H - L) * 1.1/2
-    # S3 = C - (H - L) * 1.1/2
     # R4 = C + (H - L) * 1.1
     # S4 = C - (H - L) * 1.1
     
     # Calculate for each day using previous day's data
-    pivot = (np.roll(high_1d, 1) + np.roll(low_1d, 1) + np.roll(close_1d, 1)) / 3
-    range_hl = np.roll(high_1d, 1) - np.roll(low_1d, 1)
-    r3 = np.roll(close_1d, 1) + range_hl * 1.1 / 2
-    s3 = np.roll(close_1d, 1) - range_hl * 1.1 / 2
-    r4 = np.roll(close_1d, 1) + range_hl * 1.1
-    s4 = np.roll(close_1d, 1) - range_hl * 1.1
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    range_hl = prev_high - prev_low
+    
+    r4 = prev_close + range_hl * 1.1
+    s4 = prev_close - range_hl * 1.1
     
     # Align Camarilla levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
     r4_6h = align_htf_to_ltf(prices, df_1d, r4)
     s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
@@ -50,7 +47,7 @@ def generate_signals(prices):
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.8)  # Strong volume spike for confirmation
+    volume_spike = volume > (vol_ma * 2.0)  # Higher threshold for fewer trades
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,8 +56,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(r4_6h[i]) or 
-            np.isnan(s4_6h[i]) or np.isnan(ema34_1d_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(ema34_1d_6h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,33 +65,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above R3 with volume, trend up, but not yet at R4 (avoid chasing)
-            if (close[i] > r3_6h[i] and 
-                close[i] <= r4_6h[i] and  # Not yet at extreme
+            # LONG: Break above R4 with volume, trend up
+            if (close[i] > r4_6h[i] and 
                 close[i] > ema34_1d_6h[i] and  # Uptrend filter
                 volume_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Break below S3 with volume, trend down, but not yet at S4
-            elif (close[i] < s3_6h[i] and 
-                  close[i] >= s4_6h[i] and  # Not yet at extreme
+            # SHORT: Break below S4 with volume, trend down
+            elif (close[i] < s4_6h[i] and 
                   close[i] < ema34_1d_6h[i] and  # Downtrend filter
                   volume_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # EXIT LONG: Hit R4 (take profit) or trend breaks down
-            if close[i] >= r4_6h[i] or close[i] < ema34_1d_6h[i]:
+            # EXIT LONG: Trend breaks down
+            if close[i] < ema34_1d_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Hit S4 (take profit) or trend breaks up
-            if close[i] <= s4_6h[i] or close[i] > ema34_1d_6h[i]:
+            # EXIT SHORT: Trend breaks up
+            if close[i] > ema34_1d_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
