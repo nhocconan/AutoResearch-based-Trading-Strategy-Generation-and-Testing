@@ -1,12 +1,6 @@
-# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Slope - v2
-# Modified from failing version with tighter conditions to reduce trade frequency and improve win rate
-# Uses tighter volume confirmation (3x instead of 2x) and requires price to close beyond pivot level
-# Aims for 20-50 trades/year to avoid fee drag while maintaining edge in both bull and bear markets
-# Combines Camarilla pivot breaks with daily trend filter and volume confirmation
-
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Slope_v2"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,45 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once for trend filter and Camarilla pivots
+    # 4h trend: EMA(34) on 4h close
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    
+    # 1h session filter: 08-20 UTC
+    hours = prices.index.hour
+    
+    # 1d volume spike: current volume > 2.0x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_avg)
+    
+    # 1d OHLC for Camarilla R1 and S1 (previous day)
     df_1d = get_htf_data(prices, '1d')
-    
-    # Daily EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Daily OHLC for Camarilla R1 and S1 (previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_vals = df_1d['close'].values
     
-    # Calculate Camarilla R1 and S1 for previous day
     p = (high_1d + low_1d + close_1d_vals) / 3
     r1 = close_1d_vals + (high_1d - low_1d) * 1.1 / 2
     s1 = close_1d_vals - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to 4h (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume spike: current volume > 3.0x 20-period average (tighter than before)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (3.0 * vol_avg)
-    
-    # EMA slope: positive when current EMA > previous EMA
-    ema_slope = ema34_1d_aligned > np.roll(ema34_1d_aligned, 1)
-    ema_slope[0] = False  # first value invalid
-    
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+            np.isnan(ema34_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,20 +59,23 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
         if position == 0:
-            # Long: price closes above R1 + daily trend up + volume spike + EMA slope up
+            # Long: price breaks above R1 + 4h trend up + 1d volume spike + session
             if (close[i] > r1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
+                close[i] > ema34_4h_aligned[i] and 
                 vol_spike[i] and 
-                ema_slope[i]):
-                signals[i] = 0.30
+                in_session):
+                signals[i] = 0.20
                 position = 1
-            # Short: price closes below S1 + daily trend down + volume spike + EMA slope down
+            # Short: price breaks below S1 + 4h trend down + 1d volume spike + session
             elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
+                  close[i] < ema34_4h_aligned[i] and 
                   vol_spike[i] and 
-                  not ema_slope[i]):
-                signals[i] = -0.30
+                  in_session):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Exit long: price closes below S1
@@ -90,13 +83,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
         elif position == -1:
             # Exit short: price closes above R1
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
     
     return signals
