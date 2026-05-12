@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_MACD_RSI_Confluence_1dTrend
-Hypothesis: On 12h timeframe, MACD bullish/bearish cross combined with RSI extremes 
-(oversold/overbought) generates high-probability signals when aligned with 1d EMA50 trend 
-and volume > 1.3x 20-period average. Uses 1d Bollinger Band width < 60th percentile 
-to avoid choppy regimes. Targets 15-30 trades/year (60-120 total over 4 years) 
-with low turnover. Works in bull via MACD momentum and bear via RSI mean-reversion 
-with trend filter.
+6h_Camarilla_R3S3_Breakout_1dTrend_WeeklyTrend
+Hypothesis: On 6h timeframe, Camarilla R3/S3 levels from prior 1d act as strong breakout levels.
+Trades only when both 1d EMA34 and weekly EMA34 agree on trend direction to avoid whipsaw.
+Requires volume > 1.5x 20-period average for confirmation.
+Targets 12-37 trades/year (50-150 total over 4 years) with low turnover to minimize fee drag.
+Works in bull via momentum breaks and bear via trend-filtered breakouts.
 """
 
-name = "12h_MACD_RSI_Confluence_1dTrend"
-timeframe = "12h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -36,102 +35,85 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate 1d EMA50 for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Get weekly data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 60:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
 
-    # Calculate 1d Bollinger Band width (20, 2) for squeeze filter
-    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma20_1d + 2 * std20_1d
-    lower_bb_1d = sma20_1d - 2 * std20_1d
-    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma20_1d
-    # Percentile rank of bb_width over lookback
-    bb_width_rank = pd.Series(bb_width_1d).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
-    bb_width_rank_aligned = align_htf_to_ltf(prices, df_1d, bb_width_rank)
+    # Calculate 1d EMA34 for trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # MACD (12,26,9)
-    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
+    # Calculate weekly EMA34 for trend
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
 
-    # RSI (14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 6h Camarilla levels from previous 1d OHLC
+    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    camarilla_mult = 1.1 / 4
+    r3 = prev_close + (prev_high - prev_low) * camarilla_mult
+    s3 = prev_close - (prev_high - prev_low) * camarilla_mult
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
 
-    # Volume confirmation: 1.3x 20-period average
+    # Volume confirmation: 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(60, n):
-        # Get aligned values for current 12h bar
-        ema50 = ema50_1d_aligned[i]
-        bb_rank = bb_width_rank_aligned[i]
-
-        # Skip if any required data is NaN
-        if (np.isnan(ema50) or np.isnan(bb_rank) or 
-            np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_avg_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Squeeze filter: only trade when BB width is in lower 60% (avoid chop)
-        if bb_rank > 0.6:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
+        # Get aligned values for current 6h bar
+        ema34_1d_val = ema34_1d_aligned[i]
+        ema34_1w_val = ema34_1w_aligned[i]
+        r3_level = r3_aligned[i]
+        s3_level = s3_aligned[i]
         vol_avg_val = vol_avg_20[i]
 
+        # Skip if any required data is NaN
+        if (np.isnan(ema34_1d_val) or np.isnan(ema34_1w_val) or 
+            np.isnan(r3_level) or np.isnan(s3_level) or 
+            np.isnan(vol_avg_val)):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        # Trend filter: only trade when 1d and weekly EMA34 agree
+        trend_agree = (close[i] > ema34_1d_val) == (close[i] > ema34_1w_val)
+
         if position == 0:
-            # LONG: MACD bullish cross + RSI oversold + price above EMA50 + volume surge
-            if (macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1] and
-                rsi[i] < 35 and
-                close[i] > ema50 and
-                volume[i] > vol_avg_val * 1.3):
+            # LONG: Price breaks above R3 + trend agreement + volume surge
+            if (close[i] > r3_level and 
+                trend_agree and 
+                volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: MACD bearish cross + RSI overbought + price below EMA50 + volume surge
-            elif (macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1] and
-                  rsi[i] > 65 and
-                  close[i] < ema50 and
-                  volume[i] > vol_avg_val * 1.3):
+            # SHORT: Price breaks below S3 + trend agreement + volume surge
+            elif (close[i] < s3_level and 
+                  trend_agree and 
+                  volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: MACD bearish cross or RSI overbought or price below EMA50
-            if (macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1]) or \
-               (rsi[i] > 70) or \
-               (close[i] < ema50):
+            # EXIT LONG: Price breaks below S3 or trend disagreement
+            if (close[i] < s3_level or not trend_agree):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: MACD bullish cross or RSI oversold or price above EMA50
-            if (macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1]) or \
-               (rsi[i] < 30) or \
-               (close[i] > ema50):
+            # EXIT SHORT: Price breaks above R3 or trend disagreement
+            if (close[i] > r3_level or not trend_agree):
                 signals[i] = 0.0
                 position = 0
             else:
