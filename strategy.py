@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_VolumeWeightedRSI_TrendWithATRFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,48 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== Volume Weighted RSI (LTF) =====
-    change = np.diff(close, prepend=close[0])
-    up = np.where(change > 0, change, 0.0)
-    down = np.where(change < 0, -change, 0.0)
+    # ===== Camarilla Pivot Levels from 1d =====
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    vol_up = np.zeros(n)
-    vol_down = np.zeros(n)
-    vol_up[0] = up[0] * volume[0]
-    vol_down[0] = down[0] * volume[0]
+    # Camarilla R1, S1
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = pivot + (high_1d - low_1d) * 1.1 / 12
+    s1 = pivot - (high_1d - low_1d) * 1.1 / 12
     
-    for i in range(1, n):
-        vol_up[i] = vol_up[i-1] + up[i] * volume[i]
-        vol_down[i] = vol_down[i-1] + down[i] * volume[i]
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    rs = np.zeros(n)
-    rsi = np.zeros(n)
-    for i in range(14, n):
-        gain = vol_up[i] - vol_up[i-14]
-        loss = vol_down[i] - vol_down[i-14]
-        if loss == 0:
-            rs[i] = 100
-        else:
-            rs[i] = gain / loss
-        rsi[i] = 100 - (100 / (1 + rs[i]))
+    # ===== Daily Trend Filter =====
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
-    # ===== 12h Trend Filter (HTF) =====
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # ===== ATR Filter for Volatility =====
-    tr1 = high - low
-    tr2 = np.abs(np.roll(high, 1) - low)
-    tr3 = np.abs(np.roll(low, 1) - high)
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.zeros(n)
-    for i in range(14, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # ===== Daily Volume Spike Filter =====
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     # ===== Session Filter: 08-20 UTC =====
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -66,13 +47,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(sma50_1d_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,39 +73,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when ATR is above its 50-period average
-        if i >= 50:
-            atr_ma = np.mean(atr[i-50:i])
-            vol_filter = atr[i] > 0.8 * atr_ma
-        else:
-            vol_filter = True
-        
         if position == 0:
-            # Long: RSI oversold + above 12h EMA50 + volatility filter
-            if (rsi[i] < 30 and
-                close[i] > ema50_12h_aligned[i] and
-                vol_filter):
-                signals[i] = 0.25
+            # Long: Close above R1 + above daily SMA50 + daily volume spike
+            if (close[i] > r1_aligned[i] and
+                close[i] > sma50_1d_aligned[i] and
+                vol_spike_1d_aligned[i] > 0.5):
+                signals[i] = 0.30
                 position = 1
-            # Short: RSI overbought + below 12h EMA50 + volatility filter
-            elif (rsi[i] > 70 and
-                  close[i] < ema50_12h_aligned[i] and
-                  vol_filter):
-                signals[i] = -0.25
+            # Short: Close below S1 + below daily SMA50 + daily volume spike
+            elif (close[i] < s1_aligned[i] and
+                  close[i] < sma50_1d_aligned[i] and
+                  vol_spike_1d_aligned[i] > 0.5):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: RSI overbought or closes below 12h EMA50
-            if rsi[i] > 70 or close[i] < ema50_12h_aligned[i]:
+            # Exit long: Close below S1 or below daily SMA50
+            if close[i] < s1_aligned[i] or close[i] < sma50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: RSI oversold or closes above 12h EMA50
-            if rsi[i] < 30 or close[i] > ema50_12h_aligned[i]:
+            # Exit short: Close above R1 or above daily SMA50
+            if close[i] > r1_aligned[i] or close[i] > sma50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
