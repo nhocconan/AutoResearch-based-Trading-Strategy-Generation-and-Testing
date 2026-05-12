@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Stochastic_RSI_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Tenkan_Kijun_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,42 +25,49 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Stochastic RSI (4h) ===
-    # RSI period
-    rsi_period = 14
-    # Stochastic RSI period
-    stoch_period = 14
+    # === Ichimoku (6h) ===
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # Calculate RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
     
-    # Calculate Stochastic RSI
-    rsi_min = pd.Series(rsi).rolling(window=stoch_period, min_periods=stoch_period).min().values
-    rsi_max = pd.Series(rsi).rolling(window=stoch_period, min_periods=stoch_period).max().values
-    stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min + 1e-10) * 100
+    # Cloud top and bottom (Senkou Span A/B shifted forward 26 periods)
+    senkou_a_shifted = np.roll(senkou_a, 26)
+    senkou_b_shifted = np.roll(senkou_b, 26)
+    senkou_a_shifted[:26] = np.nan
+    senkou_b_shifted[:26] = np.nan
+    cloud_top = np.maximum(senkou_a_shifted, senkou_b_shifted)
+    cloud_bottom = np.minimum(senkou_a_shifted, senkou_b_shifted)
     
-    # === Volume spike detection (20-period average) ===
+    # Volume spike detection (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34, 14)  # Ensure enough data for all indicators
+    start_idx = max(200, 52)  # Ensure enough data for Ichimoku
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(stoch_rsi[i]) or
-            np.isnan(rsi[i])):
+            np.isnan(tenkan[i]) or
+            np.isnan(kijun[i]) or
+            np.isnan(cloud_top[i]) or
+            np.isnan(cloud_bottom[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,28 +76,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Stochastic RSI oversold (<20) + volume spike + 1d trend up
-            if (stoch_rsi[i] < 20 and 
-                volume_spike[i] and
-                close[i] > ema34_1d_aligned[i]):
+            # Long: Tenkan > Kijun (bullish momentum) + price above cloud + 1d trend up + volume spike
+            if (tenkan[i] > kijun[i] and 
+                close[i] > cloud_top[i] and
+                close[i] > ema34_1d_aligned[i] and
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Stochastic RSI overbought (>80) + volume spike + 1d trend down
-            elif (stoch_rsi[i] > 80 and 
-                  volume_spike[i] and
-                  close[i] < ema34_1d_aligned[i]):
+            # Short: Tenkan < Kijun (bearish momentum) + price below cloud + 1d trend down + volume spike
+            elif (tenkan[i] < kijun[i] and 
+                  close[i] < cloud_bottom[i] and
+                  close[i] < ema34_1d_aligned[i] and
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Stochastic RSI overbought (>80) or trend breaks
-            if stoch_rsi[i] > 80 or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Tenkan crosses below Kijun or price breaks below cloud
+            if tenkan[i] < kijun[i] or close[i] < cloud_bottom[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Stochastic RSI oversold (<20) or trend breaks
-            if stoch_rsi[i] < 20 or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Tenkan crosses above Kijun or price breaks above cloud
+            if tenkan[i] > kijun[i] or close[i] > cloud_top[i]:
                 signals[i] = 0.0
                 position = 0
             else:
