@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_1dVolume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_1dVolume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -36,12 +36,9 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + range_1d * 1.1 / 4
     camarilla_l3 = close_1d - range_1d * 1.1 / 4
     
-    # Align to 12h
+    # Align to 4h
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Session filter: 00-12 UTC (first half of day) and 12-24 UTC (second half)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,18 +48,6 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if daily trend or volume data not ready
         if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Session filter: active during London/NY overlap (08-16 UTC) and Asia (00-08 UTC)
-        hour = hours[i]
-        in_session = ((0 <= hour <= 8) or (8 <= hour <= 16))
-        
-        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
