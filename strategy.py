@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3_S3_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_1dVolume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,36 +17,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h trend filter: EMA34
-    df_4h = get_htf_data(prices, '4h')
-    ema34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
-    
-    # 1d volume filter: volume > 1.5x 20-period average
+    # Daily trend filter: EMA34
     df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Daily volume filter: volume > 1.5x 20-period average
     vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
     vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Hourly Camarilla levels (based on previous day)
-    # Calculate daily pivot points from 1d data
+    # Daily price data for Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's Camarilla levels
+    # Previous day's Camarilla levels (R3/S3)
     range_1d = high_1d - low_1d
-    camarilla_h4 = close_1d + range_1d * 1.1 / 2
-    camarilla_l4 = close_1d - range_1d * 1.1 / 2
     camarilla_h3 = close_1d + range_1d * 1.1 / 4
     camarilla_l3 = close_1d - range_1d * 1.1 / 4
     
-    # Align to hourly
+    # Align to 12h
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
-    # Session filter: 08-20 UTC
+    # Session filter: 00-12 UTC (first half of day) and 12-24 UTC (second half)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -55,8 +49,8 @@ def generate_signals(prices):
     start_idx = 20  # need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if 4h trend or 1d volume data not ready
-        if np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
+        # Skip if daily trend or volume data not ready
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,9 +58,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Session filter
+        # Session filter: active during London/NY overlap (08-16 UTC) and Asia (00-08 UTC)
         hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        in_session = ((0 <= hour <= 8) or (8 <= hour <= 16))
         
         if not in_session:
             if position != 0:
@@ -77,35 +71,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions: price breaks above H3 with 4h uptrend and volume confirmation
+            # Long conditions: price breaks above H3 with daily uptrend and volume confirmation
             if (high[i] > camarilla_h3_aligned[i] and 
                 close[i] > camarilla_h3_aligned[i] and
-                close[i] > ema34_4h_aligned[i] and  # 4h uptrend
+                close[i] > ema34_1d_aligned[i] and  # daily uptrend
                 volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short conditions: price breaks below L3 with 4h downtrend and volume confirmation
+            # Short conditions: price breaks below L3 with daily downtrend and volume confirmation
             elif (low[i] < camarilla_l3_aligned[i] and 
                   close[i] < camarilla_l3_aligned[i] and
-                  close[i] < ema34_4h_aligned[i] and  # 4h downtrend
+                  close[i] < ema34_1d_aligned[i] and  # daily downtrend
                   volume[i] > vol_ma_20_1d_aligned[i]):  # volume spike
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price breaks below L4 or reverses against trend
-            if (low[i] < camarilla_l4_aligned[i] or 
-                close[i] < ema34_4h_aligned[i]):
+            # Exit long when price breaks below L3 or reverses against trend
+            if (low[i] < camarilla_l3_aligned[i] or 
+                close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short when price breaks above H4 or reverses against trend
-            if (high[i] > camarilla_h4_aligned[i] or 
-                close[i] > ema34_4h_aligned[i]):
+            # Exit short when price breaks above H3 or reverses against trend
+            if (high[i] > camarilla_h3_aligned[i] or 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
