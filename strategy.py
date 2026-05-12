@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Donchian_VolumeTrend_Pullback
-# Hypothesis: Donchian(20) breakout in direction of 1d EMA50 trend with volume confirmation.
-# Pullback to 20-period EMA for entry improves win rate and reduces false breakouts.
-# Works in bull via breakout momentum, in bear via pullbacks during trend continuations.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily data act as strong support/resistance. 
+# Breakouts above R1 or below S1 with 1-day EMA trend filter and volume spike capture momentum.
+# Works in bull markets via breakouts and in bear via rejections at pivot levels.
 # Target: 20-40 trades/year per symbol.
 
-name = "4h_Donchian_VolumeTrend_Pullback"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,30 +23,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter (call once before loop)
+    # Get 1d data for Camarilla pivots and trend (call once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # 1d EMA50 for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Donchian Channel (20-period high/low)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for previous day (using previous close)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous day's OHLC, so shift by 1
+    if len(high_1d) < 2:
+        return np.zeros(n)
+    phigh = high_1d[-2] if len(high_1d) >= 2 else high_1d[-1]
+    plow = low_1d[-2] if len(low_1d) >= 2 else low_1d[-1]
+    pclose = close_1d[-2] if len(close_1d) >= 2 else close_1d[-1]
+    rang = phigh - plow
+    r1 = pclose + rang * 1.1 / 12
+    s1 = pclose - rang * 1.1 / 12
 
-    # EMA20 for pullback entry
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Create arrays of R1, S1 for each bar (same value until new day)
+    r1_arr = np.full(len(close_1d), np.nan)
+    s1_arr = np.full(len(close_1d), np.nan)
+    # Fill from index 1 onwards with previous day's levels
+    r1_arr[1:] = r1
+    s1_arr[1:] = s1
 
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_arr)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_arr)
+
+    # 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Volume confirmation: volume > 1.5x 24-period average (6 trading hours)
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema20[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
+    for i in range(24, n):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_24[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,26 +74,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above Donchian high + 1d uptrend + volume spike + pullback to EMA20
-            if close[i] > donchian_high[i] and close[i] > ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 1.5 and close[i] <= ema20[i] * 1.01:
+            # LONG: Close breaks above R1 + 1d uptrend + volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume[i] > vol_avg_24[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Donchian low + 1d downtrend + volume spike + pullback to EMA20
-            elif close[i] < donchian_low[i] and close[i] < ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 1.5 and close[i] >= ema20[i] * 0.99:
+            # SHORT: Close breaks below S1 + 1d downtrend + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume[i] > vol_avg_24[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below Donchian low or 1d trend turns down
-            if close[i] < donchian_low[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close crosses below S1 or 1d trend turns down
+            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above Donchian high or 1d trend turns up
-            if close[i] > donchian_high[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close crosses above R1 or 1d trend turns up
+            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
