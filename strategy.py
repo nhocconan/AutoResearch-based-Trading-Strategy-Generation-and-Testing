@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Donchian20_WeeklyTrend_VolumeS_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,35 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla pivot levels and trend
+    # Daily data for Donchian and volume
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     
-    # Calculate Camarilla pivot levels from weekly OHLC
-    # Pivot = (High + Low + Close) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
+    # Donchian Channel (20) on daily
+    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Resistance and Support levels
-    r3_1w = pivot_1w + (range_1w * 1.1 / 2)
-    s3_1w = pivot_1w - (range_1w * 1.1 / 2)
-    
-    # Weekly EMA34 for trend filter
+    # Weekly EMA(34) for trend filter
     ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Daily data for volume spike filter
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (2.0 * vol_avg_1d)
+    # Volume spike on daily: current volume > 2.0x 20-period average
+    vol_avg_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume_1d > (2.0 * vol_avg_20)
     
-    # Align all to 12h timeframe
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    # Align to daily timeframe
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
     ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,8 +52,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,28 +62,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + weekly uptrend + daily volume spike
-            if (close[i] > r3_1w_aligned[i] and 
+            # Long: price breaks above Donchian high + weekly uptrend + volume spike
+            if (close[i] > donch_high_20_aligned[i] and 
                 close[i] > ema34_1w_aligned[i] and 
-                vol_spike_1d_aligned[i]):
+                vol_spike_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + weekly downtrend + daily volume spike
-            elif (close[i] < s3_1w_aligned[i] and 
+            # Short: price breaks below Donchian low + weekly downtrend + volume spike
+            elif (close[i] < donch_low_20_aligned[i] and 
                   close[i] < ema34_1w_aligned[i] and 
-                  vol_spike_1d_aligned[i]):
+                  vol_spike_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S3 or weekly trend turns down
-            if close[i] < s3_1w_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit long: price closes below Donchian low or weekly trend turns down
+            if close[i] < donch_low_20_aligned[i] or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above R3 or weekly trend turns up
-            if close[i] > r3_1w_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit short: price closes above Donchian high or weekly trend turns up
+            if close[i] > donch_high_20_aligned[i] or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
