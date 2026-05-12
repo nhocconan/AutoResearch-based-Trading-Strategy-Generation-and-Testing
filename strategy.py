@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # 4h_1D_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts at daily Camarilla R1/S1 levels with 1d EMA trend filter and volume confirmation.
+# Hypothesis: Breakouts at daily Camarilla R1/S1 levels with 1-day EMA trend filter and volume confirmation.
 # Works in bull/bear markets: In uptrends, buy R1 breakouts; in downtrends, sell S1 breakdowns.
-# Volume ensures breakout validity, reducing false signals. Designed for 4h to limit trade frequency.
+# Volume ensures breakout validity, reducing false signals. Designed for 4h to balance trade frequency and edge.
 
 name = "4h_1D_Camarilla_R1S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
@@ -27,12 +27,11 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
 
-    # 1d EMA34 trend filter
+    # 1-day EMA34 trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Get 1d data for Camarilla pivot levels
-    # Using previous day's data to avoid look-ahead
+    # Get 1d data for Camarilla pivot levels (same timeframe as trend filter)
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -63,7 +62,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from 1d EMA34
+        # Trend filter from 1-day EMA34
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
 
