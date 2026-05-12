@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""
-1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
-Hypothesis: On 1h timeframe, buy when price breaks above 4h Camarilla R1 with 4h trend up and volume spike; sell when price breaks below 4h Camarilla S1 with 4h trend down and volume spike. Uses 4h trend and volume for signal direction, 1h for entry timing. Session filter (08-20 UTC) reduces noise. Targets 15-35 trades/year per symbol to avoid fee drag. Works in bull/bear via trend filter.
-"""
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+# 12h_Camarilla_R1_S1_1dTrend_TrendFilter
+# Hypothesis: On 12h timeframe, enter long when price breaks above previous day's Camarilla R1 with 1d EMA34 trending up and ADX>25; enter short when price breaks below previous day's Camarilla S1 with 1d EMA34 trending down and ADX>25. Exit on reversal of trend or price crossing opposite Camarilla level. Uses 1d timeframe for trend context to avoid false breakouts in ranging markets. Targets 20-35 trades per year to minimize fee drag and improve generalization across bull/bear markets.
+
+name = "12h_Camarilla_R1_S1_1dTrend_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,41 +20,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for Camarilla levels and trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1d data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate 4h Camarilla levels from previous 4h bar
-    range_4h = high_4h - low_4h
-    camarilla_r1 = close_4h + range_4h * 1.12 / 12
-    camarilla_s1 = close_4h - range_4h * 1.12 / 12
+    # Calculate Camarilla levels from previous 1d bar
+    range_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + range_1d * 1.12 / 12
+    camarilla_s1 = close_1d - range_1d * 1.12 / 12
 
-    # Use previous 4h bar's levels (shift by 1)
+    # Use previous 1d bar's levels (shift by 1)
     camarilla_r1_prev = np.roll(camarilla_r1, 1)
     camarilla_s1_prev = np.roll(camarilla_s1, 1)
     camarilla_r1_prev[0] = np.nan
     camarilla_s1_prev[0] = np.nan
 
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1_prev)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1_prev)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_prev)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_prev)
 
-    # 4h EMA34 for trend filter
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # 4h Volume confirmation: volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_aligned = align_htf_to_ltf(prices, df_4h, vol_avg_20)
-
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # 1d ADX(14) for trend strength filter
+    # Calculate True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Calculate +DM and -DM
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values using Wilder's smoothing
+    def smooth_wilder(arr, period):
+        result = np.zeros_like(arr)
+        result[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    tr_smooth = smooth_wilder(tr, 14)
+    plus_dm_smooth = smooth_wilder(plus_dm, 14)
+    minus_dm_smooth = smooth_wilder(minus_dm, 14)
+    
+    # Calculate DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    # Avoid division by zero
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 
+                  0)
+    adx = smooth_wilder(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,16 +93,7 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required value is NaN
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_avg_20_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Apply session filter
-        if not in_session[i]:
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,33 +102,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above 4h Camarilla R1 + 4h uptrend + volume spike
+            # LONG: Price breaks above Camarilla R1 + 1d uptrend + ADX > 25
             if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema34_4h_aligned[i] and 
-                volume[i] > vol_avg_20_aligned[i] * 1.5):
-                signals[i] = 0.20
+                close[i] > ema34_1d_aligned[i] and 
+                adx_aligned[i] > 25):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 4h Camarilla S1 + 4h downtrend + volume spike
+            # SHORT: Price breaks below Camarilla S1 + 1d downtrend + ADX > 25
             elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema34_4h_aligned[i] and 
-                  volume[i] > vol_avg_20_aligned[i] * 1.5):
-                signals[i] = -0.20
+                  close[i] < ema34_1d_aligned[i] and 
+                  adx_aligned[i] > 25):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 4h Camarilla S1 OR trend turns down
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_4h_aligned[i]:
+            # EXIT LONG: Price breaks below Camarilla S1 OR trend turns down OR ADX weakens
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 4h Camarilla R1 OR trend turns up
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_4h_aligned[i]:
+            # EXIT SHORT: Price breaks above Camarilla R1 OR trend turns up OR ADX weakens
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
