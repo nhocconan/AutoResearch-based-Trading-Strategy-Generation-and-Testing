@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_KAMA_AdaptiveTrend_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,56 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter and KAMA calculation
+    # Load 1d data for trend filter and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # 1d KAMA for trend filter
-    # KAMA parameters: ER period=10, fast=2, slow=30
-    price_change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    direction = np.abs(np.diff(close_1d, n=10, prepend=close_1d[:10]))
-    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)
-    er = np.where(volatility > 0, direction / volatility, 0)
-    sc = np.square(er * (2/(2+1) - 2/(30+1)) + 2/(30+1))
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d = kama
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    # Calculate Camarilla pivot levels from previous day
+    # Pivot = (H + L + C) / 3
+    # R3 = C + (H - L) * 1.1 / 4
+    # S3 = C - (H - L) * 1.1 / 4
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0
+    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0
     
-    # 6h KAMA for entry signal
-    price_change_6h = np.abs(np.diff(close, prepend=close[0]))
-    direction_6h = np.abs(np.diff(close, n=10, prepend=close[:10]))
-    volatility_6h = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
-    er_6h = np.where(volatility_6h > 0, direction_6h / volatility_6h, 0)
-    sc_6h = np.square(er_6h * (2/(2+1) - 2/(30+1)) + 2/(30+1))
-    kama_6h = np.zeros_like(close)
-    kama_6h[0] = close[0]
-    for i in range(1, len(close)):
-        kama_6h[i] = kama_6h[i-1] + sc_6h[i] * (close[i] - kama_6h[i-1])
+    # Align Camarilla levels to 12h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_avg)
+    # Volume filter: current volume > 2.0x 30-period average
+    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_filter = volume > (2.0 * vol_avg)
     
-    # Price position relative to KAMA
-    price_above_kama = close > kama_6h
-    price_below_kama = close < kama_6h
+    # Price range filter: avoid choppy markets (ATR-based)
+    tr1 = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
+    tr2 = np.maximum(np.absolute(low[1:] - close[:-1]), tr1)
+    tr = np.concatenate([[tr1[0]], tr2]) if len(tr1) > 0 else np.array([0.0])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Normalize ATR by price to get percentage
+    atr_pct = atr / close
+    # Only trade when volatility is moderate (not too high, not too low)
+    vol_regime = (atr_pct > 0.01) & (atr_pct < 0.05)  # 1% to 5% ATR
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama_1d_aligned[i]) or 
-            np.isnan(kama_6h[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(vol_filter[i]) or np.isnan(vol_regime[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,27 +71,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price crosses above 6h KAMA + above 1d KAMA + volume filter
-            if price_above_kama[i] and close[i] > kama_1d_aligned[i] and vol_filter[i]:
-                signals[i] = 0.25
+            # Long: breakout above R3 + above 1d EMA34 + volume filter + vol regime
+            if high[i] > r3_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i] and vol_regime[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: price crosses below 6h KAMA + below 1d KAMA + volume filter
-            elif price_below_kama[i] and close[i] < kama_1d_aligned[i] and vol_filter[i]:
-                signals[i] = -0.25
+            # Short: breakdown below S3 + below 1d EMA34 + volume filter + vol regime
+            elif low[i] < s3_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i] and vol_regime[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below 6h KAMA or below 1d KAMA
-            if price_below_kama[i] or close[i] < kama_1d_aligned[i]:
+            # Exit long: breakdown below S3 or below 1d EMA34
+            if low[i] < s3_1d_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price crosses above 6h KAMA or above 1d KAMA
-            if price_above_kama[i] or close[i] > kama_1d_aligned[i]:
+            # Exit short: breakout above R3 or above 1d EMA34
+            if high[i] > r3_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
