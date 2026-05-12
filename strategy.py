@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn"
-timeframe = "4h"
+name = "1D_Camarilla_R1_S1_Breakout_WeeklyTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,13 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla pivot levels ===
+    # === Weekly trend filter (EMA34) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # === Daily Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R1, S1 levels
     rango = high_1d - low_1d
     camarilla_r1 = close_1d + (rango * 1.1 / 12)
     camarilla_s1 = close_1d - (rango * 1.1 / 12)
@@ -31,11 +36,7 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === 1d EMA34 trend filter ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # === 1d Volume spike filter ===
+    # === Daily volume spike filter ===
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
@@ -50,7 +51,7 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(ema34_1w_aligned[i]) or
             np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,28 +61,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above R1 + above daily EMA34 + volume spike
+            # Long: Close above R1 + above weekly EMA34 + volume spike
             if (close[i] > camarilla_r1_aligned[i] and
-                close[i] > ema34_1d_aligned[i] and
+                close[i] > ema34_1w_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 + below daily EMA34 + volume spike
+            # Short: Close below S1 + below weekly EMA34 + volume spike
             elif (close[i] < camarilla_s1_aligned[i] and
-                  close[i] < ema34_1d_aligned[i] and
+                  close[i] < ema34_1w_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below S1 or below EMA34
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Close below S1 or below weekly EMA34
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above R1 or above EMA34
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Close above R1 or above weekly EMA34
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
