@@ -1,6 +1,14 @@
+# 12h_KAMA_Trend_RSI_MeanReversion_v1
+# Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a dynamic trend filter.
+# In trending markets, price follows KAMA closely; in ranging markets, price mean-reverts around KAMA.
+# Combined with RSI for overbought/oversold conditions and a 1d trend filter (EMA50) to avoid counter-trend trades.
+# Timeframe: 12h reduces trade frequency to avoid fee drag; uses 1d HTF for trend alignment.
+# Works in both bull (trend following) and bear (mean reversion in range) markets via adaptive KAMA and RSI extremes.
+# Expected trades: 20-40/year, well within limits.
+
 #!/usr/bin/env python3
-name = "1d_FundingRateMeanReversion_WeeklyTrend"
-timeframe = "1d"
+name = "12h_KAMA_Trend_RSI_MeanReversion_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -13,52 +21,54 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    open_time = prices['open_time'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load funding rate data for the symbol
-    symbol = getattr(prices, 'symbol', 'BTCUSDT').replace('USDT', '')
-    funding_path = f"data/processed/funding/{symbol}_funding_rate_8h.parquet"
+    # === 12h KAMA (trend/adaptive) ===
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute correctly below
+    # Recompute volatility properly: sum of absolute changes over 10 periods
+    volatility = pd.Series(close).rolling(window=10, min_periods=10).apply(lambda x: np.sum(np.abs(np.diff(x))), raw=True).values
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # start at index 9
+    for i in range(10, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    try:
-        funding_df = pd.read_parquet(funding_path)
-        # Ensure datetime index for merge
-        funding_df = funding_df.set_index('funding_time')
-        # Align funding rate to price data using forward fill (funding known at 8h intervals)
-        funding_series = pd.Series(index=open_time, dtype=float)
-        for i, dt in enumerate(open_time):
-            # Find the most recent funding rate before or at this time
-            mask = funding_df.index <= dt
-            if mask.any():
-                funding_series.iloc[i] = funding_df.loc[mask, 'funding_rate'].iloc[-1]
-            else:
-                funding_series.iloc[i] = np.nan
-        funding_rate = funding_series.values
-    except:
-        # If funding data not available, return no signals
-        return np.zeros(n)
+    # === 12h RSI (mean reversion) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 30-day z-score of funding rate
-    funding_rate_series = pd.Series(funding_rate)
-    funding_mean = funding_rate_series.rolling(window=360, min_periods=360).mean()  # 30 days * 8h = 240, but use 360 for more stability
-    funding_std = funding_rate_series.rolling(window=360, min_periods=360).std()
-    funding_z = (funding_rate - funding_mean) / funding_std
-    
-    # Load weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA 34 for trend
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # === 1d EMA50 trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 360  # Need enough data for z-score calculation
+    start_idx = 50  # after KAMA and RSI warmup
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(funding_z[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,26 +77,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: funding rate extremely negative (mean reversion long) + weekly uptrend
-            if (funding_z[i] < -2.0 and 
-                close[i] > ema34_1w_aligned[i]):
+            # Long: Price near KAMA (trend) + RSI oversold + above daily EMA50 (uptrend filter)
+            if (abs(close[i] - kama[i]) / kama[i] < 0.02 and  # within 2% of KAMA
+                rsi[i] < 30 and
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: funding rate extremely positive (mean reversion short) + weekly downtrend
-            elif (funding_z[i] > 2.0 and 
-                  close[i] < ema34_1w_aligned[i]):
+            # Short: Price near KAMA + RSI overbought + below daily EMA50 (downtrend filter)
+            elif (abs(close[i] - kama[i]) / kama[i] < 0.02 and
+                  rsi[i] > 70 and
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: funding rate normalizes or trend breaks
-            if funding_z[i] > -0.5 or close[i] < ema34_1w_aligned[i]:
+            # Exit long: Price far from KAMA (trend broken) or RSI overbought
+            if (abs(close[i] - kama[i]) / kama[i] > 0.05 or  # >5% deviation
+                rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: funding rate normalizes or trend breaks
-            if funding_z[i] < 0.5 or close[i] > ema34_1w_aligned[i]:
+            # Exit short: Price far from KAMA or RSI oversold
+            if (abs(close[i] - kama[i]) / kama[i] > 0.05 or
+                rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
