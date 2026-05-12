@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 1h_4h1d_Momentum_Volume_Regime
-# Hypothesis: 1h momentum with 4h/1d trend filter and volume confirmation, using 4h RSI for entry timing.
-# Uses 4h RSI(14) > 55 for long momentum, < 45 for short momentum, filtered by 1d EMA50 trend and volume spike.
-# Designed for 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-# Works in bull markets via momentum continuation and in bear markets via trend-aligned mean reversion within regime.
+# 6h_Supertrend_Filter_1dTrend_VolumeBreakout
+# Hypothesis: 6h Supertrend (10,3) filters trend direction, combined with 1d EMA20 for higher timeframe trend alignment, and volume spike breakouts for entry. Exits when Supertrend flips or volume drops. Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drift. Works in bull/bear by requiring alignment between 6s momentum, 1d trend, and volume confirmation.
 
-name = "1h_4h1d_Momentum_Volume_Regime"
-timeframe = "1h"
+name = "6h_Supertrend_Filter_1dTrend_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,47 +20,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 4h data for RSI momentum signal
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 6h data for Supertrend and price action
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 2:
         return np.zeros(n)
 
-    close_4h = df_4h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
 
-    # Calculate 4h RSI(14)
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    rsi_4h[0] = 50  # neutral for first value
-
-    # Align 4h RSI to 1h
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
 
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
 
-    # Volume spike detection (2x 20-period SMA)
+    # Calculate ATR for Supertrend
+    tr1 = high_6h - low_6h
+    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
+    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+
+    # Calculate Supertrend
+    basic_ub = (high_6h + low_6h) / 2 + 3 * atr
+    basic_lb = (high_6h + low_6h) / 2 - 3 * atr
+    final_ub = np.zeros_like(basic_ub)
+    final_lb = np.zeros_like(basic_lb)
+    supertrend = np.zeros_like(close_6h)
+    direction = np.ones_like(close_6h)  # 1 for uptrend, -1 for downtrend
+
+    for i in range(1, len(close_6h)):
+        final_ub[i] = basic_ub[i] if (basic_ub[i] < final_ub[i-1] or close_6h[i-1] > final_ub[i-1]) else final_ub[i-1]
+        final_lb[i] = basic_lb[i] if (basic_lb[i] > final_lb[i-1] or close_6h[i-1] < final_lb[i-1]) else final_lb[i-1]
+
+        if direction[i-1] == 1:
+            supertrend[i] = final_ub[i] if close_6h[i] <= final_ub[i] else final_lb[i]
+            direction[i] = -1 if close_6h[i] <= final_ub[i] else 1
+        else:
+            supertrend[i] = final_lb[i] if close_6h[i] >= final_lb[i] else final_ub[i]
+            direction[i] = 1 if close_6h[i] >= final_lb[i] else -1
+
+    # Align Supertrend and direction to LTF
+    supertrend_aligned = align_htf_to_ltf(prices, df_6h, supertrend)
+    direction_aligned = align_htf_to_ltf(prices, df_6h, direction)
+
+    # Calculate 6h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_sma20 * 2.0)
+    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(volume_sma20[i])):
+        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,29 +89,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: 4h RSI > 55 (bullish momentum) + price > 1d EMA50 (uptrend) + volume spike
-            if rsi_4h_aligned[i] > 55 and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # LONG: Supertrend uptrend, price above 1d EMA, and volume spike
+            if direction_aligned[i] == 1 and close[i] > ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 4h RSI < 45 (bearish momentum) + price < 1d EMA50 (downtrend) + volume spike
-            elif rsi_4h_aligned[i] < 45 and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # SHORT: Supertrend downtrend, price below 1d EMA, and volume spike
+            elif direction_aligned[i] == -1 and close[i] < ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 4h RSI < 50 (loss of momentum) or price < 1d EMA50 (trend break)
-            if rsi_4h_aligned[i] < 50 or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Supertrend flips to downtrend or volume drops below average
+            if direction_aligned[i] == -1 or volume[i] < volume_sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 4h RSI > 50 (loss of bearish momentum) or price > 1d EMA50 (trend break)
-            if rsi_4h_aligned[i] > 50 or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Supertrend flips to uptrend or volume drops below average
+            if direction_aligned[i] == 1 or volume[i] < volume_sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
