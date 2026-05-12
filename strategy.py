@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""
-1h_4d_1d_HeikinAshi_Trend_Pullback
-Hypothesis: Uses 4h Heikin-Ashi candles for trend identification and 1d Heikin-Ashi for higher timeframe confirmation.
-Enters long when 4h HA closes above open (bullish candle) with pullback to EMA21 on 1h, and 1d trend is up.
-Enters short when 4h HA closes below open (bearish candle) with pullback to EMA21 on 1h, and 1d trend is down.
-Uses 1h EMA21 as dynamic support/resistance for pullback entries.
-Designed for low trade frequency (~60-150 total trades over 4 years) by requiring multi-timeframe alignment and pullback to moving average.
-Works in bull/bear markets by following 1d trend while using 4h HA for entry timing and 1h for precision.
-"""
+# Weekly Pivot + 1d Trend + Volume Filter on 6h
+# Hypothesis: Uses weekly pivot points (standard calculation) as key support/resistance.
+# Enters long when price breaks above weekly R1 with 1d uptrend and volume confirmation.
+# Enters short when price breaks below weekly S1 with 1d downtrend and volume confirmation.
+# Weekly pivots provide robust S/R that work across market regimes; 1d trend filter avoids counter-trend trades.
+# Low trade frequency expected (~50-150 total trades over 4 years) due to strict weekly pivot breaks.
 
-name = "1h_4d_1d_HeikinAshi_Trend_Pullback"
-timeframe = "1h"
+name = "6h_1w_1d_WeeklyPivot_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,61 +16,54 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # 1h EMA21 for dynamic support/resistance
-    close_s = pd.Series(close)
-    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Volume spike: >1.5x 20-period average (on 6h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # 4h Heikin-Ashi for trend identification
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    ha_close_4h = (df_4h['open'] + df_4h['high'] + df_4h['low'] + df_4h['close']) / 4
-    ha_open_4h = (df_4h['open'].shift(1, fill_value=df_4h['open'].iloc[0]) + df_4h['close'].shift(1, fill_value=df_4h['close'].iloc[0])) / 2
-    ha_high_4h = df_4h[['high', 'open', 'close']].max(axis=1)
-    ha_low_4h = df_4h[['low', 'open', 'close']].min(axis=1)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h HA bullish/bearish: close > open = bullish, close < open = bearish
-    ha_bullish_4h = ha_close_4h > ha_open_4h
-    ha_bearish_4h = ha_close_4h < ha_open_4h
+    # Standard pivot points: P = (H+L+C)/3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot = (high_1w + low_1w + close_1w) / 3
+    weekly_r1 = 2 * pivot - low_1w
+    weekly_s1 = 2 * pivot - high_1w
     
-    # 1d Heikin-Ashi for higher timeframe trend confirmation
+    # Daily EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    ha_close_1d = (df_1d['open'] + df_1d['high'] + df_1d['low'] + df_1d['close']) / 4
-    ha_open_1d = (df_1d['open'].shift(1, fill_value=df_1d['open'].iloc[0]) + df_1d['close'].shift(1, fill_value=df_1d['close'].iloc[0])) / 2
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1d HA trend: bullish if close > open, bearish if close < open
-    ha_bullish_1d = ha_close_1d > ha_open_1d
-    ha_bearish_1d = ha_close_1d < ha_open_1d
-    
-    # Align all indicators to 1h timeframe
-    ema_21_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), ema_21)  # Trivial alignment for same TF
-    ha_bullish_4h_aligned = align_htf_to_ltf(prices, df_4h, ha_bullish_4h.astype(float))
-    ha_bearish_4h_aligned = align_htf_to_ltf(prices, df_4h, ha_bearish_4h.astype(float))
-    ha_bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, ha_bullish_1d.astype(float))
-    ha_bearish_1d_aligned = align_htf_to_ltf(prices, df_1d, ha_bearish_1d.astype(float))
+    # Align all indicators to 6h timeframe
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        if (np.isnan(ema_21_aligned[i]) or
-            np.isnan(ha_bullish_4h_aligned[i]) or
-            np.isnan(ha_bearish_4h_aligned[i]) or
-            np.isnan(ha_bullish_1d_aligned[i]) or
-            np.isnan(ha_bearish_1d_aligned[i])):
+    for i in range(50, n):
+        if (np.isnan(weekly_r1_aligned[i]) or
+            np.isnan(weekly_s1_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,35 +72,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: 4h HA bullish, 1d HA bullish, price pulls back to EMA21 from below
-            if (ha_bullish_4h_aligned[i] and 
-                ha_bullish_1d_aligned[i] and
-                close[i] >= ema_21_aligned[i] * 0.998 and  # Allow small deviation below EMA
-                close[i] <= ema_21_aligned[i] * 1.002):    # Allow small deviation above EMA
-                signals[i] = 0.20
+            # LONG: Price breaks above weekly R1 + 1d EMA50 uptrend + volume spike
+            if (close[i] > weekly_r1_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 4h HA bearish, 1d HA bearish, price pulls back to EMA21 from above
-            elif (ha_bearish_4h_aligned[i] and 
-                  ha_bearish_1d_aligned[i] and
-                  close[i] >= ema_21_aligned[i] * 0.998 and  # Allow small deviation below EMA
-                  close[i] <= ema_21_aligned[i] * 1.002):    # Allow small deviation above EMA
-                signals[i] = -0.20
+            # SHORT: Price breaks below weekly S1 + 1d EMA50 downtrend + volume spike
+            elif (close[i] < weekly_s1_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 4h HA turns bearish OR 1d HA turns bearish
-            if (not ha_bullish_4h_aligned[i]) or (not ha_bullish_1d_aligned[i]):
+            # EXIT LONG: Price breaks below weekly S1 OR closes below 1d EMA50
+            if (close[i] < weekly_s1_aligned[i]) or \
+               (close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 4h HA turns bullish OR 1d HA turns bullish
-            if (not ha_bearish_4h_aligned[i]) or (not ha_bearish_1d_aligned[i]):
+            # EXIT SHORT: Price breaks above weekly R1 OR closes above 1d EMA50
+            if (close[i] > weekly_r1_aligned[i]) or \
+               (close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
