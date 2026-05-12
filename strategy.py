@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_VOLUME_SPIKE
+# 4H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_VOLUME_SPIKE
 # Hypothesis: Camarilla pivot levels (R3/S3) from daily timeframe provide strong support/resistance.
 # Enter long when price breaks above R3 with volume spike and daily uptrend; short when price breaks below S3 with volume spike and daily downtrend.
 # Exit when price returns to the opposite Camarilla level (S3 for longs, R3 for shorts).
 # Uses 1d trend filter to avoid counter-trend trades and volume spike to confirm breakout strength.
 # Targets 15-30 trades/year to minimize fee dent while capturing meaningful breakouts.
-# Tested on 12h timeframe with 1d HTF - expected to work in both bull and bear markets via trend filter.
+# Tested on 4h timeframe with 1d HTF - expected to work in both bull and bear markets via trend filter.
 
-name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_VOLUME_SPIKE"
-timeframe = "12h"
+name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_VOLUME_SPIKE"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
     S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
