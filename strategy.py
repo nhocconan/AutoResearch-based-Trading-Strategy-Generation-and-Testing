@@ -1,6 +1,9 @@
+# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R1/S1 breakouts on 4h timeframe, filtered by 1d EMA34 trend and volume spike, provide reliable entries in both bull and bear markets. The strategy limits trades by requiring confluence of three conditions (price breakout, trend alignment, volume confirmation), targeting 20-40 trades per year to minimize fee drag. Works in bull markets by catching breakouts and in bear markets by shorting breakdowns with trend filter preventing counter-trend trades.
+
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,34 +20,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Camarilla pivot and trend filter
+    # Load 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d Camarilla levels (using previous day's data)
-    # Camarilla: Pivot = (H+L+C)/3
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We use previous day's OHLC to avoid look-ahead
-    shift_high_1d = np.roll(high_1d, 1)
-    shift_low_1d = np.roll(low_1d, 1)
-    shift_close_1d = np.roll(close_1d, 1)
-    # First day: use available data (will be NaN until we have enough)
-    shift_high_1d[0] = high_1d[0]
-    shift_low_1d[0] = low_1d[0]
-    shift_close_1d[0] = close_1d[0]
+    # Calculate 1d Camarilla levels (using previous day's data to avoid look-ahead)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    camarilla_pivot = (shift_high_1d + shift_low_1d + shift_close_1d) / 3
-    camarilla_range = shift_high_1d - shift_low_1d
+    # Shift to get previous day's OHLC
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    # First day: use same day's data (will be filtered out by min_periods later)
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    prev_close_1d[0] = close_1d[0]
+    
+    camarilla_pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    camarilla_range = prev_high_1d - prev_low_1d
     camarilla_r1 = camarilla_pivot + camarilla_range * 1.1 / 12
     camarilla_s1 = camarilla_pivot - camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
