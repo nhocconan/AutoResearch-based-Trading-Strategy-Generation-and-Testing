@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_MarketRegime_Adaptive_Momentum
-Hypothesis: On 6h timeframe, use 1d RSI and ATR to detect market regime (trending vs ranging).
-In trending regime (ADX > 25): breakout of 6h Donchian(10) with volume confirmation.
-In ranging regime (ADX <= 25): mean reversion at 6h Bollinger Bands (20,2) with RSI(14) filter.
-This adapts to both bull and bear markets by switching between trend following and mean reversion.
-Target: 50-150 total trades over 4 years = 12-37/year. Size: 0.25.
+4h_KAMA_Trend_RSI_MeanReversion
+Hypothesis: On 4h timeframe, KAMA determines trend direction (bullish if price > KAMA, bearish if price < KAMA). In bullish trend, look for mean reversion entries when RSI < 30; in bearish trend, look for RSI > 70. Uses volume confirmation (volume > 1.5x 20-period average) to filter low-quality signals. Designed to work in both bull and bear markets by adapting to trend direction and avoiding trades in sideways markets via RSI extremes. Targets 20-40 trades per year to minimize fee drag.
 """
 
-name = "6h_MarketRegime_Adaptive_Momentum"
-timeframe = "6h"
+name = "4h_KAMA_Trend_RSI_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,71 +22,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for regime detection
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate KAMA (Kaufman Adaptive Moving Average) for trend
+    def kama(close, period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
 
-    # 1d ADX for regime detection
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    def smooth_wilder(arr, period):
-        result = np.zeros_like(arr)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    tr_smooth = smooth_wilder(tr, 14)
-    plus_dm_smooth = smooth_wilder(plus_dm, 14)
-    minus_dm_smooth = smooth_wilder(minus_dm, 14)
-    
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 
-                  0)
-    adx_1d = smooth_wilder(dx, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    kama_vals = kama(close, 10, 2, 30)
 
-    # 6h Donchian(10) for breakout signals
-    donchian_high = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    donchian_low = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    # Calculate RSI (Relative Strength Index) for mean reversion
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_vals = 100 - (100 / (1 + rs))
+        return rsi_vals
 
-    # 6h Bollinger Bands(20,2) for mean reversion
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
-
-    # 6h RSI(14) for mean reversion filter
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi[avg_loss == 0] = 100
-    rsi[avg_gain == 0] = 0
+    rsi_vals = rsi(close, 14)
 
     # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -98,11 +60,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required value is NaN
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(rsi[i]) or 
+        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -112,58 +72,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # Regime detection: ADX > 25 = trending, ADX <= 25 = ranging
-            if adx_1d_aligned[i] > 25:
-                # TRENDING REGIME: Donchian breakout with volume
-                if close[i] > donchian_high[i] and volume[i] > vol_avg_20[i] * 1.5:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < donchian_low[i] and volume[i] > vol_avg_20[i] * 1.5:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # LONG: Bullish trend (price > KAMA) + RSI oversold (<30) + volume confirmation
+            if (close[i] > kama_vals[i] and 
+                rsi_vals[i] < 30 and 
+                volume[i] > vol_avg_20[i] * 1.5):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Bearish trend (price < KAMA) + RSI overbought (>70) + volume confirmation
+            elif (close[i] < kama_vals[i] and 
+                  rsi_vals[i] > 70 and 
+                  volume[i] > vol_avg_20[i] * 1.5):
+                signals[i] = -0.25
+                position = -1
             else:
-                # RANGING REGIME: Mean reversion at Bollinger Bands with RSI filter
-                if close[i] < bb_lower[i] and rsi[i] < 30:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] > bb_upper[i] and rsi[i] > 70:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Opposite signal or volatility expansion
-            if adx_1d_aligned[i] > 25:
-                # In trending regime: exit on Donchian reversal
-                if close[i] < donchian_low[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # EXIT LONG: RSI overbought (>70) or trend turns bearish (price < KAMA)
+            if rsi_vals[i] > 70 or close[i] < kama_vals[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging regime: exit at mean or RSI normalization
-                if close[i] > sma_20[i] or rsi[i] > 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Opposite signal or volatility expansion
-            if adx_1d_aligned[i] > 25:
-                # In trending regime: exit on Donchian reversal
-                if close[i] > donchian_high[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # EXIT SHORT: RSI oversold (<30) or trend turns bullish (price > KAMA)
+            if rsi_vals[i] < 30 or close[i] > kama_vals[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In ranging regime: exit at mean or RSI normalization
-                if close[i] < sma_20[i] or rsi[i] < 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
 
     return signals
