@@ -1,12 +1,11 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_RSI_Trend_Reversal_With_Volume_Confirmation
-Hypothesis: RSI extremes on 6h combined with trend confirmation from 1d and volume spike captures reversal opportunities in both bull and bear markets. Works by entering on mean reversion when momentum is exhausted but trend remains intact, filtered by volume to avoid low-conviction moves. Uses 6h timeframe with 1d trend filter and volume confirmation for higher timeframe context.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Price breaking above/below Camarilla R3/S3 levels on 12h with 1d EMA trend filter and volume confirmation captures strong trending moves. Works in bull/bear by following trend direction. Uses 12h timeframe with 1d EMA34 trend filter for higher timeframe context. Designed for low trade frequency (<40/year) to minimize fee drag.
 """
 
-name = "6h_RSI_Trend_Reversal_With_Volume_Confirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,30 +25,34 @@ def generate_signals(prices):
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
 
-    # Calculate RSI(14) on 6h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate previous day's Camarilla levels (R3, S3)
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # Using previous day's OHLC to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
+    camarilla_r3 = prev_close + 1.1 * prev_range / 2
+    camarilla_s3 = prev_close - 1.1 * prev_range / 2
+
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
 
     # 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Volume confirmation: >1.5x 20-period average
+    # Volume confirmation: >1.5x 20-period average on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after warmup
-        if (np.isnan(rsi[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+    for i in range(35, n):  # Start after EMA34 warmup
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,14 +61,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI oversold (<30) + price above 1d EMA34 (uptrend) + volume confirmation
-            if (rsi[i] < 30 and 
+            # LONG: Price breaks above R3 + 1d EMA34 uptrend + volume confirmation
+            if (close[i] > camarilla_r3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought (>70) + price below 1d EMA34 (downtrend) + volume confirmation
-            elif (rsi[i] > 70 and 
+            # SHORT: Price breaks below S3 + 1d EMA34 downtrend + volume confirmation
+            elif (close[i] < camarilla_s3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
@@ -73,15 +76,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (>50) or trend breaks
-            if rsi[i] > 50 or close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: Price closes below EMA34 (trend reversal)
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (<50) or trend breaks
-            if rsi[i] < 50 or close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: Price closes above EMA34 (trend reversal)
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
