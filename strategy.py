@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
-# Hypothesis: Breakouts at Camarilla R1/S1 levels with 12h EMA trend filter and volume confirmation.
+# 12h_1D_Camarilla_R1S1_Breakout_12hTrend_Volume
+# Hypothesis: Breakouts at daily Camarilla R1/S1 levels with 12h EMA trend filter and volume confirmation.
 # Works in bull/bear markets: In uptrends, buy R1 breakouts; in downtrends, sell S1 breakdowns.
-# Volume ensures breakout validity, reducing false signals. Designed for 4h to limit trade frequency.
+# Volume ensures breakout validity, reducing false signals. Designed for 12h to limit trade frequency.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "12h_1D_Camarilla_R1S1_Breakout_12hTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -46,7 +46,7 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
 
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
