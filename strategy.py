@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dATR_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,13 +17,8 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once for trend filter and Camarilla pivots
+    # Load 1d data once for Camarilla pivots and ATR
     df_1d = get_htf_data(prices, '1d')
-    
-    # 1d EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Daily OHLC for Camarilla R1 and S1 (previous day)
     high_1d = df_1d['high'].values
@@ -35,9 +30,16 @@ def generate_signals(prices):
     r1 = close_1d_vals + (high_1d - low_1d) * 1.1 / 2
     s1 = close_1d_vals - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to 12h (wait for daily close)
+    # Daily ATR(14) for volatility filter
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d_vals[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d_vals[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align Camarilla levels and ATR to 4h (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,7 +53,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+            np.isnan(atr_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,17 +62,17 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + 1d trend up + volume spike
+            # Long: price breaks above R1 + volatility filter + volume spike
             if (close[i] > r1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
+                atr_1d_aligned[i] > 0 and  # volatility present
                 vol_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below S1 + 1d trend down + volume spike
+            # Short: price breaks below S1 + volatility filter + volume spike
             elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
+                  atr_1d_aligned[i] > 0 and 
                   vol_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit long: price closes below S1
@@ -78,13 +80,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short: price closes above R1
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
