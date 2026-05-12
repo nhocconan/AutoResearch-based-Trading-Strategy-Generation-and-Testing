@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyKAMA_Trend_12hRSI_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,51 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly data for trend context ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1d Data for trend and Camarilla levels ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # === 12h data for RSI filter ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === 1d EMA34 for trend ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Daily KAMA calculation ===
-    change = np.abs(np.diff(close, prepend=close[0]))
-    direction = np.abs(np.diff(close, n=10, prepend=close[:10]))
-    volatility = np.sum(change.reshape(-1, 10), axis=1)
-    er = np.where(volatility != 0, direction / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # Fast=2, Slow=30
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # === Calculate Camarilla levels (R1, S1) from previous day ===
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    camarilla_range = (high_1d - low_1d) * 1.1
+    r1_level = close_1d + camarilla_range / 12.0
+    s1_level = close_1d - camarilla_range / 12.0
     
-    # === 12h RSI (14) ===
-    delta = np.diff(close_12h, prepend=close_12h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_12h = 100 - (100 / (1 + rs))
+    # Align Camarilla levels to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
     
-    # === Align indicators to daily timeframe ===
-    kama_aligned = kama  # Already daily
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    
-    # Weekly trend: price above/below weekly EMA(20)
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # === Volume spike detection (20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20, 14)  # Warmup period
+    start_idx = max(200, 34)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi_12h_aligned[i]) or
-            np.isnan(ema20_1w_aligned[i])):
+        # Skip if data not ready
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,28 +61,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above KAMA AND weekly uptrend AND RSI not overbought
-            if (close[i] > kama_aligned[i] and 
-                close[i] > ema20_1w_aligned[i] and
-                rsi_12h_aligned[i] < 70):
+            # Long: Price breaks above R1 with volume spike and 1d trend up
+            if (close[i] > r1_aligned[i] and 
+                volume_spike[i] and
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA AND weekly downtrend AND RSI not oversold
-            elif (close[i] < kama_aligned[i] and 
-                  close[i] < ema20_1w_aligned[i] and
-                  rsi_12h_aligned[i] > 30):
+            # Short: Price breaks below S1 with volume spike and 1d trend down
+            elif (close[i] < s1_aligned[i] and 
+                  volume_spike[i] and
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below KAMA or weekly trend breaks
-            if close[i] < kama_aligned[i] or close[i] < ema20_1w_aligned[i]:
+            # Exit long: Price crosses back below R1 or trend breaks
+            if close[i] < r1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above KAMA or weekly trend breaks
-            if close[i] > kama_aligned[i] or close[i] > ema20_1w_aligned[i]:
+            # Exit short: Price crosses back above S1 or trend breaks
+            if close[i] > s1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
