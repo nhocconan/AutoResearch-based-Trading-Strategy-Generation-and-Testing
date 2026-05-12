@@ -1,11 +1,11 @@
-# 4h_KeltnerBreakout_12hTrend
-# Hypothesis: Use 12h Keltner Channel breakout with 12h EMA20 trend filter and volume confirmation for 4h entries.
-# Keltner adapts to volatility, reducing false breakouts in ranging markets. Trend filter ensures alignment with higher timeframe momentum.
-# Volume confirmation filters low-conviction moves. Target 20-50 trades/year for low fee drag.
-# Works in bull markets (trend continuation) and bear markets (sharp reversals with volume).
+#!/usr/bin/env python3
+"""
+6h_Momentum_With_Volume_Regime_Filter
+Hypothesis: On 6h timeframe, enter long when price breaks above 6h high with volume >1.5x average and RSI < 70 (not overbought), enter short when price breaks below 6h low with volume >1.5x average and RSI > 30 (not oversold). Use 12h EMA50 as trend filter to avoid counter-trend trades. Designed to capture momentum bursts in both bull and bear markets while avoiding exhaustion moves. Targets 20-40 trades per year to minimize fee drag.
+"""
 
-name = "4h_KeltnerBreakout_12hTrend"
-timeframe = "4h"
+name = "6h_Momentum_With_Volume_Regime_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,35 +22,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data
+    # Get 12h data for trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 20:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
 
-    # 12h EMA20 for Keltner middle line and trend
-    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # 12h ATR(10) for Keltner width
-    tr12 = np.maximum(np.maximum(high_12h[1:] - low_12h[1:], np.abs(high_12h[1:] - close_12h[:-1])), np.abs(low_12h[1:] - close_12h[:-1]))
-    tr12 = np.concatenate([[np.nan], tr12])
-    atr10_12h = pd.Series(tr12).ewm(span=10, adjust=False, min_periods=10).mean().values
-    keltner_upper_12h = ema20_12h + 2 * atr10_12h
-    keltner_lower_12h = ema20_12h - 2 * atr10_12h
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
 
-    # Use previous 12h bar's Keltner bands (only after close)
-    keltner_upper_prev = np.roll(keltner_upper_12h, 1)
-    keltner_lower_prev = np.roll(keltner_lower_12h, 1)
-    keltner_upper_prev[0] = np.nan
-    keltner_lower_prev[0] = np.nan
+    # RSI(14) for momentum exhaustion filter
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
 
-    # Align to 4h
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_12h, keltner_upper_prev)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_12h, keltner_lower_prev)
-    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
-
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
@@ -58,8 +50,9 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or 
-            np.isnan(ema20_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +61,36 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above upper Keltner + above EMA20 + volume spike
-            if (close[i] > keltner_upper_aligned[i] and 
-                close[i] > ema20_12h_aligned[i] and 
-                volume[i] > vol_avg_20[i] * 2.0):
+            # LONG: Price breaks above 6h high + volume spike + not overbought + 12h uptrend
+            if (close[i] > high[i-1] and  # broke previous 6h bar high
+                volume[i] > vol_avg_20[i] * 1.5 and
+                rsi[i] < 70 and
+                close[i] > ema50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below lower Keltner + below EMA20 + volume spike
-            elif (close[i] < keltner_lower_aligned[i] and 
-                  close[i] < ema20_12h_aligned[i] and 
-                  volume[i] > vol_avg_20[i] * 2.0):
+            # SHORT: Price breaks below 6h low + volume spike + not oversold + 12h downtrend
+            elif (close[i] < low[i-1] and  # broke previous 6h bar low
+                  volume[i] > vol_avg_20[i] * 1.5 and
+                  rsi[i] > 30 and
+                  close[i] < ema50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below lower Keltner OR below EMA20
-            if close[i] < keltner_lower_aligned[i] or close[i] < ema20_12h_aligned[i]:
+            # EXIT LONG: Price breaks below 6h low OR RSI overbought OR trend turns down
+            if (close[i] < low[i-1] or 
+                rsi[i] > 70 or 
+                close[i] < ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above upper Keltner OR above EMA20
-            if close[i] > keltner_upper_aligned[i] or close[i] > ema20_12h_aligned[i]:
+            # EXIT SHORT: Price breaks above 6h high OR RSI oversold OR trend turns up
+            if (close[i] > high[i-1] or 
+                rsi[i] < 30 or 
+                close[i] > ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
