@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Enter long when price breaks above Camarilla R1 on 12h chart with weekly uptrend and volume confirmation.
-# Enter short when price breaks below Camarilla S1 with weekly downtrend and volume confirmation.
-# Uses weekly trend filter to avoid counter-trend trades, volume to confirm breakout strength.
-# Designed for low frequency (12-37 trades/year) to minimize fee drag on 12h timeframe.
+# 1d_1W_Donchian20_Breakout_Trend_Volume
+# Hypothesis: Buy when price breaks above 20-day high with bullish weekly trend and volume surge, sell when breaks below 20-day low with bearish weekly trend and volume surge.
+# Uses Donchian channel for trend following, weekly EMA for trend filter, volume confirmation to filter false breakouts.
+# Designed for low frequency (10-25 trades/year) to minimize fee drag and work in both bull and bear markets.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "1d_1W_Donchian20_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -34,29 +33,23 @@ def generate_signals(prices):
     ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
 
-    # Calculate 12h Camarilla levels (based on previous 12h bar)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    rang = prev_high - prev_low
-    R1 = prev_close + rang * 1.1 / 12
-    S1 = prev_close - rang * 1.1 / 12
+    # Calculate Donchian channel (20-day high/low)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
 
-    # Volume confirmation: current volume > 1.3x average of last 20 bars
+    # Volume confirmation: current volume > 1.5x average of last 20 days
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.3 * vol_ma)
+    volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or
-            np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,26 +62,26 @@ def generate_signals(prices):
         bearish_trend = close[i] < ema_1w_aligned[i]
 
         if position == 0:
-            # LONG: Price crosses above R1 with bullish weekly trend and volume confirmation
-            if close[i] > R1[i] and close[i-1] <= R1[i-1] and bullish_trend and volume_ok[i]:
+            # LONG: Price breaks above 20-day high with bullish weekly trend and volume surge
+            if close[i] > donchian_high[i] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below S1 with bearish weekly trend and volume confirmation
-            elif close[i] < S1[i] and close[i-1] >= S1[i-1] and bearish_trend and volume_ok[i]:
+            # SHORT: Price breaks below 20-day low with bearish weekly trend and volume surge
+            elif close[i] < donchian_low[i] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 or weekly trend turns bearish
-            if close[i] < S1[i] and close[i-1] >= S1[i-1] or not bullish_trend:
+            # EXIT LONG: Price breaks below 20-day low or weekly trend turns bearish
+            if close[i] < donchian_low[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 or weekly trend turns bullish
-            if close[i] > R1[i] and close[i-1] <= R1[i-1] or not bearish_trend:
+            # EXIT SHORT: Price breaks above 20-day high or weekly trend turns bullish
+            if close[i] > donchian_high[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
