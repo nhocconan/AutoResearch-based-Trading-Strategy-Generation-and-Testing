@@ -1,33 +1,37 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_DonchianBreakout_Volume
-# Hypothesis: Combine weekly pivot levels with Donchian breakout and volume confirmation.
-# Go long when price breaks above Donchian(20) high AND weekly pivot R1 level with volume > 1.5x average.
-# Go short when price breaks below Donchian(20) low AND weekly pivot S1 level with volume > 1.5x average.
-# Weekly pivot provides structural support/resistance from higher timeframe, reducing false breakouts.
-# Volume confirmation ensures breakouts have conviction. Designed for low frequency (15-35 trades/year)
-# to avoid fee drag. Works in both bull (breakouts continue) and bear (breakdowns continue) markets.
+# 12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance.
+# Breakout above R3 or below S3 with volume confirmation and 1d trend filter.
+# Designed for low frequency (15-35 trades/year) to avoid fee drag.
+# Works in bull/bear via trend filter; volume avoids false breakouts.
 
-name = "6h_WeeklyPivot_DonchianBreakout_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_weekly_pivot(high, low, close):
+def calculate_camarilla(high, low, close):
     """
-    Calculate weekly pivot points: P, R1, R2, S1, S2.
-    Uses typical price: (H + L + C) / 3
-    Returns pivot, r1, r2, s1, s2 arrays.
+    Calculate Camarilla pivot levels for given high, low, close arrays.
+    Returns R4, R3, R2, R1, PP, S1, S2, S3, S4 arrays.
     """
-    typical_price = (high + low + close) / 3.0
-    pivot = typical_price
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    return pivot, r1, r2, s1, s2
+    typical = (high + low + close) / 3.0
+    range_ = high - low
+    
+    R4 = close + range_ * 1.500
+    R3 = close + range_ * 1.250
+    R2 = close + range_ * 1.166
+    R1 = close + range_ * 1.083
+    PP = typical
+    S1 = close - range_ * 1.083
+    S2 = close - range_ * 1.166
+    S3 = close - range_ * 1.250
+    S4 = close - range_ * 1.500
+    
+    return R4, R3, R2, R1, PP, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
@@ -39,50 +43,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 30:
+    # Get daily data for Camarilla pivot and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly = df_weekly['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points
-    pivot, r1, r2, s1, s2 = calculate_weekly_pivot(high_weekly, low_weekly, close_weekly)
+    # Calculate Camarilla levels on daily data
+    R4_1d, R3_1d, R2_1d, R1_1d, PP_1d, S1_1d, S2_1d, S3_1d, S4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align weekly pivots to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    # Calculate 1d EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False).values
     
-    # Calculate Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Align Camarilla levels and EMA to 12h timeframe
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    for i in range(n):
-        if i >= lookback - 1:
-            highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-            lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
-    
-    # Calculate average volume (20-period)
-    avg_volume = np.full(n, np.nan)
-    for i in range(n):
-        if i >= lookback - 1:
-            avg_volume[i] = np.mean(volume[i - lookback + 1:i + 1])
+    # Volume average (20-period) for confirmation
+    volume_series = pd.Series(volume)
+    vol_ma_20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = lookback - 1
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(avg_volume[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,28 +84,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.5x average volume
-        volume_surge = volume[i] > 1.5 * avg_volume[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * vol_ma_20[i]
+        
+        # Trend filter: price above/below EMA34 on 1d
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # LONG: Break above Donchian high AND above weekly R1 with volume surge
-            if close[i] > highest_high[i] and close[i] > r1_aligned[i] and volume_surge:
+            # LONG: Break above R3 with volume and uptrend
+            if close[i] > R3_1d_aligned[i] and volume_confirmed and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Donchian low AND below weekly S1 with volume surge
-            elif close[i] < lowest_low[i] and close[i] < s1_aligned[i] and volume_surge:
+            # SHORT: Break below S3 with volume and downtrend
+            elif close[i] < S3_1d_aligned[i] and volume_confirmed and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price falls below Donchian low OR weekly pivot
-            if close[i] < lowest_low[i] or close[i] < pivot_aligned[i]:
+            # EXIT LONG: Break below S3 or trend change
+            if close[i] < S3_1d_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above Donchian high OR weekly pivot
-            if close[i] > highest_high[i] or close[i] > pivot_aligned[i]:
+            # EXIT SHORT: Break above R3 or trend change
+            if close[i] > R3_1d_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
