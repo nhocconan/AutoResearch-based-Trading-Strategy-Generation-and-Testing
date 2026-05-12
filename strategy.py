@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_CCI_MeanReversion_WithTrendFilter
-# Hypothesis: CCI identifies overbought/oversold conditions for mean reversion.
-# In ranging markets (CHOP > 61.8), extreme CCI readings (> +100 or < -100) offer high-probability reversals.
-# A daily EMA50 filter ensures we only trade in the direction of the higher timeframe trend, avoiding counter-trend trades in strong trends.
-# Designed for 4h timeframe with tight entry conditions to target 20-50 trades per year, minimizing fee drag.
+# 12h_ADX_Trend_With_Volume
+# Hypothesis: ADX identifies strong trends while avoiding choppy markets. Combined with volume confirmation
+# and daily EMA trend filter, it provides high-probability entries in both bull and bear markets.
+# Designed for 12h timeframe to target 12-37 trades per year, minimizing fee drag.
 
-name = "4h_CCI_MeanReversion_WithTrendFilter"
-timeframe = "4h"
+name = "12h_ADX_Trend_With_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,55 +22,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for EMA trend filter and chop calculation
+    # Get daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
 
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
 
-    # Calculate EMA50 on daily for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # Calculate 14-period CCI
-    tp = (high + low + close) / 3.0  # Typical Price
-    sma_tp = pd.Series(tp).rolling(window=14, min_periods=14).mean().values
-    mad = pd.Series(tp).rolling(window=14, min_periods=14).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    # Avoid division by zero
-    mad = np.where(mad == 0, 1e-10, mad)
-    cci = (tp - sma_tp) / (0.015 * mad)
-
-    # Calculate Chopiness Index (CHOP) on daily for regime filter
-    # ATR14
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # Calculate ADX (14-period)
+    # True Range
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Max high and min low over 14 periods
-    max_high14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop calculation: 100 * log10(sum(ATR14) / (max_high - min_low)) / log10(14)
-    sum_atr14 = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
-    range14 = max_high14 - min_low14
-    # Avoid division by zero or log of zero
-    range14 = np.where(range14 == 0, 1e-10, range14)
-    chop = 100 * (np.log10(sum_atr14) - np.log10(range14)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+
+    # Smoothed values
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+
+    # Directional Indicators
+    plus_di = 100 * plus_dm_sum / tr_sum
+    minus_di = 100 * minus_dm_sum / tr_sum
+
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+
+    # Get daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Volume confirmation: 1.5x 20-period SMA
+    volume_series = pd.Series(volume)
+    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_threshold = volume_sma20 * 1.5
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
+    for i in range(28, n):  # Start after ADX needs 28 bars (14+14)
         # Skip if any required data is NaN
-        if (np.isnan(cci[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,30 +82,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # Only trade in ranging markets (CHOP > 61.8 indicates ranging)
-            if chop_aligned[i] > 61.8:
-                # LONG: CCI < -100 (oversold) and price above daily EMA50 (uptrend bias)
-                if cci[i] < -100 and close[i] > ema50_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # SHORT: CCI > +100 (overbought) and price below daily EMA50 (downtrend bias)
-                elif cci[i] > 100 and close[i] < ema50_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # LONG: Strong uptrend (ADX > 25, +DI > -DI) with volume confirmation and uptrend
+            if (adx[i] > 25 and
+                plus_di[i] > minus_di[i] and
+                volume[i] > volume_threshold[i] and
+                close[i] > ema34_1d_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Strong downtrend (ADX > 25, -DI > +DI) with volume confirmation and downtrend
+            elif (adx[i] > 25 and
+                  minus_di[i] > plus_di[i] and
+                  volume[i] > volume_threshold[i] and
+                  close[i] < ema34_1d_aligned[i]):
+                signals[i] = -0.25
+                position = -1
             else:
-                signals[i] = 0.0  # Trending market, stay flat
+                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: CCI returns to neutral (> -50) or trend alignment breaks
-            if cci[i] > -50 or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Trend weakening (ADX < 20 or -DI > +DI)
+            if adx[i] < 20 or minus_di[i] > plus_di[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: CCI returns to neutral (< +50) or trend alignment breaks
-            if cci[i] < 50 or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Trend weakening (ADX < 20 or +DI > -DI)
+            if adx[i] < 20 or plus_di[i] > minus_di[i]:
                 signals[i] = 0.0
                 position = 0
             else:
