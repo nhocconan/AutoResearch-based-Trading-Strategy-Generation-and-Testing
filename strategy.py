@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Adaptive_Kelly_TRIX_Trend_Filter
-Hypothesis: Combines TRIX momentum with volatility-adjusted Kelly sizing for 6h timeframe.
-Uses TRIX(12) crossing zero as momentum signal, filtered by 1d EMA50 trend, with position
-size scaled by inverse volatility (ATR-based) and Kelly criterion based on recent win rate.
-Designed for low trade frequency (<30/year) with strong edge in both bull and bear markets
-by adapting position size to volatility and maintaining trend alignment.
-Timeframe: 6h
+1d_KeltnerChannel_WeeklyTrend_Volume
+Hypothesis: Trade breakouts above upper Keltner Channel or below lower Keltner Channel on 1d timeframe when aligned with weekly EMA40 trend and confirmed by volume spike. Uses ATR-based channel for volatility adaptation, works in both bull and bear markets by following weekly trend. Targets 10-25 trades/year with strict confluence of breakout, trend alignment, and volume confirmation.
+Timeframe: 1d
 """
 
-name = "6h_Adaptive_Kelly_TRIX_Trend_Filter"
-timeframe = "6h"
+name = "1d_KeltnerChannel_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -27,66 +23,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for EMA50 trend filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for EMA40 trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
 
-    # Calculate daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA40 for trend filter
+    close_1w = df_1w['close'].values
+    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
 
-    # Calculate ATR(14) for volatility normalization
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]  # first value
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate ATR(20) for Keltner Channel on daily data
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
 
-    # Calculate TRIX(12,9,9) - triple EMA of ROC
-    # ROC = (close / close.shift(1) - 1) * 100
-    roc = np.zeros_like(close)
-    roc[1:] = (close[1:] / close[:-1] - 1) * 100
-    
-    # Triple EMA
-    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = ema3
+    # Keltner Channel: EMA20 ± 2*ATR
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = ema_20 + 2.0 * atr
+    kc_lower = ema_20 - 2.0 * atr
 
-    # Calculate recent win rate for Kelly (lookback 50 periods)
-    returns = np.zeros_like(close)
-    returns[1:] = (close[1:] / close[:-1] - 1)
-    
-    win_rate = np.full_like(close, 0.5)  # default 50%
-    for i in range(50, n):
-        # Look at returns when we had signals in past 50 periods
-        # Simplified: use price change direction as proxy
-        period_returns = returns[i-50:i]
-        wins = np.sum(period_returns > 0)
-        win_rate[i] = wins / 50.0 if 50 > 0 else 0.5
-    
-    # Kelly fraction: f = (bp * w - l) / b where b=1 (1:1), w=win_rate, l=loss_rate
-    kelly = np.maximum(0, win_rate * 2 - 1)  # simplified for 1:1 payoff
-    kelly = np.minimum(kelly, 0.5)  # cap at 50% kelly
-    
-    # Volatility scaling: inverse of ATR normalized
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=20).mean().values
-    vol_scale = np.ones_like(atr)
-    mask = atr_ma > 0
-    vol_scale[mask] = np.clip(atr[mask] / atr_ma[mask], 0.5, 2.0)  # normalize
-    vol_scale = 1.0 / vol_scale  # inverse - lower vol = higher scale
-    vol_scale = np.clip(vol_scale, 0.5, 2.0)  # cap scaling
+    # Volume spike: current > 2.0x average of last 20 days
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(60, n):  # Start after warmup
-        if (np.isnan(trix[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_scale[i])):
+    for i in range(40, n):  # Start after EMA40 and ATR20 warmup
+        if (np.isnan(ema_40_1w_aligned[i]) or np.isnan(kc_upper[i]) or 
+            np.isnan(kc_lower[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -94,49 +62,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # TRIX signal: crossing zero
-        trix_signal = 0
-        if i > 0:
-            if trix[i-1] <= 0 and trix[i] > 0:
-                trix_signal = 1   # bullish crossover
-            elif trix[i-1] >= 0 and trix[i] < 0:
-                trix_signal = -1  # bearish crossover
-
-        if position == 0 and trix_signal != 0:
-            # Check trend filter: price vs 1d EMA50
-            if trix_signal == 1 and close[i] > ema_50_1d_aligned[i]:
-                # Long signal
-                base_size = 0.25
-                kelly_adj = kelly[i] * 0.5  # use half Kelly
-                vol_adj = vol_scale[i]
-                size = base_size * kelly_adj * vol_adj
-                size = np.clip(size, 0.1, 0.35)  # reasonable bounds
-                signals[i] = size
+        if position == 0:
+            # LONG: close > upper KC + price > weekly EMA40 + volume spike
+            if (close[i] > kc_upper[i] and 
+                close[i] > ema_40_1w_aligned[i] and 
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            elif trix_signal == -1 and close[i] < ema_50_1d_aligned[i]:
-                # Short signal
-                base_size = 0.25
-                kelly_adj = kelly[i] * 0.5  # use half Kelly
-                vol_adj = vol_scale[i]
-                size = base_size * kelly_adj * vol_adj
-                size = np.clip(size, 0.1, 0.35)  # reasonable bounds
-                signals[i] = -size
+            # SHORT: close < lower KC + price < weekly EMA40 + volume spike
+            elif (close[i] < kc_lower[i] and 
+                  close[i] < ema_40_1w_aligned[i] and 
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: TRIX turns negative or trend breaks
-            if trix[i] < 0 or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: close < EMA20 (middle of Keltner Channel)
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX turns positive or trend breaks
-            if trix[i] > 0 or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: close > EMA20 (middle of Keltner Channel)
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.25
 
     return signals
