@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter
-# Hypothesis: On 4h timeframe, enter long when price closes above daily R1 with close > 1d EMA34.
-# Enter short when price closes below daily S1 with close < 1d EMA34.
-# Exit when price crosses 1d EMA34 (trend reversal).
-# Uses 1d EMA for trend filter to reduce whipsaw and improve performance in both bull and bear markets.
-# Targets 20-30 trades/year for low fee drag.
+# 6h_WilliamsAlligator_ElderRay_TrendFollow
+# Hypothesis: On 6h timeframe, use Williams Alligator (3 SMAs) for trend direction and Elder Ray (bull/bear power) for momentum confirmation.
+# Enter long when price > Alligator teeth (middle SMA) and bull power > 0 and rising.
+# Enter short when price < Alligator teeth and bear power < 0 and falling.
+# Exit when price crosses Alligator teeth or Elder Ray momentum fades.
+# Uses Williams Alligator (13,8,5 SMAs) and Elder Ray (EMA13) to capture trends while avoiding whipsaws in both bull and bear markets.
+# Targets 15-25 trades/year for low fee drag.
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_ElderRay_TrendFollow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,43 +25,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot calculation and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
-        return np.zeros(n)
+    # Calculate Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
+    # Using SMA as proxy for SMMA (Smoothed Moving Average) for simplicity
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # Alligator Jaw
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values   # Alligator Teeth
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values    # Alligator Lips
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Calculate pivot point and range
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_range = daily_high - daily_low
-    
-    # Camarilla R1 and S1 levels
-    r1 = daily_pivot + daily_range * 1.083
-    s1 = daily_pivot - daily_range * 1.083
-    
-    # Calculate 1d EMA34
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align daily levels and 1d EMA34 to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: 20-period moving average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Smooth Elder Ray for momentum confirmation
+    bull_power_smooth = pd.Series(bull_power).ewm(span=5, adjust=False, min_periods=5).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=5, adjust=False, min_periods=5).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are stable
+    start_idx = 20  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,32 +56,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema1d_trend = ema34_1d_aligned[i]
-        vol_ma_val = vol_ma[i]
+        teeth_val = teeth[i]
+        bull_val = bull_power_smooth[i]
+        bear_val = bear_power_smooth[i]
         
         if position == 0:
-            # LONG: Price closes above R1 with close > 1d EMA34 and volume > 20MA
-            if close[i] > r1_val and close[i] > ema1d_trend and volume[i] > vol_ma_val:
+            # LONG: Price > Alligator teeth AND bull power > 0 AND bull power rising
+            if close[i] > teeth_val and bull_val > 0 and bull_val > bull_power_smooth[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below S1 with close < 1d EMA34 and volume > 20MA
-            elif close[i] < s1_val and close[i] < ema1d_trend and volume[i] > vol_ma_val:
+            # SHORT: Price < Alligator teeth AND bear power < 0 AND bear power falling (more negative)
+            elif close[i] < teeth_val and bear_val < 0 and bear_val < bear_power_smooth[i-1]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below 1d EMA34 (trend reversal)
-            if close[i] < ema1d_trend:
+            # EXIT LONG: Price < Alligator teeth OR bull power <= 0 OR bull power falling
+            if close[i] < teeth_val or bull_val <= 0 or bull_val < bull_power_smooth[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above 1d EMA34 (trend reversal)
-            if close[i] > ema1d_trend:
+            # EXIT SHORT: Price > Alligator teeth OR bear power >= 0 OR bear power rising (less negative)
+            if close[i] > teeth_val or bear_val >= 0 or bear_val > bear_power_smooth[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
