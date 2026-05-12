@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_with_RSI_and_Choppy_Filter
-# Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) to determine trend direction on daily timeframe.
-# Enter long when price crosses above KAMA and RSI < 70 (not overbought) and market is not choppy (Choppiness Index > 38.2).
-# Enter short when price crosses below KAMA and RSI > 30 (not oversold) and market is not choppy.
-# Exit when price crosses back across KAMA or RSI reaches extreme levels.
-# Designed for low-frequency signals (7-25 trades/year) to minimize fee drag, works in both bull and bear markets via trend following with momentum and regime filters.
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Price breaking above Camarilla R1 or below S1 with 12h EMA trend and volume confirmation.
+# Works in bull/bear via trend filter and avoids false breakouts with volume. Targets 25-35 trades/year.
 
-name = "1d_KAMA_Trend_with_RSI_and_Choppy_Filter"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,64 +13,54 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for chop filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
 
-    # KAMA on daily close
-    def kama(close, length=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, n=length))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(slow+1) - 2/(fast+1)) + 2/(fast+1)) ** 2
-        kama = np.full_like(close, np.nan, dtype=float)
-        kama[length-1] = close[length-1]
-        for i in range(length, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
 
-    kama_vals = kama(close, 10, 2, 30)
+    # Calculate Camarilla levels from previous day
+    ph = df_1d['high'].shift(1).values  # previous day high
+    pl = df_1d['low'].shift(1).values   # previous day low
+    pc = df_1d['close'].shift(1).values # previous day close
 
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[np.nan], rsi])  # align with close
+    # Only calculate when we have valid previous day data
+    valid = ~(np.isnan(ph) | np.isnan(pl) | np.isnan(pc))
+    range_val = np.where(valid, ph - pl, 0)
+    r1 = np.where(valid, pc + (range_val * 1.1 / 12), np.nan)
+    s1 = np.where(valid, pc - (range_val * 1.1 / 12), np.nan)
 
-    # Choppiness Index (14) on weekly
-    def choppiness_index(high, low, close, length=14):
-        atr = np.zeros_like(high)
-        tr1 = high - low
-        tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
-        tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = pd.Series(tr).rolling(window=length, min_periods=length).mean().values
-        highest_high = pd.Series(high).rolling(window=length, min_periods=length).max().values
-        lowest_low = pd.Series(low).rolling(window=length, min_periods=length).min().values
-        ci = 100 * np.log10(atr * length / (highest_high - lowest_low)) / np.log10(length)
-        return ci
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    chop_vals = choppiness_index(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_vals)
+    # 12h EMA20 trend filter
+    ema_20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+
+    # Volume confirmation: current volume > 1.5x average of last 6 periods
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        if (np.isnan(kama_vals[i]) or np.isnan(rsi[i]) or np.isnan(chop_aligned[i])):
+    for i in range(60, n):  # Start after warmup
+        # Skip if any required data is NaN
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,34 +68,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend and momentum conditions
-        price_above_kama = close[i] > kama_vals[i]
-        price_below_kama = close[i] < kama_vals[i]
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
-        not_choppy = chop_aligned[i] > 38.2  # trending market
-
         if position == 0:
-            # LONG: price above KAMA, RSI not overbought, trending market
-            if price_above_kama and rsi_not_overbought and not_choppy:
+            # LONG: Price > R1 AND above 12h EMA20 AND volume
+            if close[i] > r1_aligned[i] and close[i] > ema_20_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price below KAMA, RSI not oversold, trending market
-            elif price_below_kama and rsi_not_oversold and not_choppy:
+            # SHORT: Price < S1 AND below 12h EMA20 AND volume
+            elif close[i] < s1_aligned[i] and close[i] < ema_20_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price below KAMA or RSI overbought or choppy
-            if not price_above_kama or not rsi_not_overbought or not not_choppy:
+            # EXIT LONG: Price < S1 OR below 12h EMA20
+            if close[i] < s1_aligned[i] or close[i] < ema_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price above KAMA or RSI oversold or choppy
-            if not price_below_kama or not rsi_not_oversold or not not_choppy:
+            # EXIT SHORT: Price > R1 OR above 12h EMA20
+            if close[i] > r1_aligned[i] or close[i] > ema_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
