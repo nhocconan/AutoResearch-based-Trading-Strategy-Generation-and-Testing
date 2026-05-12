@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
-# Hypothesis: Price breaking above/below 4-hour Camarilla R1/S1 levels with 1-day volume confirmation and 4-hour trend filter captures strong trending moves in 1h timeframe while avoiding false breakouts. Works in bull/bear by following the 4h trend direction. Uses 1h timeframe with 4h trend and 1d volume filters to reduce noise and false signals.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Price breaking above/below daily Camarilla R3/S3 levels with 1-day trend filter and volume confirmation captures strong trending moves. Works in bull/bear by following daily trend direction. Uses 12h timeframe to reduce trade frequency and avoid fee drag, with daily timeframe for trend context and breakout levels.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,44 +20,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate 4h high, low, close for Camarilla levels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-
-    # Calculate 4h Camarilla levels: R1, S1
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    camarilla_range_4h = high_4h - low_4h
-    r1_level_4h = close_4h + 1.1 * camarilla_range_4h / 12
-    s1_level_4h = close_4h - 1.1 * camarilla_range_4h / 12
-
-    # Align Camarilla levels to 1h timeframe
-    r1_level_aligned = align_htf_to_ltf(prices, df_4h, r1_level_4h)
-    s1_level_aligned = align_htf_to_ltf(prices, df_4h, s1_level_4h)
-
-    # 4h EMA20 trend filter
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    # 1d volume confirmation: >1.8x 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = vol_1d > (1.8 * vol_ma_1d)
-    volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d)
+
+    # Calculate daily high, low, close for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+
+    # Calculate Camarilla levels: R3, S3
+    camarilla_range = high_1d - low_1d
+    r3_level = close_1d + 1.1 * camarilla_range / 2
+    s3_level = close_1d - 1.1 * camarilla_range / 2
+
+    # Align Camarilla levels to 12h timeframe
+    r3_level_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
+    s3_level_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
+
+    # 1d trend filter: price above/below close (simple trend)
+    trend_1d = close_1d  # Using close as trend proxy
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+
+    # Volume confirmation: >1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after EMA20 warmup
-        if (np.isnan(r1_level_aligned[i]) or np.isnan(s1_level_aligned[i]) or 
-            np.isnan(ema_20_4h_aligned[i]) or np.isnan(volume_confirm_1d_aligned[i])):
+    for i in range(20, n):  # Start after volume MA warmup
+        if (np.isnan(r3_level_aligned[i]) or np.isnan(s3_level_aligned[i]) or 
+            np.isnan(trend_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,33 +59,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + 4h EMA20 uptrend + 1d volume confirmation
-            if (close[i] > r1_level_aligned[i] and 
-                close[i] > ema_20_4h_aligned[i] and 
-                volume_confirm_1d_aligned[i]):
-                signals[i] = 0.20
+            # LONG: Price breaks above R3 + price above daily close + volume confirmation
+            if (close[i] > r3_level_aligned[i] and 
+                close[i] > trend_1d_aligned[i] and 
+                volume_confirm[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + 4h EMA20 downtrend + 1d volume confirmation
-            elif (close[i] < s1_level_aligned[i] and 
-                  close[i] < ema_20_4h_aligned[i] and 
-                  volume_confirm_1d_aligned[i]):
-                signals[i] = -0.20
+            # SHORT: Price breaks below S3 + price below daily close + volume confirmation
+            elif (close[i] < s3_level_aligned[i] and 
+                  close[i] < trend_1d_aligned[i] and 
+                  volume_confirm[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below 4h EMA20 (trend reversal)
-            if close[i] < ema_20_4h_aligned[i]:
+            # EXIT LONG: Price closes below daily close (trend reversal)
+            if close[i] < trend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above 4h EMA20 (trend reversal)
-            if close[i] > ema_20_4h_aligned[i]:
+            # EXIT SHORT: Price closes above daily close (trend reversal)
+            if close[i] > trend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
