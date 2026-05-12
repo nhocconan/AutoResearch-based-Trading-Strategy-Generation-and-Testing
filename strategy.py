@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filter_2"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_Signal_v3"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,7 +32,7 @@ def generate_signals(prices):
     r1 = p + (high_1d - low_1d) * 1.1 / 12
     s1 = p - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 4h (wait for daily close)
+    # Align Camarilla levels to 12h (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -40,7 +40,7 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_avg)
     
-    # Price momentum: 4-period rate of change > 0
+    # Momentum filter: 4-period rate of change > 0
     roc4 = np.zeros_like(close)
     roc4[4:] = (close[4:] - close[:-4]) / close[:-4]
     momentum = roc4 > 0
