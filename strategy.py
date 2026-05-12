@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Williams_Alligator_Elder_Ray_Signal_1dTrend_Filter
-# Hypothesis: Combine Williams Alligator (trend) and Elder Ray (bull/bear power) signals on 4h,
-# filtered by 1d EMA50 trend. Enter long when Alligator bullish (jaw<teeth<lips) AND Bull Power > 0.
-# Enter short when Alligator bearish (jaw>teeth>lips) AND Bear Power < 0.
-# Exit when signals conflict or trend weakens. Uses volume confirmation to avoid false breakouts.
-# Designed for 4-8 trades/year per symbol, works in both bull and bear via dual indicators.
+# 12h_Donchian_Breakout_Volume_1dTrend
+# Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d EMA50 trend filter.
+# Long when price breaks above 20-period high with volume > 1.5x average and price > 1d EMA50.
+# Short when price breaks below 20-period low with volume > 1.5x average and price < 1d EMA50.
+# Exit on opposite Donchian breakout or trend reversal. Designed for 15-30 trades/year per symbol.
 
-name = "4h_Williams_Alligator_Elder_Ray_Signal_1dTrend_Filter"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_Volume_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -33,19 +32,12 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Williams Alligator on 4h: SMAs of median price
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Donchian channels (20-period) on 12h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
 
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-
-    # Volume confirmation: current volume > 1.5x average of last 6 periods (1.5 days)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume confirmation: current volume > 1.5x average of last 4 periods (2 days)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
@@ -53,8 +45,7 @@ def generate_signals(prices):
 
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,26 +59,26 @@ def generate_signals(prices):
         price_below_ema = close[i] < ema_50_aligned[i]
 
         if position == 0:
-            # LONG: Alligator bullish AND Bull Power positive AND volume AND uptrend
-            if (jaw[i] < teeth[i] < lips[i]) and (bull_power[i] > 0) and volume_ok[i] and price_above_ema:
+            # LONG: Price breaks above 20-period high + volume + uptrend
+            if close[i] > high_20[i] and volume_ok[i] and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Alligator bearish AND Bear Power negative AND volume AND downtrend
-            elif (jaw[i] > teeth[i] > lips[i]) and (bear_power[i] < 0) and volume_ok[i] and price_below_ema:
+            # SHORT: Price breaks below 20-period low + volume + downtrend
+            elif close[i] < low_20[i] and volume_ok[i] and price_below_ema:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alligator turns bearish OR Bull Power negative OR trend down
-            if not (jaw[i] < teeth[i] < lips[i]) or (bull_power[i] <= 0) or (close[i] < ema_50_aligned[i]):
+            # EXIT LONG: Price breaks below 20-period low OR trend down
+            if close[i] < low_20[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator turns bullish OR Bear Power positive OR trend up
-            if not (jaw[i] > teeth[i] > lips[i]) or (bear_power[i] >= 0) or (close[i] > ema_50_aligned[i]):
+            # EXIT SHORT: Price breaks above 20-period high OR trend up
+            if close[i] > high_20[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
