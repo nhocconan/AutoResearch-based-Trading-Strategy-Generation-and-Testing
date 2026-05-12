@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 4h_RVI_Crossover_12hTrend_VolumeFilter
-# Hypothesis: Relative Vigor Index (RVI) crossovers signal momentum shifts. Combined with 12h EMA trend filter and volume confirmation, this captures sustained moves in both bull and bear markets. RVI oscillates between -1 and 1, with crossovers above/below zero indicating bullish/bearish momentum. Trend filter ensures alignment with higher timeframe direction, reducing false signals. Volume filter confirms participation. Target: 20-40 trades/year.
+# 1d_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) on 1-day with 1-week trend filter and volume confirmation.
+# Breaks above R1 in uptrend or below S1 in downtrend capture institutional breakouts.
+# Trend filter avoids counter-trend trades. Volume ensures institutional participation.
+# Works in bull/bear by following weekly trend. Target: 15-25 trades/year.
 
-name = "4h_RVI_Crossover_12hTrend_VolumeFilter"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,38 +23,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
 
-    # Calculate 12h EMA50 trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA50 trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
 
-    # RVI (10-period) calculation
-    # Numerator: close - open
-    # Denominator: high - low
-    num = close - prices['open'].values
-    den = high - low
-    # Avoid division by zero
-    den = np.where(den == 0, 1e-10, den)
-    # Smoothed numerator and denominator using EMA(10)
-    num_smooth = pd.Series(num).ewm(span=10, adjust=False, min_periods=10).mean().values
-    den_smooth = pd.Series(den).ewm(span=10, adjust=False, min_periods=10).mean().values
-    rvi = num_smooth / den_smooth
-    # Signal line: EMA of RVI
-    rvi_signal = pd.Series(rvi).ewm(span=4, adjust=False, min_periods=4).mean().values
+    # Camarilla levels on 1D: using previous day's OHLC
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    # We need previous day's data, so shift by 1
+    phigh = np.roll(high, 1)
+    plow = np.roll(low, 1)
+    pclose = np.roll(close, 1)
+    phigh[0] = phigh[1] if n > 1 else high[0]
+    plow[0] = plow[1] if n > 1 else low[0]
+    pclose[0] = pclose[1] if n > 1 else close[0]
+    
+    camarilla_range = phigh - plow
+    r1 = pclose + 1.1 * camarilla_range / 12
+    s1 = pclose - 1.1 * camarilla_range / 12
 
-    # Volume filter: current > 1.3x average of last 20 bars
+    # Volume confirmation: current > 1.3x average of last 20 days
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
+    volume_confirm = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after RVI warmup
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(rvi[i]) or 
-            np.isnan(rvi_signal[i]) or np.isnan(volume_filter[i])):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r1[i]) or 
+            np.isnan(s1[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,30 +64,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RVI crosses above signal line + 12h EMA50 uptrend + volume filter
-            if (rvi[i] > rvi_signal[i] and rvi[i-1] <= rvi_signal[i-1] and
-                close[i] > ema_50_12h_aligned[i] and 
-                volume_filter[i]):
+            # LONG: Price breaks above R1 + 1w EMA50 uptrend + volume confirmation
+            if (close[i] > r1[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RVI crosses below signal line + 12h EMA50 downtrend + volume filter
-            elif (rvi[i] < rvi_signal[i] and rvi[i-1] >= rvi_signal[i-1] and
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume_filter[i]):
+            # SHORT: Price breaks below S1 + 1w EMA50 downtrend + volume confirmation
+            elif (close[i] < s1[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RVI crosses below signal line (momentum fading)
-            if rvi[i] < rvi_signal[i] and rvi[i-1] >= rvi_signal[i-1]:
+            # EXIT LONG: Price closes below previous day's close (mean reversion)
+            if close[i] < pclose[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RVI crosses above signal line (momentum fading)
-            if rvi[i] > rvi_signal[i] and rvi[i-1] <= rvi_signal[i-1]:
+            # EXIT SHORT: Price closes above previous day's close (mean reversion)
+            if close[i] > pclose[i]:
                 signals[i] = 0.0
                 position = 0
             else:
