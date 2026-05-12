@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 6h_OrderFlow_Imbalance_VWAP_Divergence
-# Hypothesis: On 6h timeframe, price divergence from VWAP combined with volume imbalance
-# (buying/selling pressure) signals mean-reversion in ranging markets and continuation
-# in trending markets. Uses 1d trend filter to align with higher timeframe momentum.
-# Designed for low trade frequency (~20-40/year) to minimize fee drag in bear markets.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Price breaking Camarilla R1/S1 levels on 4h with volume confirmation and 1d trend filter captures institutional breakouts in both bull and bear markets. Designed for low trade frequency (~20-40/year) to minimize fee drag.
 
-name = "6h_OrderFlow_Imbalance_VWAP_Divergence"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,48 +20,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Trend Filter (Higher Timeframe) ===
+    # === 1d Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # 20-period EMA on daily for trend direction
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === VWAP (6s) - Typical Price * Volume / Cumulative Volume ===
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(volume)
-    # Avoid division by zero
-    vwap = np.where(cum_vol > 0, cum_pv / cum_vol, typical_price)
+    # === Camarilla Levels from Previous Day (using 1d OHLC) ===
+    # Camarilla formula: Range = (H-L), Levels = C +/- (Range * multiplier)
+    # We use previous day's data to avoid look-ahead
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === Volume Imbalance (Buying vs Selling Pressure) ===
-    # Using close location within the bar's range as proxy for aggression
-    # Prevent division by zero in range
-    ranges = high - low
-    # Where range is zero, assume neutral (0.5)
-    close_location = np.where(ranges > 0, (close - low) / ranges, 0.5)
-    # Volume imbalance: positive = buying pressure, negative = selling pressure
-    vol_imbalance = (2.0 * close_location - 1.0) * volume
-    # Smooth with 3-period EMA to reduce noise
-    vol_imbalance_smooth = pd.Series(vol_imbalance).ewm(span=3, adjust=False, min_periods=3).mean().values
+    # Calculate previous day's Camarilla levels
+    range_1d = high_1d - low_1d
+    # S1 = C - (Range * 1.1/12), R1 = C + (Range * 1.1/12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    r1 = close_1d + (range_1d * 1.1 / 12)
     
-    # === Price Deviation from VWAP (%) ===
-    # Normalized deviation for signal scaling
-    price_dev = (close - vwap) / (vwap + 1e-10)
+    # Align Camarilla levels to 4h timeframe (using previous day's levels)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    
+    # === Volume Confirmation ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure VWAP, EMA, and volume imbalance are stable
+    start_idx = 40  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(vol_imbalance_smooth[i]) or np.isnan(price_dev[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,35 +65,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Entry conditions require alignment with 1d trend
-        trend_up = close[i] > ema_20_1d_aligned[i]
-        trend_down = close[i] < ema_20_1d_aligned[i]
+        # Trend direction from 1d EMA
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
+        
+        # Volume confirmation (above average)
+        vol_confirm = volume[i] > vol_ma[i]
         
         if position == 0:
-            # LONG: Price significantly below VWAP (oversold) + buying pressure + uptrend bias
-            if (price_dev[i] < -0.015 and  # 1.5% below VWAP
-                vol_imbalance_smooth[i] > 0 and  # buying pressure
-                trend_up):  # aligned with 1d uptrend
+            # LONG: Price breaks above R1 with volume and uptrend
+            if (close[i] > r1_aligned[i] and 
+                vol_confirm and 
+                trend_up):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price significantly above VWAP (overbought) + selling pressure + downtrend bias
-            elif (price_dev[i] > 0.015 and  # 1.5% above VWAP
-                  vol_imbalance_smooth[i] < 0 and  # selling pressure
-                  trend_down):  # aligned with 1d downtrend
+            # SHORT: Price breaks below S1 with volume and downtrend
+            elif (close[i] < s1_aligned[i] and 
+                  vol_confirm and 
+                  trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price returns to VWAP or trend changes
-            if (price_dev[i] > -0.005 or  # back to near VWAP
-                not trend_up):  # trend turned down
+            # EXIT LONG: Price returns below R1 or trend changes
+            if (close[i] < r1_aligned[i] or 
+                not trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to VWAP or trend changes
-            if (price_dev[i] < 0.005 or  # back to near VWAP
-                not trend_down):  # trend turned up
+            # EXIT SHORT: Price returns above S1 or trend changes
+            if (close[i] > s1_aligned[i] or 
+                not trend_down):
                 signals[i] = 0.0
                 position = 0
             else:
