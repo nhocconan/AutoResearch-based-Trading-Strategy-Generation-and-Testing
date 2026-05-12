@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Keltner_Breakout_12hTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,19 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Keltner Channel: EMA(20) ± 2*ATR(10)
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    upper_keltner = ema20 + 2 * atr10
-    lower_keltner = ema20 - 2 * atr10
+    # Load 1d data once for trend filter and pivots
+    df_1d = get_htf_data(prices, '1d')
     
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Daily EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Daily OHLC for Camarilla pivots (previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla R1 and S1 for previous day
+    p = (high_1d + low_1d + close_1d) / 3
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h (wait for daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -42,7 +50,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema50_12h_aligned[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -51,28 +60,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above upper Keltner + 12h trend up + volume spike
-            if (close[i] > upper_keltner[i] and 
-                close[i] > ema50_12h_aligned[i] and 
+            # Long: price breaks above R1 + 1d trend up + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Keltner + 12h trend down + volume spike
-            elif (close[i] < lower_keltner[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
+            # Short: price breaks below S1 + 1d trend down + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below EMA20 (middle of Keltner)
-            if close[i] < ema20[i]:
+            # Exit long: price closes below S1
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above EMA20 (middle of Keltner)
-            if close[i] > ema20[i]:
+            # Exit short: price closes above R1
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
