@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "6h_RSI20_WeeklyTrend_ObvMomentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -13,49 +13,44 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Weekly EMA for trend filter (1w)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Load daily data for Camarilla pivot levels
+    # Daily OBV momentum (1d)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    # Calculate OBV
+    price_change = np.diff(close_1d, prepend=close_1d[0])
+    obv = np.cumsum(np.where(price_change > 0, volume_1d, np.where(price_change < 0, -volume_1d, 0)))
+    # 10-period EMA of OBV
+    obv_ema = pd.Series(obv).ewm(span=10, adjust=False, min_periods=10).mean().values
+    obv_ema_aligned = align_htf_to_ltf(prices, df_1d, obv_ema)
     
-    # Calculate Camarilla pivot levels from previous day
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align pivot levels to 4h timeframe (use previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume filter: current volume > 2.0x 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (2.0 * vol_avg)
+    # 6h RSI(20)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(vol_filter[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(obv_ema_aligned[i]) or
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,28 +59,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 12h EMA50 + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                vol_filter[i]):
+            # Long: RSI < 30 (oversold) + weekly uptrend + OBV rising
+            if (rsi[i] < 30 and 
+                close[i] > ema_20_1w_aligned[i] and 
+                obv_ema_aligned[i] > obv_ema_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 12h EMA50 + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  vol_filter[i]):
+            # Short: RSI > 70 (overbought) + weekly downtrend + OBV falling
+            elif (rsi[i] > 70 and 
+                  close[i] < ema_20_1w_aligned[i] and 
+                  obv_ema_aligned[i] < obv_ema_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 or below 12h EMA50
-            if close[i] < s1_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Exit long: RSI > 70 or weekly trend turns down
+            if rsi[i] > 70 or close[i] < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 or above 12h EMA50
-            if close[i] > r1_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Exit short: RSI < 30 or weekly trend turns up
+            if rsi[i] < 30 or close[i] > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
