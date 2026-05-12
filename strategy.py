@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Price breaking above/below Camarilla R1/S1 levels (derived from 1d high-low-close) with 1d EMA50 trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. R1/S1 levels provide tighter risk control than R3/S3, reducing whipsaw in choppy markets. Works in bull/bear by following 1d trend direction. 4h timeframe balances trade frequency and signal quality.
+12h_TrueRange_Reversal_Bollinger_Trend_1d
+Hypothesis: Price reversing from Bollinger Bands (20,2) extremes on 12h with strong 1d trend (EMA50) and above-average volume captures mean-reversion moves in ranging markets and trend continuations in trending markets. Works in both bull/bear by filtering with 1d EMA50 direction.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "12h_TrueRange_Reversal_Bollinger_Trend_1d"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,42 +25,28 @@ def generate_signals(prices):
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
 
-    # Calculate Camarilla levels from 1d data
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C = close, H = high, L = low of previous day
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-
-    # Shift by 1 to use previous day's data
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = np.nan
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-
-    camarilla_upper = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
-    camarilla_lower = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
-
-    # Align Camarilla levels to 4h timeframe
-    camarilla_upper_aligned = align_htf_to_ltf(prices, df_1d, camarilla_upper)
-    camarilla_lower_aligned = align_htf_to_ltf(prices, df_1d, camarilla_lower)
+    # 12h Bollinger Bands (20,2)
+    close_s = pd.Series(close)
+    basis = close_s.rolling(window=20, min_periods=20).mean().values
+    dev = close_s.rolling(window=20, min_periods=20).std().values
+    upper_band = basis + 2 * dev
+    lower_band = basis - 2 * dev
 
     # 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Volume spike: >1.5x 20-period average (4h)
+    # Volume filter: > 1.3x 20-period average (12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):  # Start after EMA50 warmup
-        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(basis[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,30 +55,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 + 1d EMA50 uptrend + volume spike
-            if (close[i] > camarilla_upper_aligned[i] and 
+            # LONG: Price at or below lower Bollinger Band + 1d EMA50 uptrend + volume
+            if (close[i] <= lower_band[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
-                volume_spike[i]):
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S1 + 1d EMA50 downtrend + volume spike
-            elif (close[i] < camarilla_lower_aligned[i] and 
+            # SHORT: Price at or above upper Bollinger Band + 1d EMA50 downtrend + volume
+            elif (close[i] >= upper_band[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
-                  volume_spike[i]):
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Camarilla S1 (reversal level)
-            if close[i] < camarilla_lower_aligned[i]:
+            # EXIT LONG: Price crosses back to basis (mean reversion) or trend fails
+            if close[i] >= basis[i] or close[i] <= ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Camarilla R1 (reversal level)
-            if close[i] > camarilla_upper_aligned[i]:
+            # EXIT SHORT: Price crosses back to basis or trend fails
+            if close[i] <= basis[i] or close[i] >= ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
