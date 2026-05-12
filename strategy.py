@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-# Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 4h timeframe when aligned with 12h EMA50 trend and confirmed by volume spike.
-# Uses 12h EMA50 as a higher timeframe trend filter to avoid counter-trend trades, reducing whipsaw in sideways markets.
-# Volume spike confirms institutional participation. Designed for low turnover with high win rate in both bull and bear markets.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+# Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 1h timeframe when aligned with 4h EMA50 trend and confirmed by volume spike. Uses 4h EMA50 for trend filter (reduces whipsaw) and volume spike for institutional confirmation. Designed for low turnover with high win rate in both bull and bear markets by targeting 1h entries with 4h trend alignment.
+# Timeframe: 1h, Target trades: 60-150 over 4 years (15-37/year).
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -33,30 +32,30 @@ def generate_signals(prices):
     pc = df_1d['close'].shift(1).values # prior day close
     r1 = pc + (ph - pl) * 1.1 / 12
     s1 = pc - (ph - pl) * 1.1 / 12
-    # Align to 4h: daily Camarilla values are constant through the day
+    # Align to 1h: daily Camarilla values are constant through the day
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Get 12h data ONCE before loop for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data ONCE before loop for EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
 
-    # 12h EMA50 trend filter
-    if len(df_12h) < 50:
+    # 4h EMA50 trend filter
+    if len(df_4h) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
 
-    # Volume spike: current > 2.0x average of last 6 bars (1 day on 4h)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume spike: current > 2.0x average of last 12 bars (2 hours on 1h)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after EMA50 warmup
+    for i in range(60, n):  # Start after EMA50 warmup
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,17 +64,17 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: close > daily R1 + price > 12h EMA50 + volume spike
+            # LONG: close > daily R1 + price > 4h EMA50 + volume spike
             if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
+                close[i] > ema_50_4h_aligned[i] and 
                 volume_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # SHORT: close < daily S1 + price < 12h EMA50 + volume spike
+            # SHORT: close < daily S1 + price < 4h EMA50 + volume spike
             elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
+                  close[i] < ema_50_4h_aligned[i] and 
                   volume_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
@@ -85,20 +84,20 @@ def generate_signals(prices):
             pp = (ph + pl + pc) / 3.0
             pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
             if (close[i] < pp_aligned[i] or 
-                close[i] < ema_50_12h_aligned[i]):
+                close[i] < ema_50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # EXIT SHORT: close > daily pivot P or trend breaks
             pp = (ph + pl + pc) / 3.0
             pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
             if (close[i] > pp_aligned[i] or 
-                close[i] > ema_50_12h_aligned[i]):
+                close[i] > ema_50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
