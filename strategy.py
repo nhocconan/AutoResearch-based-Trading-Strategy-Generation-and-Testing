@@ -1,11 +1,12 @@
+# %%
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_PriceChannelBreakout_VolumeSpike_HT
-Hypothesis: Breakouts from weekly pivot-based price channels (CPR) with volume confirmation and 1d EMA trend filter capture strong trending moves while avoiding false breakouts. Weekly Central Pivot Range (CPR) acts as dynamic support/resistance. Works in bull/bear by following 1d trend direction.
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
+Hypothesis: Breakouts above/below Camarilla R1/S1 levels (from 1d) with 12h EMA50 trend filter and volume confirmation capture strong directional moves while filtering false breakouts. R1/S1 provide tighter, more frequent signals than R3/S3, and 12h EMA50 filters trend direction to work in both bull and bear markets.
 """
 
-name = "6h_WeeklyPivot_PriceChannelBreakout_VolumeSpike_HT"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,54 +23,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data ONCE before loop
-    df_wk = get_htf_data(prices, '1w')
-
-    # Calculate Weekly Central Pivot Range (CPR)
-    # TC = (H + L + C) / 3
-    # BC = (H + L) / 2
-    # TC > BC: TC is pivot, BC is base
-    # TC < BC: BC is pivot, TC is base
-    wk_high = df_wk['high'].values
-    wk_low = df_wk['low'].values
-    wk_close = df_wk['close'].values
-
-    tc = (wk_high + wk_low + wk_close) / 3  # True Pivot
-    bc = (wk_high + wk_low) / 2             # Base Pivot
-
-    pivot = np.where(tc >= bc, tc, bc)
-    base = np.where(tc >= bc, bc, tc)
-
-    # Shift by 1 to use previous week's data
-    prev_pivot = np.roll(pivot, 1)
-    prev_base = np.roll(base, 1)
-    prev_pivot[0] = np.nan
-    prev_base[0] = np.nan
-
-    # Weekly CPR boundaries (support and resistance)
-    wk_cpr_top = np.maximum(prev_pivot, prev_base)
-    wk_cpr_bottom = np.minimum(prev_pivot, prev_base)
-
-    # Align weekly CPR to 6h timeframe
-    wk_cpr_top_aligned = align_htf_to_ltf(prices, df_wk, wk_cpr_top)
-    wk_cpr_bottom_aligned = align_htf_to_ltf(prices, df_wk, wk_cpr_bottom)
-
-    # 1d EMA34 trend filter
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Volume spike: >1.5x 20-period average (6h)
+    # Calculate Camarilla levels from 1d data: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+
+    # Shift by 1 to use previous day's data
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = np.nan
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+
+    camarilla_upper = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
+    camarilla_lower = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
+
+    # Align Camarilla levels to 4h timeframe
+    camarilla_upper_aligned = align_htf_to_ltf(prices, df_1d, camarilla_upper)
+    camarilla_lower_aligned = align_htf_to_ltf(prices, df_1d, camarilla_lower)
+
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+
+    # 12h EMA50 trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+
+    # Volume spike: >1.5x 20-period average (4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):  # Start after EMA34 warmup
-        if (np.isnan(wk_cpr_top_aligned[i]) or np.isnan(wk_cpr_bottom_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,33 +72,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above weekly CPR top + 1d EMA34 uptrend + volume spike
-            if (close[i] > wk_cpr_top_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # LONG: Price breaks above Camarilla R1 + 12h EMA50 uptrend + volume spike
+            if (close[i] > camarilla_upper_aligned[i] and 
+                close[i] > ema_50_12h_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly CPR bottom + 1d EMA34 downtrend + volume spike
-            elif (close[i] < wk_cpr_bottom_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # SHORT: Price breaks below Camarilla S1 + 12h EMA50 downtrend + volume spike
+            elif (close[i] < camarilla_lower_aligned[i] and 
+                  close[i] < ema_50_12h_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below weekly CPR bottom (reversal)
-            if close[i] < wk_cpr_bottom_aligned[i]:
+            # EXIT LONG: Price closes below Camarilla S1 (reversal level)
+            if close[i] < camarilla_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above weekly CPR top (reversal)
-            if close[i] > wk_cpr_top_aligned[i]:
+            # EXIT SHORT: Price closes above Camarilla R1 (reversal level)
+            if close[i] > camarilla_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
 
     return signals
+# %%
