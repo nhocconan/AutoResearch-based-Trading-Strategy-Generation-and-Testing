@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot + 1d Trend Filter + Volume Spike
-Hypothesis: Weekly pivot levels act as strong support/resistance zones. When price breaks
-above/below weekly pivot with alignment to daily trend (EMA34) and volume confirmation,
-it signals continuation of the trend. This strategy targets low-frequency, high-conviction
-breakouts suitable for 6h timeframe, aiming for 15-30 trades/year to minimize fee drag.
-Works in both bull and bear markets by following the trend defined by daily EMA.
+4h Williams Alligator + ADX Trend Filter
+Hypothesis: The Williams Alligator (Jaw/Teeth/Lips) identifies trend presence and direction,
+while ADX filters for strong trends. In trending markets, the lips (fastest MA) cross
+above/below teeth and jaw. Combined with ADX > 25 to ensure trend strength, this avoids
+whipsaws in ranging markets. Designed for low trade frequency (<25/year) to minimize
+fee drag while capturing sustained moves in both bull and bear markets.
 """
-name = "6h_WeeklyPivot_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,31 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Pivot Calculation (from weekly data) ===
-    df_1w = get_htf_data(prices, '1w')  # Call ONCE before loop
-    # Typical price for weekly pivot: (H + L + C) / 3
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
-    weekly_pivot = typical_price.values
-    # Support and resistance levels
-    weekly_r1 = 2 * weekly_pivot - df_1w['low'].values
-    weekly_s1 = 2 * weekly_pivot - df_1w['high'].values
-    weekly_r2 = weekly_pivot + (df_1w['high'].values - df_1w['low'].values)
-    weekly_s2 = weekly_pivot - (df_1w['high'].values - df_1w['low'].values)
-    # Align to 6h timeframe (waits for weekly close)
-    pivot_6h = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    r1_6h = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    s1_6h = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    r2_6h = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    s2_6h = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    # === Williams Alligator (13,8,5) ===
+    # Jaw (13-period SMMA, 8 bars ahead)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)  # shift 8 bars forward
+    # Teeth (8-period SMMA, 5 bars ahead)
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)  # shift 5 bars forward
+    # Lips (5-period SMMA, 3 bars ahead)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)  # shift 3 bars forward
+    jaw = jaw.values
+    teeth = teeth.values
+    lips = lips.values
     
-    # === Daily EMA34 for Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')  # Call ONCE before loop
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # === Volume Spike (20-period) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)  # Require 2x average volume for confirmation
+    # === ADX (14) ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,9 +61,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(ema_34_6h[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(adx[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,28 +71,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above weekly R1, above daily EMA34, with volume spike
-            if (close[i] > r1_6h[i] and 
-                close[i] > ema_34_6h[i] and
-                vol_spike[i]):
+            # LONG: Lips > Teeth > Jaw (bullish alignment) + ADX > 25 (strong trend)
+            if (lips[i] > teeth[i] and 
+                teeth[i] > jaw[i] and
+                adx[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly S1, below daily EMA34, with volume spike
-            elif (close[i] < s1_6h[i] and 
-                  close[i] < ema_34_6h[i] and
-                  vol_spike[i]):
+            # SHORT: Lips < Teeth < Jaw (bearish alignment) + ADX > 25 (strong trend)
+            elif (lips[i] < teeth[i] and 
+                  teeth[i] < jaw[i] and
+                  adx[i] > 25):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below weekly pivot OR volume dries up
-            if close[i] < pivot_6h[i] or not vol_spike[i]:
+            # EXIT LONG: Lips < Teeth (loss of bullish momentum) OR ADX < 20 (weakening trend)
+            if lips[i] < teeth[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above weekly pivot OR volume dries up
-            if close[i] > pivot_6h[i] or not vol_spike[i]:
+            # EXIT SHORT: Lips > Teeth (loss of bearish momentum) OR ADX < 20 (weakening trend)
+            if lips[i] > teeth[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
