@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Stochastic_Reversal_RiskOff
-# Hypothesis: In BTC/ETH, extreme Stochastic readings (overbought/oversold) combined with risk-off sentiment (VIX proxy via BTC volatility) and 1d trend filter capture mean-reversion moves. Works in bull via oversold bounces and bear via overbought reversals. Target: 20-30 trades/year per symbol.
+# 4h_Donchian_Volume_Trend
+# Hypothesis: Donchian(20) breakouts with volume confirmation and 1d EMA50 trend filter capture momentum in both bull and bear markets.
+# Exit when price crosses below/above Donchian middle line (20-day mid) to avoid whipsaws.
+# Target: 25-40 trades/year per symbol.
 
-name = "4h_Stochastic_Reversal_RiskOff"
+name = "4h_Donchian_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,36 +22,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter and volatility (VIX proxy)
+    # Get 1d data for trend filter (call once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-
     # 1d EMA50 for trend
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # 14-period Stochastic Oscillator
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    # Avoid division by zero
-    denominator = highest_high - lowest_low
-    denominator = np.where(denominator == 0, 1, denominator)
-    stoch = 100 * (close - lowest_low) / denominator
+    # Calculate Donchian Channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
 
-    # BTC volatility as risk-off proxy (20-period ATR of 1d returns)
-    returns_1d = np.diff(np.log(close_1d), prepend=np.log(close_1d[0]))
-    atr_returns = pd.Series(np.abs(returns_1d)).rolling(window=20, min_periods=20).mean().values
-    atr_returns_aligned = align_htf_to_ltf(prices, df_1d, atr_returns)
+    # Volume confirmation: volume > 2x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
-        if np.isnan(stoch[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_returns_aligned[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,26 +52,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Oversold (<20) + 1d uptrend + rising volatility (risk-off fading)
-            if stoch[i] < 20 and close[i] > ema50_1d_aligned[i] and atr_returns_aligned[i] > atr_returns_aligned[i-1]:
+            # LONG: Close breaks above Donchian High + 1d uptrend + volume spike
+            if close[i] > donchian_high[i] and close[i] > ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Overbought (>80) + 1d downtrend + rising volatility (risk-off)
-            elif stoch[i] > 80 and close[i] < ema50_1d_aligned[i] and atr_returns_aligned[i] > atr_returns_aligned[i-1]:
+            # SHORT: Close breaks below Donchian Low + 1d downtrend + volume spike
+            elif close[i] < donchian_low[i] and close[i] < ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Stochastic crosses above 50 or 1d trend turns down
-            if stoch[i] > 50 or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close crosses below Donchian Mid
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Stochastic crosses below 50 or 1d trend turns up
-            if stoch[i] < 50 or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close crosses above Donchian Mid
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
