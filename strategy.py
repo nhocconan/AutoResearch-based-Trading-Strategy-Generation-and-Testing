@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once
+    # Load daily data for trend filter and pivot calculation
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
@@ -48,8 +48,8 @@ def generate_signals(prices):
     daily_r2_aligned = align_htf_to_ltf(prices, df_1d, daily_r2)
     daily_s2_aligned = align_htf_to_ltf(prices, df_1d, daily_s2)
     
-    # Volume filter: current volume > 1.5x 6-period average (1.5 days of 4h data)
-    vol_avg = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume filter: current volume > 1.5x 20-period average (10 days of 4h data)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
