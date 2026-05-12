@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_TurtleTrader_10_40_ATR_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,41 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once for trend filter and Camarilla pivots
+    # Load daily data for 10-period high/low breakout and 40-period exit
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 10-day high and low (Turtle entry)
+    high_10d = pd.Series(df_1d['high']).rolling(window=10, min_periods=10).max().values
+    low_10d = pd.Series(df_1d['low']).rolling(window=10, min_periods=10).min().values
     
-    # Daily OHLC for Camarilla R3 and S3 (previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # Calculate 40-day high and low (Turtle exit)
+    high_40d = pd.Series(df_1d['high']).rolling(window=40, min_periods=40).max().values
+    low_40d = pd.Series(df_1d['low']).rolling(window=40, min_periods=40).min().values
     
-    # Calculate Camarilla R3 and S3 for previous day
-    p = (high_1d + low_1d + close_1d_vals) / 3
-    r3 = close_1d_vals + (high_1d - low_1d) * 1.1 * 3 / 4
-    s3 = close_1d_vals - (high_1d - low_1d) * 1.1 * 3 / 4
+    # Align to 6h timeframe (wait for daily close)
+    high_10d_aligned = align_htf_to_ltf(prices, df_1d, high_10d)
+    low_10d_aligned = align_htf_to_ltf(prices, df_1d, low_10d)
+    high_40d_aligned = align_htf_to_ltf(prices, df_1d, high_40d)
+    low_40d_aligned = align_htf_to_ltf(prices, df_1d, low_40d)
     
-    # Align Camarilla levels to 4h (wait for daily close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # ATR for volatility filter (using daily data)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift())
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=10, min_periods=10).mean().values
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(high_10d_aligned[i]) or np.isnan(low_10d_aligned[i]) or 
+            np.isnan(high_40d_aligned[i]) or np.isnan(low_40d_aligned[i]) or
+            np.isnan(atr_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Skip if volatility too low (ATR < 0.5% of price)
+        if atr_aligned[i] < 0.005 * close[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,28 +73,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + daily trend up + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                vol_spike[i]):
+            # Long: price breaks above 10-day high + volume filter
+            if close[i] > high_10d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + daily trend down + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  vol_spike[i]):
+            # Short: price breaks below 10-day low + volume filter
+            elif close[i] < low_10d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S3
-            if close[i] < s3_aligned[i]:
+            # Exit long: price breaks below 40-day low
+            if close[i] < low_40d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above R3
-            if close[i] > r3_aligned[i]:
+            # Exit short: price breaks above 40-day high
+            if close[i] > high_40d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
