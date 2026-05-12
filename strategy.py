@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_OrderBlock_OrderFlow_WeeklyTrend"
-timeframe = "6h"
+name = "12h_MultiTimeframe_Breakout_With_Volume_And_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,33 +17,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== Order Block Detection (6h) =====
-    # Bullish OB: bearish candle followed by bullish breakout
-    # Bearish OB: bullish candle followed by bearish breakdown
-    ob_bull = np.zeros(n, dtype=bool)
-    ob_bear = np.zeros(n, dtype=bool)
+    # ===== 12h Donchian Channel Breakout (LTF) =====
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high[i-lookback:i])
+        lowest_low[i] = np.min(low[i-lookback:i])
     
-    for i in range(2, n):
-        # Bullish OB: red candle (close < open) then bullish breakout (close > high of red candle)
-        if (close[i-2] < prices['open'].iloc[i-2] and  # red candle
-            close[i] > high[i-2]):  # breaks above red candle's high
-            ob_bull[i] = True
-        # Bearish OB: green candle (close > open) then bearish breakdown (close < low of green candle)
-        elif (close[i-2] > prices['open'].iloc[i-2] and  # green candle
-              close[i] < low[i-2]):  # breaks below green candle's low
-            ob_bear[i] = True
-    
-    # ===== Weekly Trend Filter =====
+    # ===== Weekly Trend Filter (HTF) =====
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema26_1w = pd.Series(close_1w).ewm(span=26, adjust=False, min_periods=26).mean().values
+    ema26_1w_aligned = align_htf_to_ltf(prices, df_1w, ema26_1w)
     
     # ===== Daily Volume Spike Filter =====
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    vol_spike_1d = vol_1d > (1.5 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     # ===== Session Filter: 08-20 UTC =====
@@ -52,11 +44,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = max(lookback, 50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or
+            np.isnan(ema26_1w_aligned[i]) or
             np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -77,28 +71,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bullish OB + above weekly EMA50 + daily volume spike
-            if (ob_bull[i] and
-                close[i] > ema50_1w_aligned[i] and
+            # Long: Price breaks above Donchian high + above weekly EMA26 + volume spike
+            if (close[i] > highest_high[i] and
+                close[i] > ema26_1w_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish OB + below weekly EMA50 + daily volume spike
-            elif (ob_bear[i] and
-                  close[i] < ema50_1w_aligned[i] and
+            # Short: Price breaks below Donchian low + below weekly EMA26 + volume spike
+            elif (close[i] < lowest_low[i] and
+                  close[i] < ema26_1w_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bearish OB formed or closes below weekly EMA50
-            if ob_bear[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit long: Price closes below Donchian low or weekly EMA26
+            if close[i] < lowest_low[i] or close[i] < ema26_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bullish OB formed or closes above weekly EMA50
-            if ob_bull[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit short: Price closes above Donchian high or weekly EMA26
+            if close[i] > highest_high[i] or close[i] > ema26_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
