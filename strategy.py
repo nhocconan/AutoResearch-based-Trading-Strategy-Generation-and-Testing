@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Refined"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -33,17 +33,9 @@ def generate_signals(prices):
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_avg)
-    
-    # Volatility regime filter: ATR-based to avoid choppy and excessively volatile markets
-    tr1 = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
-    tr2 = np.maximum(np.absolute(low[1:] - close[:-1]), tr1)
-    tr = np.concatenate([[tr1[0]], tr2]) if len(tr1) > 0 else np.array([0.0])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_pct = atr / close
-    vol_regime = (atr_pct > 0.015) & (atr_pct < 0.050)
+    vol_filter = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,7 +46,7 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(vol_filter[i]) or np.isnan(vol_regime[i])):
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,13 +55,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R3 + above 1d EMA34 + volume filter + vol regime
-            if high[i] > r3_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i] and vol_regime[i]:
-                signals[i] = 0.25
+            # Long: breakout above R3 + above 1d EMA34 + volume spike
+            if high[i] > r3_1d_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: breakdown below S3 + below 1d EMA34 + volume filter + vol regime
-            elif low[i] < s3_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i] and vol_regime[i]:
-                signals[i] = -0.25
+            # Short: breakdown below S3 + below 1d EMA34 + volume spike
+            elif low[i] < s3_1d_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit long: breakdown below S3 or below 1d EMA34
@@ -77,13 +69,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short: breakout above R3 or above 1d EMA34
             if high[i] > r3_1d_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
