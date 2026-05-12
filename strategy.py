@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_156462"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data once for trend filter and pivots
+    # Load 1d data once for EMA trend and pivots
     df_1d = get_htf_data(prices, '1d')
     
     # 1d EMA(34) for trend filter
@@ -28,14 +28,14 @@ def generate_signals(prices):
     # Daily OHLC for Camarilla pivots (previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_val = df_1d['close'].values
+    close_1d_vals = df_1d['close'].values
     
     # Calculate Camarilla R1 and S1 for previous day
-    p = (high_1d + low_1d + close_1d_val) / 3
-    r1 = close_1d_val + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d_val - (high_1d - low_1d) * 1.1 / 12
+    p = (high_1d + low_1d + close_1d_vals) / 3
+    r1 = close_1d_vals + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d_vals - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h (wait for daily close)
+    # Align Camarilla levels to 4h (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
