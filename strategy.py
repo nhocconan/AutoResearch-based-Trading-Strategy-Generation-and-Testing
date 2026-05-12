@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 
-# 1d_1W_12H_EMA_Crossover_Volume_Momentum
-# Hypothesis: Use weekly EMA trend filter with daily EMA crossover (21/55) for momentum,
-# combined with volume confirmation. Weekly trend ensures alignment with higher timeframe
-# momentum, while EMA crossover captures medium-term trends. Volume filters weak moves.
-# Designed for low frequency (15-25 trades/year) to work in both bull and bear markets
-# by following the dominant trend on multiple timeframes.
+# 6h_1D_Bollinger_Band_Width_Regime_Mean_Reversion
+# Hypothesis: Mean reversion in low volatility regimes (BB Width < 30th percentile) with
+# Bollinger Band touch entries on 6h, filtered by 1d trend (price above/below 200 EMA).
+# Works in both bull and bear markets by capturing mean reversion during consolidation
+# periods, which occur frequently across market regimes. Low frequency (~20-40 trades/year)
+# to minimize fee drag.
 
-name = "1d_1W_12H_EMA_Crossover_Volume_Momentum"
-timeframe = "1d"
+name = "6h_1D_Bollinger_Band_Width_Regime_Mean_Reversion"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mta_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -25,40 +25,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 55:
+    # Get 1d data for trend filter and BB width regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=55, adjust=False, min_periods=55).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
 
-    # Get 12-hour data for faster trend confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 55:
-        return np.zeros(n)
+    # Calculate 1d Bollinger Bands and BB Width for regime filter
+    sma_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_20_1d + 2 * std_20_1d
+    lower_bb_1d = sma_20_1d - 2 * std_20_1d
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma_20_1d
 
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=55, adjust=False, min_periods=55).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # BB Width regime: low volatility when BB Width < 30th percentile
+    # Use expanding window percentile to avoid look-ahead
+    bb_width_percentile = pd.Series(bb_width_1d).expanding(min_periods=50).quantile(0.30).values
+    low_vol_regime = bb_width_1d < bb_width_percentile
+    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime.astype(float))
 
-    # Daily EMA crossover (21/55) for momentum
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
-
-    # Volume confirmation: current volume > 1.5x average of last 20 days
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    # Calculate 6h Bollinger Bands for entry signals
+    sma_20_6h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20_6h = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb_6h = sma_20_6h + 2 * std_20_6h
+    lower_bb_6h = sma_20_6h - 2 * std_20_6h
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(55, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(ema_12h_aligned[i]) or
-            np.isnan(ema21[i]) or np.isnan(ema55[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(low_vol_regime_aligned[i]) or
+            np.isnan(upper_bb_6h[i]) or np.isnan(lower_bb_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,37 +68,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Multi-timeframe trend alignment
-        weekly_bullish = close[i] > ema_1w_aligned[i]
-        weekly_bearish = close[i] < ema_1w_aligned[i]
-        twelve_hour_bullish = close[i] > ema_12h_aligned[i]
-        twelve_hour_bearish = close[i] < ema_12h_aligned[i]
-
-        # EMA crossover signals
-        ema_bullish_cross = ema21[i] > ema55[i] and ema21[i-1] <= ema55[i-1]
-        ema_bearish_cross = ema21[i] < ema55[i] and ema21[i-1] >= ema55[i-1]
+        # Regime and trend filters
+        in_low_vol = low_vol_regime_aligned[i] > 0.5  # boolean as float
+        bullish_trend = close[i] > ema_200_1d_aligned[i]
+        bearish_trend = close[i] < ema_200_1d_aligned[i]
 
         if position == 0:
-            # LONG: Bullish alignment across timeframes + EMA bullish cross + volume
-            if (weekly_bullish and twelve_hour_bullish and ema_bullish_cross and volume_ok[i]):
+            # LONG: Price touches lower BB in low volatility regime with bullish 1d trend
+            if close[i] <= lower_bb_6h[i] and in_low_vol and bullish_trend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish alignment across timeframes + EMA bearish cross + volume
-            elif (weekly_bearish and twelve_hour_bearish and ema_bearish_cross and volume_ok[i]):
+            # SHORT: Price touches upper BB in low volatility regime with bearish 1d trend
+            elif close[i] >= upper_bb_6h[i] and in_low_vol and bearish_trend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Breakdown in alignment or EMA bearish cross
-            if (not weekly_bullish or not twelve_hour_bullish or ema_bearish_cross):
+            # EXIT LONG: Price touches middle BB or regime/trend changes
+            if close[i] >= sma_20_6h[i] or not in_low_vol or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Breakdown in alignment or EMA bullish cross
-            if (not weekly_bearish or not twelve_hour_bearish or ema_bullish_cross):
+            # EXIT SHORT: Price touches middle BB or regime/trend changes
+            if close[i] <= sma_20_6h[i] or not in_low_vol or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
