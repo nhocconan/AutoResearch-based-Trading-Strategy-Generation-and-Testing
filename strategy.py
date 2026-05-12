@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_RSI_and_Chop_Filter
-Hypothesis: On daily timeframe, KAMA adapts to market efficiency, providing a robust trend filter. 
-Combined with RSI for momentum confirmation and Choppiness Index to avoid ranging markets, 
-this strategy captures strong trending moves while minimizing false signals in chop. 
-Works in both bull and bear by following KAMA direction only when market is trending (CHOP < 38.2) 
-and momentum confirms (RSI > 50 for long, < 50 for short).
+6h_Pivot_Range_Breakout_With_Trend_and_Volume
+Hypothesis: Price breaking outside the 1d high-low range with 1d ADX > 25 (trending) and volume > 1.5x average captures strong momentum moves. Uses weekly pivot direction (above/below weekly pivot) to filter for higher probability trades in both bull and bear markets. Weekly pivot acts as a dynamic bias filter, reducing counter-trend trades.
 """
 
-name = "1d_KAMA_Trend_With_RSI_and_Chop_Filter"
-timeframe = "1d"
+name = "6h_Pivot_Range_Breakout_With_Trend_and_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,83 +17,97 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data ONCE before loop
+    # Get 1d and 1w data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate KAMA on daily close (using close prices directly)
-    close_series = pd.Series(close)
-    # Efficiency Ratio
-    change = abs(close_series.diff(10))
-    volatility = close_series.diff().abs().rolling(window=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    # 1d range (high-low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align KAMA to daily timeframe (no alignment needed as already daily)
-    kama_aligned = kama  # Already on daily timeframe
+    # Previous day's range for breakout
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # Calculate RSI(14) on daily
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # 1d ADX for trend filter (using Wilder's smoothing)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = np.nan
+        
+        # Directional Movement
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        up_move[0] = np.nan
+        down_move[0] = np.nan
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # Smoothed values
+        def WilderSmooth(data, period):
+            smoothed = np.full_like(data, np.nan)
+            if len(data) >= period:
+                smoothed[period-1] = np.nansum(data[:period])
+                for i in range(period, len(data)):
+                    smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + data[i]
+            return smoothed
+        
+        tr_sum = WilderSmooth(tr, period)
+        plus_dm_sum = WilderSmooth(plus_dm, period)
+        minus_dm_sum = WilderSmooth(minus_dm, period)
+        
+        # Avoid division by zero
+        plus_di = 100 * plus_dm_sum / tr_sum
+        minus_di = 100 * minus_dm_sum / tr_sum
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = WilderSmooth(dx, period)
+        return adx
     
-    # Calculate Choppiness Index on weekly data
-    # CHOP = 100 * log10(sum(TR, n) / (max(HH, n) - min(LL, n))) / log10(n)
-    # Using weekly data for regime detection
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, period=14)
+    
+    # Weekly pivot (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    prev_high_1w = np.roll(high_1w, 1)
+    prev_low_1w = np.roll(low_1w, 1)
+    prev_close_1w = np.roll(close_1w, 1)
+    prev_high_1w[0] = np.nan
+    prev_low_1w[0] = np.nan
+    prev_close_1w[0] = np.nan
     
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    weekly_pivot = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    # Align all 1d and 1w data to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Choppiness Index
-    chop = np.zeros_like(close_1w)
-    for i in range(len(close_1w)):
-        if np.isnan(tr_sum[i]) or np.isnan(hh[i]) or np.isnan(ll[i]) or hh[i] == ll[i]:
-            chop[i] = np.nan
-        else:
-            chop[i] = 100 * np.log10(tr_sum[i] / (hh[i] - ll[i])) / np.log10(14)
+    # Volume spike: >1.5x 20-period average (6h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Align Chop to daily timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    
-    # Generate signals
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after warmup
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop_aligned[i])):
+    for i in range(50, n):  # Start after warmup
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(prev_high_1d[i]) or np.isnan(prev_low_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -106,30 +116,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price above KAMA (uptrend), RSI > 50, and CHOP < 38.2 (trending market)
-            if (close[i] > kama_aligned[i] and 
-                rsi[i] > 50 and 
-                chop_aligned[i] < 38.2):
+            # LONG: Price breaks above 1d high + ADX > 25 + price above weekly pivot + volume spike
+            if (close[i] > prev_high_1d[i] and 
+                adx_1d_aligned[i] > 25 and 
+                close[i] > weekly_pivot_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA (downtrend), RSI < 50, and CHOP < 38.2 (trending market)
-            elif (close[i] < kama_aligned[i] and 
-                  rsi[i] < 50 and 
-                  chop_aligned[i] < 38.2):
+            # SHORT: Price breaks below 1d low + ADX > 25 + price below weekly pivot + volume spike
+            elif (close[i] < prev_low_1d[i] and 
+                  adx_1d_aligned[i] > 25 and 
+                  close[i] < weekly_pivot_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA (trend change)
-            if close[i] < kama_aligned[i]:
+            # EXIT LONG: Price closes below 1d low (range reversion)
+            if close[i] < prev_low_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA (trend change)
-            if close[i] > kama_aligned[i]:
+            # EXIT SHORT: Price closes above 1d high (range reversion)
+            if close[i] > prev_high_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
