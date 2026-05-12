@@ -1,8 +1,9 @@
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Filtered_v4
-# Hypothesis: On 12h timeframe, buy when price breaks above Camarilla R1 from previous 1d with volume >1.8x average and 1d EMA34 trending up; sell when price breaks below Camarilla S1 with volume >1.8x average and 1d EMA34 trending down. Added ADX(14) > 22 trend filter to reduce false breakouts in ranging markets. Uses ADX(14) < 18 exit condition for hysteresis. Targets 10-25 trades per year to reduce fee drag and improve generalization in bull/bear markets.
-# Uses discrete position sizing (0.25) to minimize churn and respects all MTF data loading rules.
+#!/usr/bin/env python3
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Filtered_v4"
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Filtered_v5
+# Hypothesis: On 12h timeframe, buy when price breaks above Camarilla R1 from previous 1d with volume >2x average and 1d EMA34 trending up; sell when price breaks below Camarilla S1 with volume >2x average and 1d EMA34 trending down. Added ADX(14) > 25 trend filter to reduce false breakouts in ranging markets. This version reduces position size to 0.20 and adds Bollinger Band squeeze filter (BBW < 0.05) to further reduce trade frequency and improve signal quality. Targets 10-25 trades per year to minimize fee drag and improve generalization in bull/bear markets.
+
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Filtered_v5"
 timeframe = "12h"
 leverage = 1.0
 
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -27,6 +28,18 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+
+    # Calculate Bollinger Bands width on 1d for squeeze filter (BBW < 0.05)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = (upper_bb - lower_bb) / sma_20
+    bb_width[np.isnan(bb_width)] = 1.0  # default to no squeeze if invalid
+    bb_squeeze = bb_width < 0.05
+    bb_squeeze_avg = pd.Series(bb_squeeze).rolling(window=5, min_periods=1).mean().values  # require squeeze in last 5 days
+    bb_squeeze_avg = np.where(np.isnan(bb_squeeze_avg), 0, bb_squeeze_avg)
+    bb_squeeze_filter = bb_squeeze_avg > 0.8  # at least 4 out of last 5 days squeezed
 
     # Calculate Camarilla levels from previous 1d bar
     # Camarilla: R1 = close + (high - low) * 1.12/12, S1 = close - (high - low) * 1.12/12
@@ -90,17 +103,17 @@ def generate_signals(prices):
     adx = smooth_wilder(dx, 14)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
 
-    # Volume confirmation: volume > 1.8x 24-period average (approx 12 hours)
+    # Volume confirmation: volume > 2x 24-period average (approx 12 hours)
     vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required value is NaN
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_24[i]) or 
-            np.isnan(adx_aligned[i])):
+            np.isnan(adx_aligned[i]) or np.isnan(bb_squeeze_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -109,35 +122,37 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 + 1d uptrend + volume spike + ADX > 22
+            # LONG: Price breaks above Camarilla R1 + 1d uptrend + volume squeeze + ADX > 25
             if (close[i] > camarilla_r1_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
-                volume[i] > vol_avg_24[i] * 1.8 and
-                adx_aligned[i] > 22):
-                signals[i] = 0.25
+                volume[i] > vol_avg_24[i] * 2.0 and
+                adx_aligned[i] > 25 and
+                bb_squeeze_filter[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below Camarilla S1 + 1d downtrend + volume spike + ADX > 22
+            # SHORT: Price breaks below Camarilla S1 + 1d downtrend + volume squeeze + ADX > 25
             elif (close[i] < camarilla_s1_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > vol_avg_24[i] * 1.8 and
-                  adx_aligned[i] > 22):
-                signals[i] = -0.25
+                  volume[i] > vol_avg_24[i] * 2.0 and
+                  adx_aligned[i] > 25 and
+                  bb_squeeze_filter[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S1 OR trend turns down OR ADX weakens (<18)
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i] or adx_aligned[i] < 18:
+            # EXIT LONG: Price breaks below Camarilla S1 OR trend turns down OR ADX weakens OR squeeze breaks
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i] or adx_aligned[i] < 20 or not bb_squeeze_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R1 OR trend turns up OR ADX weakens (<18)
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i] or adx_aligned[i] < 18:
+            # EXIT SHORT: Price breaks above Camarilla R1 OR trend turns up OR ADX weakens OR squeeze breaks
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i] or adx_aligned[i] < 20 or not bb_squeeze_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
