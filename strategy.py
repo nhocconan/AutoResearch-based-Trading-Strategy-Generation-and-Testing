@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h1d_Trend_Momentum_Filter"
-timeframe = "1h"
+name = "6h_TurtleSqueeze_1wTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,98 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Multi-timeframe: 4h and 1d for signal direction, 1h for entry timing
-    # 4h data
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    # === 1W DATA FOR TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # 1d data
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # === 4H INDICATORS ===
-    # 4h EMA21 for trend
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    # === TURTLE SQUEEZE (6h) ===
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # 4h RSI14 for momentum
-    delta_4h = np.diff(close_4h, prepend=close_4h[0])
-    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
-    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
-    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs_4h))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Keltner channels (20-period ATR)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    keltner_upper = donchian_mid + (2.0 * atr)
+    keltner_lower = donchian_mid - (2.0 * atr)
     
-    # 4h volume spike
-    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_spike_4h = volume_4h > (vol_ma_4h * 1.5)
-    volume_spike_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_spike_4h)
+    # Squeeze condition: Bollinger Bands inside Keltner (low volatility)
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = donchian_mid + (2.0 * bb_std)
+    bb_lower = donchian_mid - (2.0 * bb_std)
+    squeeze = (bb_upper <= keltner_upper) & (bb_lower >= keltner_lower)
     
-    # === 1D INDICATORS ===
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # 1d RSI14 for momentum filter
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
-    avg_gain_1d = pd.Series(gain_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1d = pd.Series(loss_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1d = avg_gain_1d / (avg_loss_1d + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # === 1H INDICATORS ===
-    # 1h ATR14 for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(np.roll(high, 1) - np.roll(low, 1))
-    tr3 = np.abs(np.roll(close, 1) - np.roll(high, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 1h RSI14 for entry timing
-    delta_1h = np.diff(close, prepend=close[0])
-    gain_1h = np.where(delta_1h > 0, delta_1h, 0)
-    loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
-    avg_gain_1h = pd.Series(gain_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1h = pd.Series(loss_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1h = avg_gain_1h / (avg_loss_1h + 1e-10)
-    rsi_1h = 100 - (100 / (1 + rs_1h))
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # === VOLUME CONFIRMATION (20-period) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)  # High volume breakout
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 21, 14)  # warmup for indicators
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(rsi_4h_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(atr14[i]) or np.isnan(rsi_1h[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check session
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if (np.isnan(ema50_1w_6h[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(keltner_upper[i]) or 
+            np.isnan(keltner_lower[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -117,39 +68,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: 4h uptrend + 4h bullish momentum + 1d uptrend + 1h oversold bounce
-            if (close[i] > ema21_4h_aligned[i] and  # 4h price above trend
-                rsi_4h_aligned[i] > 50 and         # 4h bullish momentum
-                close[i] > ema50_1d_aligned[i] and # 1d price above trend
-                rsi_1d_aligned[i] > 50 and         # 1d bullish momentum
-                rsi_1h[i] < 30 and                 # 1h oversold (entry timing)
-                volume_spike_4h_aligned[i]):       # 4h volume confirmation
-                signals[i] = 0.20
+            # LONG: Squeeze breakout above Donchian high + weekly uptrend + volume spike
+            if (squeeze[i-1] and  # was in squeeze
+                close[i] > donchian_high[i] and 
+                close[i] > ema50_1w_6h[i] and
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 4h downtrend + 4h bearish momentum + 1d downtrend + 1h overbought bounce
-            elif (close[i] < ema21_4h_aligned[i] and  # 4h price below trend
-                  rsi_4h_aligned[i] < 50 and         # 4h bearish momentum
-                  close[i] < ema50_1d_aligned[i] and # 1d price below trend
-                  rsi_1d_aligned[i] < 50 and         # 1d bearish momentum
-                  rsi_1h[i] > 70 and                 # 1h overbought (entry timing)
-                  volume_spike_4h_aligned[i]):       # 4h volume confirmation
-                signals[i] = -0.20
+            # SHORT: Squeeze breakout below Donchian low + weekly downtrend + volume spike
+            elif (squeeze[i-1] and  # was in squeeze
+                  close[i] < donchian_low[i] and 
+                  close[i] < ema50_1w_6h[i] and
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: 4h trend breaks OR momentum fades
-            if (close[i] <= ema21_4h_aligned[i] or  # 4h trend break
-                rsi_4h_aligned[i] < 45):            # 4h momentum weakening
+            # EXIT LONG: Price closes below Donchian midpoint OR squeeze fires
+            if close[i] < donchian_mid[i] or (not squeeze[i-1] and squeeze[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 4h trend breaks OR momentum fades
-            if (close[i] >= ema21_4h_aligned[i] or  # 4h trend break
-                rsi_4h_aligned[i] > 55):            # 4h momentum weakening
+            # EXIT SHORT: Price closes above Donchian midpoint OR squeeze fires
+            if close[i] > donchian_mid[i] or (not squeeze[i-1] and squeeze[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
