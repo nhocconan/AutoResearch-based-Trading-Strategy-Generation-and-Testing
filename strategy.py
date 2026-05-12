@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-# 4h Elder Ray + Volume Spike + Daily Trend Filter
-# Hypothesis: Elder Ray (bull/bear power) detects institutional strength. Bull Power > 0 indicates buying pressure,
-# Bear Power < 0 indicates selling pressure. Combined with volume spikes and daily EMA trend filter,
-# this captures strong momentum moves while avoiding chop. Designed for low trade frequency (~20-30/year).
-name = "4h_ElderRay_Volume_DailyTrend"
-timeframe = "4h"
+# 1d Weekly Trend + Volume Spike with Dynamic Position Sizing
+# Hypothesis: Weekly trend (via EMA10) filters direction, daily volume spikes (3x average) signal momentum, and volatility (ATR) adjusts position size to manage risk. Designed for low trade frequency (10-25/year) with strong performance in both bull and bear markets by avoiding overextended moves and catching institutional inflows.
+name = "1d_WeeklyTrend_VolumeSpike_ATRSize"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,25 +19,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Data for EMA Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === Weekly Data for Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    daily_close_1d = df_1d['close'].values
+    weekly_close_1w = df_1w['close'].values
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(daily_close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA10 for trend filter
+    ema_10_1w = pd.Series(weekly_close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_1d = align_htf_to_ltf(prices, df_1w, ema_10_1w)
     
-    # === Elder Ray on 4h: Bull Power = High - EMA13, Bear Power = Low - EMA13 ===
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
-    # === Volume Spike (20-period on 4h) ===
+    # === Daily Volume Spike (20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_spike = volume > (vol_ma * 3.0)
+    
+    # === Daily ATR (14-period) for Position Sizing ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,8 +50,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_4h[i]) or np.isnan(ema_13[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_10_1d[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,31 +59,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Bull Power > 0 (buying pressure) + volume spike + price above daily EMA34 (uptrend)
-            if (bull_power[i] > 0 and 
-                vol_spike[i] and
-                close[i] > ema_34_4h[i]):
-                signals[i] = 0.25
+            # LONG: Price above weekly EMA10 (uptrend) + volume spike
+            if (close[i] > ema_10_1d[i] and vol_spike[i]):
+                # Size inversely proportional to volatility (ATR), capped at 0.30
+                size = min(0.30, 0.015 / (atr[i] / close[i] + 0.001))  # Normalize ATR by price
+                signals[i] = size
                 position = 1
-            # SHORT: Bear Power < 0 (selling pressure) + volume spike + price below daily EMA34 (downtrend)
-            elif (bear_power[i] < 0 and 
-                  vol_spike[i] and
-                  close[i] < ema_34_4h[i]):
-                signals[i] = -0.25
+            # SHORT: Price below weekly EMA10 (downtrend) + volume spike
+            elif (close[i] < ema_10_1d[i] and vol_spike[i]):
+                size = min(0.30, 0.015 / (atr[i] / close[i] + 0.001))
+                signals[i] = -size
                 position = -1
         elif position == 1:
-            # EXIT LONG: Bull Power turns negative (loss of buying pressure)
-            if bull_power[i] <= 0:
+            # EXIT LONG: Price crosses below weekly EMA10
+            if close[i] <= ema_10_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # EXIT SHORT: Bear Power turns positive (loss of selling pressure)
-            if bear_power[i] >= 0:
+            # EXIT SHORT: Price crosses above weekly EMA10
+            if close[i] >= ema_10_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Maintain position
     
     return signals
