@@ -1,9 +1,14 @@
-#!/usr/bin/env python3
-# 4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
-# Hypothesis: Daily Camarilla R1/S1 breakouts with volume confirmation (1.5x 20-period average) and EMA34 trend filter capture institutional flow. Weekly trend is not needed as daily EMA34 provides sufficient trend filter. This strategy targets 20-30 trades per year (80-120 total over 4 years) to stay within 4h limits. Works in bull markets (breakouts continue with trend) and bear markets (mean reversion from extremes via short entries).
+# BTC/ETH Multi-Timeframe Reversal Strategy
+# Target: 1d timeframe with 1h confirmation for reduced false signals
+# Strategy: Use 1h momentum (MACD cross) to confirm 1d mean reversion signals (RSI extremes)
+# Entry: Long when 1d RSI < 30 and 1h MACD line crosses above signal
+# Entry: Short when 1d RSI > 70 and 1h MACD line crosses below signal
+# Exit: When 1d RSI returns to neutral zone (40-60) or opposite signal occurs
+# Position sizing: 0.25 for controlled risk
+# Expected trades: 15-25 per year (~60-100 total over 4 years)
 
-name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "BTCETH_1d_MeanReversion_MACD_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,102 +20,88 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    # Extract price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Momentum: close > open (bullish) or close < open (bearish)
-    momentum_long = close > open_price
-    momentum_short = close < open_price
+    # 1d indicators (primary timeframe)
+    # RSI(14) for mean reversion signals
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
-    
-    # 1d data for daily pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 1h indicators for confirmation (higher timeframe)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 35:
         return np.zeros(n)
     
-    # Calculate daily pivot points from prior day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    pivot = (prev_high + prev_low + prev_close) / 3
-    rang = prev_high - prev_low
-    R1 = pivot + rang
-    S1 = pivot - rang
+    # MACD(12,26,9) on 1h
+    close_1h = df_1h['close'].values
+    ema_12 = pd.Series(close_1h).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema_26 = pd.Series(close_1h).ewm(span=26, adjust=False, min_periods=26).mean()
+    macd_line = ema_12 - ema_26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean()
+    macd_hist = macd_line - signal_line
     
-    # Align daily pivot levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # 1d EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align 1h indicators to 1d timeframe
+    macd_line_aligned = align_htf_to_ltf(prices, df_1h, macd_line.values)
+    signal_line_aligned = align_htf_to_ltf(prices, df_1h, signal_line.values)
+    macd_hist_aligned = align_htf_to_ltf(prices, df_1h, macd_hist.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    for i in range(34, n):  # Start after warmup for EMA34 and volume MA
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_34_aligned[i])):
+    # Start from index 35 to ensure all indicators are valid
+    for i in range(35, n):
+        # Skip if any required data is NaN
+        if (np.isnan(rsi_values[i]) or 
+            np.isnan(macd_line_aligned[i]) or 
+            np.isnan(signal_line_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
-            bars_since_entry += 1
             continue
         
-        bars_since_entry += 1
-        
         if position == 0:
-            # LONG: Price breaks above R1 + bullish momentum + volume confirmation + price above EMA34 (uptrend)
-            if (close[i] > R1_aligned[i] and 
-                momentum_long[i] and 
-                volume_confirm[i] and 
-                close[i] > ema_34_aligned[i]):
+            # LONG ENTRY: 1d RSI oversold (<30) + 1h MACD bullish crossover
+            if (rsi_values[i] < 30 and 
+                macd_line_aligned[i] > signal_line_aligned[i] and
+                macd_line_aligned[i-1] <= signal_line_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # SHORT: Price breaks below S1 + bearish momentum + volume confirmation + price below EMA34 (downtrend)
-            elif (close[i] < S1_aligned[i] and 
-                  momentum_short[i] and 
-                  volume_confirm[i] and 
-                  close[i] < ema_34_aligned[i]):
+            # SHORT ENTRY: 1d RSI overbought (>70) + 1h MACD bearish crossover
+            elif (rsi_values[i] > 70 and 
+                  macd_line_aligned[i] < signal_line_aligned[i] and
+                  macd_line_aligned[i-1] >= signal_line_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters pivot range (between S1 and R1) OR closes below EMA34 (trend change)
-            if close[i] < R1_aligned[i] and close[i] > S1_aligned[i]:
+            # LONG EXIT: RSI returns to neutral (>=40) or bearish crossover occurs
+            if (rsi_values[i] >= 40 or 
+                (macd_line_aligned[i] < signal_line_aligned[i] and 
+                 macd_line_aligned[i-1] >= signal_line_aligned[i-1])):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
-            elif close[i] < ema_34_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters pivot range (between S1 and R1) OR closes above EMA34 (trend change)
-            if close[i] < R1_aligned[i] and close[i] > S1_aligned[i]:
+            # SHORT EXIT: RSI returns to neutral (<=60) or bullish crossover occurs
+            if (rsi_values[i] <= 60 or 
+                (macd_line_aligned[i] > signal_line_aligned[i] and 
+                 macd_line_aligned[i-1] <= signal_line_aligned[i-1])):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
-            elif close[i] > ema_34_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = -0.25
     
