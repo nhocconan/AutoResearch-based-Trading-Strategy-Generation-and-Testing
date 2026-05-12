@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Vortex_Volume_Trend_Filter
-# Hypothesis: Use Vortex Indicator (VI+) and (VI-) to detect trend direction on 4h, confirmed by 1d trend (EMA50) and volume spikes (>2x 20-period average). Enter long when VI+ > VI- and price > 1d EMA50 with volume spike; short when VI- > VI+ and price < 1d EMA50 with volume spike. Exit on Vortex crossover reverse. Targets 20-50 trades/year to minimize fee drag and work in both bull/bear markets via trend filter.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Use Camarilla R1/S1 breakouts on 12h with 1d trend filter (price > 1d EMA50 for long, < for short) and volume confirmation (>2x 20-period average). Trades only when price breaks R1 (long) or S1 (short) with trend alignment and volume spike. Targets 15-30 trades/year to minimize fee drift and capture breakouts in both bull/bear markets via trend filter.
 
-name = "4h_Vortex_Volume_Trend_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,30 +20,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Vortex Indicator (VI) on 4h
-    # VI+ = sum(|high - prev_low|) / sum(true_range)
-    # VI- = sum(|low - prev_high|) / sum(true_range)
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.maximum(high - low, np.absolute(low - np.roll(close, 1)))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # first bar true range
-    vm_plus = np.absolute(high - np.roll(low, 1))
-    vm_minus = np.absolute(low - np.roll(high, 1))
-    vm_plus[0] = np.absolute(high[0] - low[0])
-    vm_minus[0] = np.absolute(low[0] - high[0])
+    # Calculate Camarilla levels for R1 and S1 using previous day's range
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # First day: use current day's values
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
 
-    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / \
-              pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / \
-               pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    daily_range = prev_high - prev_low
+    r1 = prev_close + 1.1 * daily_range / 12
+    s1 = prev_close - 1.1 * daily_range / 12
+
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
     # 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -55,9 +57,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
+    for i in range(1, n):  # Start from 1 to have previous day's data
         # Skip if any required value is NaN
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,14 +69,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: VI+ > VI- (bullish vortex) + price > 1d EMA50 + volume spike
-            if (vi_plus[i] > vi_minus[i] and 
+            # LONG: price breaks above R1 + price > 1d EMA50 + volume spike
+            if (close[i] > r1_aligned[i] and 
                 close[i] > ema50_1d_aligned[i] and
                 volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: VI- > VI+ (bearish vortex) + price < 1d EMA50 + volume spike
-            elif (vi_minus[i] > vi_plus[i] and 
+            # SHORT: price breaks below S1 + price < 1d EMA50 + volume spike
+            elif (close[i] < s1_aligned[i] and 
                   close[i] < ema50_1d_aligned[i] and
                   volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
@@ -82,15 +84,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Vortex turns bearish (VI- > VI+)
-            if vi_minus[i] > vi_plus[i]:
+            # EXIT LONG: price breaks below S1 (reversal signal)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Vortex turns bullish (VI+ > VI-)
-            if vi_plus[i] > vi_minus[i]:
+            # EXIT SHORT: price breaks above R1 (reversal signal)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
