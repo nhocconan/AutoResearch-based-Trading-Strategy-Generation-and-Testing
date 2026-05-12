@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_OrderBlock_Retest_4hTrend_1dVolFilter
-Hypothesis: Price retests 4h order blocks (bullish/bearish) in direction of 1d EMA50 trend with volume confirmation. Designed for 15-30 trades/year on 1h timeframe to work in both bull and bear markets by using institutional order flow concepts and trend filtering.
+6h_Ichimoku_Cloud_Filtered_TK_Cross
+Hypothesis: Use daily Ichimoku cloud (conversion line, base line, leading spans) as trend filter on 6h chart. Enter long when Tenkan-sen crosses above Kijun-sen AND price is above cloud (bullish), enter short when Tenkan-sen crosses below Kijun-sen AND price is below cloud (bearish). Add volume confirmation to avoid false signals. Designed for 15-35 trades/year on 6h timeframe to work in both bull and bear markets by using cloud as dynamic support/resistance and TK cross as momentum signal.
 """
 
-name = "1h_OrderBlock_Retest_4hTrend_1dVolFilter"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Filtered_TK_Cross"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,77 +22,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for order blocks (once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-
-    # Identify bullish and bearish order blocks on 4h
-    # Bullish OB: bearish candle followed by strong bullish candle
-    # Bearish OB: bullish candle followed by strong bearish candle
-    body_4h = np.abs(close_4h - open_4h) if 'open_4h' in df_4h.columns else np.abs(close_4h - np.roll(close_4h, 1))
-    # Simplified: look for strong directional candles
-    bullish_4h = close_4h > np.roll(close_4h, 1)  # closing higher than previous close
-    bearish_4h = close_4h < np.roll(close_4h, 1)  # closing lower than previous close
-    
-    # Bullish OB: previous candle bearish, current bullish with strong body
-    bullish_ob = np.zeros(len(close_4h), dtype=bool)
-    bearish_ob = np.zeros(len(close_4h), dtype=bool)
-    
-    for i in range(1, len(close_4h)):
-        # Bullish OB: prev bearish, current bullish with strong close
-        if bearish_4h[i-1] and bullish_4h[i]:
-            body_size = abs(close_4h[i] - open_4h[i]) if 'open_4h' in df_4h.columns else abs(close_4h[i] - close_4h[i-1])
-            avg_body = np.mean(np.abs(close_4h[max(0,i-5):i] - np.roll(close_4h[max(0,i-5):i], 1))) if i >= 5 else np.abs(close_4h[i] - close_4h[i-1])
-            if body_size > avg_body * 1.5:  # strong bullish candle
-                bullish_ob[i] = True
-        # Bearish OB: prev bullish, current bearish with strong body
-        elif bullish_4h[i-1] and bearish_4h[i]:
-            body_size = abs(close_4h[i] - open_4h[i]) if 'open_4h' in df_4h.columns else abs(close_4h[i] - close_4h[i-1])
-            avg_body = np.mean(np.abs(close_4h[max(0,i-5):i] - np.roll(close_4h[max(0,i-5):i], 1))) if i >= 5 else np.abs(close_4h[i] - close_4h[i-1])
-            if body_size > avg_body * 1.5:  # strong bearish candle
-                bearish_ob[i] = True
-
-    # Store OB levels (high of bearish OB, low of bullish OB)
-    ob_high = np.where(bearish_ob, high_4h, np.nan)
-    ob_low = np.where(bullish_ob, low_4h, np.nan)
-    
-    # Forward fill OB levels until broken
-    ob_high_series = pd.Series(ob_high)
-    ob_low_series = pd.Series(ob_low)
-    ob_high_ffill = ob_high_series.ffill().values
-    ob_low_ffill = ob_low_series.ffill().values
-    
-    # Align to 1h timeframe
-    ob_high_aligned = align_htf_to_ltf(prices, df_4h, ob_high_ffill)
-    ob_low_aligned = align_htf_to_ltf(prices, df_4h, ob_low_ffill)
-
-    # Get 1d data for trend filter (EMA50)
+    # Get daily data for Ichimoku (call once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 52:
         return np.zeros(n)
+
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Get 1d volume for filter (20-period average)
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Ichimoku parameters: 9, 26, 52
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
 
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
+
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b = (pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                     pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
+
+    # Align Ichimoku components to 6h timeframe (values from previous day's close)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+
+    # Volume confirmation: 6h volume > 1.3x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        if not in_session[i]:
+    for i in range(52, n):  # Start after Ichimoku warmup
+        tenkan_val = tenkan_sen_aligned[i]
+        kijun_val = kijun_sen_aligned[i]
+        span_a_val = senkou_span_a_aligned[i]
+        span_b_val = senkou_span_b_aligned[i]
+        vol_avg_val = vol_avg_20[i]
+
+        if np.isnan(tenkan_val) or np.isnan(kijun_val) or np.isnan(span_a_val) or np.isnan(span_b_val) or np.isnan(vol_avg_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -100,43 +78,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        ob_high_val = ob_high_aligned[i]
-        ob_low_val = ob_low_aligned[i]
-        ema50_val = ema50_1d_aligned[i]
-        vol_avg_val = vol_avg_20_1d_aligned[i]
-
-        if np.isnan(ob_high_val) or np.isnan(ob_low_val) or np.isnan(ema50_val) or np.isnan(vol_avg_val):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        # Cloud top and bottom
+        cloud_top = max(span_a_val, span_b_val)
+        cloud_bottom = min(span_a_val, span_b_val)
 
         if position == 0:
-            # LONG: Price retests bullish OB (support) + uptrend + volume confirmation
-            if low[i] <= ob_low_val * 1.001 and close[i] > ob_low_val and close[i] > ema50_val and volume[i] > vol_avg_val * 1.5:
-                signals[i] = 0.20
+            # LONG: TK cross bullish + price above cloud + volume confirmation
+            if (tenkan_val > kijun_val and 
+                close[i] > cloud_top and 
+                volume[i] > vol_avg_val * 1.3):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price retests bearish OB (resistance) + downtrend + volume confirmation
-            elif high[i] >= ob_high_val * 0.999 and close[i] < ob_high_val and close[i] < ema50_val and volume[i] > vol_avg_val * 1.5:
-                signals[i] = -0.20
+            # SHORT: TK cross bearish + price below cloud + volume confirmation
+            elif (tenkan_val < kijun_val and 
+                  close[i] < cloud_bottom and 
+                  volume[i] > vol_avg_val * 1.3):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below OB low or reverses against trend
-            if close[i] < ob_low_val * 0.995 or close[i] < ema50_val:
+            # EXIT LONG: TK cross bearish OR price drops below cloud
+            if tenkan_val < kijun_val or close[i] < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above OB high or reverses against trend
-            if close[i] > ob_high_val * 1.005 or close[i] > ema50_val:
+            # EXIT SHORT: TK cross bullish OR price rises above cloud
+            if tenkan_val > kijun_val or close[i] > cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
