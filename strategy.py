@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_BullBearPower_1wTrend_Filter
-# Hypothesis: Elder Ray index (Bull Power = High - EMA13, Bear Power = Low - EMA13) on 6h combined with 1-week EMA trend filter.
-# In bull markets (price > weekly EMA), we take long signals when Bull Power turns positive after being negative.
-# In bear markets (price < weekly EMA), we take short signals when Bear Power turns negative after being positive.
-# This captures momentum shifts in the direction of the higher timeframe trend, working in both bull and bear regimes.
-# Uses volume confirmation to avoid false signals. Designed for low trade frequency (~20-50/year) to minimize fee drag.
+# 12h_Donchian_Breakout_1wTrend_Volume
+# Hypothesis: Donchian channel breakout on 12h with 1-week EMA trend filter and volume confirmation.
+# The 1-week EMA ensures alignment with higher timeframe trend, reducing counter-trend trades.
+# Volume confirmation ensures breakouts have conviction. Designed to work in both bull and bear markets
+# by following the trend defined by higher timeframe.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
-name = "6h_ElderRay_BullBearPower_1wTrend_Filter"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -34,10 +34,11 @@ def generate_signals(prices):
     ema_30_1w = pd.Series(close_1w).ewm(span=30, adjust=False, min_periods=30).mean().values
     ema_30_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_30_1w)
     
-    # === Elder Ray on 6h (EMA13) ===>
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13  # Bull Power = High - EMA13
-    bear_power = low - ema_13   # Bear Power = Low - EMA13
+    # === Donchian Channel (20) on 12h ===
+    # Upper band: highest high of last 20 periods
+    upper_band = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 periods
+    lower_band = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === Volume Confirmation (20-period average) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,9 +50,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_30_1w_aligned[i]) or np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_30_1w_aligned[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,31 +60,31 @@ def generate_signals(prices):
             continue
         
         # Trend direction from 1w EMA
-        bullish_trend = close[i] > ema_30_1w_aligned[i]
-        bearish_trend = close[i] < ema_30_1w_aligned[i]
+        trend_up = close[i] > ema_30_1w_aligned[i]
+        trend_down = close[i] < ema_30_1w_aligned[i]
         
         # Volume filter: above average
         vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: Bull Power turns positive (from negative or zero) in bullish trend with volume
-            if bullish_trend and vol_ok and bull_power[i] > 0 and bull_power[i-1] <= 0:
+            # LONG: Price breaks above upper Donchian band with volume and higher timeframe uptrend
+            if (close[i] > upper_band[i] and vol_ok and trend_up):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power turns negative (from positive or zero) in bearish trend with volume
-            elif bearish_trend and vol_ok and bear_power[i] < 0 and bear_power[i-1] >= 0:
+            # SHORT: Price breaks below lower Donchian band with volume and higher timeframe downtrend
+            elif (close[i] < lower_band[i] and vol_ok and trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Bull Power turns negative or trend turns bearish
-            if bull_power[i] < 0 or not bullish_trend:
+            # EXIT LONG: Price closes below lower band or higher timeframe trend changes
+            if (close[i] < lower_band[i] or not trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power turns positive or trend turns bullish
-            if bear_power[i] > 0 or not bearish_trend:
+            # EXIT SHORT: Price closes above upper band or higher timeframe trend changes
+            if (close[i] > upper_band[i] or not trend_down):
                 signals[i] = 0.0
                 position = 0
             else:
