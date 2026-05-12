@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 1d_FundingRateMeanReversion_1wTrend
-# Hypothesis: Use funding rate mean-reversion (Z-score) for entry, filtered by weekly trend.
-# Long when funding Z-score < -2 and weekly close > weekly EMA50; short when Z-score > 2 and weekly close < weekly EMA50.
-# Exit on Z-score crossing zero or trend reversal. Designed for low frequency (10-25 trades/year) to avoid fee drag.
-# Funding rate provides a structural edge in BTC/ETH perpetuals, working in both bull and bear markets via mean reversion.
+# 1d_WilliamsAlligator_1wTrend
+# Hypothesis: Use Williams Alligator for trend detection on 1d, filtered by 1w trend direction.
+# Long when Alligator jaws above teeth and lips (bullish alignment) and weekly close > weekly EMA50.
+# Short when jaws below teeth and lips (bearish alignment) and weekly close < weekly EMA50.
+# Exit when alignment breaks or weekly trend reverses. Williams Alligator captures sustained trends with fewer whipsaws.
+# Weekly trend filter ensures we only trade in the direction of the higher timeframe momentum, improving win rate in both bull and bear markets.
 
-name = "1d_FundingRateMeanReversion_1wTrend"
+name = "1d_WilliamsAlligator_1wTrend"
 timeframe = "1d"
 leverage = 1.0
 
@@ -31,29 +32,37 @@ def generate_signals(prices):
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Funding rate data (assumed available in prices DataFrame as 'funding_rate' column)
-    # If not present, we'll use a placeholder - in practice this should be loaded separately
-    if 'funding_rate' not in prices.columns:
-        # Fallback: use price-based proxy for demonstration (not ideal but functional)
-        returns = np.diff(np.log(close), prepend=0)
-        funding_rate = np.cumsum(returns) * 0.0001  # Proxy - replace with actual funding data
-    else:
-        funding_rate = prices['funding_rate'].values
+    # Williams Alligator on 1d: SMMA (Smoothed Moving Average)
+    # Jaws: SMMA(13, 8), Teeth: SMMA(8, 5), Lips: SMMA(5, 3)
+    def smma(data, period, shift):
+        # Smoothed Moving Average: EMA-like but with smoothing
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: smoothed
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        # Shift the result to the right by 'shift' bars
+        if shift > 0:
+            result = np.roll(result, shift)
+            result[:shift] = np.nan
+        return result
     
-    # Funding rate Z-score (30-day window)
-    funding_series = pd.Series(funding_rate)
-    funding_mean = funding_series.rolling(window=30, min_periods=30).mean().values
-    funding_std = funding_series.rolling(window=30, min_periods=30).std().values
-    funding_zscore = (funding_rate - funding_mean) / (funding_std + 1e-8)
+    jaws = smma(close, 13, 8)
+    teeth = smma(close, 8, 5)
+    lips = smma(close, 5, 3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 30  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(funding_zscore[i])):
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,35 +70,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: weekly close above/below EMA50
-        weekly_close = close_1w[-1] if len(close_1w) > 0 else 0  # Simplified - actual alignment handled below
-        # Get current weekly close aligned to daily
-        # We need to get the aligned weekly close price for comparison
-        weekly_close_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
-        weekly_close_current = weekly_close_aligned[i]
+        # Get weekly close aligned to daily for trend comparison
+        close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+        weekly_close_current = close_1w_aligned[i]
         
         trend_up = weekly_close_current > ema50_1w_aligned[i]
         trend_down = weekly_close_current < ema50_1w_aligned[i]
         
+        # Alligator alignment: jaws > teeth > lips = bullish, jaws < teeth < lips = bearish
+        bullish_alignment = jaws[i] > teeth[i] and teeth[i] > lips[i]
+        bearish_alignment = jaws[i] < teeth[i] and teeth[i] < lips[i]
+        
         if position == 0:
-            # LONG: funding deeply negative AND weekly uptrend
-            if funding_zscore[i] < -2.0 and trend_up:
+            # LONG: bullish Alligator alignment AND weekly uptrend
+            if bullish_alignment and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: funding deeply positive AND weekly downtrend
-            elif funding_zscore[i] > 2.0 and trend_down:
+            # SHORT: bearish Alligator alignment AND weekly downtrend
+            elif bearish_alignment and trend_down:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: funding normalizes OR trend turns down
-            if funding_zscore[i] > -0.5 or not trend_up:
+            # EXIT LONG: Alligator alignment breaks OR weekly trend turns down
+            if not bullish_alignment or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: funding normalizes OR trend turns up
-            if funding_zscore[i] < 0.5 or not trend_down:
+            # EXIT SHORT: Alligator alignment breaks OR weekly trend turns up
+            if not bearish_alignment or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
