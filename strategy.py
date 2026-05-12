@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_MonetaryPulse_With_Volume_Regime
-Hypothesis: 12-hour strategy combining monetary pulse (price change over 3 periods) with volume confirmation and Choppiness Index regime filter.
-Only takes long when monetary pulse is positive, volume > 2x average, and market is trending (CHOP < 38.2).
-Short when monetary pulse negative, volume spike, and trending.
-Uses 1d EMA200 as additional trend filter to avoid counter-trend trades in strong trends.
-Designed for low trade frequency (target: 15-25/year) to minimize fee drag while capturing sustained moves.
-Works in bull/bear via regime filter and dual trend confirmation.
+6h_12h_1d_WeeklyBreakout_VolumeTrend
+Hypothesis: 6-hour breakouts from weekly high/low levels (based on prior week's close) with 12h trend filter and volume confirmation.
+Targets 6h timeframe to reduce trade frequency (target: 15-35 trades/year) while using proven weekly structure.
+Only takes long when price breaks above weekly high with volume spike and 12h uptrend, short when breaks below weekly low with volume spike and 12h downtrend.
+Weekly high/low provides stronger support/resistance than daily pivots, working in both bull and bear markets via trend filter and volume confirmation.
 """
 
-name = "12h_MonetaryPulse_With_Volume_Regime"
-timeframe = "12h"
+name = "6h_12h_1d_WeeklyBreakout_VolumeTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,57 +17,47 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Monetary pulse: price change over 3 periods (normalized)
-    price_change = (close - np.roll(close, 3)) / np.roll(close, 3)
-    price_change[0:3] = 0  # first 3 values invalid
-    
-    # Volume confirmation: >2.0x 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume spike: >2.0x 30-period average (on 6h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # Choppiness Index regime filter (14-period)
-    def calculate_chop(high, low, close, window=14):
-        atr = []
-        for i in range(len(high)):
-            if i == 0:
-                tr = high[i] - low[i]
-            else:
-                tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-            atr.append(tr)
-        
-        atr = np.array(atr)
-        tr_sum = pd.Series(atr).rolling(window=window, min_periods=window).sum().values
-        hh = pd.Series(high).rolling(window=window, min_periods=window).max().values
-        ll = pd.Series(low).rolling(window=window, min_periods=window).min().values
-        denominator = hh - ll
-        chop = np.where(denominator != 0, 100 * np.log10(tr_sum / denominator) / np.log10(window), 50)
-        return chop
-    
-    chop = calculate_chop(high, low, close, 14)
-    trending = chop < 38.2  # trending regime
-    
-    # 1d EMA200 for trend filter
+    # 1d data for weekly high/low calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Weekly high/low from previous 5 trading days (prior week)
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values
+    
+    # Align weekly high/low to 6h timeframe (wait for weekly bar to close)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1d, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1d, weekly_low)
+    
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        if (np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(chop[i])):
+    for i in range(50, n):
+        if (np.isnan(weekly_high_aligned[i]) or
+            np.isnan(weekly_low_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,36 +66,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Positive monetary pulse + volume spike + trending + price above 1d EMA200
-            if (price_change[i] > 0.01 and 
+            # LONG: Price breaks above weekly high + volume spike + price above 12h EMA50
+            if (close[i] > weekly_high_aligned[i] and 
                 volume_spike[i] and 
-                trending[i] and 
-                close[i] > ema_200_1d_aligned[i]):
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Negative monetary pulse + volume spike + trending + price below 1d EMA200
-            elif (price_change[i] < -0.01 and 
+            # SHORT: Price breaks below weekly low + volume spike + price below 12h EMA50
+            elif (close[i] < weekly_low_aligned[i] and 
                   volume_spike[i] and 
-                  trending[i] and 
-                  close[i] < ema_200_1d_aligned[i]):
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Monetary pulse turns negative OR price below 1d EMA200 OR chop > 61.8 (ranging)
-            if (price_change[i] < 0 or 
-                close[i] < ema_200_1d_aligned[i] or 
-                chop[i] > 61.8):
+            # EXIT LONG: Price re-enters between weekly low and high OR closes below 12h EMA50
+            if (close[i] > weekly_low_aligned[i] and close[i] < weekly_high_aligned[i]) or \
+               close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Monetary pulse turns positive OR price above 1d EMA200 OR chop > 61.8 (ranging)
-            if (price_change[i] > 0 or 
-                close[i] > ema_200_1d_aligned[i] or 
-                chop[i] > 61.8):
+            # EXIT SHORT: Price re-enters between weekly low and high OR closes above 12h EMA50
+            if (close[i] > weekly_low_aligned[i] and close[i] < weekly_high_aligned[i]) or \
+               close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
