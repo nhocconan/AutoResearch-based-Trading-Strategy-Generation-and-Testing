@@ -1,59 +1,72 @@
-# 4h_20DayDonchian_Breakout_1dTrend_VolumeSpike
-# Hypothesis: On 4h, buy breakouts above 20-period high when 1-day EMA50 is rising and volume >1.5x average; sell breakdowns below 20-period low when 1-day EMA50 is falling and volume >1.5x average. Uses volatility-adjusted breakout thresholds to avoid false breakouts in low-volatility regimes. Designed for low trade frequency (20-50/year) to minimize fee drag while capturing strong trends in both bull and bear markets. This builds on proven 4h Donchian breakout patterns that worked well on SOLUSDT, adding 1d trend filter and volume confirmation to improve robustness across BTC/ETH.
+#!/usr/bin/env python3
+"""
+6h_PivotReversal_VolumeExhaustion
+Hypothesis: On 6h, trade reversals at daily pivot levels (S1/S2/R1/R2) when volume shows exhaustion (current volume < 50% of 20-period average) and price shows rejection (close near open). Uses pivot levels as natural support/resistance that work in both trending and ranging markets. Low frequency (~20 trades/year) due to strict volume exhaustion filter.
+"""
 
-name = "4h_20DayDonchian_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "6h_PivotReversal_VolumeExhaustion"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_hlf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_ = prices['open'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
+    # Get 1d data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
+
+    # Calculate daily pivot points (standard formula)
+    # P = (H + L + C) / 3
+    # S1 = 2*P - H
+    # S2 = P - (H - L)
+    # R1 = 2*P - L
+    # R2 = P + (H - L)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    s1 = 2 * pivot - high_1d
+    s2 = pivot - (high_1d - low_1d)
+    r1 = 2 * pivot - low_1d
+    r2 = pivot + (high_1d - low_1d)
+    
+    # Align pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
 
-    # 20-period high/low for breakout levels (4h timeframe)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume exhaustion: current volume < 50% of 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-
-    # Volatility filter: avoid breakouts in low-volatility regimes
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    # Use 20-period average of ATR to normalize breakout threshold
-    atr_avg_20 = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-
+    
+    # Price rejection: close near open (small body)
+    body_size = np.abs(close - open_)
+    candle_range = high - low
+    body_ratio = np.where(candle_range > 0, body_size / candle_range, 0)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or 
-            np.isnan(atr_avg_20[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(s1_6h[i]) or np.isnan(s2_6h[i]) or 
+            np.isnan(r1_6h[i]) or np.isnan(r2_6h[i]) or np.isnan(vol_avg_20[i]) or
+            np.isnan(body_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,39 +74,46 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Calculate dynamic breakout threshold based on volatility
-        # In low volatility, require larger breakout; in high volatility, smaller breakout
-        vol_factor = atr_avg_20[i] / (high[i] - low[i] + 1e-10)  # normalize by current bar range
-        breakout_threshold = 0.001 * vol_factor  # base 0.1% threshold adjusted by volatility
+        # Volume exhaustion condition
+        volume_exhausted = volume[i] < vol_avg_20[i] * 0.5
+        
+        # Price rejection condition (small body)
+        price_rejected = body_ratio[i] < 0.3  # body less than 30% of range
 
         if position == 0:
-            # LONG: Price breaks above 20-period high + 1d uptrend + volume spike + volatility filter
-            if (close[i] > high_max_20[i-1] * (1 + breakout_threshold) and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Near S1/S2 with volume exhaustion and price rejection
+            near_support = (low[i] <= s1_6h[i] * 1.002 and low[i] >= s2_6h[i] * 0.998) or \
+                          (low[i] <= s2_6h[i] * 1.002 and low[i] >= s2_6h[i] * 0.998)
+                          
+            if near_support and volume_exhausted and price_rejected:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 20-period low + 1d downtrend + volume spike + volatility filter
-            elif (close[i] < low_min_20[i-1] * (1 - breakout_threshold) and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = -0.25
-                position = -1
+            # SHORT: Near R1/R2 with volume exhaustion and price rejection
+            elif (high[i] >= r1_6h[i] * 0.998 and high[i] <= r1_6h[i] * 1.002) or \
+                 (high[i] >= r2_6h[i] * 0.998 and high[i] <= r2_6h[i] * 1.002):
+                if volume_exhausted and price_rejected:
+                    signals[i] = -0.25
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 20-period low OR trend turns down
-            if close[i] < low_min_20[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price moves above pivot or stops showing rejection
+            if close[i] > pivot_6h[i] or body_ratio[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 20-period high OR trend turns up
-            if close[i] > high_max_20[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price moves below pivot or stops showing rejection
+            if close[i] < pivot_6h[i] or body_ratio[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
 
     return signals
+
+def align_htf_to_ltf(prices, df_htf, values):
+    """Simple alignment function - in practice use the one from mtf_data"""
+    from mtf_data import align_htf_to_ltf
+    return align_htf_to_ltf(prices, df_htf, values)
