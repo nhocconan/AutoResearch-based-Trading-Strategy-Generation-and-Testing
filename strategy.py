@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_ADX_Ichimoku_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,66 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 1w trend filter: EMA50
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Camarilla levels from previous 1d
-    def calculate_camarilla(high_val, low_val, close_val):
-        range_val = high_val - low_val
-        if range_val <= 0:
-            return close_val, close_val, close_val, close_val, close_val, close_val, close_val, close_val
-        multiplier = range_val / 12.0
-        S1 = close_val - multiplier * 1.1
-        S2 = close_val - multiplier * 2.0
-        S3 = close_val - multiplier * 3.0
-        R3 = close_val + multiplier * 3.0
-        R2 = close_val + multiplier * 2.0
-        R1 = close_val + multiplier * 1.1
-        return S1, S2, S3, R3, R2, R1
+    # ADX on 6h
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    tr = np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    for i in range(1, n):
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    S1_1d = np.full_like(close_1d, np.nan)
-    S2_1d = np.full_like(close_1d, np.nan)
-    S3_1d = np.full_like(close_1d, np.nan)
-    R3_1d = np.full_like(close_1d, np.nan)
-    R2_1d = np.full_like(close_1d, np.nan)
-    R1_1d = np.full_like(close_1d, np.nan)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    for i in range(len(close_1d)):
-        S1, S2, S3, R3, R2, R1 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        S1_1d[i] = S1
-        S2_1d[i] = S2
-        S3_1d[i] = S3
-        R3_1d[i] = R3
-        R2_1d[i] = R2
-        R1_1d[i] = R1
+    # Ichimoku on 6h (conversion: 9, base: 26, span B: 52)
+    nine_period_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    nine_period_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    conversion_line = (nine_period_high + nine_period_low) / 2
     
-    # Align Camarilla levels to 12h timeframe
-    S1_12h = align_htf_to_ltf(prices, df_1d, S1_1d)
-    S2_12h = align_htf_to_ltf(prices, df_1d, S2_1d)
-    S3_12h = align_htf_to_ltf(prices, df_1d, S3_1d)
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3_1d)
-    R2_12h = align_htf_to_ltf(prices, df_1d, R2_1d)
-    R1_12h = align_htf_to_ltf(prices, df_1d, R1_1d)
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    base_line = (period26_high + period26_low) / 2
     
-    # Volume spike detection (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    span_a = (conversion_line + base_line) / 2
+    span_b_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    span_b_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    span_b = (span_b_high + span_b_low) / 2
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 34  # need enough data for 1d EMA34
+    start_idx = max(50, 52)  # need enough data for 1w EMA50 and Ichimoku
     
     for i in range(start_idx, n):
-        # Skip if 1d trend data not ready
-        if np.isnan(ema34_1d_aligned[i]):
+        if np.isnan(ema50_1w_aligned[i]) or np.isnan(adx[i]) or np.isnan(conversion_line[i]) or np.isnan(base_line[i]) or np.isnan(span_a[i]) or np.isnan(span_b[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,29 +70,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Ichimoku cloud
+        span_a_lagged = np.roll(span_a, 26)  # projected 26 periods ahead
+        span_b_lagged = np.roll(span_b, 26)
+        span_a_lagged[:26] = np.nan
+        span_b_lagged[:26] = np.nan
+        
+        # Cloud top and bottom
+        cloud_top = np.maximum(span_a_lagged, span_b_lagged)
+        cloud_bottom = np.minimum(span_a_lagged, span_b_lagged)
+        
         if position == 0:
-            # Long: Close breaks above R3 with volume spike + 1d uptrend
-            if (close[i] > R3_12h[i] and 
-                volume_spike[i] and 
-                close[i] > ema34_1d_aligned[i]):
+            # Long: price above cloud, bullish TK cross, ADX > 25, 1w uptrend
+            if (close[i] > cloud_top[i] and 
+                conversion_line[i] > base_line[i] and 
+                adx[i] > 25 and 
+                close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 with volume spike + 1d downtrend
-            elif (close[i] < S3_12h[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+            # Short: price below cloud, bearish TK cross, ADX > 25, 1w downtrend
+            elif (close[i] < cloud_bottom[i] and 
+                  conversion_line[i] < base_line[i] and 
+                  adx[i] > 25 and 
+                  close[i] < ema50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when close crosses below R2 or 1d trend turns down
-            if (close[i] < R2_12h[i] or close[i] < ema34_1d_aligned[i]):
+            # Exit long when price crosses below cloud or TK cross turns bearish
+            if (close[i] < cloud_bottom[i] or conversion_line[i] < base_line[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when close crosses above S2 or 1d trend turns up
-            if (close[i] > S2_12h[i] or close[i] > ema34_1d_aligned[i]):
+            # Exit short when price crosses above cloud or TK cross turns bullish
+            if (close[i] > cloud_top[i] or conversion_line[i] > base_line[i]):
                 signals[i] = 0.0
                 position = 0
             else:
