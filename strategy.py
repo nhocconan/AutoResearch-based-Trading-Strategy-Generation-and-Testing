@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts above Camarilla R1 (long) or below S1 (short) from the prior 1d session,
-# filtered by 1d EMA34 trend direction and confirmed by volume spikes. Works in bull markets via long
-# entries in uptrends, and in bear markets via short entries in downtrends. Volume spike ensures
-# institutional participation. Target: 20-30 trades/year.
+# 1d_TRIX_ZeroCross_VolumeFilter
+# Hypothesis: TRIX zero-line crossovers indicate trend changes. Long when TRIX crosses above zero, short when below.
+# Filtered by volume spikes (2x 20-bar average) to ensure institutional participation.
+# Works in bull markets via long entries in uptrends, and in bear markets via short entries in downtrends.
+# Target: 10-20 trades/year on daily timeframe.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_TRIX_ZeroCross_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,33 +23,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
 
-    # Calculate 1d EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA50 trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
 
-    # Calculate Camarilla levels for prior 1d session
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
-    r1 = close_1d_prev + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d_prev - (high_1d - low_1d) * 1.1 / 12
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # TRIX calculation (15-period) on daily
+    # EMA1
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA2
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA3
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # TRIX = 100 * (EMA3 - prev EMA3) / prev EMA3
+    trix_raw = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix_raw[0] = 0  # first value undefined
+    trix = trix_raw  # already the final indicator
 
-    # Volume spike: current > 2.0x average of last 6 bars (1 day)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume spike: current > 2.0x average of last 20 bars
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):  # Start after EMA34 warmup
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(15, n):  # Start after TRIX warmup
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(trix[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,30 +61,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above R1 + 1d EMA34 uptrend + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # LONG: TRIX crosses above zero + 1w EMA50 uptrend + volume spike
+            if (trix[i] > 0 and trix[i-1] <= 0 and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 + 1d EMA34 downtrend + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # SHORT: TRIX crosses below zero + 1w EMA50 downtrend + volume spike
+            elif (trix[i] < 0 and trix[i-1] >= 0 and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S1 or trend breaks
-            if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: TRIX crosses below zero or trend breaks
+            if trix[i] < 0 or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R1 or trend breaks
-            if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: TRIX crosses above zero or trend breaks
+            if trix[i] > 0 or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
