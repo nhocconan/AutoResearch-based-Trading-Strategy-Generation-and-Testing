@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_KAMA_Direction_RSI_Chop_Filter"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Chop filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load weekly data for pivot and trend
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Chop (Choppiness Index) on 1d
-    atr_1d = np.zeros(len(close_1d))
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d[1:] = np.where(np.arange(1, len(tr)) < 14, 
-                          np.mean(tr[:14]) if len(tr) >= 14 else np.mean(tr) if len(tr) > 0 else 0,
-                          0)
-    for i in range(14, len(atr_1d)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i-1]) / 14
+    # Weekly Pivot Points (using previous week)
+    # Pivot = (H+L+C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    shift_high_1w = np.roll(high_1w, 1)
+    shift_low_1w = np.roll(low_1w, 1)
+    shift_close_1w = np.roll(close_1w, 1)
+    shift_high_1w[0] = high_1w[0]
+    shift_low_1w[0] = low_1w[0]
+    shift_close_1w[0] = close_1w[0]
     
-    sum_atr_14 = np.zeros(len(close_1d))
-    for i in range(13, len(close_1d)):
-        sum_atr_14[i] = np.sum(atr_1d[i-13:i+1])
+    pivot_1w = (shift_high_1w + shift_low_1w + shift_close_1w) / 3
+    r1_1w = 2 * pivot_1w - shift_low_1w
+    s1_1w = 2 * pivot_1w - shift_high_1w
     
-    hh = np.maximum.accumulate(high_1d)
-    ll = np.minimum.accumulate(low_1d)
-    range_14 = hh - ll
-    chop = np.zeros(len(close_1d))
-    for i in range(13, len(close_1d)):
-        if sum_atr_14[i] > 0 and range_14[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr_14[i] / range_14[i]) / np.log10(14)
-        else:
-            chop[i] = 50
+    # Align weekly levels to daily timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    chop_filter = chop < 61.8  # Trending regime (chop < 61.8)
-    chop_filter = np.where(np.isnan(chop_filter), False, chop_filter)
+    # Weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_filter)
-    
-    # Calculate KAMA on 4h
-    def kama(price, period=10, fast=2, slow=30):
-        change = np.abs(np.diff(price, n=period))
-        volatility = np.sum(np.abs(np.diff(price)), axis=1)
-        er = np.zeros_like(price)
-        er[period:] = change[period-1:] / volatility[period-1:]
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(price)
-        kama[0] = price[0]
-        for i in range(1, len(price)):
-            kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
-        return kama
-    
-    kama_val = kama(close, 10, 2, 30)
-    kama_diff = kama_val - np.roll(kama_val, 1)
-    kama_diff[0] = 0
-    kama_up = kama_diff > 0
-    
-    # Calculate RSI on 4h
-    def rsi(price, period=14):
-        delta = np.diff(price)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(price)
-        avg_loss = np.zeros_like(price)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(price)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi_val = rsi(close, 14)
+    # Volume filter: current volume > 1.5x 20-day average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -97,7 +56,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama_up[i]) or np.isnan(rsi_val[i]) or np.isnan(chop_filter_aligned[i])):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -106,24 +66,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: KAMA up + RSI > 50 + Chop < 61.8 (trending)
-            if kama_up[i] and rsi_val[i] > 50 and chop_filter_aligned[i]:
+            # Long: price breaks above weekly R1 + above weekly EMA34 + volume filter
+            if close[i] > r1_1w_aligned[i] and close[i] > ema_34_1w_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down + RSI < 50 + Chop < 61.8 (trending)
-            elif not kama_up[i] and rsi_val[i] < 50 and chop_filter_aligned[i]:
+            # Short: price breaks below weekly S1 + below weekly EMA34 + volume filter
+            elif close[i] < s1_1w_aligned[i] and close[i] < ema_34_1w_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA down or RSI < 40
-            if not kama_up[i] or rsi_val[i] < 40:
+            # Exit long: price breaks below weekly S1
+            if close[i] < s1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA up or RSI > 60
-            if kama_up[i] or rsi_val[i] > 60:
+            # Exit short: price breaks above weekly R1
+            if close[i] > r1_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
