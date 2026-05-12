@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn_v4"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Filtered"
 timeframe = "4h"
 leverage = 1.0
 
@@ -45,6 +45,13 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
     
+    # ===== ATR Filter (14) =====
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -54,7 +61,7 @@ def generate_signals(prices):
         # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_spike[i])):
+            np.isnan(vol_spike[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,16 +70,18 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close crosses above R1 + above 1d EMA34 + volume spike
+            # Long: Close crosses above R1 + above 1d EMA34 + volume spike + ATR filter
             if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and
                 close[i] > ema34_1d_aligned[i] and
-                vol_spike[i]):
+                vol_spike[i] and
+                (close[i] - low[i]) > 0.5 * atr[i]):  # Strong close near high
                 signals[i] = 0.25
                 position = 1
-            # Short: Close crosses below S1 + below 1d EMA34 + volume spike
+            # Short: Close crosses below S1 + below 1d EMA34 + volume spike + ATR filter
             elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and
                   close[i] < ema34_1d_aligned[i] and
-                  vol_spike[i]):
+                  vol_spike[i] and
+                  (high[i] - close[i]) > 0.5 * atr[i]):  # Strong close near low
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
