@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Trend_RSI_Chop_Filter
-# Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) for trend direction on 12h timeframe.
-# Enter long when price > KAMA and RSI > 50 in low-chop regime; short when price < KAMA and RSI < 50 in low-chop regime.
-# Use 1-day Chop Index (ER < 38.2) as regime filter to avoid whipsaws in ranging markets.
-# Exit when trend reverses or chop increases. Designed for fewer trades (target: 20-40/year) with trend-following edge in both bull and bear markets.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+# Hypothesis: Use 4-hour Camarilla pivot levels (R1/S1) for breakout entries on 1h timeframe.
+# Enter long on break above R1 with volume confirmation and 4h uptrend.
+# Enter short on break below S1 with volume confirmation and 4h downtrend.
+# Exit when price returns to the 4h pivot (PP) or trend reverses.
+# This strategy uses higher timeframe (4h) for structure and lower timeframe (1h) for timing.
+# By requiring confluence of level break, volume, and trend, we target 15-37 trades/year.
+# Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
+# Session filter (08-20 UTC) reduces noise trades.
 
-name = "12h_KAMA_Trend_RSI_Chop_Filter"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -18,65 +22,55 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get daily data for Chop Index (ER-based)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4-hour data for Camarilla pivots and trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
 
-    # Calculate 12-period ER (Efficiency Ratio) for Chop Index
-    change = np.abs(df_1d['close'].diff(12).values)
-    volatility = np.abs(df_1d['close'].diff(1)).values
-    vol_sum = pd.Series(volatility).rolling(window=12, min_periods=12).sum().values
-    er = np.divide(change, vol_sum, out=np.zeros_like(change), where=vol_sum!=0)
-    # Smooth ER with smoothing constants (fastest EMA=2, slowest=30)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama_1d = np.full_like(df_1d['close'], np.nan)
-    kama_1d[0] = df_1d['close'].iloc[0]
-    for i in range(1, len(df_1d)):
-        if np.isnan(sc[i]):
-            kama_1d[i] = kama_1d[i-1]
-        else:
-            kama_1d[i] = kama_1d[i-1] + sc[i] * (df_1d['close'].iloc[i] - kama_1d[i-1])
-    chop_1d = 100 * (1 - er)  # Chop Index: higher = more choppy
-    chop_filter = chop_1d < 38.2  # Low chop = trending regime
-
-    # Align chop filter to 12h timeframe
-    chop_filter_aligned = align_htf_to_ltf(prices, df_1d, chop_filter.astype(float))
-
-    # Calculate KAMA on 12h price data (fast=2, slow=30)
-    change_12h = np.abs(np.diff(close, prepend=close[0]))
-    volatility_12h = np.abs(np.diff(close, prepend=close[0]))
-    vol_sum_12h = pd.Series(volatility_12h).rolling(window=12, min_periods=12).sum().values
-    er_12h = np.divide(change_12h, vol_sum_12h, out=np.zeros_like(change_12h), where=vol_sum_12h!=0)
-    sc_12h = (er_12h * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama_12h = np.full_like(close, np.nan)
-    kama_12h[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc_12h[i]):
-            kama_12h[i] = kama_12h[i-1]
-        else:
-            kama_12h[i] = kama_12h[i-1] + sc_12h[i] * (close[i] - kama_12h[i-1])
-
-    # RSI (14) on 12h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 4-hour Camarilla levels based on previous 4h bar's high, low, close
+    ph = df_4h['high'].shift(1).values  # Previous 4h high
+    pl = df_4h['low'].shift(1).values   # Previous 4h low
+    pc = df_4h['close'].shift(1).values # Previous 4h close
+    
+    # Calculate pivot and ranges
+    pivot = (ph + pl + pc) / 3
+    range_val = ph - pl
+    
+    # Camarilla levels (R1, S1, and pivot for exit)
+    r1 = pc + range_val * 1.1 / 12
+    s1 = pc - range_val * 1.1 / 12
+    pp = pivot  # Pivot point for exit
+    
+    # Align 4-hour levels to 1h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_4h, pp)
+    
+    # 4h trend filter: EMA21
+    ema_21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    
+    # Volume confirmation: current volume > 1.5x average of last 4 periods (1 hour)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_ok = volume > (1.5 * vol_ma)
+    
+    # Session filter: 08-20 UTC (avoid low-liquidity Asian session)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_ok = (hours >= 8) & (hours <= 20)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(kama_12h[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop_filter_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(ema_21_aligned[i]) or
+            np.isnan(volume_ok[i]) or np.isnan(session_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,39 +78,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Only trade in low-chop (trending) regime
-        if chop_filter_aligned[i] < 0.5:  # False = high chop
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        # Check trend alignment from 4h EMA21
+        price_above_ema = close[i] > ema_21_aligned[i]
+        price_below_ema = close[i] < ema_21_aligned[i]
 
         if position == 0:
-            # LONG: price > KAMA and RSI > 50
-            if close[i] > kama_12h[i] and rsi[i] > 50:
-                signals[i] = 0.25
+            # LONG: break above R1 with volume, uptrend, and in session
+            if close[i] > r1_aligned[i] and volume_ok[i] and price_above_ema and session_ok[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: price < KAMA and RSI < 50
-            elif close[i] < kama_12h[i] and rsi[i] < 50:
-                signals[i] = -0.25
+            # SHORT: break below S1 with volume, downtrend, and in session
+            elif close[i] < s1_aligned[i] and volume_ok[i] and price_below_ema and session_ok[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price < KAMA or RSI < 50
-            if close[i] < kama_12h[i] or rsi[i] < 50:
+            # EXIT LONG: return to pivot or trend turns down
+            if close[i] < pp_aligned[i] or close[i] < ema_21_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: price > KAMA or RSI > 50
-            if close[i] > kama_12h[i] or rsi[i] > 50:
+            # EXIT SHORT: return to pivot or trend turns up
+            if close[i] > pp_aligned[i] or close[i] > ema_21_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
