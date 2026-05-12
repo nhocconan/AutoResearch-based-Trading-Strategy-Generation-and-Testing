@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_DonchianBreakout_1dTrend_Volume
-Hypothesis: On 12h timeframe, Donchian(20) breakout with 1d EMA50 trend and volume > 2x 20-period average
-provides high-probability entries. Works in bull via breakout momentum and bear via mean-reversion
-at extremes with trend filter. Targets 15-35 trades/year (60-140 total over 4 years).
+12h_KAMA_Trend_With_Volume_Confirmation
+Hypothesis: On 12h timeframe, KAMA (Kaufman Adaptive Moving Average) adapts to market noise, 
+providing a reliable trend signal. Long when price > KAMA with volume > 1.5x 20-period average, 
+short when price < KAMA with volume surge. Uses 1d Bollinger Band width < 50th percentile to 
+filter choppy regimes, ensuring trades occur in trending markets. Targets 12-37 trades/year 
+(50-150 total over 4 years) with low turnover to minimize fee flood. Works in bull via 
+momentum continuation and bear via mean-reversion at extremes with trend filter.
 """
 
-name = "12h_DonchianBreakout_1dTrend_Volume"
+name = "12h_KAMA_Trend_With_Volume_Confirmation"
 timeframe = "12h"
 leverage = 1.0
 
@@ -33,30 +36,59 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate 1d EMA50 for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1d KAMA for trend
+    def calculate_kama(close, length=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
+        er = np.where(volatility != 0, change / volatility, 0)
+        # Smoothing constant
+        sc = np.power(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1), 2)
+        # KAMA
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
 
-    # Calculate 20-period volume average for confirmation
+    kama_1d = calculate_kama(close_1d, length=10, fast=2, slow=30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+
+    # Calculate 1d Bollinger Band width (20, 2) for squeeze filter
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma20_1d + 2 * std20_1d
+    lower_bb_1d = sma20_1d - 2 * std20_1d
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma20_1d
+    # Percentile rank of bb_width over lookback
+    bb_width_rank = pd.Series(bb_width_1d).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    bb_width_rank_aligned = align_htf_to_ltf(prices, df_1d, bb_width_rank)
+
+    # Volume confirmation: 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-
-    # Calculate 12h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(60, n):
-        # Get values for current 12h bar
-        ema50 = ema50_1d_aligned[i]
+        # Get aligned values for current 12h bar
+        kama = kama_1d_aligned[i]
+        bb_rank = bb_width_rank_aligned[i]
         vol_avg_val = vol_avg_20[i]
-        dch_high = donchian_high[i]
-        dch_low = donchian_low[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(ema50) or np.isnan(vol_avg_val) or 
-            np.isnan(dch_high) or np.isnan(dch_low)):
+        if (np.isnan(kama) or np.isnan(bb_rank) or np.isnan(vol_avg_val)):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        # Squeeze filter: only trade when BB width is in lower 50% (contraction)
+        if bb_rank > 0.5:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,30 +97,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Donchian high + price above EMA50 + volume surge
-            if (close[i] > dch_high and 
-                close[i] > ema50 and 
-                volume[i] > vol_avg_val * 2.0):
+            # LONG: Price above KAMA + volume surge
+            if (close[i] > kama and volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low + price below EMA50 + volume surge
-            elif (close[i] < dch_low and 
-                  close[i] < ema50 and 
-                  volume[i] > vol_avg_val * 2.0):
+            # SHORT: Price below KAMA + volume surge
+            elif (close[i] < kama and volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low or price below EMA50
-            if (close[i] < dch_low or close[i] < ema50):
+            # EXIT LONG: Price below KAMA
+            if close[i] < kama:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high or price above EMA50
-            if (close[i] > dch_high or close[i] > ema50):
+            # EXIT SHORT: Price above KAMA
+            if close[i] > kama:
                 signals[i] = 0.0
                 position = 0
             else:
