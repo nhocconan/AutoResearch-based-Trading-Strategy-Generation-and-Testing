@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_Pivot_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Use Camarilla R1/S1 levels from prior 1d candle with 1d EMA34 trend filter and volume confirmation (2x 20-period average). Long when price breaks above R1 in uptrend with volume; short when breaks below S1 in downtrend with volume. Exit on opposite level touch. Designed for fewer trades (<50/year) with clear trend and volume confirmation to reduce false signals. Works in bull via breakouts and bear via mean-reversion at extremes.
+# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Breakout at Camarilla R1/S1 from prior 1d candle with 1d EMA34 trend filter and volume confirmation (>2x 20-period avg). Long on R1 breakout in uptrend, short on S1 breakdown in downtrend. Exit on opposite level touch. Designed for 20-40 trades/year with clear trend and volume to avoid false signals. Works in bull via breakouts and bear via mean-reversion at extremes.
 
-name = "4h_Camarilla_Pivot_R1S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
