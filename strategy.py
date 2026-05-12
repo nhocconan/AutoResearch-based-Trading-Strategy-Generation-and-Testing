@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12H_DONCHIAN_BREAKOUT_VOLUME_TREND
-Hypothesis: Use 12h Donchian channel breakouts with volume confirmation and 1d trend filter (EMA200) to capture strong momentum moves. The 1d EMA200 filter ensures trades align with long-term trend, reducing whipsaws in both bull and bear markets. Volume confirmation filters out weak breakouts. Target: 15-30 trades/year.
+4H_CAMARILLA_R1_S1_BREAKOUT_12HTREND_VOLUME
+Hypothesis: Camarilla R1/S1 breakout on 4h with 12h EMA50 trend filter and volume confirmation. Uses price channel structure for directional bias, reducing false breakouts in both bull and bear markets. Volume spike confirms institutional interest. Target: 20-40 trades/year.
 """
-name = "12H_DONCHIAN_BREAKOUT_VOLUME_TREND"
-timeframe = "12h"
+name = "4H_CAMARILLA_R1_S1_BREAKOUT_12HTREND_VOLUME"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,28 +21,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # 12h data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Volume spike: current 12h volume > 1.5x 20-period average
+    # 1d data for Camarilla levels (using previous day's range)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Previous day's range for Camarilla calculation
+    ph = np.roll(high_1d, 1)  # previous day high
+    pl = np.roll(low_1d, 1)   # previous day low
+    pc = np.roll(close_1d, 1) # previous day close
+    ph[0] = pl[0] = pc[0] = np.nan  # first day has no previous day
+    
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    r1 = pc + (ph - pl) * 1.1 / 12
+    s1 = pc - (ph - pl) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume spike: current 4h volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
     volume_spike = volume > 1.5 * vol_ma
-    
-    # 12h Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=1).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=1).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        if np.isnan(ema200_aligned[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -50,37 +70,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine trend: above EMA200 = bullish, below = bearish
-        bullish_trend = close[i] > ema200_aligned[i]
-        bearish_trend = close[i] < ema200_aligned[i]
-        
         if position == 0:
-            # LONG: Break above 20-period high with volume spike and bullish trend
-            if (high[i] > high_20[i-1] and 
+            # LONG: Break above R1 with volume spike and price above 12h EMA50
+            if (high[i] > r1_aligned[i] and 
                 volume_spike[i] and 
-                bullish_trend):
+                close[i] > ema50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below 20-period low with volume spike and bearish trend
-            elif (low[i] < low_20[i-1] and 
+            # SHORT: Break below S1 with volume spike and price below 12h EMA50
+            elif (low[i] < s1_aligned[i] and 
                   volume_spike[i] and 
-                  bearish_trend):
+                  close[i] < ema50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls back below 20-period low or trend turns bearish
-            if (close[i] < low_20[i-1] or 
-                not bullish_trend):
+            # EXIT LONG: Price falls back below S1 or below 12h EMA50
+            if (close[i] < s1_aligned[i] or 
+                close[i] < ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises back above 20-period high or trend turns bullish
-            if (close[i] > high_20[i-1] or 
-                not bearish_trend):
+            # EXIT SHORT: Price rises back above R1 or above 12h EMA50
+            if (close[i] > r1_aligned[i] or 
+                close[i] > ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
