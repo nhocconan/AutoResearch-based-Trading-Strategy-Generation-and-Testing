@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1D_Camarilla_R1S1_Breakout_TrendVolume
-# Hypothesis: Breakouts from daily Camarilla R1 and S1 levels with volume confirmation and daily EMA34 trend filter.
+# 4h_1D_Camarilla_R2S2_Breakout_TrendVolume
+# Hypothesis: Breakouts from daily Camarilla R2 and S2 levels with volume confirmation and daily EMA34 trend filter.
+# Uses tighter levels (R2/S2) than R1/S1 to reduce false breakouts and trade frequency.
 # Works in bull markets via breakout continuation and in bear markets via mean-reversion from extremes.
-# Limits trades to 20-50 per year by requiring strict confluence of conditions.
+# Targets 20-50 trades per year by requiring strict confluence of conditions.
 
-name = "4h_1D_Camarilla_R1S1_Breakout_TrendVolume"
+name = "4h_1D_Camarilla_R2S2_Breakout_TrendVolume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,24 +36,24 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily Camarilla R1 and S1 from previous day
+    # Daily Camarilla R2 and S2 from previous day
     prev_close_1d = df_1d['close'].shift(1).values
     prev_high_1d = df_1d['high'].shift(1).values
     prev_low_1d = df_1d['low'].shift(1).values
     rang_1d = prev_high_1d - prev_low_1d
-    R1_1d = prev_close_1d + 1.1 * rang_1d * 1.1 / 4
-    S1_1d = prev_close_1d - 1.1 * rang_1d * 1.1 / 4
+    R2_1d = prev_close_1d + 1.1 * rang_1d * 2.0 / 4
+    S2_1d = prev_close_1d - 1.1 * rang_1d * 2.0 / 4
     
     # Align daily levels to 4h timeframe
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    R2_1d_aligned = align_htf_to_ltf(prices, df_1d, R2_1d)
+    S2_1d_aligned = align_htf_to_ltf(prices, df_1d, S2_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(R1_1d_aligned[i]) or 
-            np.isnan(S1_1d_aligned[i]) or 
+        if (np.isnan(R2_1d_aligned[i]) or 
+            np.isnan(S2_1d_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,14 +63,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + volume spike + price above daily EMA34 (uptrend)
-            if (close[i] > R1_1d_aligned[i] and 
+            # LONG: Price breaks above R2 + volume spike + price above daily EMA34 (uptrend)
+            if (close[i] > R2_1d_aligned[i] and 
                 volume_spike[i] and 
                 close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + volume spike + price below daily EMA34 (downtrend)
-            elif (close[i] < S1_1d_aligned[i] and 
+            # SHORT: Price breaks below S2 + volume spike + price below daily EMA34 (downtrend)
+            elif (close[i] < S2_1d_aligned[i] and 
                   volume_spike[i] and 
                   close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
@@ -78,7 +79,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # EXIT LONG: Price re-enters previous day's H-L range OR closes below daily EMA34
-            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
+            if (close[i] < R2_1d_aligned[i] and close[i] > S2_1d_aligned[i]) or \
                close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -86,7 +87,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Price re-enters previous day's H-L range OR closes above daily EMA34
-            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
+            if (close[i] < R2_1d_aligned[i] and close[i] > S2_1d_aligned[i]) or \
                close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
