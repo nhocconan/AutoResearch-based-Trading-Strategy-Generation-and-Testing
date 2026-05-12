@@ -1,14 +1,8 @@
-#!/usr/bin/env python3
-# 6h_ElderRay_BullBearPower_1wTrend_Filter
-# Hypothesis: Elder Ray (Bull/Bear Power) on 6h with 1-week trend filter.
-# Bull Power = EMA(13) - Low; Bear Power = High - EMA(13).
-# Long when Bull Power > 0 and weekly trend up; Short when Bear Power > 0 and weekly trend down.
-# Weekly trend defined by price above/below 20-period EMA on weekly chart.
-# Works in bull (trend following) and bear (counter-trend via Elder Ray extremes) via trend filter.
-# Target: 15-30 trades/year to avoid fee drag.
+# 4h_KAMA_Direction_Trend_Filter_Volume
+# Hypothesis: KAMA (Kaufman Adaptive Moving Average) on 1d for trend direction, combined with RSI extremes on 4h for mean-reversion entries in range markets, and volume confirmation to filter noise. KAMA adapts to market noise, making it effective in both trending and ranging conditions. RSI extremes provide mean-reversion signals when price is overextended. Volume ensures moves have participation. Target: 20-40 trades/year to avoid fee drag.
 
-name = "6h_ElderRay_BullBearPower_1wTrend_Filter"
-timeframe = "6h"
+name = "4h_KAMA_Direction_Trend_Filter_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,33 +14,57 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === 1-week Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # === 1d KAMA Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # 20-period EMA on 1w for trend direction
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    close_1d = df_1d['close'].values
+    # Calculate Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0) if len(change) > 0 else 0  # placeholder, will compute properly below
+    # Proper ER calculation
+    er = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        direction = np.abs(close_1d[i] - close_1d[i-10])
+        volatility = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
+        if volatility > 0:
+            er[i] = direction / volatility
+        else:
+            er[i] = 0
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Initialize KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # === Elder Ray (Bull/Bear Power) on 6h ===
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = ema_13 - low  # EMA(13) - Low
-    bear_power = high - ema_13  # High - EMA(13)
+    # === 4h RSI for Mean-Reversion Signals ===
+    # RSI(14) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,29 +72,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Weekly trend direction
-        weekly_up = close[i] > ema_20_1w_aligned[i]
-        weekly_down = close[i] < ema_20_1w_aligned[i]
+        # Trend direction from KAMA
+        trend_up = close[i] > kama_aligned[i]
+        trend_down = close[i] < kama_aligned[i]
+        
+        # Volume filter: above average
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: Bull Power positive and weekly trend up
-            if (bull_power[i] > 0 and weekly_up):
+            # LONG: RSI oversold (<30) in uptrend or neutral, with volume
+            if (rsi[i] < 30 and vol_ok and (trend_up or not trend_down)):  # Allow in uptrend or sideways
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power positive and weekly trend down
-            elif (bear_power[i] > 0 and weekly_down):
+            # SHORT: RSI overbought (>70) in downtrend or neutral, with volume
+            elif (rsi[i] > 70 and vol_ok and (trend_down or not trend_up)):  # Allow in downtrend or sideways
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Bull Power turns negative or weekly trend changes
-            if (bull_power[i] <= 0 or not weekly_up):
+            # EXIT LONG: RSI overbought or trend changes to down
+            if (rsi[i] > 70 or not trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power turns negative or weekly trend changes
-            if (bear_power[i] <= 0 or not weekly_down):
+            # EXIT SHORT: RSI oversold or trend changes to up
+            if (rsi[i] < 30 or not trend_down):
                 signals[i] = 0.0
                 position = 0
             else:
