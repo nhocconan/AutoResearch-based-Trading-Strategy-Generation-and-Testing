@@ -1,72 +1,61 @@
 #!/usr/bin/env python3
 """
-6h_PivotReversal_VolumeExhaustion
-Hypothesis: On 6h, trade reversals at daily pivot levels (S1/S2/R1/R2) when volume shows exhaustion (current volume < 50% of 20-period average) and price shows rejection (close near open). Uses pivot levels as natural support/resistance that work in both trending and ranging markets. Low frequency (~20 trades/year) due to strict volume exhaustion filter.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: On 12h, buy when price touches or crosses above Camarilla R1 level with 1d uptrend (EMA34) and volume spike; sell when price touches or crosses below Camarilla S1 level with 1d downtrend and volume spike. Uses Camarilla levels from daily timeframe for institutional-grade support/resistance, combined with trend filter and volume confirmation to avoid false breakouts. Designed for low trade frequency (12-37/year) to minimize fee drag while capturing institutional order flow in both bull and bear markets.
 """
 
-name = "6h_PivotReversal_VolumeExhaustion"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_ = prices['open'].values
     volume = prices['volume'].values
 
-    # Get 1d data for pivot calculation
+    # Get 1d data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
-
-    # Calculate daily pivot points (standard formula)
-    # P = (H + L + C) / 3
-    # S1 = 2*P - H
-    # S2 = P - (H - L)
-    # R1 = 2*P - L
-    # R2 = P + (H - L)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    s1 = 2 * pivot - high_1d
-    s2 = pivot - (high_1d - low_1d)
-    r1 = 2 * pivot - low_1d
-    r2 = pivot + (high_1d - low_1d)
-    
-    # Align pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
 
-    # Volume exhaustion: current volume < 50% of 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Price rejection: close near open (small body)
-    body_size = np.abs(close - open_)
-    candle_range = high - low
-    body_ratio = np.where(candle_range > 0, body_size / candle_range, 0)
-    
+    # Calculate Camarilla levels for previous day
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C = (H+L+C)/3 (typical price), but commonly simplified to close
+    # Using standard formula: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    camarilla_r1 = close_1d + camarilla_range
+    camarilla_s1 = close_1d - camarilla_range
+
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Volume confirmation: volume > 1.5x 24-period average (2 days of 12h data)
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(24, n):
         # Skip if any required value is NaN
-        if (np.isnan(pivot_6h[i]) or np.isnan(s1_6h[i]) or np.isnan(s2_6h[i]) or 
-            np.isnan(r1_6h[i]) or np.isnan(r2_6h[i]) or np.isnan(vol_avg_20[i]) or
-            np.isnan(body_ratio[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,46 +63,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Volume exhaustion condition
-        volume_exhausted = volume[i] < vol_avg_20[i] * 0.5
-        
-        # Price rejection condition (small body)
-        price_rejected = body_ratio[i] < 0.3  # body less than 30% of range
-
         if position == 0:
-            # LONG: Near S1/S2 with volume exhaustion and price rejection
-            near_support = (low[i] <= s1_6h[i] * 1.002 and low[i] >= s2_6h[i] * 0.998) or \
-                          (low[i] <= s2_6h[i] * 1.002 and low[i] >= s2_6h[i] * 0.998)
-                          
-            if near_support and volume_exhausted and price_rejected:
+            # LONG: Price touches or crosses above Camarilla R1 + 1d uptrend + volume spike
+            if (close[i] >= camarilla_r1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume[i] > vol_avg_24[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Near R1/R2 with volume exhaustion and price rejection
-            elif (high[i] >= r1_6h[i] * 0.998 and high[i] <= r1_6h[i] * 1.002) or \
-                 (high[i] >= r2_6h[i] * 0.998 and high[i] <= r2_6h[i] * 1.002):
-                if volume_exhausted and price_rejected:
-                    signals[i] = -0.25
-                    position = -1
+            # SHORT: Price touches or crosses below Camarilla S1 + 1d downtrend + volume spike
+            elif (close[i] <= camarilla_s1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume[i] > vol_avg_24[i] * 1.5):
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price moves above pivot or stops showing rejection
-            if close[i] > pivot_6h[i] or body_ratio[i] > 0.5:
+            # EXIT LONG: Price touches or crosses below Camarilla S1 OR trend turns down
+            if close[i] <= camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price moves below pivot or stops showing rejection
-            if close[i] < pivot_6h[i] or body_ratio[i] > 0.5:
+            # EXIT SHORT: Price touches or crosses above Camarilla R1 OR trend turns up
+            if close[i] >= camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
 
     return signals
-
-def align_htf_to_ltf(prices, df_htf, values):
-    """Simple alignment function - in practice use the one from mtf_data"""
-    from mtf_data import align_htf_to_ltf
-    return align_htf_to_ltf(prices, df_htf, values)
