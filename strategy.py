@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian_Breakout_1wTrend_Filter
-Hypothesis: Weekly Donchian(20) breakouts capture long-term momentum, with trend filter from weekly EMA50 and volume confirmation to reduce false signals. Works in bull (breakouts continue) and bear (breakouts fail quickly, limiting losses). Targets 15-25 trades/year.
+6h_LiquiditySweep_Retest_1dTrend
+Hypothesis: In BTC/ETH, price often sweeps liquidity (equal highs/lows) before reversing. 
+Buy when price sweeps prior day's low then closes back above it with 1d uptrend and volume confirmation.
+Sell when price sweeps prior day's high then closes back below it with 1d downtrend and volume confirmation.
+Uses 1d trend filter to align with higher timeframe momentum. Targets 15-25 trades/year.
 """
 
-name = "1d_WeeklyDonchian_Breakout_1wTrend_Filter"
-timeframe = "1d"
+name = "6h_LiquiditySweep_Retest_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -22,42 +25,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data (call once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 60:
+    # Get 1d data (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
 
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
 
-    # Weekly Donchian(20) channels
-    donch_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donch_high_20_aligned = align_htf_to_ltf(prices, df_1w, donch_high_20)
-    donch_low_20_aligned = align_htf_to_ltf(prices, df_1w, donch_low_20)
+    # Calculate 1d EMA50 for trend
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Previous day's high and low (for liquidity levels)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
 
-    # Volume confirmation: 1.5x 20-period average (daily)
+    # Align liquidity levels to 6h timeframe
+    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+
+    # Volume confirmation: 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(60, n):
-        # Get aligned values for current daily bar
-        donch_high = donch_high_20_aligned[i]
-        donch_low = donch_low_20_aligned[i]
-        ema50 = ema50_1w_aligned[i]
+    for i in range(50, n):
+        # Get aligned values for current 6h bar
+        ema50 = ema50_1d_aligned[i]
+        ph = prev_high_aligned[i]
+        pl = prev_low_aligned[i]
         vol_avg_val = vol_avg_20[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(donch_high) or np.isnan(donch_low) or 
-            np.isnan(ema50) or np.isnan(vol_avg_val)):
+        if (np.isnan(ema50) or np.isnan(ph) or 
+            np.isnan(pl) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,14 +71,15 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above weekly Donchian high + price above weekly EMA50 + volume surge
-            if (close[i] > donch_high and 
+            # LONG: Sweep prior day's low then close back above it
+            # Condition: low swept below pl AND close recovered above pl
+            if (low[i] < pl and close[i] > pl and 
                 close[i] > ema50 and 
                 volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly Donchian low + price below weekly EMA50 + volume surge
-            elif (close[i] < donch_low and 
+            # SHORT: Sweep prior day's high then close back below it
+            elif (high[i] > ph and close[i] < ph and 
                   close[i] < ema50 and 
                   volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
@@ -81,15 +87,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below weekly Donchian low or price below weekly EMA50
-            if (close[i] < donch_low or close[i] < ema50):
+            # EXIT LONG: Price breaks below prior day's low or trend fails
+            if (close[i] < pl or close[i] < ema50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above weekly Donchian high or price above weekly EMA50
-            if (close[i] > donch_high or close[i] > ema50):
+            # EXIT SHORT: Price breaks above prior day's high or trend fails
+            if (close[i] > ph or close[i] > ema50):
                 signals[i] = 0.0
                 position = 0
             else:
