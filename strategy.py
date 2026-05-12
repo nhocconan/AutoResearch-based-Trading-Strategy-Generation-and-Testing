@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_WilliamsAlligator_ElderRay_1wTrend
-Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and convergence/divergence, combined with Elder Ray (Bull/Bear Power) to measure trend strength, filtered by 1-week EMA50 trend. Works in bull markets (Alligator aligned up + positive Elder Ray) and bear markets (Alligator aligned down + negative Elder Ray). Uses 1-week trend filter to avoid counter-trend trades. Designed for low trade frequency (~20-40/year) to minimize fee drag.
+1d_WV3_Filter_Signal
+Hypothesis: WV3 (wave trend) oscillator combined with 1-week RSI trend filter and volume confirmation captures sustainable moves while avoiding whipsaws. Works in bull markets via momentum continuation and in bear via mean-reversion extremes filtered by higher timeframe trend.
 """
 
-name = "4h_WilliamsAlligator_ElderRay_1wTrend"
-timeframe = "4h"
+name = "1d_WV3_Filter_Signal"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,58 +18,41 @@ def generate_signals(prices):
         return np.zeros(n)
 
     close = prices['close'].values
+    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
 
-    # Get 1-week data for trend filter (call once before loop)
+    # Get 1w data for trend filter (call once before loop)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 14:
         return np.zeros(n)
     close_1w = df_1w['close'].values
-    # 1-week EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1w RSI14 for trend
+    delta = pd.Series(close_1w).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1w = (100 - (100 / (1 + rs))).values
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
 
-    # Williams Alligator: SMMA (Smoothed Moving Average) with periods 13,8,5 and offsets 8,5,3
-    # Jaw (13-period, 8-bar offset): SMMA(close, 13) shifted 8 bars
-    # Teeth (8-period, 5-bar offset): SMMA(close, 8) shifted 5 bars
-    # Lips (5-period, 3-bar offset): SMMA(close, 5) shifted 3 bars
-    # SMMA calculation: first value = SMA, then SMMA = (prev_SMMA*(period-1) + close) / period
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        sma = np.full_like(arr, np.nan)
-        sma[period-1] = np.mean(arr[:period])
-        smma_vals = np.full_like(arr, np.nan)
-        smma_vals[period-1] = sma[period-1]
-        for i in range(period, len(arr)):
-            smma_vals[i] = (smma_vals[i-1] * (period-1) + arr[i]) / period
-        return smma_vals
+    # WV3 (Wave Trend) calculation: EMA of (HL2 - SMA(HL2,10)), then double EMA
+    hl2 = (high + low) / 2
+    esa = pd.Series(hl2).ewm(span=10, adjust=False, min_periods=10).mean().values
+    d = pd.Series(np.abs(hl2 - esa)).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ci = (hl2 - esa) / (0.015 * d)
+    tci1 = pd.Series(ci).ewm(span=21, adjust=False, min_periods=21).mean().values
+    wv3 = pd.Series(tci1).ewm(span=42, adjust=False, min_periods=42).mean().values
 
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
-
-    # Apply Alligator offsets: Jaw shifted 8, Teeth shifted 5, Lips shifted 3
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    # Set first values to NaN due to roll
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
-
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Volume confirmation: volume > 1.5x 20-day average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]):
+    for i in range(42, n):
+        if np.isnan(rsi_1w_aligned[i]) or np.isnan(wv3[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,26 +61,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Alligator aligned up (Lips > Teeth > Jaw) + Bull Power > 0 + 1w uptrend
-            if lips_shifted[i] > teeth_shifted[i] and teeth_shifted[i] > jaw_shifted[i] and bull_power[i] > 0 and close[i] > ema50_1w_aligned[i]:
+            # LONG: WV3 oversold (< -60) turning up + 1w RSI > 50 (bullish bias) + volume confirmation
+            if wv3[i] < -60 and wv3[i] > wv3[i-1] and rsi_1w_aligned[i] > 50 and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Alligator aligned down (Lips < Teeth < Jaw) + Bear Power < 0 + 1w downtrend
-            elif lips_shifted[i] < teeth_shifted[i] and teeth_shifted[i] < jaw_shifted[i] and bear_power[i] < 0 and close[i] < ema50_1w_aligned[i]:
+            # SHORT: WV3 overbought (> 60) turning down + 1w RSI < 50 (bearish bias) + volume confirmation
+            elif wv3[i] > 60 and wv3[i] < wv3[i-1] and rsi_1w_aligned[i] < 50 and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alligator alignment breaks (Lips < Teeth) or 1w trend turns down
-            if lips_shifted[i] < teeth_shifted[i] or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: WV3 crosses above zero or 1w RSI drops below 40
+            if wv3[i] > 0 or rsi_1w_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator alignment breaks (Lips > Teeth) or 1w trend turns up
-            if lips_shifted[i] > teeth_shifted[i] or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: WV3 crosses below zero or 1w RSI rises above 60
+            if wv3[i] < 0 or rsi_1w_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
