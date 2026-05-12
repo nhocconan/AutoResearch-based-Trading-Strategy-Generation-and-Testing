@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 1d_WeeklyTrend_RSI_Reversal_With_Volume
-# Hypothesis: Use weekly RSI extremes (>70 or <30) for trend direction, then look for daily RSI reversals from overbought/oversold levels with volume confirmation. In bull markets, buy dips in uptrend; in bear markets, sell rallies in downtrend. Weekly trend filter prevents counter-trend trades, while daily RSI provides precise entry timing. Volume confirmation ensures institutional participation. Designed for 7-25 trades/year per symbol, works in both bull and bear via trend-aligned mean reversion.
+# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Combine 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Camarilla levels provide mean-reversion boundaries; breaks above R3 or below S3 indicate strong momentum.
+# Filtering by 1d EMA34 ensures trades align with long-term trend, reducing false breakouts.
+# Volume confirmation adds conviction to breakouts.
+# Designed for 12-37 trades/year per symbol, works in both bull and bear via trend filter.
 
-name = "1d_WeeklyTrend_RSI_Reversal_With_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,39 +24,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 1d data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
 
-    # Weekly RSI(14) for trend filter
-    delta = pd.Series(df_1w['close']).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss
-    rsi_14_1w = 100 - (100 / (1 + rs))
-    rsi_1w = rsi_14_1w.values
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Daily RSI(14) for entry signals
-    delta_d = pd.Series(close).diff()
-    gain_d = (delta_d.where(delta_d > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss_d = (-delta_d.where(delta_d < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs_d = gain_d / loss_d
-    rsi_14_d = 100 - (100 / (1 + rs_d))
-    rsi_d = rsi_14_d.values
+    # Calculate Camarilla levels from previous 1d bar
+    # Using previous 1d bar's high, low, close
+    prev_1d_high = df_1d['high'].shift(1).values  # Previous bar
+    prev_1d_low = df_1d['low'].shift(1).values
+    prev_1d_close = df_1d['close'].shift(1).values
 
-    # Volume confirmation: current volume > 1.5x average of last 20 days
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate R3 and S3 levels
+    r3 = prev_1d_close + 1.1 * (prev_1d_high - prev_1d_low) / 2
+    s3 = prev_1d_close - 1.1 * (prev_1d_high - prev_1d_low) / 2
+
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+
+    # Volume confirmation: current volume > 1.5x average of last 4 periods (2 days)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(rsi_d[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,31 +65,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Weekly trend filter: RSI > 50 = uptrend, RSI < 50 = downtrend
-        weekly_uptrend = rsi_1w_aligned[i] > 50
-        weekly_downtrend = rsi_1w_aligned[i] < 50
+        # Trend filter from 1d EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
 
         if position == 0:
-            # LONG: Weekly uptrend AND daily RSI oversold (<30) AND volume
-            if weekly_uptrend and rsi_d[i] < 30 and volume_ok[i]:
+            # LONG: Close breaks above R3 AND uptrend AND volume
+            if close[i] > r3_aligned[i] and price_above_ema and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Weekly downtrend AND daily RSI overbought (>70) AND volume
-            elif weekly_downtrend and rsi_d[i] > 70 and volume_ok[i]:
+            # SHORT: Close breaks below S3 AND downtrend AND volume
+            elif close[i] < s3_aligned[i] and price_below_ema and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Daily RSI overbought (>70) OR trend turns down
-            if rsi_d[i] > 70 or not weekly_uptrend:
+            # EXIT LONG: Close falls back below R3 OR trend turns down
+            if close[i] < r3_aligned[i] or not price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Daily RSI oversold (<30) OR trend turns up
-            if rsi_d[i] < 30 or not weekly_downtrend:
+            # EXIT SHORT: Close rises back above S3 OR trend turns up
+            if close[i] > s3_aligned[i] or not price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
