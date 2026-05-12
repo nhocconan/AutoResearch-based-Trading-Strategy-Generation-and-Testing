@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Elder_Ray_Power_1wTrend_Volume
-# Hypothesis: Elder Ray combines bull power (high - EMA13) and bear power (EMA13 - low) to measure trend strength.
-# Long when bull power > 0 and rising, bear power < 0 and falling, with weekly uptrend and volume confirmation.
-# Short when bear power < 0 and falling, bull power > 0 and rising, with weekly downtrend and volume confirmation.
-# Uses weekly EMA20 for trend filter, daily EMA13 for power calculation, and volume > 1.3x 20-period average.
-# Designed for 6h timeframe to avoid overtrading. Works in bull markets via strong bullish power and in bear markets via strong bearish power.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Camarilla pivot breakouts with daily trend filter and volume confirmation work across market regimes.
+# Long when price breaks above R1 with daily uptrend and volume spike.
+# Short when price breaks below S1 with daily downtrend and volume spike.
+# Uses daily EMA34 for trend filter and volume > 1.5x 20-period average for confirmation.
+# Designed for 4h timeframe to target 20-50 trades/year with low frequency and high edge.
 
-name = "6h_Elder_Ray_Power_1wTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,47 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-
-    # Weekly EMA20 trend filter
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-
-    # Get daily data for EMA13 (used in Elder Ray)
+    # Get daily data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 34:
         return np.zeros(n)
 
-    # Daily EMA13 for Elder Ray power calculation
-    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    # Daily EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Elder Ray Power: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high - ema_13_1d_aligned
-    bear_power = ema_13_1d_aligned - low
+    # Calculate Camarilla levels from previous day
+    ph = df_1d['high'].shift(1).values  # previous day high
+    pl = df_1d['low'].shift(1).values   # previous day low
+    pc = df_1d['close'].shift(1).values # previous day close
+    
+    # Camarilla R1 = C + (H-L)*1.1/12
+    r1 = pc + (ph - pl) * 1.1 / 12
+    # Camarilla S1 = C - (H-L)*1.1/12
+    s1 = pc - (ph - pl) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Slope of power (1-period change) to detect strengthening/weakening
-    bull_power_slope = bull_power - np.roll(bull_power, 1)
-    bear_power_slope = bear_power - np.roll(bear_power, 1)
-    # Set first value to 0 to avoid roll artifact
-    bull_power_slope[0] = 0
-    bear_power_slope[0] = 0
-
-    # Volume confirmation: current volume > 1.3x average of last 20 periods
+    # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.3 * vol_ma)
+    volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(bull_power_slope[i]) or np.isnan(bear_power_slope[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,35 +65,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from weekly EMA20
-        price_above_weekly_ema = close[i] > ema_20_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_20_1w_aligned[i]
+        # Trend filter from daily EMA34
+        price_above_daily_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_daily_ema = close[i] < ema_34_1d_aligned[i]
 
         if position == 0:
-            # LONG: Bull power > 0 and rising, bear power < 0 and falling, weekly uptrend, volume confirmation
-            if (bull_power[i] > 0 and bull_power_slope[i] > 0 and 
-                bear_power[i] < 0 and bear_power_slope[i] < 0 and
-                price_above_weekly_ema and volume_ok[i]):
+            # LONG: Price breaks above R1 with daily uptrend and volume confirmation
+            if close[i] > r1_aligned[i] and price_above_daily_ema and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear power < 0 and falling, bull power > 0 and rising, weekly downtrend, volume confirmation
-            elif (bear_power[i] > 0 and bear_power_slope[i] > 0 and 
-                  bull_power[i] < 0 and bull_power_slope[i] < 0 and
-                  price_below_weekly_ema and volume_ok[i]):
+            # SHORT: Price breaks below S1 with daily downtrend and volume confirmation
+            elif close[i] < s1_aligned[i] and price_below_daily_ema and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull power turns negative or bear power turns positive
-            if bull_power[i] <= 0 or bear_power[i] >= 0:
+            # EXIT LONG: Price breaks below S1 or daily trend turns down
+            if close[i] < s1_aligned[i] or not price_above_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear power turns negative or bull power turns positive
-            if bear_power[i] <= 0 or bull_power[i] >= 0:
+            # EXIT SHORT: Price breaks above R1 or daily trend turns up
+            if close[i] > r1_aligned[i] or not price_below_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
