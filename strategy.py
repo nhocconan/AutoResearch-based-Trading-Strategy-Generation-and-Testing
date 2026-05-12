@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hypothesis: 1d Donchian(20) breakout with 1w trend filter (1w EMA50) and volume confirmation.
-Works in bull/bear markets because: 1) Donchian channels capture breakouts in trending markets, 
-2) 1w EMA50 ensures alignment with higher timeframe trend, 3) Volume spike confirms breakout strength.
-Target 10-20 trades/year on 1d timeframe to minimize fee drag.
+6h_Keltner_Reversal_1dTrend_Volume
+Hypothesis: Mean reversion on 6h using Keltner Channel (ATR-based) with 1d EMA trend filter and volume confirmation.
+Works in bull/bear markets because: 1) In trends, price respects the Keltner mid-EMA as dynamic support/resistance, 2) 
+In ranges, price reverts from upper/lower bands to the mean, 3) Volume spike confirms reversal strength, reducing false signals.
+Target: 20-30 trades/year (80-120 total over 4 years).
 """
-name = "1d_Donchian20_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Keltner_Reversal_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,18 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1w DATA FOR TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1d DATA FOR TREND FILTER ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === 1d DONCHIAN CHANNELS (20-period) ===
-    # Calculate on daily data
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 6h KELTNER CHANNEL (20, 2.0) ===
+    # EMA20 of close
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # ATR(20)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Keltner bands
+    upper_keltner = ema20 + 2.0 * atr
+    lower_keltner = ema20 - 2.0 * atr
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,12 +52,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # 50 for weekly EMA, 20 for Donchian
+    start_idx = max(34, 20)  # 34 for daily EMA, 20 for Keltner
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(ema20[i]) or 
+            np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,28 +67,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above 20-day high, price above weekly EMA50, volume spike
-            if (close[i] > high_20[i] and 
-                close[i] > ema50_1w_aligned[i] and 
+            # LONG: Price touches lower Keltner band, price above daily EMA34, volume spike
+            if (close[i] <= lower_keltner[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 20-day low, price below weekly EMA50, volume spike
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema50_1w_aligned[i] and 
+            # SHORT: Price touches upper Keltner band, price below daily EMA34, volume spike
+            elif (close[i] >= upper_keltner[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price crosses below 20-day low or below weekly EMA50
-            if (close[i] < low_20[i]) or (close[i] < ema50_1w_aligned[i]):
+            # EXIT LONG: Price crosses above EMA20 (mean) or below daily EMA34
+            if (close[i] > ema20[i]) or (close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above 20-day high or above weekly EMA50
-            if (close[i] > high_20[i]) or (close[i] > ema50_1w_aligned[i]):
+            # EXIT SHORT: Price crosses below EMA20 (mean) or above daily EMA34
+            if (close[i] < ema20[i]) or (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
