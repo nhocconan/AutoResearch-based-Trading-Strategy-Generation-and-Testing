@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_MACD_Histogram_Trend_Filter
-# Hypothesis: MACD histogram crossing zero with 12h trend filter and volume confirmation captures momentum with low trade frequency.
-# Works in bull markets via bullish crosses and in bear via bearish crosses, filtered by higher timeframe trend.
-# Target: 15-30 trades/year per symbol.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels on daily timeframe provide strong support/resistance.
+# Breakouts above R1 or below S1 with daily trend filter and volume capture momentum moves.
+# Works in bull markets via breakouts and in bear via mean reversion touches of pivot points.
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 
-name = "4h_MACD_Histogram_Trend_Filter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,33 +18,44 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter (call once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla pivot calculation and trend filter (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    # 12h EMA50 for trend
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-
-    # Calculate MACD (12,26,9)
-    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
-
+    
+    # Calculate Camarilla pivot levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
+    
+    pivot = (high_prev + low_prev + close_prev) / 3
+    range_val = high_prev - low_prev
+    
+    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
+    r1 = close_prev + (range_val * 1.1 / 12)
+    s1 = close_prev - (range_val * 1.1 / 12)
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_prev).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align all 1d data to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
     # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
-        if np.isnan(macd_hist[i]) or np.isnan(signal_line[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_20[i]):
+    for i in range(20, n):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,26 +64,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: MACD histogram crosses above zero + 12h uptrend + volume spike
-            if macd_hist[i] > 0 and macd_hist[i-1] <= 0 and close[i] > ema50_12h_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # LONG: Close breaks above R1 + 1d uptrend + volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: MACD histogram crosses below zero + 12h downtrend + volume spike
-            elif macd_hist[i] < 0 and macd_hist[i-1] >= 0 and close[i] < ema50_12h_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # SHORT: Close breaks below S1 + 1d downtrend + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: MACD histogram crosses below zero or 12h trend turns down
-            if macd_hist[i] < 0 and macd_hist[i-1] >= 0 or close[i] < ema50_12h_aligned[i]:
+            # EXIT LONG: Close crosses below S1 or 1d trend turns down
+            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: MACD histogram crosses above zero or 12h trend turns up
-            if macd_hist[i] > 0 and macd_hist[i-1] <= 0 or close[i] > ema50_12h_aligned[i]:
+            # EXIT SHORT: Close crosses above R1 or 1d trend turns up
+            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
