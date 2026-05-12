@@ -1,11 +1,12 @@
-#/usr/bin/env python3
-# 4h Donchian Breakout with Volume Confirmation and Daily EMA Trend Filter
-# Hypothesis: Donchian channel breakouts capture momentum, validated by volume spikes and aligned with daily trend.
-# Works in both bull and bear markets by only taking breakouts in the direction of the daily EMA50 trend.
-# Designed for low trade frequency (~20-40/year) with clear entry/exit rules.
+#!/usr/bin/env python3
+# 6h_RSI_Trend_With_200EMA_Filter
+# Hypothesis: RSI(14) crossing above 50 with price above 200EMA signals momentum in trending markets.
+# The 200EMA filter ensures we only trade in the direction of the long-term trend,
+# reducing false signals during ranging periods. Works in both bull and bear markets
+# by adapting to the prevailing trend direction. Target: 50-150 trades over 4 years.
 
-name = "4h_Donchian_Breakout_Volume_DailyTrend"
-timeframe = "4h"
+name = "6h_RSI_Trend_With_200EMA_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,34 +23,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Data for EMA Trend Filter ===
+    # === Daily Data for 200EMA Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     daily_close_1d = df_1d['close'].values
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(daily_close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Daily EMA200 for trend filter
+    ema_200_1d = pd.Series(daily_close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_6h = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # === Donchian Channel (20-period) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === RSI (14-period) on 6h chart ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # === Volume Spike (20-period on 4h) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure all indicators ready
+    start_idx = 200  # Ensure EMA200 and RSI ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_200_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,30 +68,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above upper Donchian + volume spike + price above daily EMA50
-            if (close[i] > highest_high[i] and 
-                vol_spike[i] and
-                close[i] > ema_50_4h[i]):
+            # LONG: RSI > 50 (bullish momentum) + price above daily EMA200 (uptrend)
+            if rsi[i] > 50 and close[i] > ema_200_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below lower Donchian + volume spike + price below daily EMA50
-            elif (close[i] < lowest_low[i] and 
-                  vol_spike[i] and
-                  close[i] < ema_50_4h[i]):
+            # SHORT: RSI < 50 (bearish momentum) + price below daily EMA200 (downtrend)
+            elif rsi[i] < 50 and close[i] < ema_200_6h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price re-enters the Donchian channel (below midpoint)
-            midpoint = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] < midpoint:
+            # EXIT LONG: RSI falls below 50 (momentum shifts)
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters the Donchian channel (above midpoint)
-            midpoint = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] > midpoint:
+            # EXIT SHORT: RSI rises above 50 (momentum shifts)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
