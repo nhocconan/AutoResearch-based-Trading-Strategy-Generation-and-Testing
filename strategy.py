@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 12h_1D_Camarilla_R3_S3_Breakout_TrendFilter_VolumeSpike
-# Hypothesis: 12-hour breakouts from daily-derived Camarilla R3/S3 levels with daily trend filter and volume spike confirmation.
-# In bull markets, price above daily EMA34 supports long breakouts above R3; in bear markets, price below daily EMA34 supports short breakdowns below S3.
-# Volume spike ensures institutional participation, reducing false breakouts.
-# Targets 12-37 trades per year by requiring confluence of daily trend, daily level break, and volume spike.
+# 4h_1D_Choppiness_Reversal
+# Hypothesis: Mean reversion in ranging markets using daily Choppiness Index on 4H timeframe. 
+# When market is choppy (CHOP > 61.8), price tends to revert to mean (daily VWAP).
+# In trending markets (CHOP < 38.2), avoid trades to prevent whipsaw.
+# Works in both bull and bear markets as ranging regimes occur in all market conditions.
+# Uses volume confirmation to filter low-quality signals.
+# Target: 20-40 trades per year by requiring chop regime + VWAP deviation + volume spike.
 
-name = "12h_1D_Camarilla_R3_S3_Breakout_TrendFilter_VolumeSpike"
-timeframe = "12h"
+name = "4h_1D_Choppiness_Reversal"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,38 +25,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >2.0x 20-period average
+    # Volume spike filter: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
     
-    # Daily data for Camarilla levels and trend filter
+    # Daily data for Choppiness Index and VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Daily Choppiness Index (14-period)
+    def calculate_choppiness(high_arr, low_arr, close_arr, period=14):
+        atr = np.zeros_like(close_arr)
+        tr = np.zeros_like(close_arr)
+        for i in range(1, len(close_arr)):
+            tr[i] = max(
+                high_arr[i] - low_arr[i],
+                abs(high_arr[i] - close_arr[i-1]),
+                abs(low_arr[i] - close_arr[i-1])
+            )
+        # Smooth TR using Wilder's smoothing (same as ATR)
+        atr[period-1] = np.nanmean(tr[1:period+1])
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        # True range sum over period
+        tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+        
+        # Max high and min low over period
+        max_high = pd.Series(high_arr).rolling(window=period, min_periods=period).max().values
+        min_low = pd.Series(low_arr).rolling(window=period, min_periods=period).min().values
+        
+        # Choppiness formula: 100 * log10(tr_sum / (max_high - min_low)) / log10(period)
+        range_val = max_high - min_low
+        chop = np.full_like(close_arr, np.nan)
+        valid = (range_val > 0) & (~np.isnan(tr_sum))
+        chop[valid] = 100 * np.log10(tr_sum[valid] / range_val[valid]) / np.log10(period)
+        return chop
     
-    # Daily Camarilla R3 and S3 from previous day
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
-    rang_1d = prev_high_1d - prev_low_1d
-    R3_1d = prev_close_1d + 1.1 * rang_1d * 3.0 / 4
-    S3_1d = prev_close_1d - 1.1 * rang_1d * 3.0 / 4
+    chop = calculate_choppiness(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    chop_align = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Align daily levels to 12h timeframe
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    # Daily VWAP (typical price * volume / cumulative volume)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_values = vwap.values
+    vwap_align = align_htf_to_ltf(prices, df_1d, vwap_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(R3_1d_aligned[i]) or 
-            np.isnan(S3_1d_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(chop_align[i]) or 
+            np.isnan(vwap_align[i]) or 
+            np.isnan(close[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,32 +87,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 + volume spike + price above daily EMA34 (bullish trend)
-            if (close[i] > R3_1d_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > ema_34_1d_aligned[i]):
+            # LONG: Choppy market + price below VWAP + volume spike
+            if (chop_align[i] > 61.8 and 
+                close[i] < vwap_align[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + volume spike + price below daily EMA34 (bearish trend)
-            elif (close[i] < S3_1d_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema_34_1d_aligned[i]):
+            # SHORT: Choppy market + price above VWAP + volume spike
+            elif (chop_align[i] > 61.8 and 
+                  close[i] > vwap_align[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters previous day's H-L range OR closes below daily EMA34
-            if (close[i] < R3_1d_aligned[i] and close[i] > S3_1d_aligned[i]) or \
-               close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: Price crosses above VWAP OR chop drops below 38.2 (trending)
+            if close[i] > vwap_align[i] or chop_align[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters previous day's H-L range OR closes above daily EMA34
-            if (close[i] < R3_1d_aligned[i] and close[i] > S3_1d_aligned[i]) or \
-               close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: Price crosses below VWAP OR chop drops below 38.2 (trending)
+            if close[i] < vwap_align[i] or chop_align[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
