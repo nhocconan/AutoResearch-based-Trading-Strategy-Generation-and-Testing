@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v1
-# Hypothesis: Trading breakouts from daily Camarilla R1/S1 levels on 12h timeframe in the direction of the daily trend, with volume confirmation requiring 1.5x average volume. Targets 50-150 total trades over 4 years to avoid fee drag while maintaining edge in both bull and bear markets by following higher-timeframe trend. Designed to work on BTC and ETH.
+# 12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3
+# Hypothesis: Trading breakouts from daily Camarilla R1/S1 levels in the direction of daily trend with volume confirmation on 12h timeframe. Uses stricter volume filter (2.0x average volume) and requires close confirmation to reduce false breakouts. Targets 50-150 trades over 4 years by combining strong signal (price level breakout) with volume and trend filters, suitable for both bull and bear markets by following higher-timeframe trend.
 
-name = "12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v1"
+name = "12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3"
 timeframe = "12h"
 leverage = 1.0
 
@@ -45,7 +45,7 @@ def generate_signals(prices):
     # Calculate 12h volume SMA20 for volume confirmation (with spike filter)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
+    volume_spike_threshold = volume_sma20 * 2.0  # Require 2.0x average volume to reduce frequency
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
