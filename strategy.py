@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1wTrend_Volume
-# Hypothesis: Camarilla R3/S3 breakout on 12h with 1w trend filter and volume confirmation.
-# Camarilla levels provide institutional support/resistance; weekly trend ensures directional alignment.
-# Volume confirms breakout strength. Designed for low-frequency, high-conviction trades in bull/bear markets.
+# 1h_4h1d_Trend_Filtered_TripleMA_Cross
+# Hypothesis: On 1h timeframe, use 4h and 1d moving averages to establish trend direction.
+# Enter long when 1h EMA(8) > EMA(21) AND 4h EMA(21) > EMA(55) AND 1d EMA(55) > EMA(89).
+# Enter short when 1h EMA(8) < EMA(21) AND 4h EMA(21) < EMA(55) AND 1d EMA(55) < EMA(89).
+# Add volume confirmation (volume > 20-period average) and session filter (08:00-20:00 UTC).
+# Exit on opposite signal or when any trend condition fails.
+# Designed to reduce false signals in chop by requiring alignment across multiple timeframes.
+# Works in both bull and bear markets by following the higher timeframe trend.
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "1h_4h1d_Trend_Filtered_TripleMA_Cross"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,43 +26,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1w Camarilla Levels (from daily OHLC) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # === 4h EMA (21, 55) for trend filter ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 55:
         return np.zeros(n)
     
-    # Previous week's OHLC for Camarilla calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_4h = df_4h['close'].values
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema55_4h = pd.Series(close_4h).ewm(span=55, adjust=False, min_periods=55).mean().values
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    ema55_4h_aligned = align_htf_to_ltf(prices, df_4h, ema55_4h)
     
-    # Calculate Camarilla levels: R3, S3
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    range_1w = high_1w - low_1w
-    camarilla_r3 = close_1w + range_1w * 1.1 / 2
-    camarilla_s3 = close_1w - range_1w * 1.1 / 2
+    # === 1d EMA (55, 89) for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 89:
+        return np.zeros(n)
     
-    # Align to 12h timeframe (wait for weekly close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    close_1d = df_1d['close'].values
+    ema55_1d = pd.Series(close_1d).ewm(span=55, adjust=False, min_periods=55).mean().values
+    ema89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
+    ema55_1d_aligned = align_htf_to_ltf(prices, df_1d, ema55_1d)
+    ema89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
     
-    # === 1w Trend Filter (EMA34) ===
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # === 1h EMA (8, 21) for entry signal ===
+    ema8_1h = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # === Volume Confirmation (24-period average on 12h) ===
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === Volume confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === Session filter: 08:00-20:00 UTC ===
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are stable
+    start_idx = 200  # Ensure all indicators are stable
     
     for i in range(start_idx, n):
-        # Skip if any critical data is not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_24[i])):
+        # Skip if outside trading session
+        if not (8 <= hours[i] <= 20):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,39 +73,52 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > camarilla_r3_aligned[i]
-        breakout_down = close[i] < camarilla_s3_aligned[i]
+        # Skip if any critical data is not ready
+        if (np.isnan(ema8_1h[i]) or np.isnan(ema21_1h[i]) or 
+            np.isnan(ema21_4h_aligned[i]) or np.isnan(ema55_4h_aligned[i]) or
+            np.isnan(ema55_1d_aligned[i]) or np.isnan(ema89_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Trend filter: price above/below weekly EMA34
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        # Trend alignment conditions
+        bullish_alignment = (ema8_1h[i] > ema21_1h[i]) and \
+                           (ema21_4h_aligned[i] > ema55_4h_aligned[i]) and \
+                           (ema55_1d_aligned[i] > ema89_1d_aligned[i])
+        
+        bearish_alignment = (ema8_1h[i] < ema21_1h[i]) and \
+                           (ema21_4h_aligned[i] < ema55_4h_aligned[i]) and \
+                           (ema55_1d_aligned[i] < ema89_1d_aligned[i])
         
         # Volume filter
-        vol_ok = volume[i] > vol_ma_24[i]
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: Breakout above R3, uptrend, volume
-            if breakout_up and uptrend and vol_ok:
-                signals[i] = 0.25
+            # LONG: bullish alignment + volume
+            if bullish_alignment and vol_ok:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Breakdown below S3, downtrend, volume
-            elif breakout_down and downtrend and vol_ok:
-                signals[i] = -0.25
+            # SHORT: bearish alignment + volume
+            elif bearish_alignment and vol_ok:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # EXIT LONG: Breakdown below S3 or trend reversal
-            if breakout_down or not uptrend:
+            # EXIT LONG: bearish alignment or volume fails
+            if bearish_alignment or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Breakout above R3 or trend reversal
-            if breakout_up or not downtrend:
+            # EXIT SHORT: bullish alignment or volume fails
+            if bullish_alignment or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
