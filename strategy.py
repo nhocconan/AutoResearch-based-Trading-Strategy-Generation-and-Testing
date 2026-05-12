@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_Enhanced"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,8 +32,12 @@ def generate_signals(prices):
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
     range_1d = prev_high_1d - prev_low_1d
+    
+    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
     r4 = prev_close_1d + (range_1d * 1.1 / 2)
     s4 = prev_close_1d - (range_1d * 1.1 / 2)
+    
+    # Align to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
@@ -42,11 +46,12 @@ def generate_signals(prices):
     volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
     start_idx = max(200, 34, 20)
     
     for i in range(start_idx, n):
+        # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(r4_aligned[i]) or
             np.isnan(s4_aligned[i]) or
@@ -59,23 +64,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
+            # Long: price breaks above R4 + volume spike + 1d trend up
             if (close[i] > r4_aligned[i] and 
                 volume_spike[i] and
                 close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
+            # Short: price breaks below S4 + volume spike + 1d trend down
             elif (close[i] < s4_aligned[i] and 
                   volume_spike[i] and
                   close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
+            # Exit long: price crosses below S4 or trend breaks
             if close[i] < s4_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
+            # Exit short: price crosses above R4 or trend breaks
             if close[i] > r4_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
