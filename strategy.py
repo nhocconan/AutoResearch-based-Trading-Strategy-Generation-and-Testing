@@ -1,13 +1,13 @@
-# 6h Weekly Pivot + Volume Confirmation Trend Strategy
-# Hypothesis: Weekly pivot levels (from weekly chart) act as strong support/resistance.
-# In trending markets, price respects these levels as pullback entries.
-# In ranging markets, reversals occur at these levels.
-# Volume confirmation filters false breakouts.
-# Timeframe: 6h balances trade frequency (~20-50/year) with signal quality.
-# Works in bull/bear: uses price action at key levels rather than trend direction.
-
-name = "6h_WeeklyPivot_Volume_Trend"
-timeframe = "6h"
+#!/usr/bin/env python3
+"""
+12h_1d_Donchian20_Breakout_Volume_Trend
+Hypothesis: Daily Donchian channel (20-period) breakouts on 12h timeframe capture significant
+trend moves with high probability. Volume confirmation filters false breakouts. Trend filter
+using 12h EMA(50) ensures trades align with intermediate-term direction. Works in bull/bear
+markets by following momentum. Target: 50-150 trades over 4 years.
+"""
+name = "12h_1d_Donchian20_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,40 +24,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY DATA FOR PIVOT LEVELS ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === DAILY DONCHIAN CHANNEL (20-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly pivot points (standard calculation)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
+    # Calculate 20-period Donchian channels on daily data
+    high_roll = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    upper_donchian = high_roll
+    lower_donchian = low_roll
     
-    # === VOLUME CONFIRMATION (20-period) ===
+    # Align daily Donchian levels to 12h timeframe
+    upper_donchian_aligned = align_htf_to_ltf(prices, df_1d, upper_donchian)
+    lower_donchian_aligned = align_htf_to_ltf(prices, df_1d, lower_donchian)
+    
+    # === VOLUME CONFIRMATION (20-period on 12h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)  # Moderate volume filter
+    volume_spike = volume > (vol_ma * 1.5)  # Volume 1.5x average
+    
+    # === TREND FILTER: 12h EMA(50) ===
+    ema_50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # For volume MA
+    start_idx = 50  # For EMA(50) and Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or 
-            np.isnan(s2_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_donchian_aligned[i]) or np.isnan(lower_donchian_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(ema_50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,28 +64,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price bounces off S1 or S2 with volume
-            if ((close[i] > s1_1w_aligned[i] and low[i] <= s1_1w_aligned[i] * 1.005) or
-                (close[i] > s2_1w_aligned[i] and low[i] <= s2_1w_aligned[i] * 1.005)) and \
-               volume_spike[i]:
+            # LONG: Price breaks above upper Donchian with volume and above EMA50
+            if (high[i] > upper_donchian_aligned[i] and 
+                close[i] > upper_donchian_aligned[i] and
+                volume_spike[i] and
+                close[i] > ema_50[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price rejects at R1 or R2 with volume
-            elif ((close[i] < r1_1w_aligned[i] and high[i] >= r1_1w_aligned[i] * 0.995) or
-                  (close[i] < r2_1w_aligned[i] and high[i] >= r2_1w_aligned[i] * 0.995)) and \
-                 volume_spike[i]:
+            # SHORT: Price breaks below lower Donchian with volume and below EMA50
+            elif (low[i] < lower_donchian_aligned[i] and 
+                  close[i] < lower_donchian_aligned[i] and
+                  volume_spike[i] and
+                  close[i] < ema_50[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below S2 or reaches R2
-            if close[i] < s2_1w_aligned[i] or close[i] > r2_1w_aligned[i]:
+            # EXIT LONG: Price breaks below lower Donchian or reverses with volume
+            if low[i] < lower_donchian_aligned[i] and volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R2 or reaches S2
-            if close[i] > r2_1w_aligned[i] or close[i] < s2_1w_aligned[i]:
+            # EXIT SHORT: Price breaks above upper Donchian or reverses with volume
+            if high[i] > upper_donchian_aligned[i] and volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
