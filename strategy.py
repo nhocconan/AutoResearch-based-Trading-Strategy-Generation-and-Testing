@@ -1,11 +1,12 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
 12H_CAMARILLA_R4_S4_BREAKOUT_1D_TREND_VOLUME
-Hypothesis: Camarilla R4/S4 levels on daily chart represent strong breakout points.
+Hypothesis: Camarilla R4/S4 levels on the daily chart represent strong breakout points.
 Price breaking above R4 with volume and daily uptrend signals continuation long.
 Price breaking below S4 with volume and daily downtrend signals continuation short.
 Works in bull (buy breakouts) and bear (sell breakdowns) markets.
-Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
+Target: 15-35 trades/year on 12h timeframe (60-140 total over 4 years).
 """
 
 name = "12H_CAMARILLA_R4_S4_BREAKOUT_1D_TREND_VOLUME"
