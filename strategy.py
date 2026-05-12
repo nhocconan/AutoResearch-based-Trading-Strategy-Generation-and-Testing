@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-# 160114: 1h_Momentum_Reversal_4hTrend_1dVolatility
-# Hypothesis: In ranging or mean-reverting conditions (1d volatility low), use 1h momentum reversals (price crossing 20-period EMA with RSI divergence) aligned to 4h trend direction. This captures short-term mean reversion within the larger trend, reducing false signals in chop while maintaining trend alignment. Works in bull/bear by following 4h EMA50 trend and avoiding trades when 1d volatility is high (trending markets prone to false reversals).
+"""
+160115: 6h_WeeklyPivot_DailyTrend_Flow
+Hypothesis: Combines weekly pivot points (PP, R1, S1) with daily trend (EMA50) and volume flow confirmation on 6h timeframe.
+Weekly pivots provide strong institutional support/resistance levels. Daily EMA50 filters for higher timeframe trend direction.
+Volume flow (OBV slope) confirms institutional participation. Works in bull/bear by following weekly pivot structure with daily trend filter.
+Targets 50-150 total trades over 4 years (12-37/year) with size 0.25.
+"""
 
-name = "1h_Momentum_Reversal_4hTrend_1dVolatility"
-timeframe = "1h"
+name = "6h_WeeklyPivot_DailyTrend_Flow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,95 +25,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-
-    # Get 1d data for volatility filter
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    # Get daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
 
-    # 4h EMA50 trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly pivot points: PP, R1, S1
+    # PP = (High + Low + Close) / 3
+    # R1 = (2 * PP) - Low
+    # S1 = (2 * PP) - High
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    pp = (high_1w + low_1w + close_1w) / 3.0
+    r1 = (2 * pp) - low_1w
+    s1 = (2 * pp) - high_1w
 
-    # 1h EMA20 for mean reversion signal
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align weekly pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
 
-    # 1h RSI(14) for momentum exhaustion
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Daily EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # 1d ATR(14) normalized by price for volatility regime
-    atr_14_1h = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
-    atr_ma_14 = pd.Series(atr_14_1h).rolling(window=14, min_periods=14).mean().values
-    volatility_ratio = atr_14_1h / atr_ma_14
-    volatility_ratio = np.where(atr_ma_14 > 0, volatility_ratio, 1.0)
-
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume confirmation: OBV slope > 0 (accumulation)
+    # OBV = cumulative volume * sign(close - prev_close)
+    close_series = pd.Series(close)
+    price_change = close_series.diff()
+    obv = (np.sign(price_change) * volume).cumsum()
+    # OBV slope: 5-period linear regression slope
+    def linreg_slope(arr, window):
+        if len(arr) < window:
+            return np.nan
+        x = np.arange(window)
+        y = arr[-window:]
+        if np.all(np.isnan(y)):
+            return np.nan
+        slope = np.polyfit(x[~np.isnan(y)], y[~np.isnan(y)], 1)[0] if np.sum(~np.isnan(y)) >= 2 else 0
+        return slope
+    
+    obv_slope = np.full(len(obv), np.nan)
+    for i in range(5, len(obv)):
+        obv_slope[i] = linreg_slope(obv[:i+1], 5)
+    obv_slope_pos = obv_slope > 0
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_20[i]) or 
-            np.isnan(rsi[i]) or np.isnan(volatility_ratio[i])):
+    for i in range(55, n):  # Start after EMA50 warmup
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(obv_slope_pos[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.0
             continue
-
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Volatility filter: only trade when volatility is low (mean-reversion regime)
-        vol_filter = volatility_ratio[i] < 0.8
 
         if position == 0:
-            # LONG: Price crosses above EMA20 + RSI < 30 (oversold) + 4h uptrend + low vol
-            if (close[i] > ema_20[i] and close[i-1] <= ema_20[i-1] and
-                rsi[i] < 30 and ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] and
-                vol_filter):
-                signals[i] = 0.20
+            # LONG: Price above PP + above S1 + daily uptrend + OBV accumulation
+            if (close[i] > pp_aligned[i] and 
+                close[i] > s1_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                obv_slope_pos[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below EMA20 + RSI > 70 (overbought) + 4h downtrend + low vol
-            elif (close[i] < ema_20[i] and close[i-1] >= ema_20[i-1] and
-                  rsi[i] > 70 and ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] and
-                  vol_filter):
-                signals[i] = -0.20
+            # SHORT: Price below PP + below R1 + daily downtrend + OBV distribution
+            elif (close[i] < pp_aligned[i] and 
+                  close[i] < r1_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  not obv_slope_pos[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below EMA20 OR RSI > 70
-            if (close[i] < ema_20[i] and close[i-1] >= ema_20[i-1]) or rsi[i] > 70:
+            # EXIT LONG: Price closes below PP (pivot breakdown) OR daily trend turns down
+            if close[i] < pp_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above EMA20 OR RSI < 30
-            if (close[i] > ema_20[i] and close[i-1] <= ema_20[i-1]) or rsi[i] < 30:
+            # EXIT SHORT: Price closes above PP (pivot breakout) OR daily trend turns up
+            if close[i] > pp_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
