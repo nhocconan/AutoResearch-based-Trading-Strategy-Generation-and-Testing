@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1h Volume Breakout with 4h Trend and Daily Volume Filter
-# Hypothesis: Volume breakouts on 1h capture momentum bursts. 4h EMA50 provides trend filter (only trade in trend direction).
-# Daily volume average filter ensures we only trade on high-volume days, reducing false signals in low-activity periods.
-# Works in bull markets (breakouts continue trends) and bear markets (breakouts catch reversals or strong bounces).
-# Designed for low trade frequency (~15-35/year) with clear entry/exit rules.
+# 6h Elder Ray Power + 1d Trend + Volume Spike
+# Hypothesis: Elder Ray (Bull/Bear Power) measures trend strength relative to EMA.
+# Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Strong uptrend when Bull Power rising and positive; strong downtrend when Bear Power falling and negative.
+# Combined with 1d EMA34 trend filter and volume spikes for confirmation.
+# Works in both bull and bear markets by following Elder Ray-defined momentum.
+# Designed for low trade frequency (~15-30/year) with clear entry/exit rules.
 
-name = "1h_VolumeBreakout_4hTrend_DailyVolFilter"
-timeframe = "1h"
+name = "6h_ElderRay_Power_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,40 +25,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Data for EMA Trend Filter ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # === Daily Data for Volume Filter ===
+    # === Daily Data for EMA Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    daily_close_1d = df_1d['close'].values
     
-    # === 1h Indicators ===
-    # 20-period volume moving average for breakout detection
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(daily_close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # === Elder Ray Power (EMA13-based) ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = low - ema13   # Bear Power: Low - EMA13
+    
+    # Smooth the power signals (13-period EMA of the power)
+    bull_power_smooth = pd.Series(bull_power).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # === Volume Spike (20-period on 6h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    # 2-period high/low for breakout levels
-    high_2 = pd.Series(high).rolling(window=2, min_periods=2).max().values
-    low_2 = pd.Series(low).rolling(window=2, min_periods=2).min().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure all indicators ready
+    start_idx = 50  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(high_2[i]) or np.isnan(low_2[i])):
+        if (np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]) or 
+            np.isnan(ema_34_6h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,33 +66,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Volume breakout above 2-period high + above 4h EMA50 + volume > 1.5x daily avg
-            if (close[i] > high_2[i] and 
-                close[i] > ema_50_4h_aligned[i] and
-                volume[i] > (vol_ma[i] * 2.0) and  # intraday volume spike
-                volume[i] > (vol_avg_1d_aligned[i] * 1.5)):  # above daily average
-                signals[i] = 0.20
+            # LONG: Rising Bull Power (>0) + volume spike + price above daily EMA34
+            if (bull_power_smooth[i] > 0 and 
+                bull_power_smooth[i] > bull_power_smooth[i-1] and 
+                vol_spike[i] and
+                close[i] > ema_34_6h[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Volume breakout below 2-period low + below 4h EMA50 + volume > 1.5x daily avg
-            elif (close[i] < low_2[i] and 
-                  close[i] < ema_50_4h_aligned[i] and
-                  volume[i] > (vol_ma[i] * 2.0) and  # intraday volume spike
-                  volume[i] > (vol_avg_1d_aligned[i] * 1.5)):  # above daily average
-                signals[i] = -0.20
+            # SHORT: Falling Bear Power (<0) + volume spike + price below daily EMA34
+            elif (bear_power_smooth[i] < 0 and 
+                  bear_power_smooth[i] < bear_power_smooth[i-1] and 
+                  vol_spike[i] and
+                  close[i] < ema_34_6h[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below 2-period low or closes below 4h EMA50
-            if close[i] < low_2[i] or close[i] < ema_50_4h_aligned[i]:
+            # EXIT LONG: Bull Power turns negative or stops rising
+            if bull_power_smooth[i] <= 0 or bull_power_smooth[i] < bull_power_smooth[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 2-period high or closes above 4h EMA50
-            if close[i] > high_2[i] or close[i] > ema_50_4h_aligned[i]:
+            # EXIT SHORT: Bear Power turns positive or stops falling
+            if bear_power_smooth[i] >= 0 or bear_power_smooth[i] > bear_power_smooth[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
