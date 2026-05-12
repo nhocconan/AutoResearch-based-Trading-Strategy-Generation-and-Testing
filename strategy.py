@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_RollingRet_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,45 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Camarilla levels from 1d (pivot + volatility) ===
+    # ===== 6h Elder Ray (LTF) =====
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
+    # Smooth powers to reduce noise
+    bull_smooth = pd.Series(bull_power).ewm(span=8, adjust=False, min_periods=8).mean().values
+    bear_smooth = pd.Series(bear_power).ewm(span=8, adjust=False, min_periods=8).mean().values
+    
+    # ===== 6h Rolling Return Trend Filter (LTF) =====
+    ret_6 = np.zeros(n)
+    ret_6[6:] = (close[6:] - close[:-6]) / close[:-6]
+    ret_avg = pd.Series(ret_6).ewm(span=12, adjust=False, min_periods=12).mean().values
+    
+    # ===== Weekly Trend Filter (HTF) =====
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # ===== Daily Volume Spike Filter (HTF) =====
     df_1d = get_htf_data(prices, '1d')
-    # Calculate daily pivot and ranges
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    # Camarilla R3/S3 levels
-    r3_1d = close_1d + (range_1d * 1.1 / 4.0)
-    s3_1d = close_1d - (range_1d * 1.1 / 4.0)
-    # Align to 4h
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # === 12h Trend filter: EMA34 ===
-    df_12h = get_htf_data(prices, '12h')
-    ema34_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    
-    # === Volume spike filter: 1d volume > 2x 20-period avg ===
     vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    vol_avg_1d = pd.Series(vol_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (1.8 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
-    # === Session filter: 08-20 UTC ===
+    # ===== Session Filter: 08-20 UTC =====
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 40  # after EMA13, ret_6 warmup
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i]) or
-            np.isnan(ema34_12h_aligned[i]) or
+        if (np.isnan(bull_smooth[i]) or 
+            np.isnan(bear_smooth[i]) or
+            np.isnan(ret_avg[i]) or
+            np.isnan(ema34_1w_aligned[i]) or
             np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,28 +77,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close breaks above R3 + 12h uptrend + volume spike
-            if (close[i] > r3_1d_aligned[i] and
-                close[i] > ema34_12h_aligned[i] and
+            # Long: Bull power positive AND rising, rolling return positive, above weekly EMA34, volume spike
+            if (bull_smooth[i] > 0 and bull_smooth[i] > bull_smooth[i-1] and
+                ret_avg[i] > 0 and
+                close[i] > ema34_1w_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 + 12h downtrend + volume spike
-            elif (close[i] < s3_1d_aligned[i] and
-                  close[i] < ema34_12h_aligned[i] and
+            # Short: Bear power negative AND falling, rolling return negative, below weekly EMA34, volume spike
+            elif (bear_smooth[i] < 0 and bear_smooth[i] < bear_smooth[i-1] and
+                  ret_avg[i] < 0 and
+                  close[i] < ema34_1w_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close breaks below S3 or trend turns down
-            if close[i] < s3_1d_aligned[i] or close[i] < ema34_12h_aligned[i]:
+            # Exit long: Bull power turns negative or rolling return turns negative
+            if bull_smooth[i] <= 0 or ret_avg[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close breaks above R3 or trend turns up
-            if close[i] > r3_1d_aligned[i] or close[i] > ema34_12h_aligned[i]:
+            # Exit short: Bear power turns positive or rolling return turns positive
+            if bear_smooth[i] >= 0 or ret_avg[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
