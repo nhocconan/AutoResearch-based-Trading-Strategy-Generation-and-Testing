@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Price breaking above/below daily Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation captures strong trending moves while avoiding false breakouts. Works in bull/bear by following the higher timeframe trend direction. Uses 12h timeframe with 1d EMA34 trend filter for higher timeframe context.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Price breaking above/below daily Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation captures strong trending moves while avoiding false breakouts. Works in bull/bear by following the higher timeframe trend direction. Uses 4h timeframe with 1d EMA34 trend filter for higher timeframe context.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3_level = close_1d + 1.1 * camarilla_range / 2
     s3_level = close_1d - 1.1 * camarilla_range / 2
 
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_level_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_level_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
 
