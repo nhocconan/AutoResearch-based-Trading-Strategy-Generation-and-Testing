@@ -1,14 +1,12 @@
-# BTC/ETH Multi-Timeframe Reversal Strategy
-# Target: 1d timeframe with 1h confirmation for reduced false signals
-# Strategy: Use 1h momentum (MACD cross) to confirm 1d mean reversion signals (RSI extremes)
-# Entry: Long when 1d RSI < 30 and 1h MACD line crosses above signal
-# Entry: Short when 1d RSI > 70 and 1h MACD line crosses below signal
-# Exit: When 1d RSI returns to neutral zone (40-60) or opposite signal occurs
-# Position sizing: 0.25 for controlled risk
-# Expected trades: 15-25 per year (~60-100 total over 4 years)
+#!/usr/bin/env python3
+# 6H_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike
+# Hypothesis: 6-hour timeframe with 12-hour trend filter and volume spike confirmation. 
+# Uses Camarilla R3/S3 levels from daily pivot calculation for institutional breakout/breakdown levels.
+# Works in bull markets (breakouts continue with trend) and bear markets (mean reversion from extremes via short entries).
+# Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "BTCETH_1d_MeanReversion_MACD_Confirmation"
-timeframe = "1d"
+name = "6H_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,50 +18,49 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Extract price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d indicators (primary timeframe)
-    # RSI(14) for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Volume confirmation: volume > 2.0 * 24-period average (more stringent for 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # 1h indicators for confirmation (higher timeframe)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 35:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # MACD(12,26,9) on 1h
-    close_1h = df_1h['close'].values
-    ema_12 = pd.Series(close_1h).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema_26 = pd.Series(close_1h).ewm(span=26, adjust=False, min_periods=26).mean()
-    macd_line = ema_12 - ema_26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean()
-    macd_hist = macd_line - signal_line
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Align 1h indicators to 1d timeframe
-    macd_line_aligned = align_htf_to_ltf(prices, df_1h, macd_line.values)
-    signal_line_aligned = align_htf_to_ltf(prices, df_1h, signal_line.values)
-    macd_hist_aligned = align_htf_to_ltf(prices, df_1h, macd_hist.values)
+    # 1d data for Camarilla R3/S3 levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from prior day's OHLC
+    # R3 = Close + 1.1*(High-Low)*1.1/4, S3 = Close - 1.1*(High-Low)*1.1/4
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    rang = prev_high - prev_low
+    R3 = prev_close + 1.1 * rang * 1.1 / 4
+    S3 = prev_close - 1.1 * rang * 1.1 / 4
+    
+    # Align daily Camarilla levels to 6h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from index 35 to ensure all indicators are valid
-    for i in range(35, n):
-        # Skip if any required data is NaN
-        if (np.isnan(rsi_values[i]) or 
-            np.isnan(macd_line_aligned[i]) or 
-            np.isnan(signal_line_aligned[i])):
+    for i in range(50, n):  # Start after warmup for EMA50
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,34 +69,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG ENTRY: 1d RSI oversold (<30) + 1h MACD bullish crossover
-            if (rsi_values[i] < 30 and 
-                macd_line_aligned[i] > signal_line_aligned[i] and
-                macd_line_aligned[i-1] <= signal_line_aligned[i-1]):
+            # LONG: Price breaks above R3 + volume spike + price above 12h EMA50 (uptrend)
+            if (close[i] > R3_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT ENTRY: 1d RSI overbought (>70) + 1h MACD bearish crossover
-            elif (rsi_values[i] > 70 and 
-                  macd_line_aligned[i] < signal_line_aligned[i] and
-                  macd_line_aligned[i-1] >= signal_line_aligned[i-1]):
+            # SHORT: Price breaks below S3 + volume spike + price below 12h EMA50 (downtrend)
+            elif (close[i] < S3_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # LONG EXIT: RSI returns to neutral (>=40) or bearish crossover occurs
-            if (rsi_values[i] >= 40 or 
-                (macd_line_aligned[i] < signal_line_aligned[i] and 
-                 macd_line_aligned[i-1] >= signal_line_aligned[i-1])):
+            # EXIT LONG: Price re-enters Camarilla H-L range (between S3 and R3) OR closes below 12h EMA50
+            if (close[i] < R3_aligned[i] and close[i] > S3_aligned[i]) or \
+               close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # SHORT EXIT: RSI returns to neutral (<=60) or bullish crossover occurs
-            if (rsi_values[i] <= 60 or 
-                (macd_line_aligned[i] > signal_line_aligned[i] and 
-                 macd_line_aligned[i-1] <= signal_line_aligned[i-1])):
+            # EXIT SHORT: Price re-enters Camarilla H-L range (between S3 and R3) OR closes above 12h EMA50
+            if (close[i] < R3_aligned[i] and close[i] > S3_aligned[i]) or \
+               close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
