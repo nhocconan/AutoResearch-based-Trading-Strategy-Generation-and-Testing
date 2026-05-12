@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Ichimoku_Cloud_Trend_With_12h_Filter
-Hypothesis: On 4h timeframe, Ichimoku cloud breakouts with Tenkan/Kijun cross and price above/below cloud generate trend signals. 
-12h EMA50 trend filter ensures alignment with higher timeframe momentum. Volume > 1.5x 20-period average confirms strength. 
-Tenkan/Kijun cross exit provides timely reversal signals. Targets 20-50 trades/year (80-200 total over 4 years) with moderate turnover.
-Works in bull via cloud breakouts and bear via cloud breakdowns with trend filter.
+12h_KAMA_Trend_Plus_Volume_Spike
+Hypothesis: KAMA adapts to market noise—trend in low volatility, range-bound in high.
+On 12h, go long when KAUMA turns up (bullish trend) with volume spike (>2x avg),
+short when KAMA turns down (bearish trend) with volume spike.
+Use 1d ADX < 20 to filter ranging markets (avoid false signals).
+Targets 12-37 trades/year (50-150 total over 4 years) with low turnover.
+Works in bull via trend continuation, bear via mean-reversion at extremes with volume filter.
 """
 
-name = "4h_Ichimoku_Cloud_Trend_With_12h_Filter"
-timeframe = "4h"
+name = "12h_KAMA_Trend_Plus_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,66 +27,103 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data (call once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 60:
+    # Get 1d data (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
 
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 1d ADX(14) for trend strength filter
+    # ADX components: +DI, -DI, DX
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # first value
 
-    # Ichimoku components (9, 26, 52)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+        # Directional Movement
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        up_move[0] = 0
+        down_move[0] = 0
 
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
 
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
+        # Smoothed values
+        def smooth(values, period):
+            smoothed = np.zeros_like(values)
+            smoothed[period-1] = np.nansum(values[:period])
+            for i in range(period, len(values)):
+                smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
+            return smoothed
 
-    # Current cloud boundaries (Senkou Span A/B from 26 periods ago)
-    senkou_a_shifted = np.roll(senkou_a, 26)
-    senkou_b_shifted = np.roll(senkou_b, 26)
-    # First 26 values will be invalid
+        tr_sum = smooth(tr, period)
+        plus_dm_sum = smooth(plus_dm, period)
+        minus_dm_sum = smooth(minus_dm, period)
 
-    # Determine if price is above or below cloud
-    # Upper cloud boundary = max(Senkou A, Senkou B)
-    # Lower cloud boundary = min(Senkou A, Senkou B)
-    upper_cloud = np.maximum(senkou_a_shifted, senkou_b_shifted)
-    lower_cloud = np.minimum(senkou_a_shifted, senkou_b_shifted)
+        # Avoid division by zero
+        plus_di = np.where(tr_sum != 0, (plus_dm_sum / tr_sum) * 100, 0)
+        minus_di = np.where(tr_sum != 0, (minus_dm_sum / tr_sum) * 100, 0)
 
-    # Volume confirmation: 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+        # DX and ADX
+        dx = np.where((plus_di + minus_di) != 0,
+                      np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+        adx = smooth(dx, period)
+        return adx
+
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+
+    # Calculate KAMA on 12h close
+    def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
+        # Efficiency Ratio
+        change = np.abs(close - np.roll(close, er_period))
+        volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
+        # Manual rolling sum for volatility
+        vol_sum = np.zeros_like(close)
+        for i in range(len(close)):
+            start = max(0, i - er_period + 1)
+            vol_sum[i] = np.sum(np.abs(np.diff(close[start:i+1], prepend=close[start])))
+        er = np.where(vol_sum != 0, change / vol_sum, 0)
+
+        # Smoothing Constant
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+
+        # KAMA
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
+
+    kama = calculate_kama(close, 10, 2, 30)
+    kama_prev = np.roll(kama, 1)
+    kama_prev[0] = kama[0]
+    kama_dir = np.where(kama > kama_prev, 1, np.where(kama < kama_prev, -1, 0))
+
+    # Volume confirmation: 2.0x 20-period average
+    vol_avg_20 = np.zeros_like(volume)
+    for i in range(len(volume)):
+        start = max(0, i - 20 + 1)
+        vol_avg_20[i] = np.mean(volume[start:i+1]) if (i - start + 1) >= 20 else np.nan
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(52, n):  # Need 52 periods for Senkou B
-        # Get aligned values for current 4h bar
-        ema50 = ema50_12h_aligned[i]
-        tenkan_val = tenkan[i]
-        kijun_val = kijun[i]
-        upper_cloud_val = upper_cloud[i]
-        lower_cloud_val = lower_cloud[i]
+    for i in range(30, n):  # wait for KAMA and ADX warmup
+        # Get aligned values for current 12h bar
+        adx = adx_1d_aligned[i]
+        kama_direction = kama_dir[i]
         vol_avg_val = vol_avg_20[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(ema50) or np.isnan(tenkan_val) or np.isnan(kijun_val) or 
-            np.isnan(upper_cloud_val) or np.isnan(lower_cloud_val) or 
+        if (np.isnan(adx) or np.isnan(kama_direction) or 
             np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
@@ -93,31 +132,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Range filter: only trade when ADX < 20 (ranging market)
+        if adx >= 20:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
         if position == 0:
-            # LONG: Price above cloud + Tenkan > Kijun + volume surge
-            if (close[i] > upper_cloud_val and 
-                tenkan_val > kijun_val and 
-                volume[i] > vol_avg_val * 1.5):
+            # LONG: KAMA turning up + volume spike
+            if (kama_direction == 1 and 
+                volume[i] > vol_avg_val * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below cloud + Tenkan < Kijun + volume surge
-            elif (close[i] < lower_cloud_val and 
-                  tenkan_val < kijun_val and 
-                  volume[i] > vol_avg_val * 1.5):
+            # SHORT: KAMA turning down + volume spike
+            elif (kama_direction == -1 and 
+                  volume[i] > vol_avg_val * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Tenkan < Kijun (trend weakening) or price drops below cloud
-            if (tenkan_val < kijun_val or close[i] < lower_cloud_val):
+            # EXIT LONG: KAMA turning down
+            if kama_direction == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Tenkan > Kijun (trend reversing) or price rises above cloud
-            if (tenkan_val > kijun_val or close[i] > upper_cloud_val):
+            # EXIT SHORT: KAMA turning up
+            if kama_direction == 1:
                 signals[i] = 0.0
                 position = 0
             else:
