@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R1S1_Breakout_12hTrend_VolumeSpike
-Hypothesis: On 4h timeframe, buy when price breaks above Camarilla R1 level with volume >2x average and 12h EMA50 trending up; sell when price breaks below Camarilla S1 level with volume >2x average and 12h EMA50 trending down. Uses Camarilla pivot levels from daily data for structure, volume confirmation, and trend filter to avoid false breakouts, targeting low trade frequency (<30/year) to minimize fee drag while capturing strong trends in both bull and bear markets.
+12h_WilliamsAlligator_ElderRay
+Hypothesis: On 12h timeframe, use Williams Alligator (JAW, TEETH, LIPS) for trend direction,
+Elder Ray (Bull Power/Bear Power) for momentum confirmation, and 1-week high-low
+range for volatility filter. Enter long when price > TEETH, Bull Power > 0, and price
+above 1-week 50% retracement level; enter short when price < TEETH, Bear Power < 0,
+and price below 1-week 50% retracement level. Uses Williams Alligator for trend,
+Elder Ray for momentum, and weekly range for volatility filtering to capture trends
+in both bull and bear markets while minimizing false signals.
 """
 
-name = "4H_Camarilla_R1S1_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_ElderRay"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,53 +20,58 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1-week data for volatility filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
-    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
-    # Using previous day's data to avoid look-ahead
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    # First day will have NaN due to roll, handled by isnan check later
-    camarilla_range = prev_high_1d - prev_low_1d
-    r1_level = prev_close_1d + camarilla_range * 1.1 / 12
-    s1_level = prev_close_1d - camarilla_range * 1.1 / 12
+    # Williams Alligator (13,8,5 SMAs smoothed with 8,5,3 periods)
+    # JAW: 13-period SMA, smoothed by 8 periods
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.rolling(window=8, min_periods=8).mean().values
+    # TEETH: 8-period SMA, smoothed by 5 periods
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.rolling(window=5, min_periods=5).mean().values
+    # LIPS: 5-period SMA, smoothed by 3 periods
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = lips.rolling(window=3, min_periods=3).mean().values
 
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    close_12h = df_12h['close'].values
+    # Elder Ray (13-period EMA for Bull/Bear Power)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
 
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 1-week high-low range for volatility filter
+    # Calculate 50% retracement level of weekly range
+    weekly_range = high_1w - low_1w
+    weekly_mid = low_1w + (weekly_range * 0.5)
+    weekly_mid_aligned = align_htf_to_ltf(prices, df_1w, weekly_mid)
 
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Williams Alligator and Elder Ray to 12h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, prices, jaw)  # Already 12h data
+    teeth_aligned = align_htf_to_ltf(prices, prices, teeth)
+    lips_aligned = align_htf_to_ltf(prices, prices, lips)
+    bull_power_aligned = align_htf_to_ltf(prices, prices, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, prices, bear_power)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(13, n):  # Start after Alligator warmup
         # Skip if any required value is NaN
-        if (np.isnan(r1_level[i]) or np.isnan(s1_level[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(weekly_mid_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,33 +80,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 + 12h uptrend + volume spike
-            if (close[i] > r1_level[i] and 
-                close[i] > ema50_12h_aligned[i] and 
-                volume[i] > vol_avg_20[i] * 2.0):
-                signals[i] = 0.30
+            # LONG: Price > TEETH, Bull Power > 0, and price above weekly 50% level
+            if (close[i] > teeth_aligned[i] and 
+                bull_power_aligned[i] > 0 and 
+                close[i] > weekly_mid_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S1 + 12h downtrend + volume spike
-            elif (close[i] < s1_level[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
-                  volume[i] > vol_avg_20[i] * 2.0):
-                signals[i] = -0.30
+            # SHORT: Price < TEETH, Bear Power < 0, and price below weekly 50% level
+            elif (close[i] < teeth_aligned[i] and 
+                  bear_power_aligned[i] < 0 and 
+                  close[i] < weekly_mid_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S1 OR trend turns down
-            if close[i] < s1_level[i] or close[i] < ema50_12h_aligned[i]:
+            # EXIT LONG: Price < TEETH OR Bull Power <= 0
+            if close[i] < teeth_aligned[i] or bull_power_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R1 OR trend turns up
-            if close[i] > r1_level[i] or close[i] > ema50_12h_aligned[i]:
+            # EXIT SHORT: Price > TEETH OR Bear Power >= 0
+            if close[i] > teeth_aligned[i] or bear_power_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
 
     return signals
