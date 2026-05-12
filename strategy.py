@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot breakouts on 12h with 1d trend filter and volume spike.
-Works in bull via breakouts, in bear via mean-reversion touches of pivot levels.
-Uses 1d trend filter to avoid counter-trend trades, volume confirmation to filter noise.
-Target: 15-30 trades/year per symbol (60-120 total over 4 years).
-"""
+# 4h_Stochastic_Reversal_RiskOff
+# Hypothesis: In BTC/ETH, extreme Stochastic readings (overbought/oversold) combined with risk-off sentiment (VIX proxy via BTC volatility) and 1d trend filter capture mean-reversion moves. Works in bull via oversold bounces and bear via overbought reversals. Target: 20-30 trades/year per symbol.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Stochastic_Reversal_RiskOff"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,36 +20,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get 1d data for trend filter and volatility (VIX proxy)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
 
-    # Calculate Camarilla levels from previous 1d bar
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    rng = high_1d - low_1d
-    R1 = close_1d + rng * 1.1 / 12
-    S1 = close_1d - rng * 1.1 / 12
+    # 1d EMA50 for trend
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Align Camarilla levels to 12h timeframe (previous day's levels)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # 14-period Stochastic Oscillator
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    denominator = np.where(denominator == 0, 1, denominator)
+    stoch = 100 * (close - lowest_low) / denominator
 
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # BTC volatility as risk-off proxy (20-period ATR of 1d returns)
+    returns_1d = np.diff(np.log(close_1d), prepend=np.log(close_1d[0]))
+    atr_returns = pd.Series(np.abs(returns_1d)).rolling(window=20, min_periods=20).mean().values
+    atr_returns_aligned = align_htf_to_ltf(prices, df_1d, atr_returns)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
+    for i in range(20, n):
+        if np.isnan(stoch[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_returns_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,26 +58,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above R1 + 1d uptrend + volume spike
-            if close[i] > R1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # LONG: Oversold (<20) + 1d uptrend + rising volatility (risk-off fading)
+            if stoch[i] < 20 and close[i] > ema50_1d_aligned[i] and atr_returns_aligned[i] > atr_returns_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S1 + 1d downtrend + volume spike
-            elif close[i] < S1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # SHORT: Overbought (>80) + 1d downtrend + rising volatility (risk-off)
+            elif stoch[i] > 80 and close[i] < ema50_1d_aligned[i] and atr_returns_aligned[i] > atr_returns_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below S1 (mean reversion) or 1d trend turns down
-            if close[i] < S1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Stochastic crosses above 50 or 1d trend turns down
+            if stoch[i] > 50 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses above R1 (mean reversion) or 1d trend turns up
-            if close[i] > R1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Stochastic crosses below 50 or 1d trend turns up
+            if stoch[i] < 50 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
