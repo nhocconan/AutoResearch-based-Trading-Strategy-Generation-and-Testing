@@ -1,13 +1,13 @@
-# 6h_Camarilla_R3_S3_Breakout_1wTrend_Volume
-# Hypothesis: Weekly trend filter with daily Camarilla R3/S3 breakout on 6h timeframe.
-# Uses Camarilla R3/S3 from prior day's OHLC for mean-reversion at extremes.
-# In bull markets (price > weekly EMA50): long on R3 breakout, short on S3 breakdown.
-# In bear markets (price < weekly EMA50): short on R3 breakdown, long on S3 breakout.
-# Volume spike confirmation (2x 20-period SMA) reduces false breakouts.
-# Designed for low trade frequency (12-37/year) to avoid fee drag.
+#!/usr/bin/env python3
+# 12h_Donchian_20_Breakout_1dEMA_Trend_Volume
+# Hypothesis: Donchian(20) breakout on 12h timeframe with daily EMA trend filter and volume confirmation.
+# Long when price breaks above 20-period upper band with price > daily EMA and volume spike.
+# Short when price breaks below 20-period lower band with price < daily EMA and volume spike.
+# Exit on break of opposite band or when trend fails. Designed for low trade frequency to avoid fee drag.
+# Works in bull/bear markets by following daily EMA trend direction.
 
-name = "6h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian_20_Breakout_1dEMA_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,46 +24,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Camarilla R3/S3 for each day: based on prior day's OHLC
-    # R3 = close + 1.1 * (high - low) / 6
-    # S3 = close - 1.1 * (high - low) / 6
-    rng_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + 1.1 * rng_1d / 6
-    camarilla_s3 = close_1d - 1.1 * rng_1d / 6
+    # Calculate Donchian channels (20-period) on 12h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
 
-    # Align Camarilla levels to 6h timeframe (use prior day's levels for current day)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Get weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-
-    # Calculate volume spike threshold (2.0x 20-period SMA on 6h)
+    # Calculate volume spike threshold (2.0x 20-period SMA on 12h)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0
+    volume_spike = volume > (volume_sma20 * 2.0)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,67 +60,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Determine trend based on weekly EMA50
-        is_uptrend = close[i] > ema50_1w_aligned[i]
-
         if position == 0:
-            # In uptrend: look for R3 breakout (long) or S3 breakdown (short)
-            # In downtrend: look for S3 breakout (long) or R3 breakdown (short)
-            if is_uptrend:
-                # Uptrend: long on R3 breakout, short on S3 breakdown
-                if (close[i] > camarilla_r3_aligned[i] and 
-                    volume[i] > volume_sma20[i]):
-                    signals[i] = 0.25
-                    position = 1
-                elif (close[i] < camarilla_s3_aligned[i] and 
-                      volume[i] > volume_sma20[i]):
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # LONG: price breaks above upper Donchian with uptrend and volume spike
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume_spike[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: price breaks below lower Donchian with downtrend and volume spike
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume_spike[i]):
+                signals[i] = -0.25
+                position = -1
             else:
-                # Downtrend: long on S3 breakout, short on R3 breakdown
-                if (close[i] > camarilla_s3_aligned[i] and 
-                    volume[i] > volume_sma20[i]):
-                    signals[i] = 0.25
-                    position = 1
-                elif (close[i] < camarilla_r3_aligned[i] and 
-                      volume[i] > volume_sma20[i]):
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price touches or crosses below opposite level based on trend
-            if is_uptrend:
-                # In uptrend, exit long at S3
-                if close[i] < camarilla_s3_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # EXIT LONG: price breaks below lower Donchian or trend fails
+            if close[i] < donchian_low[i] or close[i] < ema34_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In downtrend, exit long at R3
-                if close[i] < camarilla_r3_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price touches or crosses above opposite level based on trend
-            if is_uptrend:
-                # In uptrend, exit short at R3
-                if close[i] > camarilla_r3_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # EXIT SHORT: price breaks above upper Donchian or trend fails
+            if close[i] > donchian_high[i] or close[i] > ema34_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In downtrend, exit short at S3
-                if close[i] > camarilla_s3_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
 
     return signals
