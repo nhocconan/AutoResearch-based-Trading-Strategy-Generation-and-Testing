@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 6h_LinearRegression_Trend_Follower
-# Hypothesis: Use 6h linear regression slope to detect medium-term trend, confirmed by 12h trend (EMA100) and volume spikes (>1.5x 30-period average). Enter long when regression slope > 0 and price > 12h EMA100 with volume spike; short when regression slope < 0 and price < 12h EMA100 with volume spike. Exit on regression slope cross. Targets 10-30 trades/year to minimize fee drift and work in both bull/bear markets via trend filter.
+# 4h_Camarilla_R1_S1_Breakout_Trend_Filter
+# Hypothesis: Use Camarilla pivot levels (R1/S1) from 1d combined with 1w EMA trend filter and volume confirmation (>2x 20-period average).
+# Enter long when price breaks above R1 with bullish trend and volume spike; short when price breaks below S1 with bearish trend and volume spike.
+# Exit when price returns to the 1d VWAP level or on trend reversal. Designed for 20-50 trades/year to minimize fee drag and work in both bull/bear markets via trend filter.
 
-name = "6h_LinearRegression_Trend_Follower"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -12,48 +14,57 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 100:
+    # Get 1d data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
 
-    # Calculate linear regression slope on 6h (20-period)
-    def linreg_slope(arr, window):
-        slopes = np.full_like(arr, np.nan, dtype=np.float64)
-        for i in range(window - 1, len(arr)):
-            y = arr[i - window + 1:i + 1]
-            x = np.arange(window)
-            if np.any(np.isnan(y)):
-                continue
-            slope = np.polyfit(x, y, 1)[0]
-            slopes[i] = slope
-        return slopes
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
 
-    lr_slope = linreg_slope(close, 20)
+    # Calculate Camarilla pivot levels for 1d
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    rang = high_1d - low_1d
+    r1_1d = close_1d + rang * 1.1 / 12
+    s1_1d = close_1d - rang * 1.1 / 12
+    # VWAP-like level: (H+L+C)/3
+    vwap_1d = (high_1d + low_1d + close_1d) / 3
 
-    # 12h EMA100 for trend filter
-    ema100_12h = pd.Series(close_12h).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema100_12h_aligned = align_htf_to_ltf(prices, df_12h, ema100_12h)
+    # Align 1d levels to 4h
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
 
-    # Volume confirmation: volume > 1.5x 30-period average
-    vol_avg_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # 1w EMA20 for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+
+    # Volume confirmation: volume > 2x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(lr_slope[i]) or np.isnan(ema100_12h_aligned[i]) or 
-            np.isnan(vol_avg_30[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(vwap_1d_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,30 +73,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: LR slope > 0 (bullish trend) + price > 12h EMA100 + volume spike
-            if (lr_slope[i] > 0 and 
-                close[i] > ema100_12h_aligned[i] and
-                volume[i] > vol_avg_30[i] * 1.5):
+            # LONG: Price breaks above R1 + price > 1w EMA20 (bullish trend) + volume spike
+            if (close[i] > r1_1d_aligned[i] and 
+                close[i] > ema20_1w_aligned[i] and
+                volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: LR slope < 0 (bearish trend) + price < 12h EMA100 + volume spike
-            elif (lr_slope[i] < 0 and 
-                  close[i] < ema100_12h_aligned[i] and
-                  volume[i] > vol_avg_30[i] * 1.5):
+            # SHORT: Price breaks below S1 + price < 1w EMA20 (bearish trend) + volume spike
+            elif (close[i] < s1_1d_aligned[i] and 
+                  close[i] < ema20_1w_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: LR slope turns negative
-            if lr_slope[i] < 0:
+            # EXIT LONG: Price returns to VWAP or trend turns bearish
+            if (close[i] < vwap_1d_aligned[i] or 
+                close[i] < ema20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: LR slope turns positive
-            if lr_slope[i] > 0:
+            # EXIT SHORT: Price returns to VWAP or trend turns bullish
+            if (close[i] > vwap_1d_aligned[i] or 
+                close[i] > ema20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
