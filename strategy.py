@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_Bollinger_Breakout_Volume_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,25 +17,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D DATA FOR CAMARILLA AND TREND ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1W DATA FOR TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
-    range_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + (range_1d * 1.1 / 4)
-    camarilla_s3 = close_1d - (range_1d * 1.1 / 4)
+    # Calculate EMA50 for weekly trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # 1D EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === BOLLINGER BANDS (20, 2.0) ===
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma20 + 2.0 * std20
+    lower_band = sma20 - 2.0 * std20
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,8 +42,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_4h[i]) or np.isnan(camarilla_s3_4h[i]) or 
-            np.isnan(ema34_1d_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_1d[i]) or np.isnan(sma20[i]) or np.isnan(std20[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,28 +52,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 + above trend + volume confirmation
-            if (close[i] > camarilla_r3_4h[i] and 
-                close[i] > ema34_1d_4h[i] and
+            # LONG: Price breaks above upper Bollinger Band + weekly uptrend + volume spike
+            if (close[i] > upper_band[i] and 
+                close[i] > ema50_1d[i] and
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + below trend + volume confirmation
-            elif (close[i] < camarilla_s3_4h[i] and 
-                  close[i] < ema34_1d_4h[i] and
+            # SHORT: Price breaks below lower Bollinger Band + weekly downtrend + volume spike
+            elif (close[i] < lower_band[i] and 
+                  close[i] < ema50_1d[i] and
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 OR below trend
-            if close[i] < camarilla_s3_4h[i] or close[i] < ema34_1d_4h[i]:
+            # EXIT LONG: Price closes below middle Bollinger Band (SMA20)
+            if close[i] < sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 OR above trend
-            if close[i] > camarilla_r3_4h[i] or close[i] > ema34_1d_4h[i]:
+            # EXIT SHORT: Price closes above middle Bollinger Band (SMA20)
+            if close[i] > sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
