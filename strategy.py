@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_4D_Donchian_UpperLower_With_Volume_Spike
-Hypothesis: 1-hour Donchian breakouts above the 4-day upper band (or below the 4-day lower band) with volume confirmation and 1d trend filter capture institutional breakout moves. Using 4d bands (vs 20-period) reduces noise and increases breakout quality. Volume spike (>1.5x 24-period average) confirms participation, while 1d EMA50 trend filter ensures directional alignment. Target: 20-40 trades/year per symbol.
+6h_1d_VolumeWeighted_Candlestick_Engulfing
+Hypothesis: Combining daily volume-weighted RSI with engulfing candlestick patterns on 6h provides mean-reversion entries during overextended moves while avoiding chop. The volume-weighted RSI identifies exhaustion, and engulfing candles confirm reversal. Works in both bull (buy dips) and bear (sell rallies) by fading extremes. Target: 15-25 trades/year per symbol.
 """
 
-name = "1h_4D_Donchian_UpperLower_With_Volume_Spike"
-timeframe = "1h"
+name = "6h_1d_VolumeWeighted_Candlestick_Engulfing"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,49 +17,56 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 24-period average (1 day of 1h bars)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
-    
-    # 4-hour data for 4-day Donchian channels (96 periods of 4h = 4 days)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 96:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # 4-day Donchian channels: highest high and lowest low of last 96 periods
-    dh_4h = pd.Series(high_4h).rolling(window=96, min_periods=96).max().values
-    dl_4h = pd.Series(low_4h).rolling(window=96, min_periods=96).min().values
-    
-    # 1-day data for EMA50 trend filter
+    # Volume-weighted RSI on daily timeframe (more responsive to institutional activity)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate price changes
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align all indicators to 1h timeframe
-    dh_4h_aligned = align_htf_to_ltf(prices, df_4h, dh_4h)
-    dl_4h_aligned = align_htf_to_ltf(prices, df_4h, dl_4h)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Volume-weighted average gain/loss
+    vol_weighted_gain = gain * volume_1d
+    vol_weighted_loss = loss * volume_1d
+    
+    # Wilder smoothing with volume weighting
+    avg_gain = pd.Series(vol_weighted_gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(vol_weighted_loss).ewm(alpha=1/14, adjust=False).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Engulfing pattern detection on 6h
+    bullish_engulf = (close > open_) & (open_ < close_) & (close > open_.shift(1)) & (open_ < close_.shift(1))
+    bearish_engulf = (close < open_) & (open_ > close_) & (close < open_.shift(1)) & (open_ > close_.shift(1))
+    
+    # Need open prices for engulfing - reconstruct from available data
+    open_prices = prices['open'].values
+    bullish_engulf = (close > open_prices) & (open_prices < close) & (close > np.roll(open_prices, 1)) & (open_prices < np.roll(close, 1))
+    bearish_engulf = (close < open_prices) & (open_prices > close) & (close < np.roll(open_prices, 1)) & (open_prices > np.roll(close, 1))
+    
+    # Handle first element
+    bullish_engulf[0] = False
+    bearish_engulf[0] = False
+    
+    # Align daily RSI to 6h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
-        if (np.isnan(dh_4h_aligned[i]) or
-            np.isnan(dl_4h_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if np.isnan(rsi_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,35 +75,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above 4d Donchian high + 1d EMA50 uptrend + volume spike
-            if (close[i] > dh_4h_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_spike[i]):
-                signals[i] = 0.20
+            # LONG: Oversold RSI + bullish engulfing candle
+            if (rsi_1d_aligned[i] < 30) and bullish_engulf[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 4d Donchian low + 1d EMA50 downtrend + volume spike
-            elif (close[i] < dl_4h_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_spike[i]):
-                signals[i] = -0.20
+            # SHORT: Overbought RSI + bearish engulfing candle
+            elif (rsi_1d_aligned[i] > 70) and bearish_engulf[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 4d Donchian low OR closes below 1d EMA50
-            if (close[i] < dl_4h_aligned[i]) or \
-               (close[i] < ema_50_1d_aligned[i]):
+            # EXIT LONG: RSI returns to neutral or bearish engulf
+            if (rsi_1d_aligned[i] >= 50) or bearish_engulf[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 4d Donchian high OR closes above 1d EMA50
-            if (close[i] > dh_4h_aligned[i]) or \
-               (close[i] > ema_50_1d_aligned[i]):
+            # EXIT SHORT: RSI returns to neutral or bullish engulf
+            if (rsi_1d_aligned[i] <= 50) or bullish_engulf[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
