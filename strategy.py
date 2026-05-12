@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S4_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S4_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -44,15 +44,15 @@ def generate_signals(prices):
     s3 = camarilla_base - range_1d * 1.1 / 4
     s4 = camarilla_base - range_1d * 1.1 / 2
     
-    # Align to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
     
     # 1D EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # === VOLUME SPIKE (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,9 +65,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or 
-            np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(ema34_1d_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(r4_12h[i]) or 
+            np.isnan(s3_12h[i]) or np.isnan(s4_12h[i]) or
+            np.isnan(ema34_1d_12h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,27 +77,27 @@ def generate_signals(prices):
         
         if position == 0:
             # LONG: Break above R4 with volume spike + price above 1d EMA34 (uptrend)
-            if (close[i] > r4_4h[i] and 
-                close[i] > ema34_1d_4h[i] and
+            if (close[i] > r4_12h[i] and 
+                close[i] > ema34_1d_12h[i] and
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
             # SHORT: Break below S4 with volume spike + price below 1d EMA34 (downtrend)
-            elif (close[i] < s4_4h[i] and 
-                  close[i] < ema34_1d_4h[i] and
+            elif (close[i] < s4_12h[i] and 
+                  close[i] < ema34_1d_12h[i] and
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # EXIT LONG: Price breaks below R3 (false breakout) OR below EMA34
-            if close[i] < r3_4h[i] or close[i] < ema34_1d_4h[i]:
+            if close[i] < r3_12h[i] or close[i] < ema34_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Price breaks above S3 (false breakout) OR above EMA34
-            if close[i] > s3_4h[i] or close[i] > ema34_1d_4h[i]:
+            if close[i] > s3_12h[i] or close[i] > ema34_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
