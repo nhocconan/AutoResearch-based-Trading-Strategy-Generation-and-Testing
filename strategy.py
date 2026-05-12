@@ -1,14 +1,10 @@
-#!/usr/bin/env python3
-"""
-6h_Camarilla_R3_S3_Breakout_WeeklyTrend_Volume
-Hypothesis: Uses daily Camarilla pivot levels (R3/S3) for breakout entries,
-confirmed by weekly trend (price above/below weekly VWAP) and volume surge.
-Designed for 6h timeframe to capture multi-day moves with low trade frequency.
-Works in both bull and bear markets by adapting to weekly trend context.
-"""
+# 4h_Combo_Filter_Strategy
+# Hypothesis: Combines 4h price momentum with 1d trend filter and volume spike to capture strong trends in both bull and bear markets.
+# Uses RSI for momentum, EMA for trend, and volume confirmation to reduce false signals.
+# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
 
-name = "6h_Camarilla_R3_S3_Breakout_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "4h_Combo_Filter_Strategy"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,55 +21,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivot points (call once before loop)
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 5:
+    # Get 1h data for momentum filter (RSI)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 14:
+        return np.zeros(n)
+    
+    # Get 1d data for trend filter (EMA)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Get weekly data for trend filter
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 5:
-        return np.zeros(n)
+    # Calculate RSI on 1h closes (14-period)
+    close_1h = df_1h['close'].values
+    delta = np.diff(close_1h, prepend=close_1h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1h, rsi)
 
-    # Calculate daily Camarilla pivot levels (standard formula)
-    # Based on previous day's high, low, close
-    hh_d = df_d['high'].values
-    ll_d = df_d['low'].values
-    cc_d = df_d['close'].values
+    # Calculate 50-period EMA on 1d closes for trend filter
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
 
-    # Camarilla levels
-    # R4 = C + (H-L)*1.1/2
-    # R3 = C + (H-L)*1.1/4
-    # R2 = C + (H-L)*1.1/6
-    # R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12
-    # S2 = C - (H-L)*1.1/6
-    # S3 = C - (H-L)*1.1/4
-    # S4 = C - (H-L)*1.1/2
-    r3_d = cc_d + (hh_d - ll_d) * 1.1 / 4
-    s3_d = cc_d - (hh_d - ll_d) * 1.1 / 4
-
-    # Calculate weekly VWAP for trend filter
-    typical_price_w = (df_w['high'] + df_w['low'] + df_w['close']) / 3
-    vwap_w = (typical_price_w * df_w['volume']).cumsum() / df_w['volume'].cumsum()
-    vwap_w = vwap_w.values
-
-    # Volume confirmation: 12-period average (3 days of 6h data)
-    vol_avg_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume confirmation: 20-period average on 4h data
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(12, n):  # Start from 12 to have enough data for volume average
-        # Get aligned values for current 6h bar
-        r3_d_aligned = align_htf_to_ltf(prices, df_d, r3_d)[i]
-        s3_d_aligned = align_htf_to_ltf(prices, df_d, s3_d)[i]
-        vwap_w_aligned = align_htf_to_ltf(prices, df_w, vwap_w)[i]
-        vol_avg_val = vol_avg_12[i]
+    for i in range(20, n):
+        # Get aligned values for current 4h bar
+        rsi_val = rsi_aligned[i]
+        ema_trend = ema_50_aligned[i]
+        vol_avg_val = vol_avg_20[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(r3_d_aligned) or np.isnan(s3_d_aligned) or 
-            np.isnan(vwap_w_aligned) or np.isnan(vol_avg_val)):
+        if (np.isnan(rsi_val) or np.isnan(ema_trend) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,30 +68,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above daily R3 with bullish weekly trend and volume surge
-            if (close[i] > r3_d_aligned and 
-                close[i] > vwap_w_aligned and 
-                volume[i] > vol_avg_val * 2.0):
+            # LONG: RSI > 55 (bullish momentum), price above EMA50 (uptrend), volume surge
+            if (rsi_val > 55 and 
+                close[i] > ema_trend and 
+                volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below daily S3 with bearish weekly trend and volume surge
-            elif (close[i] < s3_d_aligned and 
-                  close[i] < vwap_w_aligned and 
-                  volume[i] > vol_avg_val * 2.0):
+            # SHORT: RSI < 45 (bearish momentum), price below EMA50 (downtrend), volume surge
+            elif (rsi_val < 45 and 
+                  close[i] < ema_trend and 
+                  volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below daily S3 or weekly VWAP (reversal signal)
-            if (close[i] < s3_d_aligned or close[i] < vwap_w_aligned):
+            # EXIT LONG: RSI < 40 (momentum fading) or price below EMA50 (trend change)
+            if (rsi_val < 40 or close[i] < ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above daily R3 or weekly VWAP (reversal signal)
-            if (close[i] > r3_d_aligned or close[i] > vwap_w_aligned):
+            # EXIT SHORT: RSI > 60 (momentum fading) or price above EMA50 (trend change)
+            if (rsi_val > 60 or close[i] > ema_trend):
                 signals[i] = 0.0
                 position = 0
             else:
