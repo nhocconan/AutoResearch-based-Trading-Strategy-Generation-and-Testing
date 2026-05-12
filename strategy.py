@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Donchian20_Volume_Trend
-# Hypothesis: Trade Donchian(20) breakouts with volume confirmation and 1d EMA50 trend filter.
-# Uses price channel breakouts for clear entry/exit, volume to confirm momentum, and higher timeframe trend to avoid counter-trend trades.
-# Designed for low frequency (20-40 trades/year) to survive both bull and bear markets by following structure.
+# 12h_Donchian20_1dTrend_Volume
+# Hypothesis: Trade 12h breakouts of Donchian(20) channels confirmed by daily trend and volume.
+# Donchian channels provide clear support/resistance levels. Daily EMA50 filters trend direction.
+# Volume confirms breakout momentum. Designed for low frequency (12-30 trades/year) to survive
+# both bull and bear markets by following higher timeframe structure with minimal whipsaw.
 
-name = "4h_Donchian20_Volume_Trend"
-timeframe = "4h"
+name = "12h_Donchian20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -31,15 +32,25 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Donchian(20) channels ===
-    # Use 20-period high/low for upper/lower bands
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # === Donchian(20) channels from 1d timeframe ===
+    # Use 1d high/low for structural levels
+    df_1d_hl = get_htf_data(prices, '1d')
+    if len(df_1d_hl) < 20:
+        return np.zeros(n)
     
-    # === Volume confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    high_1d = df_1d_hl['high'].values
+    low_1d = df_1d_hl['low'].values
+    
+    # Calculate Donchian channels (20-period high/low)
+    high_roll = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 12h timeframe
+    donchian_high = align_htf_to_ltf(prices, df_1d_hl, high_roll)
+    donchian_low = align_htf_to_ltf(prices, df_1d_hl, low_roll)
+    
+    # === Volume confirmation (24-period average on 12h) ===
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,8 +59,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,26 +77,26 @@ def generate_signals(prices):
         breakout_down = close[i] < donchian_low[i]
         
         # Volume filter: above average
-        vol_ok = volume[i] > vol_ma_20[i]
+        vol_ok = volume[i] > vol_ma_24[i]
         
         if position == 0:
-            # LONG: breakout above upper band, uptrend, volume confirmation
+            # LONG: breakout above Donchian high, uptrend, volume confirmation
             if breakout_up and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakout below lower band, downtrend, volume confirmation
+            # SHORT: breakout below Donchian low, downtrend, volume confirmation
             elif breakout_down and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: breakdown below lower band or trend reversal
+            # EXIT LONG: breakdown below Donchian low or trend reversal
             if breakout_down or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: breakout above upper band or trend reversal
+            # EXIT SHORT: breakout above Donchian high or trend reversal
             if breakout_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
