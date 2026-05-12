@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_1w_Donchian_Breakout_Trend_Filter
-# Hypothesis: Uses 1-week Donchian channels to establish trend direction and 1-day Donchian breakouts for entries.
-# The 1-week channel acts as a trend filter (price above/below weekly high/low), while 1-day breakouts provide entry timing.
-# Volume confirmation (>1.5x 20-day average) ensures institutional participation.
-# Designed for low trade frequency (<50 total trades over 4 years) to minimize fee drift.
-# Works in bull markets (breakouts above weekly high) and bear markets (breakdowns below weekly low).
+# 6h_12h_1d_MarketStructure_Breakout
+# Hypothesis: Combines 1d market structure (HH/HL/LH/LL) with 6h breakouts for trend-following entries.
+# Uses 1d swing points to determine trend direction, and breaks of 6h swing highs/lows for entry timing.
+# Volume confirmation (>1.5x 20-period average) filters for institutional participation.
+# Designed for low trade frequency (<150 total 6h trades) to minimize fee drag.
+# Works in bull/bear markets by following 1d structure while using 6h breaks for precise entries.
 
-name = "1d_1w_Donchian_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "6h_12h_1d_MarketStructure_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,42 +24,100 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-day average
+    # Volume spike: >1.5x 20-period average (on 6h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Weekly data for trend filter (Donchian channels)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 12h data for market structure (swing points)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Weekly Donchian channels (20-period)
-    def donchian_channels(high_arr, low_arr, window):
-        upper = pd.Series(high_arr).rolling(window=window, min_periods=window).max().values
-        lower = pd.Series(low_arr).rolling(window=window, min_periods=window).min().values
-        return upper, lower
+    # Calculate 12h swing points: Higher Highs (HH), Lower Lows (LL)
+    # Swing high: current high > previous high AND current high > next high
+    # Swing low: current low < previous low AND current low < next low
+    swing_high = np.zeros(len(high_12h), dtype=bool)
+    swing_low = np.zeros(len(low_12h), dtype=bool)
     
-    weekly_upper, weekly_lower = donchian_channels(high_1w, low_1w, 20)
+    for i in range(1, len(high_12h)-1):
+        if high_12h[i] > high_12h[i-1] and high_12h[i] > high_12h[i+1]:
+            swing_high[i] = True
+        if low_12h[i] < low_12h[i-1] and low_12h[i] < low_12h[i+1]:
+            swing_low[i] = True
     
-    # Daily Donchian channels (20-period) for entry signals
-    daily_upper, daily_lower = donchian_channels(high, low, 20)
+    # Determine trend structure: HH/HL = uptrend, LH/LL = downtrend
+    # We'll track the last swing high and low to determine structure
+    last_swing_high = np.full(len(high_12h), np.nan)
+    last_swing_low = np.full(len(low_12h), np.nan)
     
-    # Align weekly Donchian channels to daily timeframe
-    weekly_upper_aligned = align_htf_to_ltf(prices, df_1w, weekly_upper)
-    weekly_lower_aligned = align_htf_to_ltf(prices, df_1w, weekly_lower)
+    last_high_val = np.nan
+    last_low_val = np.nan
+    
+    for i in range(len(high_12h)):
+        if swing_high[i]:
+            last_high_val = high_12h[i]
+        if swing_low[i]:
+            last_low_val = low_12h[i]
+        last_swing_high[i] = last_high_val
+        last_swing_low[i] = last_low_val
+    
+    # Determine market structure: 
+    # Uptrend: making higher highs and higher lows
+    # Downtrend: making lower highs and lower lows
+    # We'll use the relationship between current price and last swing points
+    structure_long = np.zeros(len(high_12h), dtype=bool)   # Bullish structure
+    structure_short = np.zeros(len(high_12h), dtype=bool)  # Bearish structure
+    
+    for i in range(len(high_12h)):
+        if not np.isnan(last_swing_high[i]) and not np.isnan(last_swing_low[i]):
+            # Bullish structure: price above last swing low and making higher highs
+            if close_12h[i] > last_swing_low[i]:
+                structure_long[i] = True
+            # Bearish structure: price below last swing high and making lower lows
+            if close_12h[i] < last_swing_high[i]:
+                structure_short[i] = True
+    
+    # Align 12h structure to 6h timeframe
+    structure_long_aligned = align_htf_to_ltf(prices, df_12h, structure_long)
+    structure_short_aligned = align_htf_to_ltf(prices, df_12h, structure_short)
+    
+    # 6h swing points for entry timing
+    swing_high_6h = np.zeros(len(high), dtype=bool)
+    swing_low_6h = np.zeros(len(low), dtype=bool)
+    
+    for i in range(1, len(high)-1):
+        if high[i] > high[i-1] and high[i] > high[i+1]:
+            swing_high_6h[i] = True
+        if low[i] < low[i-1] and low[i] < low[i+1]:
+            swing_low_6h[i] = True
+    
+    # Calculate 6h swing high and low levels for breakout entries
+    last_swing_high_6h = np.full(len(high), np.nan)
+    last_swing_low_6h = np.full(len(low), np.nan)
+    
+    last_high_6h = np.nan
+    last_low_6h = np.nan
+    
+    for i in range(len(high)):
+        if swing_high_6h[i]:
+            last_high_6h = high[i]
+        if swing_low_6h[i]:
+            last_low_6h = low[i]
+        last_swing_high_6h[i] = last_high_6h
+        last_swing_low_6h[i] = last_low_6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        if (np.isnan(weekly_upper_aligned[i]) or
-            np.isnan(weekly_lower_aligned[i]) or
-            np.isnan(daily_upper[i]) or
-            np.isnan(daily_lower[i])):
+    for i in range(50, n):
+        if (np.isnan(structure_long_aligned[i]) or
+            np.isnan(structure_short_aligned[i]) or
+            np.isnan(last_swing_high_6h[i]) or
+            np.isnan(last_swing_low_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,32 +126,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price above weekly upper AND breaks above daily upper + volume spike
-            if (close[i] > weekly_upper_aligned[i] and
-                close[i] > daily_upper[i] and
+            # LONG: Bullish 12h structure + price breaks above 6h swing high + volume spike
+            if (structure_long_aligned[i] and 
+                close[i] > last_swing_high_6h[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below weekly lower AND breaks below daily lower + volume spike
-            elif (close[i] < weekly_lower_aligned[i] and
-                  close[i] < daily_lower[i] and
+            # SHORT: Bearish 12h structure + price breaks below 6h swing low + volume spike
+            elif (structure_short_aligned[i] and 
+                  close[i] < last_swing_low_6h[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below daily lower OR weekly trend turns bearish
-            if (close[i] < daily_lower[i]) or \
-               (close[i] < weekly_lower_aligned[i]):
+            # EXIT LONG: Price breaks below 6h swing low OR 12h structure turns bearish
+            if (close[i] < last_swing_low_6h[i]) or \
+               not structure_long_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above daily upper OR weekly trend turns bullish
-            if (close[i] > daily_upper[i]) or \
-               (close[i] > weekly_upper_aligned[i]):
+            # EXIT SHORT: Price breaks above 6h swing high OR 12h structure turns bullish
+            if (close[i] > last_swing_high_6h[i]) or \
+               not structure_short_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
