@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
-# Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 1h timeframe when aligned with 4h EMA50 trend and confirmed by volume spike. Uses 4h EMA50 for trend filter (reduces whipsaw) and volume spike for institutional confirmation. Designed for low turnover with high win rate in both bull and bear markets by targeting 1h entries with 4h trend alignment.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume_SessionFilter
+# Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 1h timeframe when aligned with 4h EMA50 trend and confirmed by volume spike, restricted to active trading hours (08-20 UTC). This reduces noise trades during low-volume sessions, targeting 15-37 trades/year with high win rate in both bull and bear markets.
 # Timeframe: 1h, Target trades: 60-150 over 4 years (15-37/year).
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume_SessionFilter"
 timeframe = "1h"
 leverage = 1.0
 
@@ -50,12 +49,26 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
+    # Session filter: 08-20 UTC (active trading hours)
+    # Pre-compute hour array to avoid datetime operations in loop
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(60, n):  # Start after EMA50 warmup
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_spike[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        # Only trade during active session
+        if not session_mask[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
