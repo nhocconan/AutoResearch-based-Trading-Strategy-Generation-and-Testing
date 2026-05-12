@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Volume_Weighted_RSI_With_1dTrend"
-timeframe = "6h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVol"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,41 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== 1d Trend Filter (HTF) =====
+    # ===== 4h Trend Filter (HTF) =====
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    
+    # ===== Daily Pivot Points (1d) =====
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]
     
-    # ===== Volume-Weighted RSI (14) =====
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
+    r1 = pivot + (high_1d - low_1d)
+    s1 = pivot - (high_1d - low_1d)
     
-    # Weight gains/losses by volume
-    vol_ratio = volume / (np.mean(volume) + 1e-9)
-    weighted_gain = gain * vol_ratio
-    weighted_loss = loss * vol_ratio
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    avg_gain = pd.Series(weighted_gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(weighted_loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # ===== Daily Volume Spike Filter =====
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
-    rs = avg_gain / (avg_loss + 1e-9)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # ===== Volume Spike Filter =====
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * vol_ma)
+    # ===== Session Filter: 08-20 UTC =====
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema20_4h_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,31 +77,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + above 1d EMA50 + volume spike
-            if (rsi[i] < 30 and
-                close[i] > ema50_1d_aligned[i] and
-                vol_spike[i]):
-                signals[i] = 0.25
+            # Long: Price touches S1 + above 4h EMA20 + daily volume spike
+            if (low[i] <= s1_aligned[i] and
+                close[i] > ema20_4h_aligned[i] and
+                vol_spike_1d_aligned[i] > 0.5):
+                signals[i] = 0.20
                 position = 1
-            # Short: RSI > 70 (overbought) + below 1d EMA50 + volume spike
-            elif (rsi[i] > 70 and
-                  close[i] < ema50_1d_aligned[i] and
-                  vol_spike[i]):
-                signals[i] = -0.25
+            # Short: Price touches R1 + below 4h EMA20 + daily volume spike
+            elif (high[i] >= r1_aligned[i] and
+                  close[i] < ema20_4h_aligned[i] and
+                  vol_spike_1d_aligned[i] > 0.5):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 50 or closes below 1d EMA50
-            if rsi[i] > 50 or close[i] < ema50_1d_aligned[i]:
+            # Exit long: Price reaches pivot or closes below 4h EMA20
+            if high[i] >= pivot_aligned[i] or close[i] < ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: RSI < 50 or closes above 1d EMA50
-            if rsi[i] < 50 or close[i] > ema50_1d_aligned[i]:
+            # Exit short: Price reaches pivot or closes above 4h EMA20
+            if low[i] <= pivot_aligned[i] or close[i] > ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
