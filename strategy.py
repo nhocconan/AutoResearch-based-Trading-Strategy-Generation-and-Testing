@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 6h_VolumeSpike_Camarilla_R3S3_Breakout_1dTrend_Filter
-# Hypothesis: On 6h timeframe, enter long when price breaks above daily R3 with volume > 2x average and price > daily EMA34.
-# Enter short when price breaks below daily S3 with volume > 2x average and price < daily EMA34.
-# Exit when price crosses daily EMA34 (trend reversal).
-# Uses volume spike to confirm breakout strength and EMA34 for trend filter.
-# Works in bull markets via breakouts at R3 and in bear via short reversals at S3.
-# Targets 15-25 trades/year for low fee drag on 6h timeframe.
+# 4h_KAMA_Trend_Filter_Donchian_Breakout_With_Volume
+# Hypothesis: Use KAMA on 1d to determine long/short regime, then enter on 4h Donchian breakout
+# with volume confirmation. Exit on opposite Donchian breakout or when KAMA trend flips.
+# Works in bull (breakout long) and bear (breakout short) by using KAMA to avoid counter-trend.
+# KAMA adapts to choppy markets, reducing false breakouts. Targets 20-30 trades/year.
 
-name = "6h_VolumeSpike_Camarilla_R3S3_Breakout_1dTrend_Filter"
-timeframe = "6h"
+name = "4h_KAMA_Trend_Filter_Donchian_Breakout_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,33 +23,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot calculation and EMA34
+    # Load daily data for KAMA and Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     
-    # Calculate pivot point and range
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_range = daily_high - daily_low
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(daily_close, prepend=daily_close[0]))
+    volatility = np.sum(np.abs(np.diff(daily_close)), axis=0)
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = np.square(er * (fast_sc - slow_sc) + slow_sc)
+    # Initialize KAMA
+    kama = np.full_like(daily_close, np.nan, dtype=np.float64)
+    kama[0] = daily_close[0]
+    for i in range(1, len(daily_close)):
+        kama[i] = kama[i-1] + sc[i] * (daily_close[i] - kama[i-1])
     
-    # Camarilla R3 and S3 levels
-    r3 = daily_pivot + daily_range * 1.250
-    s3 = daily_pivot - daily_range * 1.250
+    # Donchian channels on daily (20-period)
+    def rolling_max(arr, window):
+        return np.convolve(arr, np.ones(window), 'valid')[:len(arr)-window+1] if len(arr) >= window else np.full_like(arr, np.nan)
+    def rolling_min(arr, window):
+        return np.convolve(arr, np.ones(window), 'valid')[:len(arr)-window+1] if len(arr) >= window else np.full_like(arr, np.nan)
     
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Pad arrays for alignment
+    if len(daily_high) >= 20:
+        donchian_high = np.concatenate([np.full(19, np.nan), 
+                                       np.array([np.max(daily_high[i-19:i+1]) for i in range(19, len(daily_high))])])
+        donchian_low = np.concatenate([np.full(19, np.nan),
+                                      np.array([np.min(daily_low[i-19:i+1]) for i in range(19, len(daily_low))])])
+    else:
+        donchian_high = np.full_like(daily_high, np.nan)
+        donchian_low = np.full_like(daily_low, np.nan)
     
-    # Align daily levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align daily indicators to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Volume confirmation: 20-period moving average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 50-period moving average on 4h
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,8 +79,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,32 +88,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        ema1d_trend = ema34_1d_aligned[i]
+        kama_val = kama_aligned[i]
+        upper = donchian_high_aligned[i]
+        lower = donchian_low_aligned[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: Price closes above R3 with volume > 2x average and close > daily EMA34
-            if close[i] > r3_val and close[i] > ema1d_trend and volume[i] > 2.0 * vol_ma_val:
+            # LONG: Price breaks above Donchian high with volume > 1.5x average and close > KAMA (uptrend)
+            if close[i] > upper and volume[i] > 1.5 * vol_ma_val and close[i] > kama_val:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below S3 with volume > 2x average and close < daily EMA34
-            elif close[i] < s3_val and close[i] < ema1d_trend and volume[i] > 2.0 * vol_ma_val:
+            # SHORT: Price breaks below Donchian low with volume > 1.5x average and close < KAMA (downtrend)
+            elif close[i] < lower and volume[i] > 1.5 * vol_ma_val and close[i] < kama_val:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below daily EMA34 (trend reversal)
-            if close[i] < ema1d_trend:
+            # EXIT LONG: Price breaks below Donchian low OR close < KAMA (trend change)
+            if close[i] < lower or close[i] < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above daily EMA34 (trend reversal)
-            if close[i] > ema1d_trend:
+            # EXIT SHORT: Price breaks above Donchian high OR close > KAMA (trend change)
+            if close[i] > upper or close[i] > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
