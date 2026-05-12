@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3S3_Breakout_12hTrend_Volume
-# Hypothesis: Combine 6h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
+# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Combine 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
 # Camarilla levels provide mean-reversion boundaries; breaks above R3 or below S3 indicate strong momentum.
-# Filtering by 12h EMA50 ensures trades align with medium-term trend, reducing false breakouts.
+# Filtering by 1d EMA50 ensures trades align with long-term trend, reducing false breakouts.
 # Volume confirmation adds conviction to breakouts.
 # Designed for 12-37 trades/year per symbol, works in both bull and bear via trend filter.
 
-name = "6h_Camarilla_R3S3_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,32 +24,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter and Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
 
-    # 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Calculate Camarilla levels from previous 12h bar
-    # Camarilla: H4 = C + 1.1*(H-L)/2, L4 = C - 1.1*(H-L)/2
-    # R3 = C + 1.1*(H-L)/2, S3 = C - 1.1*(H-L)/2
-    # Using previous 12h bar's high, low, close
-    prev_12h_high = df_12h['high'].shift(1).values  # Previous bar
-    prev_12h_low = df_12h['low'].shift(1).values
-    prev_12h_close = df_12h['close'].shift(1).values
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla: R3 = C + 1.1*(H-L)/2, S3 = C - 1.1*(H-L)/2
+    prev_1d_high = df_1d['high'].shift(1).values  # Previous bar
+    prev_1d_low = df_1d['low'].shift(1).values
+    prev_1d_close = df_1d['close'].shift(1).values
 
     # Calculate R3 and S3 levels
-    r3 = prev_12h_close + 1.1 * (prev_12h_high - prev_12h_low) / 2
-    s3 = prev_12h_close - 1.1 * (prev_12h_high - prev_12h_low) / 2
+    r3 = prev_1d_close + 1.1 * (prev_1d_high - prev_1d_low) / 2
+    s3 = prev_1d_close - 1.1 * (prev_1d_high - prev_1d_low) / 2
 
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
 
-    # Volume confirmation: current volume > 1.5x average of last 4 periods (4 hours)
+    # Volume confirmation: current volume > 1.5x average of last 4 periods (2 days)
     vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
     volume_ok = volume > (1.5 * vol_ma)
 
@@ -58,7 +56,7 @@ def generate_signals(prices):
 
     for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r3_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,9 +65,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from 12h EMA50
-        price_above_ema = close[i] > ema_50_12h_aligned[i]
-        price_below_ema = close[i] < ema_50_12h_aligned[i]
+        # Trend filter from 1d EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
 
         if position == 0:
             # LONG: Close breaks above R3 AND uptrend AND volume
