@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_RSI_Extreme_TrendV1
-# Hypothesis: 4h RSI extreme (overbought/oversold) with 1d EMA34 trend filter and volume spike confirmation.
-# RSI > 80 triggers short in downtrend, RSI < 20 triggers long in uptrend, both confirmed by volume spike (>1.5x 20-period average).
-# Exits when price crosses 1d EMA34 (trend reversal). Designed for 20-30 trades/year to avoid fee drag.
-# Works in bull/bear markets by following 1d trend direction.
+# 1d_WeeklyPivot_Breakout_TrendVolume_v1
+# Hypothesis: 1d price breaks above/below previous week's pivot levels with 1w trend filter and volume confirmation.
+# Uses weekly pivot points (PP, R1, S1) for key support/resistance, 1w EMA34 for trend direction,
+# and volume spike (1.8x 20-day average) to confirm breakout strength.
+# Designed for 10-20 trades/year to avoid fee drag. Works in bull/bear markets by following 1w trend.
 
-name = "4h_RSI_Extreme_TrendV1"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Breakout_TrendVolume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,39 +23,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot points and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly pivot points (PP, R1, S1) from previous week
+    pivot_pp = (high_1w + low_1w + close_1w) / 3.0
+    pivot_r1 = 2 * pivot_pp - low_1w
+    pivot_s1 = 2 * pivot_pp - high_1w
 
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly pivots to daily timeframe (available after weekly close)
+    pivot_pp_aligned = align_htf_to_ltf(prices, df_1w, pivot_pp)
+    pivot_r1_aligned = align_htf_to_ltf(prices, df_1w, pivot_r1)
+    pivot_s1_aligned = align_htf_to_ltf(prices, df_1w, pivot_s1)
 
-    # Calculate volume SMA20 for volume confirmation
+    # Get 1w EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+
+    # Calculate daily volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
+    volume_spike_threshold = volume_sma20 * 1.8  # Require 1.8x average volume
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(pivot_pp_aligned[i]) or np.isnan(pivot_r1_aligned[i]) or 
+            np.isnan(pivot_s1_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,30 +67,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI < 20 (oversold) in 1d uptrend with volume spike
-            if (rsi[i] < 20 and 
-                close[i] > ema34_1d_aligned[i] and 
+            # LONG: Break above weekly R1 in 1w uptrend with volume spike
+            if (close[i] > pivot_r1_aligned[i] and 
+                close[i] > ema34_1w_aligned[i] and 
                 volume[i] > volume_sma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI > 80 (overbought) in 1d downtrend with volume spike
-            elif (rsi[i] > 80 and 
-                  close[i] < ema34_1d_aligned[i] and 
+            # SHORT: Break below weekly S1 in 1w downtrend with volume spike
+            elif (close[i] < pivot_s1_aligned[i] and 
+                  close[i] < ema34_1w_aligned[i] and 
                   volume[i] > volume_sma20[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below 1d EMA34 (trend reversal)
-            if close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price closes below weekly pivot point (trend reversal)
+            if close[i] < pivot_pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above 1d EMA34 (trend reversal)
-            if close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price closes above weekly pivot point (trend reversal)
+            if close[i] > pivot_pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
