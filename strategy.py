@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Refined
 Hypothesis: On 12h timeframe, Camarilla R1/S1 levels from prior 1d act as strong support/resistance. 
 Breaks above R1 with 1d EMA34 uptrend and volume > 1.5x 20-period average generate long signals; 
 breaks below S1 with 1d EMA34 downtrend and volume surge generate shorts. 
 Uses 1d Bollinger Band width < 50th percentile to filter choppy regimes. 
 Targets 12-37 trades/year (50-150 total over 4 years) with low turnover to minimize fee drag.
 Works in bull via momentum breaks and bear via mean-reversion at extremes with trend filter.
+Refined: Added minimum 2-bar hold time to reduce churn.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Refined"
 timeframe = "12h"
 leverage = 1.0
 
@@ -70,6 +71,7 @@ def generate_signals(prices):
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0  # Track holding period
 
     for i in range(60, n):
         # Get aligned values for current 12h bar
@@ -86,6 +88,7 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
             continue
@@ -95,6 +98,7 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
             continue
@@ -106,27 +110,34 @@ def generate_signals(prices):
                 volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
+                bars_since_entry = 0
             # SHORT: Price breaks below S1 + price below EMA34 + volume surge
             elif (close[i] < s1_level and 
                   close[i] < ema34 and 
                   volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
+                bars_since_entry += 1
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or price below EMA34
-            if (close[i] < s1_level or close[i] < ema34):
+            # EXIT LONG: Price breaks below S1 or price below EMA34 (min 2-bar hold)
+            if bars_since_entry >= 2 and (close[i] < s1_level or close[i] < ema34):
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
                 signals[i] = 0.25
+                bars_since_entry += 1
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or price above EMA34
-            if (close[i] > r1_level or close[i] > ema34):
+            # EXIT SHORT: Price breaks above R1 or price above EMA34 (min 2-bar hold)
+            if bars_since_entry >= 2 and (close[i] > r1_level or close[i] > ema34):
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             else:
                 signals[i] = -0.25
+                bars_since_entry += 1
 
     return signals
