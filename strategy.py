@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_1D_Camarilla_R1_S1_Breakout_TrendVol
-Hypothesis: 12-hour breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
+4h_1D_Camarilla_R1_S1_Breakout_TrendVol
+Hypothesis: 4-hour breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
 Only takes long when price breaks above R1 with volume spike and daily uptrend, short when breaks below S1 with volume spike and daily downtrend.
 Uses tight entry conditions (trend + volume + level break) to target 20-50 trades per year, avoiding overtrading.
 Works in bull markets via trend-following breaks and in bear markets via counter-trend reversals at extreme daily levels.
 """
 
-name = "12h_1D_Camarilla_R1_S1_Breakout_TrendVol"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1_S1_Breakout_TrendVol"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -46,7 +46,7 @@ def generate_signals(prices):
     R1_1d = prev_close_1d + 1.1 * rang_1d * 1.0 / 4
     S1_1d = prev_close_1d - 1.1 * rang_1d * 1.0 / 4
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
     S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
