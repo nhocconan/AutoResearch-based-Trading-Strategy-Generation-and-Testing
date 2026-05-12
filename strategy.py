@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_FundingRateMeanReversion_1dTrend
-# Hypothesis: Use funding rate mean reversion as a contrarian signal on 6h timeframe.
-# Long when funding rate is extremely negative (shorts overcrowded) and price above 1d EMA50.
-# Short when funding rate is extremely positive (longs overcrowded) and price below 1d EMA50.
-# Funding rates are mean-reverting and provide edge in both bull and bear markets by fading extreme sentiment.
-# Designed for low frequency (15-30 trades/year) with high conviction trades.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Breakout of Camarilla R3/S3 levels on 4h timeframe with 1d EMA50 trend filter and volume confirmation.
+# Camarilla levels act as strong support/resistance in ranging markets, while breakouts capture momentum.
+# 1d EMA50 filters trend direction, volume confirms breakout strength.
+# Designed for 20-40 trades/year to minimize fee drag and work in both bull and bear markets.
 
-name = "6h_FundingRateMeanReversion_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +18,10 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # === 1d EMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
@@ -30,26 +32,38 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Funding rate z-score (30-day lookback) ===
-    # Note: funding data is available via external path, but we simulate using price-based proxy
-    # In practice, replace with actual funding rate data: pd.read_parquet(funding_path)
-    # Here we use a proxy: deviations from 200-period moving average as sentiment extreme
-    ma_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    deviation = (close - ma_200) / ma_200
-    # Z-score of deviation over 30 periods (approx 10 days on 6h)
-    mean_dev = pd.Series(deviation).rolling(window=30, min_periods=30).mean().values
-    std_dev = pd.Series(deviation).rolling(window=30, min_periods=30).std().values
-    # Avoid division by zero
-    z_score = np.where(std_dev != 0, (deviation - mean_dev) / std_dev, 0.0)
+    # === Camarilla levels from previous day (using 1d data) ===
+    # Camarilla levels calculated from previous day's OHLC
+    # R3 = C + (H-L) * 1.1/2, S3 = C - (H-L) * 1.1/2
+    # We use the previous day's data to avoid look-ahead
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Previous day's OHLC
+    prev_close = df_1d['close'].iloc[:-1].values
+    prev_high = df_1d['high'].iloc[:-1].values
+    prev_low = df_1d['low'].iloc[:-1].values
+    
+    # Calculate Camarilla R3 and S3 for previous day
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align to 4h timeframe (each 1d bar corresponds to 16 * 4h bars)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # === Volume confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Ensure indicators are stable
+    start_idx = 60  # Ensure indicators are stable (enough for EMA50 and previous day data)
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(z_score[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,29 +75,28 @@ def generate_signals(prices):
         trend_up = close[i] > ema_50_1d_aligned[i]
         trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Funding rate extremes: z-score > 2.0 or < -2.0
-        funding_extreme_long = z_score[i] < -2.0  # Extremely negative = contrarian long
-        funding_extreme_short = z_score[i] > 2.0   # Extremely positive = contrarian short
+        # Volume filter
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: Extremely negative funding (shorts overcrowded) + uptrend
-            if funding_extreme_long and trend_up:
+            # LONG: Price breaks above Camarilla R3, uptrend, volume
+            if close[i] > camarilla_r3_aligned[i] and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Extremely positive funding (longs overcrowded) + downtrend
-            elif funding_extreme_short and trend_down:
+            # SHORT: Price breaks below Camarilla S3, downtrend, volume
+            elif close[i] < camarilla_s3_aligned[i] and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Funding normalizes or trend breaks
-            if z_score[i] > -0.5 or not trend_up:  # Exit when funding less extreme or trend fails
+            # EXIT LONG: Price falls below Camarilla S3 or trend reversal
+            if close[i] < camarilla_s3_aligned[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Funding normalizes or trend breaks
-            if z_score[i] < 0.5 or not trend_down:  # Exit when funding less extreme or trend fails
+            # EXIT SHORT: Price rises above Camarilla R3 or trend reversal
+            if close[i] > camarilla_r3_aligned[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
