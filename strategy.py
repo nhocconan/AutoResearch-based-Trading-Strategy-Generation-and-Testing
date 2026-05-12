@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Keltner_Breakout_Trend_Volume"
-timeframe = "4h"
+name = "12h_RSI_Momentum_Bias"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,31 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter and ATR
+    # Load 1d data for trend filter and momentum
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA20 for trend filter
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate ATR(14) on 1d for Keltner channels
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
-    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 12h RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Keltner channels on 4h using 1d ATR
-    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_keltner = ema_20_4h + (2.0 * atr_14_1d_aligned)
-    lower_keltner = ema_20_4h - (2.0 * atr_14_1d_aligned)
-    
-    # Volume spike: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.8 * vol_avg)
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,8 +45,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,27 +55,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above upper Keltner + above 1d EMA20 + volume spike
-            if close[i] > upper_keltner[i] and close[i] > ema_20_1d_aligned[i] and vol_spike[i]:
-                signals[i] = 0.30
+            # Long: RSI > 55 + above 1d EMA50 + volume filter
+            if rsi[i] > 55 and close[i] > ema_50_1d_aligned[i] and vol_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Keltner + below 1d EMA20 + volume spike
-            elif close[i] < lower_keltner[i] and close[i] < ema_20_1d_aligned[i] and vol_spike[i]:
-                signals[i] = -0.30
+            # Short: RSI < 45 + below 1d EMA50 + volume filter
+            elif rsi[i] < 45 and close[i] < ema_50_1d_aligned[i] and vol_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below lower Keltner
-            if close[i] < lower_keltner[i]:
+            # Exit long: RSI < 45
+            if rsi[i] < 45:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above upper Keltner
-            if close[i] > upper_keltner[i]:
+            # Exit short: RSI > 55
+            if rsi[i] > 55:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
