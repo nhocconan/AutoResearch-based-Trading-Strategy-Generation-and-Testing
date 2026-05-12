@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_Follow_With_Chop_Filter
-# Hypothesis: Kaufman Adaptive Moving Average (KAMA) on daily timeframe provides trend direction.
-# Chopiness Index (14) filters for trending markets (CHOP < 38.2) to avoid whipsaws in ranging conditions.
-# Entry when price crosses KAMA with volume confirmation (>1.5x 20-day average volume).
-# Designed for low trade frequency (<25/year) to minimize fee drag in 1d timeframe.
-# Works in both bull and bear markets by following trend only when market is trending (low chop).
+# 4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe provide key support/resistance.
+# Breakouts above R1 or below S1 with volume confirmation and daily EMA34 trend filter capture
+# institutional moves. Works in bull/bear by following the daily trend. Target: 20-40 trades/year.
 
-name = "1d_KAMA_Trend_Follow_With_Chop_Filter"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,87 +17,54 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Chopiness Index filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 1d data for Camarilla pivots and EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
 
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate KAMA on daily close
-    close_series = pd.Series(close)
-    # Efficiency Ratio (ER) over 10 periods
-    change = abs(close - np.roll(close, 10))
-    change[0:10] = np.nan  # First 10 values invalid
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # Will be calculated properly below
-    # Recalculate volatility as sum of absolute changes over 10 periods
-    volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # Fast=2, Slow=30
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate Camarilla pivot levels for previous day
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # Using previous day's values to avoid look-ahead
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = np.nan  # First day has no previous
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
 
-    # Calculate Chopiness Index on weekly data
-    def true_range(high, low, close_prev):
-        return np.maximum(np.maximum(high - low, np.abs(high - close_prev)), np.abs(low - close_prev))
+    cam_r1 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 12
+    cam_s1 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 12
 
-    tr1w = np.zeros_like(high_1w)
-    tr1w[0] = high_1w[0] - low_1w[0]  # First TR
-    for i in range(1, len(high_1w)):
-        tr1w[i] = true_range(high_1w[i], low_1w[i], close_1w[i-1])
+    # Get 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
 
-    # Sum of TR over 14 periods
-    atr1w = np.zeros_like(high_1w)
-    for i in range(13, len(high_1w)):
-        atr1w[i] = np.sum(tr1w[i-13:i+1])
+    # Align daily levels to 4h timeframe (wait for daily close)
+    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
+    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate Chopiness Index: 100 * log10(ATR14 / (sum of ranges)) / log10(14)
-    ranges1w = high_1w - low_1w
-    sum_ranges1w = np.zeros_like(high_1w)
-    for i in range(13, len(high_1w)):
-        sum_ranges1w[i] = np.sum(ranges1w[i-13:i+1])
-
-    chop = np.zeros_like(high_1w)
-    for i in range(13, len(high_1w)):
-        if sum_ranges1w[i] > 0:
-            chop[i] = 100 * np.log10(atr1w[i] / sum_ranges1w[i]) / np.log10(14)
-        else:
-            chop[i] = 50  # Default to neutral when undefined
-
-    # Align Chop to daily timeframe (with 2-bar delay for weekly confirmation)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop, additional_delay_bars=2)
-
-    # KAMA aligned to daily (no additional delay needed for trend)
-    kama_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama)
-
-    # Volume confirmation: 1.5x 20-day average volume
+    # Volume spike: 2.0x 20-period SMA
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_threshold = volume_sma20 * 1.5
+    volume_spike_threshold = volume_sma20 * 2.0
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after sufficient data for indicators
+    for i in range(35, n):  # Start after EMA34 needs 34 bars + 1 for safety
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_sma20[i]) or np.isnan(close[i])):
+        if (np.isnan(cam_r1_aligned[i]) or np.isnan(cam_s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -108,28 +73,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price crosses above KAMA, low chop (trending market), volume confirmation
-            if (close[i-1] <= kama_aligned[i-1] and close[i] > kama_aligned[i] and
-                chop_aligned[i] < 38.2 and volume[i] > volume_threshold[i]):
+            # LONG: Break above R1 with volume spike and uptrend
+            if (close[i] > cam_r1_aligned[i] and
+                volume[i] > volume_spike_threshold[i] and
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below KAMA, low chop (trending market), volume confirmation
-            elif (close[i-1] >= kama_aligned[i-1] and close[i] < kama_aligned[i] and
-                  chop_aligned[i] < 38.2 and volume[i] > volume_threshold[i]):
+            # SHORT: Break below S1 with volume spike and downtrend
+            elif (close[i] < cam_s1_aligned[i] and
+                  volume[i] > volume_spike_threshold[i] and
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA OR chop becomes too high (ranging market)
-            if (close[i] < kama_aligned[i]) or (chop_aligned[i] > 61.8):
+            # EXIT LONG: Price closes below S1 (reversal) or opposite signal
+            if close[i] < cam_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA OR chop becomes too high (ranging market)
-            if (close[i] > kama_aligned[i]) or (chop_aligned[i] > 61.8):
+            # EXIT SHORT: Price closes above R1 (reversal) or opposite signal
+            if close[i] > cam_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
