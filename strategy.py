@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_Momentum_VolumeSpike_12hTrend
-Hypothesis: TRIX momentum (12,9) combined with volume spikes and 12h EMA50 trend filter captures strong directional moves while avoiding whipsaws. Works in bull (momentum continuation) and bear (sharp reversals) markets by filtering with higher timeframe trend.
+1h_OrderBookImbalance_Reversal_4hTrend
+Hypothesis: Intraday reversals occur when order book imbalance (proxied by VWAP deviation) reaches extremes while higher timeframe trend remains intact. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets by combining mean reversion with trend filter.
 """
 
-name = "4h_TRIX_Momentum_VolumeSpike_12hTrend"
-timeframe = "4h"
+name = "1h_OrderBookImbalance_Reversal_4hTrend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -18,32 +18,37 @@ def generate_signals(prices):
         return np.zeros(n)
 
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter (call once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # VWAP approximation: (high + low + close) / 3 * volume
+    typical_price = (high + low + close) / 3.0
+    vwap = (typical_price * volume).cumsum() / volume.cumsum()
+    vwap = np.where(volume.cumsum() == 0, typical_price, vwap)
+
+    # Deviation from VWAP as % - proxy for order book imbalance
+    deviation = (close - vwap) / vwap * 100
+
+    # Z-score of deviation over 20 periods
+    dev_mean = pd.Series(deviation).rolling(window=20, min_periods=20).mean().values
+    dev_std = pd.Series(deviation).rolling(window=20, min_periods=20).std().values
+    z_score = np.where(dev_std != 0, (deviation - dev_mean) / dev_std, 0)
+
+    # Get 4h data for trend filter (call once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    # 12h EMA50 for trend
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-
-    # Calculate TRIX: EMA(EMA(EMA(close, 12), 12), 12) then % change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix_raw = pd.Series(ema3).pct_change() * 100  # percentage
-    trix = trix_raw.fillna(0).values
-
-    # Volume confirmation: volume > 2x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    close_4h = df_4h['close'].values
+    # 4h EMA20 for trend
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
-        if np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_20[i]):
+    for i in range(20, n):
+        if np.isnan(ema20_4h_aligned[i]) or np.isnan(z_score[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,29 +57,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX positive + rising + volume spike + 12h uptrend
-            if trix[i] > 0 and trix[i] > trix[i-1] and volume[i] > vol_avg_20[i] * 2 and close[i] > ema50_12h_aligned[i]:
-                signals[i] = 0.30
+            # LONG: Extreme negative deviation (oversold) + 4h uptrend
+            if z_score[i] < -2.0 and close[i] > ema20_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: TRIX negative + falling + volume spike + 12h downtrend
-            elif trix[i] < 0 and trix[i] < trix[i-1] and volume[i] > vol_avg_20[i] * 2 and close[i] < ema50_12h_aligned[i]:
-                signals[i] = -0.30
+            # SHORT: Extreme positive deviation (overbought) + 4h downtrend
+            elif z_score[i] > 2.0 and close[i] < ema20_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX turns negative or 12h trend turns down
-            if trix[i] < 0 or close[i] < ema50_12h_aligned[i]:
+            # EXIT LONG: Deviation returns to mean or 4h trend turns down
+            if abs(z_score[i]) < 0.5 or close[i] < ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: TRIX turns positive or 12h trend turns up
-            if trix[i] > 0 or close[i] > ema50_12h_aligned[i]:
+            # EXIT SHORT: Deviation returns to mean or 4h trend turns up
+            if abs(z_score[i]) < 0.5 or close[i] > ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
 
     return signals
