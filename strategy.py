@@ -1,14 +1,16 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1S1_Breakout_4hTrend_1dVolumeFilter
-Hypothesis: Camarilla pivot points on 1h provide precise entry/exit levels. 
-Trend filter from 4h EMA20 ensures trades align with higher timeframe momentum.
-Volume filter from 1d average volume > 1.5x 20-period average reduces false breakouts.
-Designed for 15-30 trades/year on 1h to minimize fee drag while capturing trends in both bull and bear markets.
+12h_Donchian_Breakout_With_1d_Trend_Filter
+Hypothesis: Donchian(20) breakouts on 12h timeframe capture intermediate-term trends,
+while 1d EMA(50) filter ensures trades align with higher timeframe trend.
+Volume confirmation reduces false breakouts. Designed for 12-37 trades/year to
+minimize fee drag and work in both bull and bear markets by filtering for trend
+alignment.
 """
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolumeFilter"
-timeframe = "1h"
+name = "12h_Donchian_Breakout_With_1d_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,48 +27,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for trend filter (call once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-
-    close_4h = df_4h['close'].values
-    # Calculate EMA20 on 4h close
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-
-    # Get 1d data for volume filter (call once before loop)
+    # Get 1d data (call once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    volume_1d = df_1d['volume'].values
-    # Calculate 20-period average volume on 1d
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Calculate Camarilla levels for 1h (using previous bar's OHLC)
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We calculate these for each bar using previous bar's OHLC
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # Set first bar values to avoid NaN propagation
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Calculate Donchian(20) on 12h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+
+    # Calculate 12h volume average for confirmation
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after warmup for indicators
-        # Skip if any required data is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i]) or
-            np.isnan(R1[i]) or np.isnan(S1[i])):
+    for i in range(50, n):
+        # Skip if any values are NaN
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,37 +57,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        vol_1d_current = volume_1d[i // 24] if i // 24 < len(volume_1d) else volume_1d[-1]
-        vol_avg_val = vol_avg_20_1d_aligned[i]
+        # Check volume confirmation (volume > 1.5x 20-period average)
+        volume_confirm = volume[i] > vol_avg_20[i] * 1.5
 
         if position == 0:
-            # LONG: Price breaks above R1 + 4h uptrend (close > EMA20) + 1d volume surge
-            if (close[i] > R1[i] and 
-                close[i] > ema_20_4h_aligned[i] and 
-                vol_1d_current > vol_avg_val * 1.5):
-                signals[i] = 0.20
+            # LONG: Price breaks above Donchian upper + above 1d EMA50 + volume confirmation
+            if close[i] > high_20[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + 4h downtrend (close < EMA20) + 1d volume surge
-            elif (close[i] < S1[i] and 
-                  close[i] < ema_20_4h_aligned[i] and 
-                  vol_1d_current > vol_avg_val * 1.5):
-                signals[i] = -0.20
+            # SHORT: Price breaks below Donchian lower + below 1d EMA50 + volume confirmation
+            elif close[i] < low_20[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or 4h trend turns down
-            if (close[i] < S1[i] or close[i] < ema_20_4h_aligned[i]):
+            # EXIT LONG: Price crosses below Donchian lower or below 1d EMA50
+            if close[i] < low_20[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or 4h trend turns up
-            if (close[i] > R1[i] or close[i] > ema_20_4h_aligned[i]):
+            # EXIT SHORT: Price crosses above Donchian upper or above 1d EMA50
+            if close[i] > high_20[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
