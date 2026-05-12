@@ -1,14 +1,11 @@
-#!/usr/bin/env python3
-"""
-12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-Hypothesis: Camarilla R1/S1 breakouts with weekly trend filter and volume confirmation capture institutional breakouts in both bull and bear markets.
-Breakouts above R1 + weekly uptrend = long; breakdowns below S1 + weekly downtrend = short.
-Uses weekly EMA for trend filter to avoid whipsaws and capture major moves.
-Target: 15-30 trades/year per symbol with disciplined risk management.
-"""
+# Solution: 4h_TradingView_AVWAP_Crossover_Trend_Filter
+# Hypothesis: Anchored Volume Weighted Average Price (VWAP) crossovers with 1d EMA50 trend filter
+# and volume confirmation capture institutional momentum. Anchors reset at daily/weekly starts.
+# AVWAP acts as dynamic support/resistance, reducing whipsaws in choppy markets.
+# Target: 25-40 trades/year per symbol with disciplined risk management.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_TradingView_AVWAP_Crossover_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,40 +21,42 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = pd.to_datetime(prices['open_time'])
 
-    # Get weekly data for trend filter (call once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-
-    # Calculate daily pivot points for Camarilla levels
+    # Get 1d data for trend filter (call once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels: R1 = C + (H-L)*1.12/12, S1 = C - (H-L)*1.12/12
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.12 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.12 / 12
-    
-    # Align daily Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # 1d EMA50 for trend
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate typical price and VWAP components
+    typical_price = (high + low + close) / 3.0
+    tpv = typical_price * volume
+
+    # Initialize AVWAP arrays with daily anchors
+    avwap = np.full(n, np.nan)
+    cum_tpv = 0.0
+    cum_vol = 0.0
+
+    # Calculate AVWAP with daily resets
+    for i in range(n):
+        # Reset at start of each day (00:00 UTC)
+        if i == 0 or open_time[i].date() != open_time[i-1].date():
+            cum_tpv = 0.0
+            cum_vol = 0.0
+        cum_tpv += tpv[i]
+        cum_vol += volume[i]
+        if cum_vol > 0:
+            avwap[i] = cum_tpv / cum_vol
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
+    for i in range(50, n):
+        if np.isnan(avwap[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,26 +65,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above Camarilla R1 + weekly uptrend + volume spike
-            if close[i] > camarilla_r1_aligned[i] and close[i] > ema50_1w_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # LONG: Close crosses above AVWAP + 1d uptrend + volume confirmation
+            if close[i] > avwap[i] and close[i-1] <= avwap[i-1] and close[i] > ema50_1d_aligned[i] and volume[i] > np.median(volume[max(0, i-20):i+1]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below Camarilla S1 + weekly downtrend + volume spike
-            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema50_1w_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # SHORT: Close crosses below AVWAP + 1d downtrend + volume confirmation
+            elif close[i] < avwap[i] and close[i-1] >= avwap[i-1] and close[i] < ema50_1d_aligned[i] and volume[i] > np.median(volume[max(0, i-20):i+1]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below Camarilla S1 or weekly trend turns down
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Close crosses below AVWAP or 1d trend turns down
+            if close[i] < avwap[i] and close[i-1] >= avwap[i-1] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses above Camarilla R1 or weekly trend turns up
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Close crosses above AVWAP or 1d trend turns up
+            if close[i] > avwap[i] and close[i-1] <= avwap[i-1] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
