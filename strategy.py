@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_Breakout_1dTrend_Volume_v2"
-timeframe = "6h"
+name = "4h_1w_Pivot_1d_EMA50_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for pivot calculation
+    # Load weekly data for pivot calculation (using previous week's data to avoid look-ahead)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     high_1w = df_1w['high'].values
@@ -35,22 +35,18 @@ def generate_signals(prices):
     weekly_range = shift_high_1w - shift_low_1w
     weekly_r1 = weekly_pivot + weekly_range * 1.1 / 12
     weekly_s1 = weekly_pivot - weekly_range * 1.1 / 12
-    weekly_r2 = weekly_pivot + weekly_range * 1.1 / 6
-    weekly_s2 = weekly_pivot - weekly_range * 1.1 / 6
     
-    # Align weekly levels to 6h timeframe
+    # Align weekly levels to 4h timeframe
     weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
     
     # Load daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: current volume > 1.5x 24-period average (4 days of 6h data)
+    # Volume filter: current volume > 1.5x 24-period average (6 days of 4h data)
     vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_filter = volume > (1.5 * vol_avg)
     
@@ -62,8 +58,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(weekly_r2_aligned[i]) or np.isnan(weekly_s2_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_filter[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,24 +67,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above weekly R1 + above daily EMA34 + volume filter
-            if close[i] > weekly_r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
+            # Long: price breaks above weekly R1 + above daily EMA50 + volume filter
+            if close[i] > weekly_r1_aligned[i] and close[i] > ema_50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1 + below daily EMA34 + volume filter
-            elif close[i] < weekly_s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
+            # Short: price breaks below weekly S1 + below daily EMA50 + volume filter
+            elif close[i] < weekly_s1_aligned[i] and close[i] < ema_50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below weekly S1 or below daily EMA34
-            if close[i] < weekly_s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price breaks below weekly S1 or below daily EMA50
+            if close[i] < weekly_s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above weekly R1 or above daily EMA34
-            if close[i] > weekly_r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price breaks above weekly R1 or above daily EMA50
+            if close[i] > weekly_r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
