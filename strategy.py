@@ -1,11 +1,12 @@
-# 12h_1D_Camarilla_R4S4_Breakout_Volume
-# Hypothesis: Breakouts at daily Camarilla R4/S4 levels with volume confirmation on 12h timeframe.
-# Uses 1d timeframe for Camarilla levels and momentum confirmation, 12h for entry/exit.
+#!/usr/bin/env python3
+# 4h_1D_Camarilla_R4S4_Breakout_Volume
+# Hypothesis: Breakouts at daily Camarilla R4/S4 levels with volume confirmation on 4h timeframe.
+# Uses 1d timeframe for Camarilla levels and momentum confirmation, 4h for entry/exit.
 # Designed to work in both bull and bear markets by requiring volume confirmation and momentum alignment.
-# Targets 12-37 trades/year on 12h timeframe to avoid fee drag.
+# Targets 20-50 trades/year on 4h timeframe to avoid fee drag.
 
-name = "12h_1D_Camarilla_R4S4_Breakout_Volume"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R4S4_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
