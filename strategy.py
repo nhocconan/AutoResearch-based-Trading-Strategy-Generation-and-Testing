@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: On 4h timeframe, breakouts above daily R1 or below daily S1 with daily EMA trend filter and volume spike confirmation.
-# Uses daily Camarilla pivot levels (R1, S1) from prior day's OHLC. Long when price breaks above R1 with uptrend (price > daily EMA34) and volume spike.
-# Short when price breaks below S1 with downtrend (price < daily EMA34) and volume spike.
-# Designed for low trade frequency (20-50/year) to avoid fee drag. Works in bull/bear markets by following daily EMA trend direction.
-# Exit on opposite Camarilla level touch (S1 for long exit, R1 for short exit).
-# Focus on BTC/ETH as primary targets.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike
+# Hypothesis: Breakout of daily Camarilla R1/S1 levels with 1-day EMA trend filter and volume spike confirmation on 12h timeframe.
+# Uses prior day's OHLC to calculate same-day Camarilla levels (R1, S1). Enters long when price breaks above R1 with uptrend (price > EMA34) and volume > 2x 20-period SMA.
+# Enters short when price breaks below S1 with downtrend (price < EMA34) and volume spike.
+# Exits on touch of opposite level (S1 for long exit, R1 for short exit).
+# Designed for low trade frequency (12-37/year) to avoid fee drag. Works in bull/bear markets by following daily trend.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -42,7 +41,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + 1.1 * rng_1d / 12
     camarilla_s1 = close_1d - 1.1 * rng_1d / 12
 
-    # Align Camarilla levels to 4h timeframe (use prior day's levels for current day)
+    # Align Camarilla levels to 12h timeframe (use prior day's levels for current day)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
@@ -50,7 +49,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate volume spike threshold (2.0x 20-period SMA on 4h)
+    # Calculate volume spike threshold (2.0x 20-period SMA on 12h)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 2.0
