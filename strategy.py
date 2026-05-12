@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1wTrend"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_12hTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,34 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w trend filter: EMA34
-    df_1w = get_htf_data(prices, '1w')
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 12h trend filter: EMA50
+    df_12h = get_htf_data(prices, '12h')
+    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Daily Camarilla levels (use previous day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate Camarilla levels for each day using previous day's data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # TRIX: triple EMA of ROC
+    close_series = pd.Series(close)
+    # ROC 1-period
+    roc = close_series.pct_change(1)
+    # EMA1 of ROC
+    ema1 = roc.ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA2 of EMA1
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA3 of EMA2 (TRIX)
+    trix = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
     
-    # Camarilla R3 and S3 from previous day
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 6
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 6
-    
-    # Align to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Volume spike: volume > 1.5 * 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough data for warmup
+    start_idx = 50  # need enough data for TRIX and 12h EMA50
     
     for i in range(start_idx, n):
-        # Skip if 1w trend data not ready
-        if np.isnan(ema34_1w_aligned[i]):
+        # Skip if 12h trend data not ready
+        if np.isnan(ema50_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,24 +53,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R3 + 1w uptrend
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_1w_aligned[i]:
+            # Long: TRIX crosses above zero + volume spike + 12h uptrend
+            if (trix[i] > 0 and trix[i-1] <= 0 and  # TRIX bullish crossover
+                volume_spike[i] and                  # volume confirmation
+                close[i] > ema50_12h_aligned[i]):    # 12h uptrend filter
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + 1w downtrend
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_1w_aligned[i]:
+            # Short: TRIX crosses below zero + volume spike + 12h downtrend
+            elif (trix[i] < 0 and trix[i-1] >= 0 and   # TRIX bearish crossover
+                  volume_spike[i] and                   # volume confirmation
+                  close[i] < ema50_12h_aligned[i]):     # 12h downtrend filter
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price closes below S3 or 1w trend turns down
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit long when TRIX crosses below zero
+            if trix[i] < 0 and trix[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price closes above R3 or 1w trend turns up
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit short when TRIX crosses above zero
+            if trix[i] > 0 and trix[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
