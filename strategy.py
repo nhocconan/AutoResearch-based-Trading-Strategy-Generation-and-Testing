@@ -1,34 +1,50 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
-# Hypothesis: Use Camarilla pivot levels on 1h for mean-reversion entries, filtered by 4h EMA trend and volume spike.
-# Long when price breaks above R1 with 4h uptrend and volume spike; short when breaks below S1 with 4h downtrend and volume spike.
-# Exit on opposite Camarilla level (S1 for long, R1 for short) or trend failure.
-# Designed for 15-30 trades/year to avoid fee drag. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend).
+# 6h_Stochastic_Pullback_WeeklyTrend
+# Hypothesis: Use weekly trend direction (based on weekly SMA50) to filter trades on 6h.
+# Enter long when weekly trend is up and price pulls back to 6h VWAP (oversold but within trend).
+# Enter short when weekly trend is down and price pulls back to 6h VWAP (overbought but within trend).
+# Uses slow stochastic (14,3,3) for oversold/overbought signals within the weekly trend.
+# Designed for low frequency (10-30 trades/year) to avoid fee drag. Works in bull (buy pullbacks in uptrend)
+# and bear (sell pullbacks in downtrend) with weekly trend filter.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Stochastic_Pullback_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
+def stochastic(high, low, close, k_period=14, d_period=3):
     """
-    Calculate Camarilla pivot levels for a single period.
-    Returns R1, S1, R2, S2, R3, S3, R4, S4.
+    Calculate Stochastic Oscillator (%K and %D).
+    Returns %K and %D arrays.
     """
-    typical = (high + low + close) / 3.0
-    range_val = high - low
-    R1 = close + range_val * 1.1 / 12
-    S1 = close - range_val * 1.1 / 12
-    R2 = close + range_val * 1.1 / 6
-    S2 = close - range_val * 1.1 / 6
-    R3 = close + range_val * 1.1 / 4
-    S3 = close - range_val * 1.1 / 4
-    R4 = close + range_val * 1.1 / 2
-    S4 = close - range_val * 1.1 / 2
-    return R1, S1, R2, S2, R3, S3, R4, S4
+    n = len(high)
+    lowest_low = np.zeros(n)
+    highest_high = np.zeros(n)
+    
+    for i in range(n):
+        if i < k_period:
+            lowest_low[i] = np.min(low[0:i+1])
+            highest_high[i] = np.max(high[0:i+1])
+        else:
+            lowest_low[i] = np.min(low[i-k_period+1:i+1])
+            highest_high[i] = np.max(high[i-k_period+1:i+1])
+    
+    # Avoid division by zero
+    diff = highest_high - lowest_low
+    k_percent = np.where(diff != 0, 100 * (close - lowest_low) / diff, 0)
+    
+    # Smooth %K to get %D (simple moving average of %K)
+    d_percent = np.zeros(n)
+    for i in range(n):
+        if i < d_period:
+            d_percent[i] = np.mean(k_percent[0:i+1])
+        else:
+            d_percent[i] = np.mean(k_percent[i-d_period+1:i+1])
+    
+    return k_percent, d_percent
 
 def generate_signals(prices):
     n = len(prices)
@@ -40,38 +56,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter and Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels on 4h data
-    R1_4h, S1_4h, R2_4h, S2_4h, R3_4h, S3_4h, R4_4h, S4_4h = calculate_camarilla(high_4h, low_4h, close_4h)
+    # Weekly SMA50 for trend filter
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
     
-    # 4h EMA34 for trend filter
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 6h VWAP (volume-weighted average price)
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price)
     
-    # Volume confirmation: 20-period average on 1h
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Slow Stochastic (14,3,3) on 6h data
+    k_percent, d_percent = stochastic(high, low, close, k_period=14, d_period=3)
     
-    # Align 4h data to 1h timeframe
-    R1_4h_aligned = align_htf_to_ltf(prices, df_4h, R1_4h)
-    S1_4h_aligned = align_htf_to_ltf(prices, df_4h, S1_4h)
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Align weekly SMA50 to 6h timeframe
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure EMA is stable
+    start_idx = 50  # Ensure weekly SMA50 is stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(R1_4h_aligned[i]) or np.isnan(S1_4h_aligned[i]) or 
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(sma_50_1w_aligned[i]) or np.isnan(k_percent[i]) or np.isnan(d_percent[i]) or np.isnan(vwap[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,35 +93,40 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: 4h EMA34 direction
-        trend_up = close[i] > ema_34_4h_aligned[i]
-        trend_down = close[i] < ema_34_4h_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > sma_50_1w_aligned[i]
+        weekly_downtrend = close[i] < sma_50_1w_aligned[i]
         
-        # Volume filter
-        vol_ok = volume[i] > vol_ma_20[i]
+        # Stochastic signals for pullback entries
+        stoch_oversold = k_percent[i] < 20 and d_percent[i] < 20
+        stoch_overbought = k_percent[i] > 80 and d_percent[i] > 80
+        
+        # Price near VWAP (within 0.5% for entry)
+        vwap_distance = abs(close[i] - vwap[i]) / vwap[i]
+        near_vwap = vwap_distance < 0.005
         
         if position == 0:
-            # LONG: price breaks above R1 with 4h uptrend and volume spike
-            if close[i] > R1_4h_aligned[i] and trend_up and vol_ok:
-                signals[i] = 0.20
+            # LONG: weekly uptrend + oversold stochastic + price near VWAP (pullback)
+            if weekly_uptrend and stoch_oversold and near_vwap:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1 with 4h downtrend and volume spike
-            elif close[i] < S1_4h_aligned[i] and trend_down and vol_ok:
-                signals[i] = -0.20
+            # SHORT: weekly downtrend + overbought stochastic + price near VWAP (pullback)
+            elif weekly_downtrend and stoch_overbought and near_vwap:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: price breaks below S1 or trend fails
-            if close[i] < S1_4h_aligned[i] or not trend_up:
+            # EXIT LONG: weekly trend turns down OR stochastic becomes overbought (exit pullback)
+            if not weekly_uptrend or (k_percent[i] > 80 and d_percent[i] > 80):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above R1 or trend fails
-            if close[i] > R1_4h_aligned[i] or not trend_down:
+            # EXIT SHORT: weekly trend turns up OR stochastic becomes oversold (exit pullback)
+            if not weekly_downtrend or (k_percent[i] < 20 and d_percent[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
