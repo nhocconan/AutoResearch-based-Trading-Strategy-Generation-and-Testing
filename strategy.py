@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Direction_RSI_Chop_Filter_v2"
-timeframe = "1d"
+name = "6h_Keltner_Channel_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,50 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== KAMA (Kaufman Adaptive Moving Average) =====
-    # Efficiency Ratio (ER) = |net change| / sum(|changes|)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    direction = np.abs(np.diff(close, n=10, prepend=close[:10]))
-    er = direction / (np.sum(change.reshape(-1, 1) * np.tril(np.ones((10, 10))), axis=1) + 1e-10)
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # ===== 1d Trend Filter (HTF) =====
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # ===== RSI(14) =====
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d EMA(50) for trend
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # ===== Choppiness Index (14) =====
-    atr = np.zeros(n)
-    tr1 = high - low
-    tr2 = np.abs(np.roll(high, 1) - close)
-    tr3 = np.abs(np.roll(low, 1) - close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ===== Keltner Channel (10-period EMA, ATR(10)*2) =====
+    ema10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    kc_upper = ema10 + 2 * atr10
+    kc_lower = ema10 - 2 * atr10
     
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(np.sum(atr.reshape(-1, 1) * np.tril(np.ones((14, 14))), axis=1) / 
-                          (np.log10(max_high - min_low) * 14)) if np.any(max_high > min_low) else 50
-    chop = np.where(max_high == min_low, 50, chop)
+    # ===== Volume Spike Filter =====
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)
     
-    # ===== Signals =====
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,24 +57,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: KAMA up + RSI > 50 + Chop < 61.8 (trending)
-            if kama[i] > kama[i-1] and rsi[i] > 50 and chop[i] < 61.8:
+            # Long: Close crosses above KC upper + above 1d EMA50 + volume spike
+            if (close[i] > kc_upper[i] and close[i-1] <= kc_upper[i-1] and
+                close[i] > ema50_1d_aligned[i] and
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down + RSI < 50 + Chop < 61.8 (trending)
-            elif kama[i] < kama[i-1] and rsi[i] < 50 and chop[i] < 61.8:
+            # Short: Close crosses below KC lower + below 1d EMA50 + volume spike
+            elif (close[i] < kc_lower[i] and close[i-1] >= kc_lower[i-1] and
+                  close[i] < ema50_1d_aligned[i] and
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA down OR RSI < 40 OR Chop > 61.8 (choppy)
-            if kama[i] < kama[i-1] or rsi[i] < 40 or chop[i] > 61.8:
+            # Exit long: Close crosses below KC lower OR below 1d EMA50
+            if close[i] < kc_lower[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA up OR RSI > 60 OR Chop > 61.8 (choppy)
-            if kama[i] > kama[i-1] or rsi[i] > 60 or chop[i] > 61.8:
+            # Exit short: Close crosses above KC upper OR above 1d EMA50
+            if close[i] > kc_upper[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
