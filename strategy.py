@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter
-# Hypothesis: 4h breakout of daily Camarilla R1/S1 levels filtered by 1d trend (EMA34) and volume spike (2x avg volume).
-# Uses 1d EMA34 for trend filter to avoid counter-trend trades, volume spike for confirmation.
-# Designed for 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
-# Works in bull/bear by following 1d trend, avoiding false breakouts in ranging markets.
+# 12h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: 12h breakout of daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
+# Uses daily trend to avoid counter-trend trades, volume spikes confirm breakout strength.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drift.
+# Works in bull/bear by following daily trend - avoids whipsaw in sideways markets.
 
-name = "4h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,9 +23,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot levels and trend filter
+    # Get 1d data for Camarilla pivot levels (R1, S1)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
 
     high_1d = df_1d['high'].values
@@ -40,18 +40,18 @@ def generate_signals(prices):
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
 
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-
-    # Align 1d indicators to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+
+    # Get 1d data for EMA34 trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate 4h volume SMA20 for volume confirmation
+    # Calculate 12h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0  # Require 2x average volume for confirmation
+    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
