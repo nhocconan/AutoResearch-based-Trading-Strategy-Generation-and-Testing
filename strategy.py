@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h Aroon Oscillator + Volume Spike + Daily Trend Filter
-# Hypothesis: Aroon Oscillator identifies strong trends (values near +100/-100 indicate strong uptrend/downtrend).
-# Combined with volume spikes to confirm institutional participation and daily EMA trend filter,
-# this strategy captures strong momentum moves while avoiding chop. Designed for low trade frequency (~20-30/year).
-# Works in both bull and bear markets by following the trend as defined by higher timeframe.
+# 4h Williams Alligator + Volume Spike + Daily Trend
+# Hypothesis: Williams Alligator identifies trend formation (jaws/teeth/lips divergence).
+# Jaw (13-period smoothed), Teeth (8-period), Lips (5-period). 
+# Strong uptrend when Lips > Teeth > Jaws; strong downtrend when Lips < Teeth < Jaws.
+# Combined with volume spikes for confirmation and daily EMA trend filter to align with higher timeframe trend.
+# Works in both bull and bear markets by following Alligator-defined trends.
+# Designed for low trade frequency (~20-40/year) with clear entry/exit rules.
 
-name = "4h_Aroon_Volume_DailyTrend"
+name = "4h_WilliamsAlligator_Volume_DailyTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,21 +36,28 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(daily_close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Aroon Oscillator (period=25) ===
-    # Days since highest high
-    highest_high_idx = pd.Series(high).rolling(window=25, min_periods=1).apply(lambda x: x.argmax(), raw=True)
-    days_since_high = 24 - highest_high_idx  # 25-period: 0 to 24 days ago
+    # === Williams Alligator (periods: 13, 8, 5) ===
+    # Smoothed Moving Average (SMMA) function
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA formula
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Days since lowest low
-    lowest_low_idx = pd.Series(low).rolling(window=25, min_periods=1).apply(lambda x: x.argmin(), raw=True)
-    days_since_low = 24 - lowest_low_idx
+    jaws = smma(high, 13)  # Jaw (Blue) - 13-period SMMA of Median Price
+    teeth = smma(high, 8)  # Teeth (Red) - 8-period SMMA of Median Price
+    lips = smma(high, 5)   # Lips (Green) - 5-period SMMA of Median Price
     
-    # Aroon Up and Down
-    aroon_up = ((25 - days_since_high) / 25) * 100
-    aroon_down = ((25 - days_since_low) / 25) * 100
-    
-    # Aroon Oscillator
-    aroon_osc = aroon_up - aroon_down  # Range: -100 to +100
+    # Use median price (typical price) for Alligator calculation
+    median_price = (high + low) / 2
+    jaws = smma(median_price, 13)
+    teeth = smma(median_price, 8)
+    lips = smma(median_price, 5)
     
     # === Volume Spike (20-period on 4h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,7 +70,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(aroon_osc[i]) or np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaws[i]) or 
+            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,28 +80,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Aroon Oscillator > 50 (strong uptrend) + volume spike + price above daily EMA34
-            if (aroon_osc[i] > 50 and 
+            # LONG: Lips > Teeth > Jaws (bullish alignment) + volume spike + price above daily EMA34
+            if (lips[i] > teeth[i] and teeth[i] > jaws[i] and 
                 vol_spike[i] and
                 close[i] > ema_34_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Aroon Oscillator < -50 (strong downtrend) + volume spike + price below daily EMA34
-            elif (aroon_osc[i] < -50 and 
+            # SHORT: Lips < Teeth < Jaws (bearish alignment) + volume spike + price below daily EMA34
+            elif (lips[i] < teeth[i] and teeth[i] < jaws[i] and 
                   vol_spike[i] and
                   close[i] < ema_34_4h[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Trend weakens (Aroon Oscillator < 0)
-            if aroon_osc[i] < 0:
+            # EXIT LONG: Alligator lines cross (Lips < Teeth or Teeth < Jaws) - trend weakening
+            if lips[i] < teeth[i] or teeth[i] < jaws[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend weakens (Aroon Oscillator > 0)
-            if aroon_osc[i] > 0:
+            # EXIT SHORT: Alligator lines cross (Lips > Teeth or Teeth > Jaws) - trend weakening
+            if lips[i] > teeth[i] or teeth[i] > jaws[i]:
                 signals[i] = 0.0
                 position = 0
             else:
