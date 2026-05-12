@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Keltner_Channel_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Stochastic_RSI_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,29 +20,32 @@ def generate_signals(prices):
     # === 1d Data for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
     # === 1d EMA34 for trend ===
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Keltner Channel (12h) ===
-    # Typical price
-    tp = (high + low + close) / 3
-    # EMA of typical price (20)
-    ema_tp = pd.Series(tp).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # ATR (10)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # === Stochastic RSI (4h) ===
+    # RSI period
+    rsi_period = 14
+    # Stochastic RSI period
+    stoch_period = 14
     
-    # Upper and lower bands
-    upper = ema_tp + (2 * atr)
-    lower = ema_tp - (2 * atr)
+    # Calculate RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate Stochastic RSI
+    rsi_min = pd.Series(rsi).rolling(window=stoch_period, min_periods=stoch_period).min().values
+    rsi_max = pd.Series(rsi).rolling(window=stoch_period, min_periods=stoch_period).max().values
+    stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min + 1e-10) * 100
     
     # === Volume spike detection (20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,15 +54,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 34, 20, 10)  # Ensure enough data for all indicators
+    start_idx = max(100, 34, 14)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(ema_tp[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(upper[i]) or
-            np.isnan(lower[i])):
+            np.isnan(stoch_rsi[i]) or
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,28 +69,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price touches lower band + 1d trend up + volume spike
-            if (close[i] <= lower[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume_spike[i]):
+            # Long: Stochastic RSI oversold (<20) + volume spike + 1d trend up
+            if (stoch_rsi[i] < 20 and 
+                volume_spike[i] and
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price touches upper band + 1d trend down + volume spike
-            elif (close[i] >= upper[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume_spike[i]):
+            # Short: Stochastic RSI overbought (>80) + volume spike + 1d trend down
+            elif (stoch_rsi[i] > 80 and 
+                  volume_spike[i] and
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses above EMA_TP or 1d trend breaks
-            if close[i] > ema_tp[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Stochastic RSI overbought (>80) or trend breaks
+            if stoch_rsi[i] > 80 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses below EMA_TP or 1d trend breaks
-            if close[i] < ema_tp[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Stochastic RSI oversold (<20) or trend breaks
+            if stoch_rsi[i] < 20 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
