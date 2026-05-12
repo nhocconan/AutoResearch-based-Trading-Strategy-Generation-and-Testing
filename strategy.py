@@ -1,13 +1,13 @@
-#3/26/2025, 2:10:41 PM
 #!/usr/bin/env python3
 
-# 1d_1W_RSI_Reversion_with_WeeklyTrend
-# Hypothesis: Buy when daily RSI < 30 in weekly uptrend, sell when RSI > 70 in weekly downtrend.
-# RSI mean reversion works in ranging markets, weekly trend filter ensures alignment with higher timeframe momentum.
-# Designed for low frequency (10-25 trades/year) to minimize fee drag.
+# 4h_RSI_MeanReversion_1dTrend
+# Hypothesis: In ranging markets (BTC/ETH), RSI extremes provide mean-reversion opportunities. 
+# Use 1d trend filter to align with higher timeframe momentum, avoiding counter-trend trades.
+# RSI < 30 for long, RSI > 70 for short in ranging markets (ADX < 25). 
+# Designed for low frequency (20-40 trades/year) to minimize fee drag in ranging markets.
 
-name = "1d_1W_RSI_Reversion_with_WeeklyTrend"
-timeframe = "1d"
+name = "4h_RSI_MeanReversion_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,26 +22,41 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Calculate daily RSI (14-period)
+    # Calculate ADX for regime filter (ranging vs trending)
+    # ADX < 25 indicates ranging market suitable for mean reversion
+    plus_dm = np.diff(high, prepend=high[0])
+    minus_dm = np.diff(low, prepend=low[0]) * -1
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 100 + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr * 100 + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # RSI calculation
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
 
     signals = np.zeros(n)
@@ -49,7 +64,7 @@ def generate_signals(prices):
 
     for i in range(14, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(adx[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,31 +72,30 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Weekly trend filter
-        bullish_trend = close[i] > ema_1w_aligned[i]
-        bearish_trend = close[i] < ema_1w_aligned[i]
-
+        # Regime filter: only trade in ranging markets (ADX < 25)
+        ranging = adx[i] < 25
+        
         if position == 0:
-            # LONG: RSI oversold in weekly uptrend
-            if rsi[i] < 30 and bullish_trend:
+            # LONG: RSI oversold in ranging market with bullish 1d trend
+            if rsi[i] < 30 and ranging and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought in weekly downtrend
-            elif rsi[i] > 70 and bearish_trend:
+            # SHORT: RSI overbought in ranging market with bearish 1d trend
+            elif rsi[i] > 70 and ranging and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought or weekly trend turns bearish
-            if rsi[i] > 70 or not bullish_trend:
+            # EXIT LONG: RSI overbought or trend turns bearish
+            if rsi[i] > 70 or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold or weekly trend turns bullish
-            if rsi[i] < 30 or not bearish_trend:
+            # EXIT SHORT: RSI oversold or trend turns bullish
+            if rsi[i] < 30 or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
