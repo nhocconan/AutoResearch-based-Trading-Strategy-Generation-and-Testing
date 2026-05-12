@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_IchimokuCloud_1dTrend_TenkanKijunCross
-# Hypothesis: Use Ichimoku cloud from 1d for trend filter and support/resistance, with Tenkan/Kijun cross on 6h for entry.
-# In bullish trend (price above 1d cloud), go long on Tenkan-Kijun cross above; in bearish trend (price below 1d cloud), go short on cross below.
-# Exit when price crosses opposite Kumo edge or Tenkan/Kijun reverses.
-# Designed for low frequency (12-30 trades/year) by using 1d for trend and 6h for precise entry timing.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_LowFreq
+# Hypothesis: Breakout at daily R3/S3 with volume confirmation and 1d EMA34 trend filter. Exits on trend reversal or return to pivot.
+# Uses 4h for entry timing, daily for trend/levels. Designed for low frequency (<30 trades/year) to avoid fee drag.
+# Works in bull (breakouts) and bear (mean reversion to pivot) via trend filter.
 
-name = "6h_IchimokuCloud_1dTrend_TenkanKijunCross"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_LowFreq"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,81 +14,52 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === 1d data for Ichimoku cloud (trend filter) ===
+    # Get 4h data (for volume MA)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    # Get 1d data for pivot and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
+    # Calculate daily Camarilla levels (R3, S3, PP)
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    r3_1d = pp_1d + (high_1d - low_1d)
+    s3_1d = pp_1d - (high_1d - low_1d)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen_1d = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() +
-                     pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen_1d = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() +
-                    pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a_1d = (tenkan_sen_1d + kijun_sen_1d) / 2
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    senkou_span_b_1d = (pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() +
-                        pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Kumo (Cloud) edges: Senkou Span A and B shifted forward by 26 periods
-    # For trend filter, we use current cloud (Senkou Span A/B from 26 periods ago)
-    senkou_span_a_lagged = np.roll(senkou_span_a_1d, 26)
-    senkou_span_b_lagged = np.roll(senkou_span_b_1d, 26)
-    # Fill NaN from roll
-    senkou_span_a_lagged[:26] = senkou_span_a_1d[0]
-    senkou_span_b_lagged[:26] = senkou_span_b_1d[0]
+    # Align daily data to 4h timeframe
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Kumo top and bottom
-    kumo_top_1d = np.maximum(senkou_span_a_lagged, senkou_span_b_lagged)
-    kumo_bottom_1d = np.minimum(senkou_span_a_lagged, senkou_span_b_lagged)
-    
-    # Align 1d Ichimoku components to 6h
-    tenkan_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_1d.values)
-    kijun_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_1d.values)
-    kumo_top_1d_aligned = align_htf_to_ltf(prices, df_1d, kumo_top_1d)
-    kumo_bottom_1d_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom_1d)
-    
-    # === 6d data for Tenkan/Kijun cross (entry signal) ===
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < kijun_period:
-        return np.zeros(n)
-    
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    
-    # Tenkan-sen and Kijun-sen on 6h
-    tenkan_sen_6h = (pd.Series(high_6h).rolling(window=tenkan_period, min_periods=tenkan_period).max() +
-                     pd.Series(low_6h).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
-    kijun_sen_6h = (pd.Series(high_6h).rolling(window=kijun_period, min_periods=kijun_period).max() +
-                    pd.Series(low_6h).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+    # Volume confirmation: 20-period average on 4h
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, kijun_period)  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(tenkan_sen_1d_aligned[i]) or np.isnan(kijun_sen_1d_aligned[i]) or
-            np.isnan(kumo_top_1d_aligned[i]) or np.isnan(kumo_bottom_1d_aligned[i]) or
-            np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i])):
+        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -97,33 +67,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 1d cloud
-        price_above_kumo = close[i] > kumo_top_1d_aligned[i]
-        price_below_kumo = close[i] < kumo_bottom_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
         
-        # Tenkan-Kijun cross on 6h
-        tk_cross_above = tenkan_sen_6h[i] > kijun_sen_6h[i] and tenkan_sen_6h[i-1] <= kijun_sen_6h[i-1]
-        tk_cross_below = tenkan_sen_6h[i] < kijun_sen_6h[i] and tenkan_sen_6h[i-1] >= kijun_sen_6h[i-1]
+        # Volume filter
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: Price above cloud and Tenkan crosses above Kijun
-            if price_above_kumo and tk_cross_above:
+            # LONG: Price breaks above R3 with volume, in uptrend
+            if close[i] > r3_1d_aligned[i] and vol_ok and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below cloud and Tenkan crosses below Kijun
-            elif price_below_kumo and tk_cross_below:
+            # SHORT: Price breaks below S3 with volume, in downtrend
+            elif close[i] < s3_1d_aligned[i] and vol_ok and trend_down:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price crosses below Kumo bottom or Tenkan crosses below Kijun
-            if close[i] < kumo_bottom_1d_aligned[i] or tk_cross_below:
+            # EXIT LONG: Price returns to pivot point or trend reverses
+            if close[i] <= pp_1d_aligned[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above Kumo top or Tenkan crosses above Kijun
-            if close[i] > kumo_top_1d_aligned[i] or tk_cross_above:
+            # EXIT SHORT: Price returns to pivot point or trend reverses
+            if close[i] >= pp_1d_aligned[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
