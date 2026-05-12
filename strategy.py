@@ -1,11 +1,12 @@
-#!/usr/bin/env python3
-# 6h_Pivot_Volume_Reversal
-# Hypothesis: Fade extreme price movements at daily Camarilla pivot levels (R3/S3) with volume confirmation and 12h trend filter.
-# In bear markets (2025+), fading R3/S3 spikes works well as mean reversion dominates.
-# Uses 12h EMA50 for trend filter to avoid counter-trend trades. Targets 15-30 trades/year to minimize fee drag.
+#/usr/bin/env python3
+# 4h_Trend_Reversal_With_Volume
+# Hypothesis: In bear markets, strong reversals occur after exhaustion moves with volume confirmation. 
+# Uses 4h RSI(14) for overbought/oversold conditions, confirmed by 1d trend (EMA50) and volume spike (>1.5x 20-period average).
+# Enters counter-trend when RSI shows exhaustion and price rejects 1d EMA50 with volume. 
+# Trend filter avoids counter-trend trades in strong trends. Targets 20-40 trades/year to minimize fee drag.
 
-name = "6h_Pivot_Volume_Reversal"
-timeframe = "6h"
+name = "4h_Trend_Reversal_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,32 +23,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-
-    # Calculate Camarilla pivot levels for each 12h bar
-    # Pivot = (H + L + C) / 3
-    # R3 = Pivot + (H - L) * 1.1 / 2
-    # S3 = Pivot - (H - L) * 1.1 / 2
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    r3_12h = pivot_12h + (high_12h - low_12h) * 1.1 / 2.0
-    s3_12h = pivot_12h - (high_12h - low_12h) * 1.1 / 2.0
-
-    # Align to 6h timeframe (wait for 12h bar to close)
-    pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-
-    # Get 1d data for trend filter (EMA50)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     close_1d = df_1d['close'].values
+
+    # Calculate RSI(14) on 4h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Use Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+
+    # 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
@@ -59,8 +52,8 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,14 +62,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price at or below S3 (strong support) + above 1d EMA50 (uptrend filter) + volume spike
-            if (close[i] <= s3_12h_aligned[i] and 
+            # LONG: RSI < 30 (oversold) + price > 1d EMA50 (rejects bearish trend) + volume spike
+            if (rsi[i] < 30 and 
                 close[i] > ema50_1d_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at or above R3 (strong resistance) + below 1d EMA50 (downtrend filter) + volume spike
-            elif (close[i] >= r3_12h_aligned[i] and 
+            # SHORT: RSI > 70 (overbought) + price < 1d EMA50 (rejects bullish trend) + volume spike
+            elif (rsi[i] > 70 and 
                   close[i] < ema50_1d_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
@@ -84,15 +77,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches pivot level or trend changes
-            if close[i] >= pivot_12h_aligned[i] or close[i] <= ema50_1d_aligned[i]:
+            # EXIT LONG: RSI > 50 (momentum fading) or trend reversal signal
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches pivot level or trend changes
-            if close[i] <= pivot_12h_aligned[i] or close[i] >= ema50_1d_aligned[i]:
+            # EXIT SHORT: RSI < 50 (momentum fading) or trend reversal signal
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
