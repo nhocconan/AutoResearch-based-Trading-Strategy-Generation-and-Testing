@@ -1,12 +1,11 @@
-# 6h_Keltner_RSI_Fade_1dTrend_VolumeFilter
-# Hypothesis: Mean reversion from Keltner channel extremes in 6h timeframe, filtered by 1d RSI trend and volume.
-# Long when price touches lower Keltner band (2*ATR) AND 1d RSI > 50 (bullish bias) AND volume spike.
-# Short when price touches upper Keltner band AND 1d RSI < 50 (bearish bias) AND volume spike.
-# Works in ranging markets (mean reversion) and trending markets (pullbacks in trend direction).
-# Target: 50-150 total trades over 4 years = 12-37/year.
+#!/usr/bin/env python3
+# 4h_1D_VolumeSpike_Camarilla_R1_S1_Breakout
+# Hypothesis: Breakouts from Camarilla R1/S1 levels on daily timeframe, confirmed by volume spikes and aligned with 1d trend (price > EMA34 on daily).
+# Works in bull markets via breakout continuation and in bear markets via mean-reversion from extremes (short at S1, long at R1).
+# Uses daily timeframe for structure and trend, 4h for execution to limit trade frequency.
 
-name = "6h_Keltner_RSI_Fade_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "4h_1D_VolumeSpike_Camarilla_R1_S1_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,34 +22,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # 6h Keltner Channel: EMA(20) +/- 2 * ATR(10)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    keltner_upper = ema_20 + 2.0 * atr_10
-    keltner_lower = ema_20 - 2.0 * atr_10
-    
-    # 1d RSI for trend filter
+    # Daily data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    rsi_1d = compute_rsi(df_1d['close'].values, 14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Daily data for Camarilla R1/S1 levels
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    rang_1d = prev_high_1d - prev_low_1d
+    R1_1d = prev_close_1d + 1.1 * rang_1d * 1.1 / 4
+    S1_1d = prev_close_1d - 1.1 * rang_1d * 1.1 / 4
+    
+    # Align 1d Camarilla levels to 4h timeframe
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        if (np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+    for i in range(50, n):  # Start after warmup for EMA34
+        if (np.isnan(R1_1d_aligned[i]) or 
+            np.isnan(S1_1d_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,49 +62,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price at lower Keltner band + bullish 1d RSI + volume spike
-            if (close[i] <= keltner_lower[i] and 
-                rsi_1d_aligned[i] > 50 and 
-                volume_spike[i]):
+            # LONG: Price breaks above R1_1d + volume spike + price above 1d EMA34 (uptrend)
+            if (close[i] > R1_1d_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at upper Keltner band + bearish 1d RSI + volume spike
-            elif (close[i] >= keltner_upper[i] and 
-                  rsi_1d_aligned[i] < 50 and 
-                  volume_spike[i]):
+            # SHORT: Price breaks below S1_1d + volume spike + price below 1d EMA34 (downtrend)
+            elif (close[i] < S1_1d_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above EMA(20) or RSI turns bearish
-            if close[i] >= ema_20[i] or rsi_1d_aligned[i] < 50:
+            # EXIT LONG: Price re-enters previous 1d H-L range (between S1 and R1) OR closes below 1d EMA34
+            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
+               close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below EMA(20) or RSI turns bullish
-            if close[i] <= ema_20[i] or rsi_1d_aligned[i] >= 50:
+            # EXIT SHORT: Price re-enters previous 1d H-L range (between S1 and R1) OR closes above 1d EMA34
+            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
+               close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-def compute_rsi(close, period):
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    for i in range(period + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:period] = np.nan
-    return rsi
