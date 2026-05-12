@@ -1,71 +1,56 @@
 #!/usr/bin/env python3
-# 1D_KAMA_TREND_WITH_RSI_FILTER
-# Hypothesis: KAMA adapts to market noise, providing a reliable trend filter in both bull and bear markets.
-# In uptrend (price > KAMA), go long when RSI(14) pulls back from overbought (>50 and rising).
-# In downtrend (price < KAMA), go short when RSI(14) bounces from oversold (<50 and falling).
-# Uses 1d timeframe to minimize trade frequency and fee drag, targeting 10-25 trades/year.
-# KAMA's adaptive nature reduces whipsaws during sideways markets, improving survival in chop.
+# 12H_CCI_OVERBOUGHT_OVERSOLD_1D_TREND_FILTER
+# Hypothesis: CCI identifies overbought/oversold conditions. In 1d uptrend, go long when CCI crosses above -100 from below; in 1d downtrend, go short when CCI crosses below +100 from above. The 1d trend filter avoids counter-trend trades, while CCI captures mean reversion within the trend. Designed for 12h timeframe to target 15-25 trades/year.
 
-name = "1D_KAMA_TREND_WITH_RSI_FILTER"
-timeframe = "1d"
+name = "12H_CCI_OVERBOUGHT_OVERSOLD_1D_TREND_FILTER"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) parameters
-    fast_ema = 2
-    slow_ema = 30
-    lookback = 10  # ER lookback period
+    # Daily data for CCI calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=lookback))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smooth ER with simple moving average for stability
-    er = pd.Series(er).rolling(window=lookback, min_periods=1).mean().values
-    # Calculate smoothing constant SC
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[lookback] = close[lookback]  # Initialize
-    for i in range(lookback + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # CCI(20) calculation
+    tp = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
+    cci = (tp - sma_tp) / (0.015 * mad)
     
-    # RSI(14) calculation
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Pad first value
-    rsi = np.concatenate([[50], rsi])  # Start with neutral RSI
+    # EMA34 for trend filter
+    ema34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # RSI momentum (1-bar change)
-    rsi_rising = rsi > np.roll(rsi, 1)
-    rsi_falling = rsi < np.roll(rsi, 1)
-    rsi_rising[0] = False
-    rsi_falling[0] = False
+    # Align to 12h timeframe
+    cci_aligned = align_htf_to_ltf(prices, df_1d, cci)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    
+    # CCI cross signals
+    cci_cross_up = (cci_aligned > -100) & (np.roll(cci_aligned, 1) <= -100)
+    cci_cross_down = (cci_aligned < 100) & (np.roll(cci_aligned, 1) >= 100)
+    cci_cross_up[0] = False
+    cci_cross_down[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 14) + 1  # Ensure indicators are stable
+    start_idx = 20  # Ensure indicators are stable
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(rsi[i]):
+        # Skip if any critical data is not ready
+        if (np.isnan(cci_aligned[i]) or np.isnan(ema34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,32 +59,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Uptrend (price > KAMA) + RSI > 50 and rising
-            if (close[i] > kama[i] and 
-                rsi[i] > 50 and 
-                rsi_rising[i]):
+            # LONG: 1d uptrend + CCI crosses above -100
+            if (close[i] > ema34_aligned[i] and cci_cross_up[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend (price < KAMA) + RSI < 50 and falling
-            elif (close[i] < kama[i] and 
-                  rsi[i] < 50 and 
-                  rsi_falling[i]):
+            # SHORT: 1d downtrend + CCI crosses below +100
+            elif (close[i] < ema34_aligned[i] and cci_cross_down[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal or RSI overbought
-            if (close[i] <= kama[i] or 
-                rsi[i] >= 70):
+            # EXIT LONG: Trend reversal or CCI crosses below +100 (overbought)
+            if (close[i] <= ema34_aligned[i] or cci_cross_down[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal or RSI oversold
-            if (close[i] >= kama[i] or 
-                rsi[i] <= 30):
+            # EXIT SHORT: Trend reversal or CCI crosses above -100 (oversold)
+            if (close[i] >= ema34_aligned[i] or cci_cross_up[i]):
                 signals[i] = 0.0
                 position = 0
             else:
