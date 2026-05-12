@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""
-12h Weekly Pivot + Volume Confirmation Trend Strategy
-Hypothesis: Weekly pivot levels act as strong support/resistance on 12h timeframe.
-In trending markets, price respects these levels as pullback entries.
-In ranging markets, reversals occur at these levels.
-Volume confirmation filters false breakouts.
-Timeframe: 12h targets 12-37 trades/year (50-150 total over 4 years).
-Works in bull/bear: uses price action at key levels rather than trend direction.
-"""
+# 4h_WeeklyPivot_Volume_Trend
+# Hypothesis: Weekly pivot points act as strong support/resistance levels.
+# In trending markets, price respects these levels as pullback entries.
+# In ranging markets, reversals occur at these levels.
+# Volume confirmation filters false breakouts.
+# Timeframe: 4h balances trade frequency (~20-50/year) with signal quality.
+# Works in bull/bear: uses price action at key levels rather than trend direction.
 
-name = "12h_WeeklyPivot_Volume_Trend"
-timeframe = "12h"
+name = "4h_WeeklyPivot_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -40,7 +38,7 @@ def generate_signals(prices):
     r2_1w = pivot_1w + (high_1w - low_1w)
     s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Align weekly levels to 12h timeframe
+    # Align weekly levels to 4h timeframe
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
