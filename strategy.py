@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakout from Camarilla R1/S1 levels on 4h with 1d trend filter and volume confirmation.
+# 4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeS
+# Hypothesis: Breakout from Camarilla R1/S1 levels on 4h with 1d EMA34 trend filter and volume confirmation.
 # The 1d EMA34 provides trend direction (long above, short below).
 # Camarilla R1/S1 levels act as intraday support/resistance with high breakout probability.
 # Volume confirmation ensures breakouts have conviction. Designed to work in both bull and bear markets
 # by following the trend defined by higher timeframe EMA.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeS"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,10 +34,7 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # === 4h Camarilla levels (R1, S1) ===
-    # Camarilla calculation uses previous day's OHLC
-    # For 4h chart, we use previous 4h bar's OHLC to calculate levels for current bar
-    # R1 = Close + (High - Low) * 1.12
-    # S1 = Close - (High - Low) * 1.12
+    # Uses previous 4h bar's OHLC to calculate levels for current bar
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
