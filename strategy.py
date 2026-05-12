@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_RangeBound_MeanReversion
-Hypothesis: Weekly pivot levels act as strong support/resistance in range-bound markets. 
-Price tends to revert to the weekly pivot (mean) after touching weekly S1/S2 or R1/R2 levels.
-Uses 6h timeframe with 1-week pivot calculation to capture mean reversion in both bull and bear regimes.
-Designed for 10-30 trades/year to minimize fee drag while working in ranging markets.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Daily Camarilla R1/S1 levels act as strong support/resistance. 
+Breakout above R1 or below S1 with daily trend confirmation (price above/below daily EMA34) 
+and volume spike (12h volume > 1.5x 20-period average) captures institutional breakouts.
+Designed for 12-37 trades/year on 12h timeframe to minimize fee drag while working in both bull and bear regimes.
 """
 
-name = "6h_WeeklyPivot_RangeBound_MeanReversion"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,47 +23,50 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get weekly data for pivot calculation (call once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
+
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+
+    # Calculate daily EMA34 for trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Calculate daily volume average (20-period)
+    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
+
+    # Calculate daily Camarilla levels (using previous day's OHLC)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Use previous week's OHLC for weekly pivot calculation
-    prev_week_close = df_1w['close'].shift(1).values
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
+    # Calculate Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Calculate weekly pivot and support/resistance levels
-    # Standard pivot point calculation
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    
-    # Calculate support and resistance levels
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    r1 = 2 * pivot - prev_week_low
-    s1 = 2 * pivot - prev_week_high
-    r2 = pivot + (prev_week_high - prev_week_low)
-    s2 = pivot - (prev_week_high - prev_week_low)
-    
-    # Align weekly pivot levels to 6h timeframe with 1-week delay (need previous week's data)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot, additional_delay_bars=1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1, additional_delay_bars=1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1, additional_delay_bars=1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2, additional_delay_bars=1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2, additional_delay_bars=1)
+    # Align Camarilla levels to 12h timeframe with 1-day delay (need previous day's data)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1, additional_delay_bars=1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1, additional_delay_bars=1)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(1, n):
-        pivot_val = pivot_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
-        
-        if np.isnan(pivot_val) or np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(r2_val) or np.isnan(s2_val):
+    for i in range(34, n):
+        camarilla_r1_val = camarilla_r1_aligned[i]
+        camarilla_s1_val = camarilla_s1_aligned[i]
+        ema34_val = ema34_1d_aligned[i]
+        vol_avg_val = vol_avg_20_1d_aligned[i]
+        vol_12h_val = volume[i]  # Current 12h volume
+
+        if np.isnan(camarilla_r1_val) or np.isnan(camarilla_s1_val) or np.isnan(ema34_val) or np.isnan(vol_avg_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,26 +75,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price touches or goes below S2, expecting reversion to pivot
-            if low[i] <= s2_val:
+            # LONG: Break above R1 + daily uptrend + volume spike
+            if close[i] > camarilla_r1_val and close[i] > ema34_val and vol_12h_val > vol_avg_val * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price touches or goes above R2, expecting reversion to pivot
-            elif high[i] >= r2_val:
+            # SHORT: Break below S1 + daily downtrend + volume spike
+            elif close[i] < camarilla_s1_val and close[i] < ema34_val and vol_12h_val > vol_avg_val * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches or crosses pivot (mean reversion target)
-            if close[i] >= pivot_val:
+            # EXIT LONG: Price below S1 or trend reversal
+            if close[i] < camarilla_s1_val or close[i] < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches or crosses pivot (mean reversion target)
-            if close[i] <= pivot_val:
+            # EXIT SHORT: Price above R1 or trend reversal
+            if close[i] > camarilla_r1_val or close[i] > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
