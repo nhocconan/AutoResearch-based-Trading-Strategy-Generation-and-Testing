@@ -1,14 +1,6 @@
-# 1d_WeeklyPivot_Breakout_Trend_Volume
-# Hypothesis: Weekly pivot levels act as strong support/resistance. Breakouts above R1/S1
-# with weekly trend alignment and volume confirmation capture meaningful moves in both bull and bear markets.
-# Timeframe: 1d balances trade frequency and signal quality, avoiding excessive churn.
-# Weekly trend filter ensures we trade with the dominant weekly momentum, reducing whipsaws.
-# Volume confirmation filters out low-conviction breakouts.
-# Designed for 8-15 trades per year per symbol, well within the 30-100 target over 4 years.
-
 #!/usr/bin/env python3
-name = "1d_WeeklyPivot_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,30 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points and trend
-    df_1w = get_htf_data(prices, '1w')
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    # Daily Camarilla pivot levels (from previous day)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly pivot levels
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    r1_w = 2 * pivot_w - low_w
-    s1_w = 2 * pivot_w - high_w
+    # Calculate Camarilla levels for each daily bar
+    # Pivot = (H + L + C) / 3
+    pivot_d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_d = high_1d - low_1d
+    # R3 = C + (H - L) * 1.1 / 2
+    r3_d = close_1d + range_d * 1.1 / 2.0
+    # S3 = C - (H - L) * 1.1 / 2
+    s3_d = close_1d - range_d * 1.1 / 2.0
     
-    # Weekly trend: price above/below pivot
-    weekly_trend_up = close_w > pivot_w
-    weekly_trend_down = close_w < pivot_w
+    # Daily trend: close above/below pivot
+    daily_trend_up = close_1d > pivot_d
+    daily_trend_down = close_1d < pivot_d
     
-    # Align weekly data to daily timeframe
-    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
-    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
+    # Align daily data to 12h timeframe
+    pivot_d_aligned = align_htf_to_ltf(prices, df_1d, pivot_d)
+    r3_d_aligned = align_htf_to_ltf(prices, df_1d, r3_d)
+    s3_d_aligned = align_htf_to_ltf(prices, df_1d, s3_d)
+    daily_trend_up_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_up)
+    daily_trend_down_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_down)
     
-    # Daily volume moving average for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike detection: current volume > 2 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,8 +54,8 @@ def generate_signals(prices):
     start_idx = 20  # ensure volume MA has enough data
     
     for i in range(start_idx, n):
-        # Skip if weekly data not ready
-        if np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]):
+        # Skip if data not ready
+        if np.isnan(pivot_d_aligned[i]) or np.isnan(r3_d_aligned[i]) or np.isnan(s3_d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,32 +63,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume filter: current volume above 20-period average
-        vol_filter = volume[i] > volume_ma[i] if not np.isnan(volume_ma[i]) else False
-        
         if position == 0:
-            # Long: weekly trend up + price breaks above R1 + volume confirmation
-            if (weekly_trend_up_aligned[i] and 
-                close[i] > r1_w_aligned[i] and 
-                vol_filter):
+            # Long: daily trend up + price breaks above R3 + volume spike
+            if (daily_trend_up_aligned[i] and 
+                close[i] > r3_d_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly trend down + price breaks below S1 + volume confirmation
-            elif (weekly_trend_down_aligned[i] and 
-                  close[i] < s1_w_aligned[i] and 
-                  vol_filter):
+            # Short: daily trend down + price breaks below S3 + volume spike
+            elif (daily_trend_down_aligned[i] and 
+                  close[i] < s3_d_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below weekly pivot OR weekly trend changes to down
-            if close[i] < pivot_w_aligned[i] or weekly_trend_down_aligned[i]:
+            # Exit long: price crosses below pivot OR daily trend changes
+            if close[i] < pivot_d_aligned[i] or not daily_trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above weekly pivot OR weekly trend changes to up
-            if close[i] > pivot_w_aligned[i] or weekly_trend_up_aligned[i]:
+            # Exit short: price crosses above pivot OR daily trend changes
+            if close[i] > pivot_d_aligned[i] or not daily_trend_down_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
