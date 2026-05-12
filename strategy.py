@@ -1,13 +1,9 @@
-#160985
-# Hypothesis: 12h timeframe strategy using daily Camarilla R1/S1 breakouts with daily trend filter and volume confirmation.
-# The 12h timeframe reduces trade frequency compared to 4h while still capturing significant moves.
-# Uses daily trend (EMA34) to filter direction, ensuring trades align with higher timeframe momentum.
-# Volume confirmation (1.5x average volume) filters out weak breakouts.
-# Designed to work in both bull and bear markets by following the daily trend direction.
-# Target: 50-150 total trades over 4 years to minimize fee drag.
+#!/usr/bin/env python3
+# 4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3
+# Hypothesis: Enhanced version with stricter entry conditions (volume spike multiplier) and tighter exits to reduce trade frequency. Maintains the core logic of trading breakouts from daily Camarilla R1/S1 levels in the direction of the daily trend, but with volume confirmation requiring 1.5x average volume to filter out weak breakouts. Aims for 50-150 total trades over 4 years to avoid fee drag while maintaining edge in both bull and bear markets by following higher-timeframe trend.
 
-name = "12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -38,7 +34,7 @@ def generate_signals(prices):
     r1 = close_1d + 1.1 * camarilla_range / 12
     s1 = close_1d - 1.1 * camarilla_range / 12
 
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
@@ -46,7 +42,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate 12h volume SMA20 for volume confirmation (with spike filter)
+    # Calculate 4h volume SMA20 for volume confirmation (with spike filter)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
@@ -92,5 +88,3 @@ def generate_signals(prices):
                 signals[i] = -0.25
 
     return signals
-
-#!/usr/bin/env python3
