@@ -1,12 +1,14 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-12H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
-Hypothesis: Camarilla R3/S3 breakout on 12h timeframe with 1-day volume spike confirmation.
-Targets institutional breakouts with volume confirmation to filter false signals.
-Designed for 12-37 trades/year to minimize fee drag and work in both bull and bear markets.
+4H_CAMARILLA_R1_S1_BREAKOUT_1D_VOLUME_SPIKE
+Hypothesis: Buy near S1 (support) and sell near R1 (resistance) of the Camarilla pivot
+system using the prior day's OHLC. Entry requires a volume spike (1.5x 20-day average)
+to confirm institutional interest. Exit on opposite touch (S1 for longs, R1 for shorts).
+This mean-reversion strategy works in ranging markets and captures reversals in trends.
+Designed for ~20-40 trades/year on 4h to minimize fee drag.
 """
-name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
-timeframe = "12h"
+name = "4H_CAMARILLA_R1_S1_BREAKOUT_1D_VOLUME_SPIKE"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,12 +25,13 @@ def generate_signals(prices):
     close = prices['close'].values
     
     # Calculate Camarilla levels from previous day
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = np.full(n, np.nan)
+    camarilla_s1 = np.full(n, np.nan)
     
     for i in range(1, n):
-        camarilla_r3[i] = close[i-1] + (high[i-1] - low[i-1]) * 1.1 / 2
-        camarilla_s3[i] = close[i-1] - (high[i-1] - low[i-1]) * 1.1 / 2
+        camarilla_r1[i] = close[i-1] + (high[i-1] - low[i-1]) * 1.1 / 12
+        camarilla_s1[i] = close[i-1] - (high[i-1] - low[i-1]) * 1.1 / 12
     
     # 1d data for volume spike confirmation
     df_1d = get_htf_data(prices, '1d')
@@ -44,7 +47,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):  # Start from 1 to have previous day data
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
             np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -54,31 +57,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above R3 with volume spike
-            if (high[i] > camarilla_r3[i] and 
+            # LONG: Price touches S1 with volume spike (mean reversion long)
+            if (low[i] <= camarilla_s1[i] and 
                 vol_spike_aligned[i] > 1.5):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S3 with volume spike
-            elif (low[i] < camarilla_s3[i] and 
+            # SHORT: Price touches R1 with volume spike (mean reversion short)
+            elif (high[i] >= camarilla_r1[i] and 
                   vol_spike_aligned[i] > 1.5):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S3 (reversion to mean)
-            if close[i] < camarilla_s3[i]:
+            # EXIT LONG: Price touches R1 (take profit at resistance)
+            if high[i] >= camarilla_r1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R3 (reversion to mean)
-            if close[i] > camarilla_r3[i]:
+            # EXIT SHORT: Price touches S1 (take profit at support)
+            if low[i] <= camarilla_s1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
