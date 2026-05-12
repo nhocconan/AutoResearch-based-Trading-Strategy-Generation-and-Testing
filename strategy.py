@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S4_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,14 +17,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D DATA FOR CAMARILLA PIVOTS AND TREND ===
+    # === WEEKLY TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # === DAILY CAMARILLA PIVOTS ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla levels
-    # Using previous day's high, low, close to avoid look-ahead
+    # Previous day's OHLC for Camarilla (avoid look-ahead)
     prev_high_1d = np.roll(high_1d, 1)
     prev_low_1d = np.roll(low_1d, 1)
     prev_close_1d = np.roll(close_1d, 1)
@@ -32,27 +37,20 @@ def generate_signals(prices):
     prev_low_1d[0] = np.nan
     prev_close_1d[0] = np.nan
     
-    # Camarilla calculations
     range_1d = prev_high_1d - prev_low_1d
     camarilla_base = prev_close_1d
     
-    # Resistance levels
-    r3 = camarilla_base + range_1d * 1.1 / 4
-    r4 = camarilla_base + range_1d * 1.1 / 2
+    # Resistance and Support levels
+    r1 = camarilla_base + range_1d * 1.1 / 6
+    r2 = camarilla_base + range_1d * 1.1 / 4
+    s1 = camarilla_base - range_1d * 1.1 / 6
+    s2 = camarilla_base - range_1d * 1.1 / 4
     
-    # Support levels
-    s3 = camarilla_base - range_1d * 1.1 / 4
-    s4 = camarilla_base - range_1d * 1.1 / 2
-    
-    # Align to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_12h = align_htf_to_ltf(prices, df_1d, r4)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_12h = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # 1D EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align to daily timeframe (same as prices for 1d timeframe)
+    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
+    r2_1d = align_htf_to_ltf(prices, df_1d, r2)
+    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
+    s2_1d = align_htf_to_ltf(prices, df_1d, s2)
     
     # === VOLUME SPIKE (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,9 +63,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_12h[i]) or np.isnan(r4_12h[i]) or 
-            np.isnan(s3_12h[i]) or np.isnan(s4_12h[i]) or
-            np.isnan(ema34_1d_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1d[i]) or np.isnan(r2_1d[i]) or 
+            np.isnan(s1_1d[i]) or np.isnan(s2_1d[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,28 +74,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above R4 with volume spike + price above 1d EMA34 (uptrend)
-            if (close[i] > r4_12h[i] and 
-                close[i] > ema34_1d_12h[i] and
+            # LONG: Break above R2 with volume spike + price above weekly EMA50 (uptrend)
+            if (close[i] > r2_1d[i] and 
+                close[i] > ema50_1w_aligned[i] and
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S4 with volume spike + price below 1d EMA34 (downtrend)
-            elif (close[i] < s4_12h[i] and 
-                  close[i] < ema34_1d_12h[i] and
+            # SHORT: Break below S2 with volume spike + price below weekly EMA50 (downtrend)
+            elif (close[i] < s2_1d[i] and 
+                  close[i] < ema50_1w_aligned[i] and
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below R3 (false breakout) OR below EMA34
-            if close[i] < r3_12h[i] or close[i] < ema34_1d_12h[i]:
+            # EXIT LONG: Price breaks below R1 (false breakout) OR below weekly EMA50
+            if close[i] < r1_1d[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above S3 (false breakout) OR above EMA34
-            if close[i] > s3_12h[i] or close[i] > ema34_1d_12h[i]:
+            # EXIT SHORT: Price breaks above S1 (false breakout) OR above weekly EMA50
+            if close[i] > s1_1d[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
