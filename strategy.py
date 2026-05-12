@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_VolumeBreakout_12hTrend
-Hypothesis: On 4h timeframe, buy when price breaks above 12h high with volume >1.8x average and 12h EMA10 trending up; sell when price breaks below 12h low with volume >1.8x average and 12h EMA10 trending down. Uses 12h price channel breakout with volume confirmation and trend filter to capture strong trends while minimizing false breakouts. Targets 20-50 trades per year to reduce fee drift.
+6h_Liquidity_Clearing_1dTrend
+Hypothesis: On 6h timeframe, identify daily liquidity zones (previous day's high/low) and look for price to clear these levels with volume confirmation in the direction of the 1d trend. In trending markets, liquidity sweeps often precede continuation. Uses 1d EMA50 for trend filter and 1d liquidity zones for entry/exit. Targets 15-30 trades per year to minimize fee drag while capturing trend continuation moves.
 """
 
-name = "4h_VolumeBreakout_12hTrend"
-timeframe = "4h"
+name = "6h_Liquidity_Clearing_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -22,38 +22,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for high/low channel and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data for trend filter and liquidity zones
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # 12h high/low for breakout channel (use previous 12h bar's high/low)
-    high_12h_prev = np.roll(high_12h, 1)
-    low_12h_prev = np.roll(low_12h, 1)
-    high_12h_prev[0] = np.nan  # first value invalid
-    low_12h_prev[0] = np.nan
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Align 12h high/low to 4h timeframe
-    high_12h_aligned = align_htf_to_ltf(prices, df_12h, high_12h_prev)
-    low_12h_aligned = align_htf_to_ltf(prices, df_12h, low_12h_prev)
+    # Previous day's high/low for liquidity zones (use prior 1d bar's high/low)
+    high_1d_prev = np.roll(high_1d, 1)
+    low_1d_prev = np.roll(low_1d, 1)
+    high_1d_prev[0] = np.nan  # first value invalid
+    low_1d_prev[0] = np.nan
 
-    # 12h EMA10 for trend filter
-    ema10_12h = pd.Series(close_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema10_12h_aligned = align_htf_to_ltf(prices, df_12h, ema10_12h)
+    # Align 1d liquidity zones to 6h timeframe
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d_prev)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d_prev)
 
-    # Volume confirmation: volume > 1.8x 20-period average (approx 10 hours)
+    # Volume confirmation: volume > 1.5x 20-period average (approx 6 hours)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(high_12h_aligned[i]) or np.isnan(low_12h_aligned[i]) or 
-            np.isnan(ema10_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,30 +62,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above 12h high + 12h uptrend + volume spike
-            if (close[i] > high_12h_aligned[i] and 
-                close[i] > ema10_12h_aligned[i] and 
-                volume[i] > vol_avg_20[i] * 1.8):
+            # LONG: Price clears above 1d high + 1d uptrend + volume spike
+            if (close[i] > high_1d_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 12h low + 12h downtrend + volume spike
-            elif (close[i] < low_12h_aligned[i] and 
-                  close[i] < ema10_12h_aligned[i] and 
-                  volume[i] > vol_avg_20[i] * 1.8):
+            # SHORT: Price clears below 1d low + 1d downtrend + volume spike
+            elif (close[i] < low_1d_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 12h low OR trend turns down
-            if close[i] < low_12h_aligned[i] or close[i] < ema10_12h_aligned[i]:
+            # EXIT LONG: Price fails to hold above 1d low OR trend turns down
+            if close[i] < low_1d_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 12h high OR trend turns up
-            if close[i] > high_12h_aligned[i] or close[i] > ema10_12h_aligned[i]:
+            # EXIT SHORT: Price fails to hold below 1d high OR trend turns up
+            if close[i] > high_1d_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
