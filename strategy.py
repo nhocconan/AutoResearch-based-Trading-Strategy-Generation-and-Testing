@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Use daily Camarilla pivot levels (R3/S3) for breakout entries with 1-day EMA trend filter and volume spike confirmation.
-# Long when price breaks above R3 with price > daily EMA and volume > 2x MA.
-# Short when price breaks below S3 with price < daily EMA and volume > 2x MA.
-# Exit when price reverses back into the Camarilla range (between S3 and R3).
-# Designed to capture strong trending moves with confirmation, works in both bull and bear markets by filtering with daily trend.
-# Targets 15-30 trades/year to minimize fee drag on 12h timeframe.
+# 4h_RVI_Divergence_1dTrend_VolumeFilter
+# Hypothesis: Use Relative Vigor Index (RVI) divergence with daily EMA trend filter and volume spike.
+# Long when RVI makes higher low while price makes lower low (bullish divergence) with price > daily EMA and volume > 2x MA.
+# Short when RVI makes lower high while price makes higher high (bearish divergence) with price < daily EMA and volume > 2x MA.
+# Exit when RVI crosses above/below its signal line.
+# Designed to capture reversals in both bull and bear markets by filtering with daily trend.
+# Targets 20-40 trades/year to minimize fee drag.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_RVI_Divergence_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,25 +25,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla pivot levels from previous day
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Relative Vigor Index (RVI) calculation
+    # Numerator: (close - open) + 2*(close_prev - open_prev) + 2*(close_prev2 - open_prev2) + (close_prev3 - open_prev3)
+    # Denominator: (high - low) + 2*(high_prev - low_prev) + 2*(high_prev2 - low_prev2) + (high_prev3 - low_prev3)
+    open_ = prices['open'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    num = (close - open_) + 2 * np.roll(close - open_, 1) + 2 * np.roll(close - open_, 2) + np.roll(close - open_, 3)
+    den = (high - low) + 2 * np.roll(high - low, 1) + 2 * np.roll(high - low, 2) + np.roll(high - low, 3)
     
-    # Camarilla levels: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Handle first 3 values
+    num[:3] = np.nan
+    den[:3] = np.nan
     
-    # Align Camarilla levels to 12h timeframe (wait for previous day to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Avoid division by zero
+    rvi_raw = np.where(den != 0, num / den, np.nan)
+    
+    # Signal line: exponential average of RVI
+    rvi = pd.Series(rvi_raw).ewm(span=10, adjust=False, min_periods=10).mean().values
+    rvi_signal = pd.Series(rvi).ewm(span=4, adjust=False, min_periods=4).mean().values
     
     # Daily EMA for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
     daily_close = df_1d['close'].values
     daily_ema = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
@@ -54,11 +59,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 20  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+        if (np.isnan(rvi[i]) or np.isnan(rvi_signal[i]) or 
             np.isnan(daily_ema_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,26 +73,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 with price > daily EMA and volume > 2x MA
-            if close[i] > camarilla_r3_aligned[i] and close[i] > daily_ema_aligned[i] and volume[i] > vol_ma[i] * 2.0:
+            # Bullish divergence: RVI makes higher low while price makes lower low
+            bullish_div = (rvi[i] > rvi[i-5]) and (close[i] < close[i-5]) and (rvi[i-5] > rvi[i-10]) and (close[i-5] < close[i-10])
+            # Bearish divergence: RVI makes lower high while price makes higher high
+            bearish_div = (rvi[i] < rvi[i-5]) and (close[i] > close[i-5]) and (rvi[i-5] < rvi[i-10]) and (close[i-5] > close[i-10])
+            
+            # LONG: Bullish divergence with price > daily EMA and volume > 2x MA
+            if bullish_div and close[i] > daily_ema_aligned[i] and volume[i] > vol_ma[i] * 2.0:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with price < daily EMA and volume > 2x MA
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < daily_ema_aligned[i] and volume[i] > vol_ma[i] * 2.0:
+            # SHORT: Bearish divergence with price < daily EMA and volume > 2x MA
+            elif bearish_div and close[i] < daily_ema_aligned[i] and volume[i] > vol_ma[i] * 2.0:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price moves back below S3 (return to normal range)
-            if close[i] < camarilla_s3_aligned[i]:
+            # EXIT LONG: RVI crosses below signal line
+            if rvi[i] < rvi_signal[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price moves back above R3 (return to normal range)
-            if close[i] > camarilla_r3_aligned[i]:
+            # EXIT SHORT: RVI crosses above signal line
+            if rvi[i] > rvi_signal[i]:
                 signals[i] = 0.0
                 position = 0
             else:
