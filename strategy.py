@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_1D_1W_Camarilla_R1S1_Breakout_Trend_Volume
-# Hypothesis: Enter long when price breaks above daily Camarilla R1 with bullish weekly trend and volume confirmation; enter short when price breaks below daily S1 with bearish weekly trend and volume confirmation. Exit on opposite breakout or trend reversal. Uses R1/S1 for tighter entries than R3/S3, aiming for 20-50 trades/year. Weekly trend filter ensures alignment with higher timeframe momentum to avoid counter-trend trades. Volume confirmation filters false breakouts. Designed for low frequency to minimize fee drag in both bull and bear markets.
+# 4h_1D_Camarilla_R1S1_Breakout_Trend_Volume
+# Hypothesis: Buy when price breaks above daily Camarilla R1 with 4h bullish trend (EMA50) and volume confirmation; sell when breaks below daily Camarilla S1 with 4h bearish trend and volume confirmation. Daily pivot levels provide strong support/resistance; breakouts indicate momentum. Trend filter avoids counter-trend trades. Volume filter reduces false breakouts. Designed for low frequency (20-50 trades/year) to minimize fee drift.
 
-name = "4h_1D_1W_Camarilla_R1S1_Breakout_Trend_Volume"
+name = "4h_1D_Camarilla_R1S1_Breakout_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,17 +20,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
 
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
 
-    # Get daily data for Camarilla levels
+    # Get daily data for Camarilla levels (R1 and S1)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -61,7 +60,7 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
             np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,30 +69,30 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Weekly trend filter
-        bullish_trend = close[i] > ema_1w_aligned[i]
-        bearish_trend = close[i] < ema_1w_aligned[i]
+        # 4h trend filter
+        bullish_trend = close[i] > ema_4h_aligned[i]
+        bearish_trend = close[i] < ema_4h_aligned[i]
 
         if position == 0:
-            # LONG: Price crosses above R1 with bullish weekly trend and volume confirmation
+            # LONG: Price crosses above R1 with bullish 4h trend and volume confirmation
             if close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below S1 with bearish weekly trend and volume confirmation
+            # SHORT: Price crosses below S1 with bearish 4h trend and volume confirmation
             elif close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 or weekly trend turns bearish
+            # EXIT LONG: Price crosses below S1 or 4h trend turns bearish
             if close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 or weekly trend turns bullish
+            # EXIT SHORT: Price crosses above R1 or 4h trend turns bullish
             if close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
