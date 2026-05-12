@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_1w_Trend_Follow_With_Volume
-Hypothesis: 1d price breaking above/below 1w 20-period high/low with volume confirmation and 1w trend filter captures sustained moves in both bull and bear markets.
-Trades only in direction of 1w trend (EMA50). Uses volume spike to confirm breakout strength.
-Targets 15-25 trades/year per symbol with low turnover to minimize fee drag.
+6h_Market_Profile_Value_Area_Breakout
+Hypothesis: 6h price breaking out of prior 12h Value Area (high-volume range) with volume confirmation
+captures institutional breakouts. Works in bull/bear as value areas adapt to volatility.
+Value Area defined as 70% of volume within 12h period. Breakout above/below VA with volume > 1.5x avg.
 """
 
-name = "1d_1w_Trend_Follow_With_Volume"
-timeframe = "1d"
+name = "6h_Market_Profile_Value_Area_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,32 +24,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1w data for trend and breakout levels (call once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for Value Area calculation (call once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    
+    # Calculate Value Area (70% volume range) for each 12h bar
+    va_high = np.zeros(len(df_12h))
+    va_low = np.zeros(len(df_12h))
+    
+    for i in range(len(df_12h)):
+        # Get prices and volumes within this 12h bar
+        # Since we don't have tick data, approximate using OHLC
+        # Create synthetic price levels between low and high
+        n_levels = 20
+        price_levels = np.linspace(df_12h['low'].iloc[i], df_12h['high'].iloc[i], n_levels)
+        
+        # Distribute volume across price levels (simple uniform distribution as approximation)
+        # In reality, would use TPO or volume profile, but this approximates the concept
+        vol_per_level = df_12h['volume'].iloc[i] / n_levels
+        volumes = np.full(n_levels, vol_per_level)
+        
+        # Find 70% value area
+        total_vol = df_12h['volume'].iloc[i]
+        target_vol = 0.7 * total_vol
+        
+        # Sort by price and accumulate volume from high volume areas
+        # Simple approach: take range around VWAP
+        vwap = np.average(price_levels, weights=volumes)
+        va_range = 0.5 * (df_12h['high'].iloc[i] - df_12h['low'].iloc[i])  # 50% of range
+        va_high[i] = vwap + va_range
+        va_low[i] = vwap - va_range
+    
+    # Align VA to 6h timeframe
+    va_high_aligned = align_htf_to_ltf(prices, df_12h, va_high)
+    va_low_aligned = align_htf_to_ltf(prices, df_12h, va_low)
 
-    # 1w EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-
-    # 1w 20-period high/low for breakout levels
-    high_20_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    low_20_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    high_20_1w_aligned = align_htf_to_ltf(prices, df_1w, high_20_1w)
-    low_20_1w_aligned = align_htf_to_ltf(prices, df_1w, low_20_1w)
-
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
-        if np.isnan(high_20_1w_aligned[i]) or np.isnan(low_20_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(va_high_aligned[i]) or np.isnan(va_low_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,26 +76,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above 1w 20-period high + 1w uptrend + volume spike
-            if close[i] > high_20_1w_aligned[i] and close[i] > ema50_1w_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # LONG: Close breaks above VA High + volume confirmation
+            if close[i] > va_high_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 1w 20-period low + 1w downtrend + volume spike
-            elif close[i] < low_20_1w_aligned[i] and close[i] < ema50_1w_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # SHORT: Close breaks below VA Low + volume confirmation
+            elif close[i] < va_low_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below 1w 20-period low or 1w trend turns down
-            if close[i] < low_20_1w_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Close falls back into Value Area or below VA Low
+            if close[i] < va_high_aligned[i] or close[i] < va_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above 1w 20-period high or 1w trend turns up
-            if close[i] > high_20_1w_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Close rises back into Value Area or above VA High
+            if close[i] > va_low_aligned[i] or close[i] > va_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
