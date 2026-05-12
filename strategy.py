@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_EngulfingReversal_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,14 +18,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 12h trend filter: EMA50
+    df_12h = get_htf_data(prices, '12h')
+    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Bullish and bearish engulfing patterns
-    bullish_engulf = (close > open_) & (close > np.roll(open_, 1)) & (open_ < np.roll(close, 1))
-    bearish_engulf = (close < open_) & (close < np.roll(open_, 1)) & (open_ > np.roll(close, 1))
+    # Camarilla levels from 1d (need previous day's range)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    R1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    S1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align to 4h timeframe
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
     # Volume confirmation: volume > 1.5 * average volume (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -37,8 +47,8 @@ def generate_signals(prices):
     start_idx = 50  # need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if 1d trend data not ready
-        if np.isnan(ema50_1d_aligned[i]):
+        # Skip if 12h trend data not ready
+        if np.isnan(ema50_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -47,24 +57,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bullish engulfing + volume confirmation + 1d uptrend
-            if bullish_engulf[i] and vol_confirm[i] and (close[i] > ema50_1d_aligned[i]):
+            # Long: Close above R1 + volume confirmation + 12h uptrend
+            if close[i] > R1_1d_aligned[i] and vol_confirm[i] and close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish engulfing + volume confirmation + 1d downtrend
-            elif bearish_engulf[i] and vol_confirm[i] and (close[i] < ema50_1d_aligned[i]):
+            # Short: Close below S1 + volume confirmation + 12h downtrend
+            elif close[i] < S1_1d_aligned[i] and vol_confirm[i] and close[i] < ema50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bearish engulfing or trend reversal
-            if bearish_engulf[i] or (close[i] < ema50_1d_aligned[i]):
+            # Exit long: Close below S1 or trend reversal
+            if close[i] < S1_1d_aligned[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bullish engulfing or trend reversal
-            if bullish_engulf[i] or (close[i] > ema50_1d_aligned[i]):
+            # Exit short: Close above R1 or trend reversal
+            if close[i] > R1_1d_aligned[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
