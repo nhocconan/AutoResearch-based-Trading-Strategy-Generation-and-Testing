@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_Follow_With_Chop_Filter
-# Hypothesis: KAMA adapts to market noise - in trending markets it tracks price closely, in ranging markets it stays flat.
-# Combined with Choppiness Index regime filter: only trade when market is trending (CHOP < 38.2).
-# Uses 12h timeframe for trend direction to reduce whipsaw. Low trade frequency expected.
-# Works in bull markets by following uptrend, in bear markets by following downtrend.
-# Avoids whipsaws in ranging markets via CHOP filter.
+# 6h_Stochastic_14_3_3_Bollinger_20_2_Trend_1dEMA50
+# Hypothesis: Stochastic oscillator (14,3,3) identifies overbought/oversold conditions, 
+# Bollinger Bands (20,2) provide volatility context and dynamic support/resistance,
+# 1-day EMA50 establishes trend direction. Long when Stochastic crosses above 20 from below 
+# in uptrend near lower Bollinger Band; short when Stochastic crosses below 80 from above 
+# in downtrend near upper Bollinger Band. Designed for low-frequency, high-conviction trades 
+# in both bull and bear markets by combining mean reversion with trend filter.
 
-name = "4h_KAMA_Trend_Follow_With_Chop_Filter"
-timeframe = "4h"
+name = "6h_Stochastic_14_3_3_Bollinger_20_2_Trend_1dEMA50"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,85 +25,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 12h data for KAMA trend filter (primary trend)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-
-    close_12h = df_12h['close'].values
-
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # ER = |Change| / Volatility, where Change = |close - close[10]|, Volatility = sum|diff| over 10 periods
-    change = np.abs(close_12h - np.roll(close_12h, 10))
-    volatility = np.sum(np.abs(np.diff(close_12h, axis=0)), axis=0)  # temporary, will compute properly below
-    # Recalculate volatility properly: sum of absolute changes over 10 periods
-    volatility = np.zeros_like(close_12h)
-    for i in range(10, len(close_12h)):
-        volatility[i] = np.sum(np.abs(np.diff(close_12h[i-9:i+1])))
     
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants: fastest EMA = 2/(2+1) = 0.67, slowest = 2/(30+1) = 0.0645
-    sc = (er * (0.67 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close_12h)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-    
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Get 4h data for Choppiness Index calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 14:
-        return np.zeros(n)
+    # Calculate Bollinger Bands (20,2) on 6h data
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
 
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-
-    # Calculate Choppiness Index (CHOP)
-    # True Range = max(high-low, |high-previous close|, |low-previous close|)
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high_4h[0] - low_4h[0]  # First TR
+    # Calculate Stochastic Oscillator (14,3,3) on 6h data
+    # %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    k_percent = np.where((highest_high - lowest_low) == 0, 50, k_percent)
     
-    # Sum of TRUE RANGE over 14 periods
-    tr_sum = np.zeros_like(close_4h)
-    for i in range(14, len(close_4h)):
-        tr_sum[i] = np.sum(tr[i-13:i+1])
+    # %D = 3-period SMA of %K
+    k_series = pd.Series(k_percent)
+    d_percent = k_series.rolling(window=3, min_periods=3).mean().values
     
-    # Highest high and lowest low over 14 periods
-    max_hh = np.zeros_like(close_4h)
-    min_ll = np.zeros_like(close_4h)
-    for i in range(14, len(close_4h)):
-        max_hh[i] = np.max(high_4h[i-13:i+1])
-        min_ll[i] = np.min(low_4h[i-13:i+1])
-    
-    # CHOP = 100 * log10(sum(tr14) / (max(hh14) - min(ll14))) / log10(14)
-    range_hl = max_hh - min_ll
-    # Avoid division by zero and log of zero
-    chop = np.zeros_like(close_4h)
-    mask = (range_hl > 0) & (tr_sum > 0)
-    chop[mask] = 100 * np.log10(tr_sum[mask] / range_hl[mask]) / np.log10(14)
-    
-    # Align CHOP to 4h timeframe (already on 4h, so just use directly)
-    chop_aligned = chop  # Already calculated on 4h data
-
-    # Calculate volume confirmation (1.5x 20-period SMA)
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_threshold = volume_sma20 * 1.5
+    # Slow %K = 3-period SMA of %K (same as %D in standard settings)
+    slow_k = d_percent.copy()
+    # Slow %D = 3-period SMA of slow %K
+    slow_d = pd.Series(slow_k).rolling(window=3, min_periods=3).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after warmup period
-        # Skip if any required data is invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_sma20[i])):
+    for i in range(50, n):
+        # Skip if any required data is NaN
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or np.isnan(slow_k[i]) or np.isnan(slow_d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -111,30 +73,38 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above KAMA (uptrend) AND market is trending (CHOP < 38.2) AND volume confirmation
-            if (close[i] > kama_aligned[i] and 
-                chop_aligned[i] < 38.2 and 
-                volume[i] > volume_threshold[i]):
+            # LONG: Stochastic crosses above 20 from below in uptrend near lower BB
+            if (slow_k[i] > 20 and slow_k[i-1] <= 20 and 
+                slow_d[i] > slow_d[i-1] and  # Stochastic momentum up
+                close[i] > ema50_1d_aligned[i] and  # Uptrend filter
+                close[i] <= bb_lower[i] * 1.02):  # Near lower Bollinger Band (within 2%)
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA (downtrend) AND market is trending (CHOP < 38.2) AND volume confirmation
-            elif (close[i] < kama_aligned[i] and 
-                  chop_aligned[i] < 38.2 and 
-                  volume[i] > volume_threshold[i]):
+            # SHORT: Stochastic crosses below 80 from above in downtrend near upper BB
+            elif (slow_k[i] < 80 and slow_k[i-1] >= 80 and 
+                  slow_d[i] < slow_d[i-1] and  # Stochastic momentum down
+                  close[i] < ema50_1d_aligned[i] and  # Downtrend filter
+                  close[i] >= bb_upper[i] * 0.98):  # Near upper Bollinger Band (within 2%)
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA OR market becomes ranging (CHOP > 61.8)
-            if (close[i] < kama_aligned[i]) or (chop_aligned[i] > 61.8):
+            # EXIT LONG: Stochastic crosses above 80 (overbought) or trend change
+            if slow_k[i] > 80 and slow_k[i-1] <= 80:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < ema50_1d_aligned[i]:  # Trend breakdown
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA OR market becomes ranging (CHOP > 61.8)
-            if (close[i] > kama_aligned[i]) or (chop_aligned[i] > 61.8):
+            # EXIT SHORT: Stochastic crosses below 20 (oversold) or trend change
+            if slow_k[i] < 20 and slow_k[i-1] >= 20:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > ema50_1d_aligned[i]:  # Trend reversal
                 signals[i] = 0.0
                 position = 0
             else:
