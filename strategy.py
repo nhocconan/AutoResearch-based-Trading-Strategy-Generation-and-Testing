@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Price breaking Camarilla R1/S1 levels on 4h with volume confirmation and 1d trend filter captures institutional breakouts in both bull and bear markets. Designed for low trade frequency (~20-40/year) to minimize fee drag.
+# 6h_Pivot_Reversion_Volume
+# Hypothesis: On 6h timeframe, price reacting to daily pivot levels (S1/R1) with volume
+# confirmation indicates mean-reversion opportunities. Uses daily trend filter to avoid
+# trading against higher timeframe momentum. Designed for low trade frequency (~15-25/year)
+# to minimize fee drag in bear markets. Works in both bull (buying dips in uptrend) and
+# bear (selling rallies in downtrend) markets by aligning with daily trend.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Pivot_Reversion_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,44 +24,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Trend Filter ===
+    # === 1d Pivot Levels (Daily High/Low/Close) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # === Camarilla Levels from Previous Day (using 1d OHLC) ===
-    # Camarilla formula: Range = (H-L), Levels = C +/- (Range * multiplier)
-    # We use previous day's data to avoid look-ahead
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla levels
-    range_1d = high_1d - low_1d
-    # S1 = C - (Range * 1.1/12), R1 = C + (Range * 1.1/12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    r1 = close_1d + (range_1d * 1.1 / 12)
+    # Classic pivot: P = (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Support 1: S1 = 2*P - H
+    s1 = 2 * pivot - high_1d
+    # Resistance 1: R1 = 2*P - L
+    r1 = 2 * pivot - low_1d
     
-    # Align Camarilla levels to 4h timeframe (using previous day's levels)
+    # Align to 6h timeframe (values available after daily bar closes)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
-    # === Volume Confirmation ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 1d Trend Filter (Daily EMA) ===
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # === Volume Filter (20-period average) ===
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure indicators are stable
+    start_idx = 30  # Ensure EMA and volume MA are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,37 +69,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend direction from 1d EMA
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
+        # Volume must be above average to ensure participation
+        vol_ok = volume[i] > vol_ma[i]
         
-        # Volume confirmation (above average)
-        vol_confirm = volume[i] > vol_ma[i]
+        # Trend direction from daily EMA
+        trend_up = close[i] > ema_20_1d_aligned[i]
+        trend_down = close[i] < ema_20_1d_aligned[i]
         
         if position == 0:
-            # LONG: Price breaks above R1 with volume and uptrend
-            if (close[i] > r1_aligned[i] and 
-                vol_confirm and 
+            # LONG: Price at or below S1 with buying pressure in uptrend
+            if (close[i] <= s1_aligned[i] and 
+                vol_ok and 
                 trend_up):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with volume and downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  vol_confirm and 
+            # SHORT: Price at or above R1 with selling pressure in downtrend
+            elif (close[i] >= r1_aligned[i] and 
+                  vol_ok and 
                   trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price returns below R1 or trend changes
-            if (close[i] < r1_aligned[i] or 
+            # EXIT LONG: Price reaches pivot or trend changes
+            if (close[i] >= pivot_aligned[i] or 
                 not trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns above S1 or trend changes
-            if (close[i] > s1_aligned[i] or 
+            # EXIT SHORT: Price reaches pivot or trend changes
+            if (close[i] <= pivot_aligned[i] or 
                 not trend_down):
                 signals[i] = 0.0
                 position = 0
