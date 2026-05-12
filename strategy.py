@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4h_1d_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume_v3
-# Hypothesis: Uses daily Camarilla pivot levels (R1/S1) for breakout entries on 4h timeframe.
-# Trend filtered by daily EMA50 to ensure alignment with higher timeframe direction.
+# 12h_1d_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume
+# Hypothesis: Uses daily Camarilla pivot levels (R1/S1) for breakout entries on 12h timeframe.
+# Trend filtered by daily EMA50 to align with higher timeframe direction.
 # Volume confirmation (>1.5x 20-period average) ensures institutional participation.
-# Added Bollinger Band width filter to avoid choppy markets and reduce false breakouts.
-# Designed for low trade frequency (<400 total 4h trades) to minimize fee drag.
+# Designed for low trade frequency (<200 total 12h trades) to minimize fee drift.
 # Works in bull/bear markets by following daily trend direction while using Camarilla levels for precise entries.
 
-name = "4h_1d_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume_v3"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,20 +24,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-period average (on 4h timeframe)
+    # Volume spike: >1.5x 20-period average (on 12h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
-    
-    # Bollinger Band width filter to avoid choppy markets (20-period, 2 std dev)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    # Only trade when BB width is above average (avoid low volatility chop)
-    vol_filter = bb_width > bb_width_ma
     
     # Daily data for Camarilla pivot levels and EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -66,7 +54,7 @@ def generate_signals(prices):
     # Daily EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily indicators to 4h timeframe
+    # Align daily indicators to 12h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
@@ -77,8 +65,7 @@ def generate_signals(prices):
     for i in range(50, n):
         if (np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(bb_width[i])):
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,18 +74,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 + volume spike + price above daily EMA50 + volatility filter
+            # LONG: Price breaks above Camarilla R1 + volume spike + price above daily EMA50
             if (close[i] > camarilla_r1_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > ema_50_1d_aligned[i] and
-                vol_filter[i]):
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S1 + volume spike + price below daily EMA50 + volatility filter
+            # SHORT: Price breaks below Camarilla S1 + volume spike + price below daily EMA50
             elif (close[i] < camarilla_s1_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < ema_50_1d_aligned[i] and
-                  vol_filter[i]):
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
