@@ -1,12 +1,15 @@
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Combines Camarilla pivot breakouts on 4h with daily trend filter and volume spike confirmation.
-# Uses strict entry conditions to limit trades (target: 20-50/year) and avoid fee drag.
-# Works in bull markets via breakout momentum and in bear markets via counter-trend reversals at pivot levels.
-# Daily trend filter prevents counter-trend trades during strong trends.
-# Volume spike confirms institutional participation, reducing false breakouts.
+#!/usr/bin/env python3
+"""
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla pivot breakouts on 12h with daily trend filter and volume spike confirmation.
+Enters long when price breaks above R1 with daily uptrend and volume > 1.5x average.
+Enters short when price breaks below S1 with daily downtrend and volume > 1.5x average.
+Uses daily trend to avoid counter-trend trades and volume spike to confirm institutional interest.
+Designed for low trade frequency (12-37/year) to minimize fee drag in BTC/ETH markets.
+"""
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -40,7 +43,8 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate Camarilla levels on 4h data (using previous bar's HLC)
+    # Calculate Camarilla levels on 12h data (using previous bar's HLC)
+    # Shift by 1 to avoid look-ahead (use previous bar to calculate levels for current bar)
     prev_high = np.concatenate([[np.nan], high[:-1]]) if len(high) > 1 else np.full_like(high, np.nan)
     prev_low = np.concatenate([[np.nan], low[:-1]]) if len(low) > 1 else np.full_like(low, np.nan)
     prev_close = np.concatenate([[np.nan], close[:-1]]) if len(close) > 1 else np.full_like(close, np.nan)
@@ -53,14 +57,14 @@ def generate_signals(prices):
     # Volume average (20-period) for spike detection
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Pre-compute daily EMA50 alignment
+    # Pre-compute daily trend alignment
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(1, n):
-        # Get values for current bar
+    for i in range(1, n):  # Start from 1 to have previous bar data
+        # Get aligned values for current 12h bar
         r1_val = r1[i]
         s1_val = s1[i]
         ema50_val = ema50_aligned[i]
