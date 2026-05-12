@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_DonchianBreakout_1dTrend_Volume
-# Hypothesis: Trade 12h breakouts of Donchian channel (20) aligned with daily trend and volume.
-# Donchian provides clear support/resistance; daily EMA50 filters trend direction.
-# Volume confirms breakout momentum. Designed for low frequency (12-37/year) to survive
-# both bull and bear markets by following higher timeframe structure.
+# 6h_WeeklyPivot_R2S2_Breakout_1dTrend_Volume
+# Hypothesis: Trade breakouts of weekly pivot R2/S2 levels on 6h timeframe, aligned with daily EMA50 trend and volume confirmation.
+# Weekly pivot defines major weekly support/resistance; breakouts with volume indicate institutional interest.
+# Daily EMA50 filters for trend alignment to avoid counter-trend trades. Designed for low frequency (15-30 trades/year)
+# to survive both bull and bear markets by following higher timeframe structure with confirmation.
 
-name = "12h_DonchianBreakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_WeeklyPivot_R2S2_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -32,9 +32,32 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Donchian channel (20) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === Weekly pivot levels (R2, S2) ===
+    # Calculate from weekly OHLC (previous completed week)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    # Use previous week's OHLC for current week's pivot
+    wk_high = df_1w['high'].values
+    wk_low = df_1w['low'].values
+    wk_close = df_1w['close'].values
+    
+    # Shift by 1 to use previous week's data
+    wk_high_prev = np.roll(wk_high, 1)
+    wk_low_prev = np.roll(wk_low, 1)
+    wk_close_prev = np.roll(wk_close, 1)
+    wk_high_prev[0] = np.nan
+    wk_low_prev[0] = np.nan
+    wk_close_prev[0] = np.nan
+    
+    pivot = (wk_high_prev + wk_low_prev + wk_close_prev) / 3.0
+    r2 = pivot + (wk_high_prev - wk_low_prev)
+    s2 = pivot - (wk_high_prev - wk_low_prev)
+    
+    # Align weekly levels to 6h timeframe
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
     # === Volume confirmation (24-period average) ===
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -46,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
             np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,30 +83,30 @@ def generate_signals(prices):
         trend_down = close[i] < ema_50_1d_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
+        breakout_up = close[i] > r2_aligned[i]
+        breakout_down = close[i] < s2_aligned[i]
         
         # Volume filter: above average
         vol_ok = volume[i] > vol_ma_24[i]
         
         if position == 0:
-            # LONG: breakout above upper band, uptrend, volume confirmation
+            # LONG: breakout above R2, uptrend, volume confirmation
             if breakout_up and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakout below lower band, downtrend, volume confirmation
+            # SHORT: breakout below S2, downtrend, volume confirmation
             elif breakout_down and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: breakdown below lower band or trend reversal
+            # EXIT LONG: breakdown below S2 or trend reversal
             if breakout_down or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: breakout above upper band or trend reversal
+            # EXIT SHORT: breakout above R2 or trend reversal
             if breakout_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
