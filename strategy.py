@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -45,6 +45,10 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
     
+    # ===== Additional Filter: Minimum Holding Period (4 bars = 16h) =====
+    # Prevents whipsaw and reduces trade frequency
+    hold_timer = np.zeros(n, dtype=int)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -58,36 +62,58 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                hold_timer[i] = 0
             else:
                 signals[i] = 0.0
+                hold_timer[i] = 0
             continue
         
+        # Decrease hold timer if in position
+        if position != 0:
+            hold_timer[i] = hold_timer[i-1] - 1 if i > 0 else 0
+        else:
+            hold_timer[i] = 0
+        
         if position == 0:
-            # Long: Close crosses above R1 + above 1d EMA34 + volume spike
-            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and
-                close[i] > ema34_1d_aligned[i] and
-                vol_spike[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Close crosses below S1 + below 1d EMA34 + volume spike
-            elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and
-                  close[i] < ema34_1d_aligned[i] and
-                  vol_spike[i]):
-                signals[i] = -0.25
-                position = -1
+            # Only allow new entry if hold timer expired (should be 0 when flat)
+            if hold_timer[i] <= 0:
+                # Long: Close crosses above R1 + above 1d EMA34 + volume spike
+                if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and
+                    close[i] > ema34_1d_aligned[i] and
+                    vol_spike[i]):
+                    signals[i] = 0.25
+                    position = 1
+                    hold_timer[i] = 4  # Hold for 4 bars minimum
+                # Short: Close crosses below S1 + below 1d EMA34 + volume spike
+                elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and
+                      close[i] < ema34_1d_aligned[i] and
+                      vol_spike[i]):
+                    signals[i] = -0.25
+                    position = -1
+                    hold_timer[i] = 4  # Hold for 4 bars minimum
         elif position == 1:
-            # Exit long: Close crosses below S1 OR below 1d EMA34
-            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit conditions: Close crosses below S1 OR below 1d EMA34
+            # But only after minimum holding period
+            if hold_timer[i] <= 0:
+                if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
+                # Still in minimum hold period, maintain position
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close crosses above R1 OR above 1d EMA34
-            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit conditions: Close crosses above R1 OR above 1d EMA34
+            # But only after minimum holding period
+            if hold_timer[i] <= 0:
+                if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
+                # Still in minimum hold period, maintain position
                 signals[i] = -0.25
     
     return signals
