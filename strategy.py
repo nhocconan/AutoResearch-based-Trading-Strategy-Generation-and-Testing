@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 1d_RSI_Extreme_1wTrend_VolumeFilter
-# Hypothesis: On daily timeframe, take long positions when RSI(14) < 30 (oversold) with weekly uptrend (price > EMA50) and volume > 1.5x average; take short positions when RSI(14) > 70 (overbought) with weekly downtrend (price < EMA50) and volume > 1.5x average. Exit when RSI returns to neutral zone (40-60). Uses weekly trend filter to avoid counter-trend trades in strong trends, and volume filter to ensure conviction. Designed for low trade frequency (target 10-25 trades/year) to minimize fee drag and improve generalization across bull/bear markets.
+# 4h_4H_RSI_34_SMA_50_Crossover_1dTrend_VolumeConfirm
+# Hypothesis: On 4h timeframe, buy when RSI(34) crosses above SMA(50) with volume > 1.5x average and 1d EMA50 trending up; sell when RSI crosses below SMA with volume confirmation and 1d EMA50 trending down. Uses 1d trend filter to avoid counter-trend trades and volume confirmation to ensure breakout strength. Targets 20-40 trades per year to minimize fee drift. Works in bull via momentum and in bear via short signals during downtrends.
 
-name = "1d_RSI_Extreme_1wTrend_VolumeFilter"
-timeframe = "1d"
+name = "4h_4H_RSI_34_SMA_50_Crossover_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,36 +20,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate RSI(34)
+    def rsi(close, period=34):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        return 100 - (100 / (1 + rs))
 
-    # Calculate daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    rsi_34 = rsi(close, 34)
 
-    # Volume confirmation: volume > 1.5x 20-day average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate SMA(50)
+    sma_50 = np.convolve(close, np.ones(50)/50, mode='same')
+    # Adjust for edges: use expanding mean for first 50 periods
+    for i in range(50):
+        sma_50[i] = np.mean(close[:i+1])
+
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_avg_20 = np.convolve(volume, np.ones(20)/20, mode='same')
+    for i in range(20):
+        vol_avg_20[i] = np.mean(volume[:i+1])
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(rsi_34[i]) or np.isnan(sma_50[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,30 +73,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI < 30 (oversold) + weekly uptrend (price > EMA50) + volume > 1.5x avg
-            if (rsi[i] < 30 and 
-                close[i] > ema50_1w_aligned[i] and 
+            # LONG: RSI crosses above SMA + 1d uptrend + volume spike
+            if (rsi_34[i] > sma_50[i] and rsi_34[i-1] <= sma_50[i-1] and
+                close[i] > ema50_1d_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI > 70 (overbought) + weekly downtrend (price < EMA50) + volume > 1.5x avg
-            elif (rsi[i] > 70 and 
-                  close[i] < ema50_1w_aligned[i] and 
+            # SHORT: RSI crosses below SMA + 1d downtrend + volume spike
+            elif (rsi_34[i] < sma_50[i] and rsi_34[i-1] >= sma_50[i-1] and
+                  close[i] < ema50_1d_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (>= 40) or weekly trend turns down
-            if rsi[i] >= 40 or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: RSI crosses below SMA OR trend turns down
+            if rsi_34[i] < sma_50[i] and rsi_34[i-1] >= sma_50[i-1] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (<= 60) or weekly trend turns up
-            if rsi[i] <= 60 or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: RSI crosses above SMA OR trend turns up
+            if rsi_34[i] > sma_50[i] and rsi_34[i-1] <= sma_50[i-1] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
