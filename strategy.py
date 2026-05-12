@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume
-# Hypothesis: Uses daily Camarilla pivot levels (R1/S1) for breakout entries on 12h timeframe.
+# 4h_1d_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume_v2
+# Hypothesis: Uses daily Camarilla pivot levels (R1/S1) for breakout entries on 4h timeframe.
 # Trend filtered by daily EMA50 to ensure alignment with higher timeframe direction.
 # Volume confirmation (>1.5x 20-period average) ensures institutional participation.
-# Designed for low trade frequency (<200 total 12h trades) to minimize fee drag.
+# Added hysteresis to prevent whipsaw: only exit when price crosses opposite level.
+# Designed for low trade frequency (<300 total 4h trades) to minimize fee drift.
 # Works in bull/bear markets by following daily trend direction while using Camarilla levels for precise entries.
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-period average (on 12h timeframe)
+    # Volume spike: >1.5x 20-period average (on 4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
@@ -54,7 +55,7 @@ def generate_signals(prices):
     # Daily EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
@@ -89,16 +90,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below Camarilla R1 OR closes below daily EMA50
-            if (close[i] < camarilla_r1_aligned[i]) or \
+            # EXIT LONG: Price closes below Camarilla S1 (opposite level) OR closes below daily EMA50
+            if (close[i] < camarilla_s1_aligned[i]) or \
                close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above Camarilla S1 OR closes above daily EMA50
-            if (close[i] > camarilla_s1_aligned[i]) or \
+            # EXIT SHORT: Price closes above Camarilla R1 (opposite level) OR closes above daily EMA50
+            if (close[i] > camarilla_r1_aligned[i]) or \
                close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
