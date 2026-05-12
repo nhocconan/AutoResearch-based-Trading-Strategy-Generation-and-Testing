@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dEMA34_TrendVolume_v1
-# Hypothesis: Camarilla R1/S1 breakout from daily levels with 1d EMA34 trend filter and volume spike confirmation on 4h timeframe.
-# Uses Camarilla pivot levels (R1, S1) calculated from prior day's OHLC. Long when price breaks above R1 with uptrend (price > EMA34) and volume spike.
-# Short when price breaks below S1 with downtrend (price < EMA34) and volume spike. Exit on opposite Camarilla level touch (S1 for long exit, R1 for short exit).
-# Designed for low trade frequency (19-50/year) to avoid fee drag and work in both bull and bear markets.
+# 1d_Chaikin_Money_Flow_Reverse
+# Hypothesis: Chaikin Money Flow (CMF) reversal on daily timeframe with weekly trend filter.
+# Long when CMF crosses above +0.1 with weekly uptrend (price > weekly EMA20).
+# Short when CMF crosses below -0.1 with weekly downtrend (price < weekly EMA20).
+# Exit when CMF crosses back toward zero (long exit < 0.05, short exit > -0.05).
+# Designed for low trade frequency (7-25/year) to avoid fee drag. Works in bull/bear markets by following weekly trend direction.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_TrendVolume_v1"
-timeframe = "4h"
+name = "1d_Chaikin_Money_Flow_Reverse"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,43 +24,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla levels and EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate Camarilla levels for each day: based on prior day's OHLC
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    # We use prior day's values to avoid look-ahead
-    rng_1d = high_1d - low_1d
-    camarilla_r1 = close_1d + 1.1 * rng_1d / 12
-    camarilla_s1 = close_1d - 1.1 * rng_1d / 12
+    # Calculate weekly EMA20 for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
 
-    # Align Camarilla levels to 4h timeframe (use prior day's levels for current day)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate Chaikin Money Flow (20-period) on daily data
+    # MFM = ((close - low) - (high - close)) / (high - low)
+    # MFV = MFM * volume
+    # CMF = 20-period sum of MFV / 20-period sum of volume
+    high_low = high - low
+    # Avoid division by zero
+    high_low_safe = np.where(high_low == 0, 1e-10, high_low)
+    mfm = ((close - low) - (high - close)) / high_low_safe
+    mfv = mfm * volume
 
-    # Get 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # Calculate volume spike threshold (2.0x 20-period SMA on 4h)
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0
+    # Calculate 20-period sums
+    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
+    volume_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    cmf = np.divide(mfv_sum, volume_sum, out=np.zeros_like(mfv_sum), where=volume_sum!=0)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(cmf[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +64,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above R1 with uptrend and volume spike
-            if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume[i] > volume_sma20[i]):
+            # LONG: CMF crosses above +0.1 with weekly uptrend
+            if (cmf[i] > 0.1 and cmf[i-1] <= 0.1 and close[i] > ema20_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1 with downtrend and volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > volume_sma20[i]):
+            # SHORT: CMF crosses below -0.1 with weekly downtrend
+            elif (cmf[i] < -0.1 and cmf[i-1] >= -0.1 and close[i] < ema20_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price touches or crosses below S1 (opposite level)
-            if close[i] < camarilla_s1_aligned[i]:
+            # EXIT LONG: CMF crosses back below 0.05
+            if cmf[i] < 0.05:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price touches or crosses above R1 (opposite level)
-            if close[i] > camarilla_r1_aligned[i]:
+            # EXIT SHORT: CMF crosses back above -0.05
+            if cmf[i] > -0.05:
                 signals[i] = 0.0
                 position = 0
             else:
