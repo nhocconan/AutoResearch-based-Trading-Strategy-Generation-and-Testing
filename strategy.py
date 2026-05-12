@@ -1,12 +1,14 @@
-# State the hypothesis and reasoning:
-# Hypothesis: A 4-hour Donchian channel breakout strategy with volume confirmation and a 1-day trend filter using EMA50.
-# Why it should work in both bull and bear: The Donchian breakout captures momentum in trending markets,
-# while the 1-day EMA50 filter ensures trades are taken in the direction of the higher-timeframe trend.
-# Volume confirmation filters out false breakouts. This combination reduces whipsaws and improves robustness.
-# The 4h timeframe balances trade frequency (target ~20-50 trades/year) to minimize fee drag while capturing significant moves.
+#!/usr/bin/env python3
+"""
+1d_1w_WeeklyDonchianBreakout_TrendVol_v1
+Hypothesis: Weekly Donchian channel breakouts on daily timeframe with trend filter and volume confirmation.
+In bull markets, price breaks above 20-week high with volume surge and weekly uptrend.
+In bear markets, price breaks below 20-week low with volume surge and weekly downtrend.
+Uses weekly timeframe for trend to reduce noise and focus on major trend changes.
+"""
 
-name = "4h_DonchianBreakout_VolumeTrend_v1"
-timeframe = "4h"
+name = "1d_1w_WeeklyDonchianBreakout_TrendVol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,30 +25,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume spike: >1.8x 50-period average (daily)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
-    # Volume spike: >2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly Donchian channels (20 weeks)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly high and low for Donchian channels
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    
+    # Calculate 20-period rolling high/low on weekly data
+    weekly_high_20 = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    weekly_low_20 = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    
+    # Align weekly Donchian levels to daily timeframe
+    weekly_high_20_aligned = align_htf_to_ltf(prices, df_1w, weekly_high_20)
+    weekly_low_20_aligned = align_htf_to_ltf(prices, df_1w, weekly_low_20)
+    
+    # Weekly trend filter: EMA50 on weekly close
+    weekly_ema_50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema_50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i])):
+    for i in range(100, n):
+        if (np.isnan(weekly_high_20_aligned[i]) or
+            np.isnan(weekly_low_20_aligned[i]) or
+            np.isnan(weekly_ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,32 +65,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above 20-period high + volume spike + price above 1d EMA50
-            if (close[i] > highest_high[i] and 
+            # LONG: Price breaks above weekly Donchian high + volume spike + price above weekly EMA50
+            if (close[i] > weekly_high_20_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > ema_50_1d_aligned[i]):
+                close[i] > weekly_ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 20-period low + volume spike + price below 1d EMA50
-            elif (close[i] < lowest_low[i] and 
+            # SHORT: Price breaks below weekly Donchian low + volume spike + price below weekly EMA50
+            elif (close[i] < weekly_low_20_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < ema_50_1d_aligned[i]):
+                  close[i] < weekly_ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters the Donchian channel OR closes below 1d EMA50
-            if (close[i] < highest_high[i] and close[i] > lowest_low[i]) or \
-               close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: Price re-enters weekly Donchian channel OR closes below weekly EMA50
+            if (close[i] < weekly_high_20_aligned[i] and close[i] > weekly_low_20_aligned[i]) or \
+               close[i] < weekly_ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters the Donchian channel OR closes above 1d EMA50
-            if (close[i] < highest_high[i] and close[i] > lowest_low[i]) or \
-               close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: Price re-enters weekly Donchian channel OR closes above weekly EMA50
+            if (close[i] < weekly_high_20_aligned[i] and close[i] > weekly_low_20_aligned[i]) or \
+               close[i] > weekly_ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
