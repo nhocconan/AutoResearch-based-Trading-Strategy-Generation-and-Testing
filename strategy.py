@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3_S4_Breakout_4hEMA50_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4H DATA FOR EMA50 TREND FILTER ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # === CALCULATE EMA50 FOR TREND FILTER ===
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # === CALCULATE CAMARILLA LEVELS (R3, S4) FROM PREVIOUS DAY ===
+    # === 1D DATA FOR TREND FILTER (EMA34) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === 1D DATA FOR CAMARILLA LEVELS ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
     rng = high_1d - low_1d
     R3 = close_1d + rng * 1.1 / 4
-    S4 = close_1d - rng * 1.1 / 4
+    S3 = close_1d - rng * 1.1 / 4
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
     
-    # ALIGN TO 1H TIMEFRAME (PREVIOUS DAY'S LEVELS AVAILABLE AT OPEN)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    R3_1h = align_htf_to_ltf(prices, df_1d, R3)
-    S4_1h = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # === VOLUME SPIKE DETECTION (20-PERIOD) ===
+    # === VOLUME SPIKE (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
-    
-    # === SESSION FILTER: 08-20 UTC ===
-    # Pre-compute hour array for efficiency
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(R3_1h[i]) or
-            np.isnan(S4_1h[i]) or
-            np.isnan(vol_ma[i]) or
-            not in_session[i]):
+        # Skip if data not ready
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(R3_6h[i]) or
+            np.isnan(S3_6h[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,31 +55,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: PRICE BREAKS ABOVE R3 + ABOVE 4H EMA50 + VOLUME SPIKE + IN SESSION
-            if (close[i] > R3_1h[i] and 
-                close[i] > ema50_4h_aligned[i] and
+            # LONG: PRICE BREAKS ABOVE R3 + ABOVE 1D EMA34 + VOLUME SPIKE
+            if (close[i] > R3_6h[i] and 
+                close[i] > ema34_1d_aligned[i] and
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: PRICE BREAKS BELOW S4 + BELOW 4H EMA50 + VOLUME SPIKE + IN SESSION
-            elif (close[i] < S4_1h[i] and 
-                  close[i] < ema50_4h_aligned[i] and
+            # SHORT: PRICE BREAKS BELOW S3 + BELOW 1D EMA34 + VOLUME SPIKE
+            elif (close[i] < S3_6h[i] and 
+                  close[i] < ema34_1d_aligned[i] and
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: PRICE BREAKS BELOW S4 (REVERSAL) OR BELOW 4H EMA50
-            if close[i] < S4_1h[i] or close[i] < ema50_4h_aligned[i]:
+            # EXIT LONG: PRICE BREAKS BELOW S3 (REVERSAL) OR BELOW 1D EMA34
+            if close[i] < S3_6h[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: PRICE BREAKS ABOVE R3 (REVERSAL) OR ABOVE 4H EMA50
-            if close[i] > R3_1h[i] or close[i] > ema50_4h_aligned[i]:
+            # EXIT SHORT: PRICE BREAKS ABOVE R3 (REVERSAL) OR ABOVE 1D EMA34
+            if close[i] > R3_6h[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
