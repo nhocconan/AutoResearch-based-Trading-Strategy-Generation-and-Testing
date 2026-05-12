@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1D_KAMA_DIRECTION_RSI_CONFIRMATION
-# Hypothesis: Kaufman Adaptive Moving Average (KAMA) on 1d shows adaptive trend direction, confirmed by RSI(14) for momentum.
-# In bull markets: KAMA rising + RSI > 50 signals long. In bear markets: KAMA falling + RSI < 50 signals short.
-# Uses 1w trend filter to avoid counter-trend trades. Designed for low trade frequency (10-30/year) to minimize fee drag.
-# Works in both bull and bear by following adaptive trend with momentum confirmation.
+# 6H_EHLERS_FISHER_TRANSFORM_1D_TREND
+# Hypothesis: Ehlers Fisher Transform on 1d identifies turning points in cyclical markets.
+# When Fisher crosses above -1.5, it signals the end of a sell cycle and potential uptrend.
+# When Fisher crosses below +1.5, it signals the end of a buy cycle and potential downtrend.
+# Combined with 12h trend filter (EMA50) and volume confirmation to avoid false signals.
+# Works in both bull and bear markets by catching reversals at extremes.
+# Target: 15-35 trades/year on 6h timeframe to avoid overtrading.
 
-name = "1D_KAMA_DIRECTION_RSI_CONFIRMATION"
-timeframe = "1d"
+name = "6H_EHLERS_FISHER_TRANSFORM_1D_TREND"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,62 +21,62 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter (only use confirmed weekly closes)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d data for Fisher Transform
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 15:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1d KAMA calculation (adaptive trend)
-    # Efficiency ratio over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=1)
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+2) - 2/(30+2)) + 2/(30+2)) ** 2
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Start after 10 periods
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Ehlers Fisher Transform (price normalization to [-1, 1])
+    def fishert_transform(price, length=10):
+        # Normalize price to [-1, 1] over the lookback period
+        highest = np.maximum.accumulate(price)
+        lowest = np.minimum.accumulate(price)
+        # Avoid division by zero
+        diff = highest - lowest
+        diff = np.where(diff == 0, 1e-10, diff)
+        value = 2 * ((price - lowest) / diff) - 1
+        # Smooth with a small smoothing factor
+        value = np.where((value > 0.999), 0.999, value)
+        value = np.where((value < -0.999), -0.999, value)
+        # Fisher transform
+        fish = 0.5 * np.log((1 + value) / (1 - value) + 1e-10)
+        # Apply exponential moving average for smoothing
+        fish = pd.Series(fish).ewm(alpha=0.2, adjust=False).fillna(0).values
+        return fish
     
-    # 1d RSI(14) for momentum confirmation
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Pad RSI to match length (first 14 values are NaN)
-    rsi_padded = np.full_like(close, np.nan)
-    rsi_padded[14:] = rsi
+    # Apply Fisher Transform to typical price
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    fish = fishert_transform(typical_price_1d, 10)
     
-    # 1w EMA(34) for trend filter (only long in uptrend, short in downtrend)
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
+        return np.zeros(n)
     
-    # Align all 1d and 1w data to 1d timeframe
-    kama_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama)
-    rsi_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), rsi_padded)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    close_12h = df_12h['close'].values
+    # EMA50 for 12h trend
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume spike: current 6h volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_confirm = volume > 1.5 * vol_ma
+    volume_spike = volume > 2.0 * vol_ma
+    
+    # Align all data to 6h timeframe
+    fish_aligned = align_htf_to_ltf(prices, df_1d, fish)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(15, n):  # Start after RSI warmup
+    for i in range(1, n):
         # Skip if any critical data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(fish_aligned[i]) or np.isnan(ema50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,34 +85,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: KAMA rising (trend up) + RSI > 50 (bullish momentum) + 1w uptrend + volume confirmation
-            if (close[i] > kama_aligned[i] and 
-                rsi_aligned[i] > 50 and 
-                close[i] > ema34_1w_aligned[i] and 
-                volume_confirm[i]):
+            # LONG: Fisher crosses above -1.5 (end of sell cycle) with volume in uptrend
+            if (fish_aligned[i-1] <= -1.5 and fish_aligned[i] > -1.5 and 
+                volume_spike[i] and 
+                close[i] > ema50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA falling (trend down) + RSI < 50 (bearish momentum) + 1w downtrend + volume confirmation
-            elif (close[i] < kama_aligned[i] and 
-                  rsi_aligned[i] < 50 and 
-                  close[i] < ema34_1w_aligned[i] and 
-                  volume_confirm[i]):
+            # SHORT: Fisher crosses below +1.5 (end of buy cycle) with volume in downtrend
+            elif (fish_aligned[i-1] >= 1.5 and fish_aligned[i] < 1.5 and 
+                  volume_spike[i] and 
+                  close[i] < ema50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA turns down or RSI < 50
-            if (close[i] < kama_aligned[i] or 
-                rsi_aligned[i] < 50):
+            # EXIT LONG: Fisher crosses below +1.5 (sell cycle begins) or trend reversal
+            if (fish_aligned[i] < 1.5 and fish_aligned[i-1] >= 1.5) or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA turns up or RSI > 50
-            if (close[i] > kama_aligned[i] or 
-                rsi_aligned[i] > 50):
+            # EXIT SHORT: Fisher crosses above -1.5 (buy cycle begins) or trend reversal
+            if (fish_aligned[i] > -1.5 and fish_aligned[i-1] <= -1.5) or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
