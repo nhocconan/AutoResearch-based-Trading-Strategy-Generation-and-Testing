@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Chaikin_Money_Flow_Trend_Pullback
-# Hypothesis: Use Chaikin Money Flow (CMF) with daily trend filter and pullback entry.
-# Long when CMF > 0.25, price pulls back to EMA21, and price > daily EMA50.
-# Short when CMF < -0.25, price pulls back to EMA21, and price < daily EMA50.
-# Exit when CMF crosses back toward zero or price breaks EMA50 in opposite direction.
-# Designed to capture trend continuation after pullbacks with institutional flow confirmation.
-# Works in bull/bear markets via daily trend filter. Targets ~25-35 trades/year.
+# 1d_PriceAction_Momentum_WeeklyTrend_Filter
+# Hypothesis: Use daily price action with momentum confirmation and weekly trend filter.
+# Long when price closes above prior day's high with RSI > 50 and weekly trend up.
+# Short when price closes below prior day's low with RSI < 50 and weekly trend down.
+# Exit when price reverses back to prior day's close or momentum fades.
+# Designed to capture momentum bursts with trend alignment, works in both bull and bear markets.
+# Targets 15-25 trades/year to minimize fee drag.
 
-name = "4h_Chaikin_Money_Flow_Trend_Pullback"
-timeframe = "4h"
+name = "1d_PriceAction_Momentum_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,40 +25,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Chaikin Money Flow (20-period)
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Avoid division by zero
-    hl_range = high - low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    mfm = ((close - low) - (high - close)) / hl_range
-    mfv = mfm * volume
+    # Calculate 14-period RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # CMF = 20-period sum of MFV / 20-period sum of volume
-    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = np.divide(mfv_sum, vol_sum, out=np.zeros_like(mfv_sum), where=vol_sum!=0)
-    
-    # EMA21 for pullback entry
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Daily EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly trend filter: EMA34 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 20  # Ensure RSI is stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(cmf[i]) or np.isnan(ema21[i]) or 
-            np.isnan(daily_ema_aligned[i])):
+        if np.isnan(rsi[i]) or np.isnan(weekly_ema_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,26 +59,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: CMF > 0.25, price pulls back to EMA21 (close <= EMA21), and price > daily EMA
-            if cmf[i] > 0.25 and close[i] <= ema21[i] and close[i] > daily_ema_aligned[i]:
+            # LONG: Close above prior day's high, RSI > 50, weekly trend up
+            if close[i] > high[i-1] and rsi[i] > 50 and close[i] > weekly_ema_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: CMF < -0.25, price pulls back to EMA21 (close >= EMA21), and price < daily EMA
-            elif cmf[i] < -0.25 and close[i] >= ema21[i] and close[i] < daily_ema_aligned[i]:
+            # SHORT: Close below prior day's low, RSI < 50, weekly trend down
+            elif close[i] < low[i-1] and rsi[i] < 50 and close[i] < weekly_ema_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: CMF drops below 0 or price breaks below daily EMA
-            if cmf[i] < 0.0 or close[i] < daily_ema_aligned[i]:
+            # EXIT LONG: Close below prior day's close or RSI < 40
+            if close[i] < close[i-1] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: CMF rises above 0 or price breaks above daily EMA
-            if cmf[i] > 0.0 or close[i] > daily_ema_aligned[i]:
+            # EXIT SHORT: Close above prior day's close or RSI > 60
+            if close[i] > close[i-1] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
