@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_1dRSI_OverboughtOversold
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) on 4h indicates trend direction, while 1d RSI identifies overbought/oversold conditions for mean-reversion entries in the direction of the 4h trend. This combines trend-following with mean-reversion to work in both bull and bear markets by following the 4h trend and using daily RSI for timing.
+1d_WeeklyPivot_PriceChannelBreakout_VolumeSpike
+Hypothesis: Price breaking above/below weekly pivot resistance/support levels (calculated from prior week OHLC) with 1d EMA trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. Weekly pivots represent stronger support/resistance than daily, reducing false signals. Works in bull/bear by following 1d trend direction. Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
 """
 
-name = "4h_KAMA_Direction_1dRSI_OverboughtOversold"
-timeframe = "4h"
+name = "1d_WeeklyPivot_PriceChannelBreakout_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,43 +22,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
 
-    # Calculate KAMA on 4h data
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # Initialize
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate Weekly Pivot levels: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H
+    # Using prior week's data
+    weekly_close = df_weekly['close'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
 
-    # Calculate RSI on 1d data
-    delta = np.diff(df_1d['close'].values)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    # Shift by 1 to use previous day's RSI
-    rsi_1d = np.roll(rsi_1d, 1)
-    rsi_1d[0] = np.nan
+    # Shift by 1 to use previous week's data
+    prev_weekly_close = np.roll(weekly_close, 1)
+    prev_weekly_high = np.roll(weekly_high, 1)
+    prev_weekly_low = np.roll(weekly_low, 1)
+    prev_weekly_close[0] = np.nan
+    prev_weekly_high[0] = np.nan
+    prev_weekly_low[0] = np.nan
 
-    # Align KAMA and RSI to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, prices, kama)  # Already on 4h
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
+    weekly_r1 = 2 * pivot - prev_weekly_low  # Resistance 1
+    weekly_s1 = 2 * pivot - prev_weekly_high  # Support 1
+
+    # Align Weekly Pivot levels to 1d timeframe
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+
+    # Volume spike: >1.5x 20-period average (1d)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):  # Start after RSI warmup
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_1d_aligned[i])):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
+            np.isnan(ema_50_1d[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,26 +68,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above KAMA (uptrend) and RSI oversold (<30)
-            if (close[i] > kama_aligned[i] and rsi_1d_aligned[i] < 30):
+            # LONG: Price breaks above Weekly R1 + 1d EMA50 uptrend + volume spike
+            if (close[i] > weekly_r1_aligned[i] and 
+                close[i] > ema_50_1d[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA (downtrend) and RSI overbought (>70)
-            elif (close[i] < kama_aligned[i] and rsi_1d_aligned[i] > 70):
+            # SHORT: Price breaks below Weekly S1 + 1d EMA50 downtrend + volume spike
+            elif (close[i] < weekly_s1_aligned[i] and 
+                  close[i] < ema_50_1d[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA or RSI overbought (>70)
-            if (close[i] < kama_aligned[i] or rsi_1d_aligned[i] > 70):
+            # EXIT LONG: Price closes below Weekly S1 (reversal level)
+            if close[i] < weekly_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA or RSI oversold (<30)
-            if (close[i] > kama_aligned[i] or rsi_1d_aligned[i] < 30):
+            # EXIT SHORT: Price closes above Weekly R1 (reversal level)
+            if close[i] > weekly_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
