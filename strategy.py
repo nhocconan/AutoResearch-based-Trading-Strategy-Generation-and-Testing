@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,40 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1w trend filter: EMA34
+    df_1w = get_htf_data(prices, '1w')
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # 1w volume filter: volume > 1.5x 20-period average
+    vol_ma_20_1w = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    # 1w price data for Camarilla levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Previous week's Camarilla levels (R3/S3)
+    range_1w = high_1w - low_1w
+    camarilla_h3 = close_1w + range_1w * 1.1 / 4
+    camarilla_l3 = close_1w - range_1w * 1.1 / 4
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
-    
-    # Chikou Span (Lagging Span): not used for signals (requires future data)
+    # Align to 12h
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52  # need enough data for Senkou B
+    start_idx = 20  # need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if 1d trend data not ready
-        if np.isnan(ema50_1d_aligned[i]):
+        # Skip if 1w trend or volume data not ready
+        if np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_20_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,39 +55,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine cloud color and position
-        # Cloud top = max(senkou_a, senkou_b), cloud bottom = min(senkou_a, senkou_b)
-        cloud_top = max(senkou_a[i], senkou_b[i])
-        cloud_bottom = min(senkou_a[i], senkou_b[i])
-        
         if position == 0:
-            # Long conditions: TK cross bullish, price above cloud, 1d uptrend
-            if (tenkan[i] > kijun[i] and  # TK cross bullish
-                close[i] > cloud_top and  # price above cloud
-                close[i] > ema50_1d_aligned[i]):  # 1d uptrend
-                signals[i] = 0.25
+            # Long conditions: price breaks above H3 with 1w uptrend and volume confirmation
+            if (high[i] > camarilla_h3_aligned[i] and 
+                close[i] > camarilla_h3_aligned[i] and
+                close[i] > ema34_1w_aligned[i] and  # 1w uptrend
+                volume[i] > vol_ma_20_1w_aligned[i]):  # volume spike
+                signals[i] = 0.30
                 position = 1
-            # Short conditions: TK cross bearish, price below cloud, 1d downtrend
-            elif (tenkan[i] < kijun[i] and  # TK cross bearish
-                  close[i] < cloud_bottom and  # price below cloud
-                  close[i] < ema50_1d_aligned[i]):  # 1d downtrend
-                signals[i] = -0.25
+            # Short conditions: price breaks below L3 with 1w downtrend and volume confirmation
+            elif (low[i] < camarilla_l3_aligned[i] and 
+                  close[i] < camarilla_l3_aligned[i] and
+                  close[i] < ema34_1w_aligned[i] and  # 1w downtrend
+                  volume[i] > vol_ma_20_1w_aligned[i]):  # volume spike
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long when TK cross bearish or price drops below cloud
-            if (tenkan[i] < kijun[i] or 
-                close[i] < cloud_bottom):
+            # Exit long when price breaks below L3 or reverses against trend
+            if (low[i] < camarilla_l3_aligned[i] or 
+                close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short when TK cross bullish or price rises above cloud
-            if (tenkan[i] > kijun[i] or 
-                close[i] > cloud_top):
+            # Exit short when price breaks above H3 or reverses against trend
+            if (high[i] > camarilla_h3_aligned[i] or 
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
