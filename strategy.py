@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_Dyn"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -44,7 +44,7 @@ def generate_signals(prices):
     camarilla_r1 = camarilla_pivot + camarilla_range * 1.1 / 12
     camarilla_s1 = camarilla_pivot - camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -71,11 +71,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R1 + above 1d EMA34 + volume filter
             if close[i] > camarilla_r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: price breaks below S1 + below 1d EMA34 + volume filter
             elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Exit long: price breaks below S1
@@ -83,13 +83,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Exit short: price breaks above R1
             if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
