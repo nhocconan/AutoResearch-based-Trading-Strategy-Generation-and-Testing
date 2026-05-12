@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume_Confirm"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,17 +17,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    
-    # Load 1d data for Camarilla pivots (previous day)
+    # Load 1d data for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla R1 and S1 for previous day
     p = (high_1d + low_1d + close_1d) / 3
@@ -50,7 +48,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_20_12h_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,12 +57,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 12h EMA20 + volume spike
-            if (close[i] > r1_aligned[i] and close[i] > ema_20_12h_aligned[i] and vol_spike[i]):
+            # Long: price breaks above R1 + above 1d EMA34 + volume spike
+            if (close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 12h EMA20 + volume spike
-            elif (close[i] < s1_aligned[i] and close[i] < ema_20_12h_aligned[i] and vol_spike[i]):
+            # Short: price breaks below S1 + below 1d EMA34 + volume spike
+            elif (close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
