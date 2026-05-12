@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_20_Breakout_1dTrend_VolumeSpike
-Hypothesis: Donchian(20) breakout on 4h combined with 1d EMA50 trend filter and volume spike (2x average) captures strong trending moves. Works in bull/bear by following 1d trend direction. Target: 20-50 trades/year.
+1d_RSI_Divergence_VolumeTrend
+Hypothesis: On daily timeframe, bullish/bearish RSI divergence (price making higher lows/lower highs while RSI makes opposite) combined with volume trend confirmation (increasing volume on up moves/decreasing on down moves) captures trend reversals and continuations. Works in bull markets via bullish divergences leading uptrends, and in bear markets via bearish divergences leading downtrends. Uses 14-day RSI and 20-day volume trend filter to avoid false signals.
 """
 
-name = "4h_Donchian_20_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_RSI_Divergence_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,28 +21,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # RSI calculation (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Donchian(20) on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 1d EMA50 trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Volume trend: 20-period EMA of volume
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_trend = volume > vol_ema  # volume above its EMA = increasing trend
     
-    # Volume spike: >2.0x 20-period average (4h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Detect swing points for divergence
+    def find_swing_points(arr, window=5):
+        """Find local highs and lows using rolling window"""
+        highs = np.zeros_like(arr, dtype=bool)
+        lows = np.zeros_like(arr, dtype=bool)
+        
+        for i in range(window, len(arr) - window):
+            if arr[i] == np.max(arr[i-window:i+window+1]):
+                highs[i] = True
+            if arr[i] == np.min(arr[i-window:i+window+1]):
+                lows[i] = True
+        return highs, lows
+    
+    # Find price and RSI swing points
+    price_highs, price_lows = find_swing_points(close, window=3)
+    rsi_highs, rsi_lows = find_swing_points(rsi, window=3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after EMA50 warmup
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(20, n):  # Start after warmup
+        if np.isnan(rsi[i]) or np.isnan(volume_trend[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,30 +65,54 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper + 1d EMA50 uptrend + volume spike
-            if (close[i] > high_20[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_spike[i]):
+            # Check for bullish divergence: price makes higher low, RSI makes lower low
+            bullish_div = False
+            if price_lows[i] and rsi_lows[i]:
+                # Look back for previous lows
+                for j in range(max(0, i-20), i):
+                    if price_lows[j] and rsi_lows[j]:
+                        if close[i] > close[j] and rsi[i] < rsi[j]:
+                            bullish_div = True
+                        break
+            
+            # Check for bearish divergence: price makes lower high, RSI makes higher high
+            bearish_div = False
+            if price_highs[i] and rsi_highs[i]:
+                # Look back for previous highs
+                for j in range(max(0, i-20), i):
+                    if price_highs[j] and rsi_highs[j]:
+                        if close[i] < close[j] and rsi[i] > rsi[j]:
+                            bearish_div = True
+                        break
+            
+            # Enter long on bullish divergence with volume confirmation
+            if bullish_div and volume_trend[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian lower + 1d EMA50 downtrend + volume spike
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_spike[i]):
+            # Enter short on bearish divergence with volume confirmation
+            elif bearish_div and volume_trend[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
+        
         elif position == 1:
-            # EXIT LONG: Price closes below Donchian lower
-            if close[i] < low_20[i]:
+            # Exit long on bearish divergence or volume trend reversal
+            if (price_highs[i] and rsi_highs[i] and 
+                any(close[i] < close[j] and rsi[i] > rsi[j] 
+                    for j in range(max(0, i-20), i) if price_highs[j] and rsi_highs[j])) or \
+               not volume_trend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
         elif position == -1:
-            # EXIT SHORT: Price closes above Donchian upper
-            if close[i] > high_20[i]:
+            # Exit short on bullish divergence or volume trend reversal
+            if (price_lows[i] and rsi_lows[i] and 
+                any(close[i] > close[j] and rsi[i] < rsi[j] 
+                    for j in range(max(0, i-20), i) if price_lows[j] and rsi_lows[j])) or \
+               not volume_trend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
