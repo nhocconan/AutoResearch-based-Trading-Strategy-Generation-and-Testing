@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Donchian_Breakout_WeeklyTrend_VolumeFilter
-Hypothesis: Uses weekly Donchian channel breakout on the daily timeframe,
-confirmed by weekly EMA50 trend and volume surge. Designed to capture
-long-term trends with low trade frequency, working in both bull and bear markets.
+4h_TRIX_Momentum_Volume_Spike
+Hypothesis: TRIX (1-period ROC of EMA) captures momentum shifts. Combined with volume spike (>2x 20-period average) and price above/below EMA50 for trend filter. Designed for 4h timeframe to capture medium-term momentum moves in both bull and bear markets. Low trade frequency expected due to strict volume and momentum conditions.
 """
 
-name = "1d_Donchian_Breakout_WeeklyTrend_VolumeFilter"
-timeframe = "1d"
+name = "4h_TRIX_Momentum_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,37 +22,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Donchian channel and EMA50 (call once before loop)
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 50:
-        return np.zeros(n)
+    # Calculate TRIX: 1-period ROC of triple EMA (15-period EMA applied 3 times)
+    close_s = pd.Series(close)
+    ema1 = close_s.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    # TRIX = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
+    trix_raw = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
+    trix = trix_raw.fillna(0).values  # Replace NaN with 0 for stability
 
-    # Calculate weekly Donchian channel (20-period)
-    hh_w = df_w['high'].values
-    ll_w = df_w['low'].values
-    donchian_high = pd.Series(hh_w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(ll_w).rolling(window=20, min_periods=20).min().values
+    # EMA50 for trend filter
+    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
 
-    # Calculate weekly EMA50 for trend filter
-    close_w = pd.Series(df_w['close'].values)
-    ema50_w = close_w.ewm(span=50, adjust=False, min_periods=50).mean().values
-
-    # Volume confirmation: 5-period average (5 weeks of weekly data)
-    vol_avg_5 = pd.Series(df_w['volume'].values).rolling(window=5, min_periods=5).mean().values
+    # Volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start from 50 to have enough data for weekly indicators
-        # Get aligned values for current daily bar
-        donchian_high_aligned = align_htf_to_ltf(prices, df_w, donchian_high)[i]
-        donchian_low_aligned = align_htf_to_ltf(prices, df_w, donchian_low)[i]
-        ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)[i]
-        vol_avg_val = vol_avg_5[i]
-        
-        # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned) or np.isnan(donchian_low_aligned) or 
-            np.isnan(ema50_w_aligned) or np.isnan(vol_avg_val)):
+    for i in range(20, n):  # Start from 20 to have enough data for indicators
+        # Skip if any required data is invalid
+        if np.isnan(trix[i]) or np.isnan(ema50[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,30 +51,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above weekly Donchian high with bullish weekly trend and volume surge
-            if (close[i] > donchian_high_aligned and 
-                close[i] > ema50_w_aligned and 
-                volume[i] > vol_avg_val * 2.0):
+            # LONG: Positive TRIX momentum + price above EMA50 + volume spike
+            if (trix[i] > 0 and 
+                close[i] > ema50[i] and 
+                volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below weekly Donchian low with bearish weekly trend and volume surge
-            elif (close[i] < donchian_low_aligned and 
-                  close[i] < ema50_w_aligned and 
-                  volume[i] > vol_avg_val * 2.0):
+            # SHORT: Negative TRIX momentum + price below EMA50 + volume spike
+            elif (trix[i] < 0 and 
+                  close[i] < ema50[i] and 
+                  volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below weekly Donchian low or EMA50 (reversal signal)
-            if (close[i] < donchian_low_aligned or close[i] < ema50_w_aligned):
+            # EXIT LONG: Negative TRIX momentum or price below EMA50
+            if (trix[i] < 0 or close[i] < ema50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above weekly Donchian high or EMA50 (reversal signal)
-            if (close[i] > donchian_high_aligned or close[i] > ema50_w_aligned):
+            # EXIT SHORT: Positive TRIX momentum or price above EMA50
+            if (trix[i] > 0 or close[i] > ema50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
