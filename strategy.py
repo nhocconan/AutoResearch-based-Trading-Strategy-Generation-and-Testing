@@ -1,23 +1,21 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 6h_Keltner_MeanReversion_RangeFilter
-# Hypothesis: Mean reversion on 6h using Keltner Channel (EMA-based) with 12h trend filter.
-# In ranging markets (12h ADX < 25), price tends to revert to EMA20 from Keltner extremes.
-# In trending markets (12h ADX >= 25), we avoid mean reversion to prevent whipsaw.
-# Works in both bull and bear by adapting to regime via ADX.
-# Uses volume confirmation to avoid false reversals.
+# 4h_RSI_Pullback_Multiframe
+# Hypothesis: Buy RSI pullbacks in uptrend defined by 1d EMA50; sell rallies in downtrend.
+# Uses 1d EMA50 as trend filter and 4h RSI for mean-reversion entries.
+# Works in bull markets by buying dips; works in bear markets by selling rallies.
+# Low-frequency entries via strict RSI thresholds reduce fee drag.
 
-name = "6h_Keltner_MeanReversion_RangeFilter"
-timeframe = "6h"
+name = "4h_RSI_Pullback_Multiframe"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtd_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,57 +23,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 12h ADX for regime filter ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # === 1d EMA50 Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # === 4h RSI(14) ===
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Directional Movement
-    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nansum(arr[1:period+1])
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    dpi = wilder_smooth(dm_plus, 14)
-    dmi = wilder_smooth(dm_minus, 14)
-    
-    # DX and ADX
-    dx = np.where((dpi + dmi) != 0, 100 * np.abs(dpi - dmi) / (dpi + dmi), np.nan)
-    adx = wilder_smooth(dx, 14)
-    
-    # Align ADX to 6h
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    
-    # === 6h Keltner Channel (EMA20, ATRx2) ===
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_6 = pd.Series(high - low).ewm(span=6, adjust=False, min_periods=6).mean().values
-    upper_keltner = ema20 + 2 * atr_6
-    lower_keltner = ema20 - 2 * atr_6
-    
-    # === Volume confirmation (20-period average) ===
+    # === Volume Confirmation (20-period average) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -85,8 +52,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema20[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -94,31 +60,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Range regime: 12h ADX < 25
-        range_market = adx_aligned[i] < 25
+        # Trend: price above/below 1d EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
         
-        # Volume filter: above average
+        # RSI conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        
+        # Volume filter
         vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: price at lower Keltner, in range, volume confirmation
-            if range_market and vol_ok and close[i] <= lower_keltner[i]:
+            # LONG: Uptrend + RSI oversold + volume
+            if uptrend and rsi_oversold and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price at upper Keltner, in range, volume confirmation
-            elif range_market and vol_ok and close[i] >= upper_keltner[i]:
+            # SHORT: Downtrend + RSI overbought + volume
+            elif downtrend and rsi_overbought and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: price crosses EMA20 or regime changes to trend
-            if close[i] >= ema20[i] or not range_market:
+            # EXIT LONG: RSI overbought or trend change
+            if rsi[i] > 70 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses EMA20 or regime changes to trend
-            if close[i] <= ema20[i] or not range_market:
+            # EXIT SHORT: RSI oversold or trend change
+            if rsi[i] < 30 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
