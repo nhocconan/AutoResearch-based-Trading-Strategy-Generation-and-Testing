@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_Range_Breakout_With_Trend_and_Volume
-Hypothesis: Price breaking outside the 1d high-low range with 1d ADX > 25 (trending) and volume > 1.5x average captures strong momentum moves. Uses weekly pivot direction (above/below weekly pivot) to filter for higher probability trades in both bull and bear markets. Weekly pivot acts as a dynamic bias filter, reducing counter-trend trades.
+12h_RSI_MeanReversion_4hTrend_VolumeFilter
+Hypothesis: Mean reversion on 12h RSI (oversold/overbought) with 4h trend filter and volume confirmation works in both bull and bear markets. In uptrends, buy RSI < 30; in downtrends, short RSI > 70. Volume > 1.5x average filters low-probability signals. Trend filter uses 4h EMA50 to avoid counter-trend trades. Targets 20-50 trades over 4 years to minimize fee drag.
 """
 
-name = "6h_Pivot_Range_Breakout_With_Trend_and_Volume"
-timeframe = "6h"
+name = "12h_RSI_MeanReversion_4hTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,97 +17,37 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d and 1w data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    # Get 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     
-    # 1d range (high-low)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4h EMA50 trend filter
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Previous day's range for breakout
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
-    
-    # 1d ADX for trend filter (using Wilder's smoothing)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = np.nan
-        
-        # Directional Movement
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        up_move[0] = np.nan
-        down_move[0] = np.nan
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # Smoothed values
-        def WilderSmooth(data, period):
-            smoothed = np.full_like(data, np.nan)
-            if len(data) >= period:
-                smoothed[period-1] = np.nansum(data[:period])
-                for i in range(period, len(data)):
-                    smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + data[i]
-            return smoothed
-        
-        tr_sum = WilderSmooth(tr, period)
-        plus_dm_sum = WilderSmooth(plus_dm, period)
-        minus_dm_sum = WilderSmooth(minus_dm, period)
-        
-        # Avoid division by zero
-        plus_di = 100 * plus_dm_sum / tr_sum
-        minus_di = 100 * minus_dm_sum / tr_sum
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = WilderSmooth(dx, period)
-        return adx
-    
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, period=14)
-    
-    # Weekly pivot (using prior week's OHLC)
-    # Pivot = (H + L + C) / 3
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
-    prev_close_1w[0] = np.nan
-    
-    weekly_pivot = (prev_high_1w + prev_low_1w + prev_close_1w) / 3.0
-    
-    # Align all 1d and 1w data to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # Volume spike: >1.5x 20-period average (6h)
+    # Volume filter: >1.5x 20-period average (12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
+    
+    # 12h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(prev_high_1d[i]) or np.isnan(prev_low_1d[i])):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -116,32 +56,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above 1d high + ADX > 25 + price above weekly pivot + volume spike
-            if (close[i] > prev_high_1d[i] and 
-                adx_1d_aligned[i] > 25 and 
-                close[i] > weekly_pivot_aligned[i] and 
-                volume_spike[i]):
+            # LONG: RSI < 30 (oversold) + 4h EMA50 uptrend + volume filter
+            if (rsi[i] < 30 and 
+                close[i] > ema_50_4h_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 1d low + ADX > 25 + price below weekly pivot + volume spike
-            elif (close[i] < prev_low_1d[i] and 
-                  adx_1d_aligned[i] > 25 and 
-                  close[i] < weekly_pivot_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: RSI > 70 (overbought) + 4h EMA50 downtrend + volume filter
+            elif (rsi[i] > 70 and 
+                  close[i] < ema_50_4h_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below 1d low (range reversion)
-            if close[i] < prev_low_1d[i]:
+            # EXIT LONG: RSI > 50 (mean reversion complete) or trend change
+            if rsi[i] > 50 or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above 1d high (range reversion)
-            if close[i] > prev_high_1d[i]:
+            # EXIT SHORT: RSI < 50 (mean reversion complete) or trend change
+            if rsi[i] < 50 or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
