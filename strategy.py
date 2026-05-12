@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_AdaptiveKeltner_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,42 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter and volatility calculation
+    # Load daily data for trend filter and Donchian channel
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) on 6h data for dynamic bands
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar: no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 12-hour Donchian channel (20 periods)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Adaptive Keltner Channels: EMA(20) ± 2.0 * ATR
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_keltner = ema_20 + 2.0 * atr
-    lower_keltner = ema_20 - 2.0 * atr
-    
-    # Volume filter: current volume > 2.0x 20-period average (10 periods of 6h data)
+    # Volume filter: current volume > 1.8x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (2.0 * vol_avg)
+    vol_filter = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 20  # ensure Donchian has enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_keltner[i]) or 
-            np.isnan(lower_keltner[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,27 +52,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above upper Keltner + above daily EMA50 + volume filter
-            if close[i] > upper_keltner[i] and close[i] > ema_50_1d_aligned[i] and vol_filter[i]:
-                signals[i] = 0.25
+            # Long: breakout above Donchian high + above daily EMA34 + volume filter
+            if high[i] > high_max[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: breakdown below lower Keltner + below daily EMA50 + volume filter
-            elif close[i] < lower_keltner[i] and close[i] < ema_50_1d_aligned[i] and vol_filter[i]:
-                signals[i] = -0.25
+            # Short: breakdown below Donchian low + below daily EMA34 + volume filter
+            elif low[i] < low_min[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: breakdown below EMA(20) or below daily EMA50
-            if close[i] < ema_20[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: breakdown below Donchian low or below daily EMA34
+            if low[i] < low_min[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: breakout above EMA(20) or above daily EMA50
-            if close[i] > ema_20[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: breakout above Donchian high or above daily EMA34
+            if high[i] > high_max[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
