@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter_V3
-# Hypothesis: Uses Camarilla R1/S1 breakouts with 1d EMA34 trend filter and volume confirmation.
-# Avoids overtrading by requiring confluence of three conditions: price level, trend, and volume.
-# Designed to work in both bull and bear markets by filtering trades with trend direction.
-# Target: 20-30 trades per year to minimize fee drag.
+# 1d_TrendFollow_1wEMA34_DipBuy
+# Hypothesis: On 1d timeframe, enter long when price dips to or below weekly EMA34 in a bullish regime (price > weekly EMA200),
+# and exit when price returns to or above weekly EMA34. Reverse for short in bearish regime (price < weekly EMA200).
+# Uses weekly EMA for trend and dynamic support/resistance to capture trends while avoiding whipsaws.
+# Targets 10-25 trades/year for low fee drift, works in both bull and bear markets via regime filter.
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter_V3"
-timeframe = "4h"
+name = "1d_TrendFollow_1wEMA34_DipBuy"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,51 +15,36 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot calculation and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Load weekly data for EMA34 and EMA200
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate pivot point and range
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_range = daily_high - daily_low
+    # Calculate weekly EMA34 and EMA200
+    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema200_1w = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Camarilla R1 and S1 levels
-    r1 = daily_pivot + daily_range * 1.083
-    s1 = daily_pivot - daily_range * 1.083
-    
-    # Calculate 1d EMA34
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align daily levels and 1d EMA34 to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: 20-period moving average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly EMAs to daily timeframe
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are stable
+    start_idx = 200  # Ensure weekly EMA200 is stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(ema200_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,32 +52,30 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema1d_trend = ema34_1d_aligned[i]
-        vol_ma_val = vol_ma[i]
+        ema34_w = ema34_1w_aligned[i]
+        ema200_w = ema200_1w_aligned[i]
         
         if position == 0:
-            # LONG: Price closes above R1 with close > 1d EMA34 and volume > 20MA
-            if close[i] > r1_val and close[i] > ema1d_trend and volume[i] > vol_ma_val:
+            # LONG: Price at or below weekly EMA34 AND weekly trend bullish (price > weekly EMA200)
+            if low[i] <= ema34_w and close[i] > ema200_w:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below S1 with close < 1d EMA34 and volume > 20MA
-            elif close[i] < s1_val and close[i] < ema1d_trend and volume[i] > vol_ma_val:
+            # SHORT: Price at or above weekly EMA34 AND weekly trend bearish (price < weekly EMA200)
+            elif high[i] >= ema34_w and close[i] < ema200_w:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below 1d EMA34 (trend reversal)
-            if close[i] < ema1d_trend:
+            # EXIT LONG: Price returns to or above weekly EMA34 (trend resumption)
+            if high[i] >= ema34_w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above 1d EMA34 (trend reversal)
-            if close[i] > ema1d_trend:
+            # EXIT SHORT: Price returns to or below weekly EMA34 (trend resumption)
+            if low[i] <= ema34_w:
                 signals[i] = 0.0
                 position = 0
             else:
