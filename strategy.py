@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
-Hypothesis: Trade breakouts above 4h Camarilla R1 or below S1 on 1h timeframe when aligned with 4h EMA50 trend and confirmed by volume spike. Uses 4h for signal direction and 1h for precise entry timing to target 15-37 trades/year. Works in both bull and bear markets by following 4h trend direction and exiting at 4h pivot point.
-Timeframe: 1h
+6h_WeeklyPivot_Breakout_1dTrend_Volume
+Hypothesis: Trade weekly pivot breakouts on 6h timeframe when aligned with 1d EMA200 trend and confirmed by volume spike. Weekly pivots act as strong institutional support/resistance levels. In bull markets, buy breakouts above weekly R1; in bear markets, sell breakdowns below weekly S1. Volume confirmation filters false breakouts. Trend filter ensures we trade with the higher timeframe momentum. Designed for low trade frequency (15-30/year) to minimize fee drag while capturing significant moves.
+Timeframe: 6h
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,48 +23,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for Camarilla levels and EMA50 ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for pivot levels ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
 
-    # Calculate 4h Camarilla pivot levels (using prior 4h bar's OHLC)
-    ph = df_4h['high'].shift(1).values  # prior 4h high
-    pl = df_4h['low'].shift(1).values   # prior 4h low
-    pc = df_4h['close'].shift(1).values # prior 4h close
-    r1 = pc + (ph - pl) * 1.1 / 12
-    s1 = pc - (ph - pl) * 1.1 / 12
-    # Align to 1h: 4h Camarilla values are constant through the 4h period
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    ph_w = df_1w['high'].shift(1).values  # prior week high
+    pl_w = df_1w['low'].shift(1).values   # prior week low
+    pc_w = df_1w['close'].shift(1).values # prior week close
+    pw = (ph_w + pl_w + pc_w) / 3.0       # weekly pivot
+    r1_w = 2 * pw - pl_w                  # weekly resistance 1
+    s1_w = 2 * pw - ph_w                  # weekly support 1
 
-    # Get 4h data for EMA50 trend filter ONCE before loop
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Align weekly pivots to 6h: constant through the week
+    pw_aligned = align_htf_to_ltf(prices, df_1w, pw)
+    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
 
-    # Volume spike: current > 2.0x average of last 12 bars (2 hours on 1h)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Get daily data for EMA200 trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
 
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume spike: current > 2.5x average of last 4 bars (1 day on 6h)
+    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_spike = volume > (2.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):  # Start after EMA50 warmup
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(100, n):  # Start after EMA200 warmup
+        if (np.isnan(pw_aligned[i]) or np.isnan(r1_w_aligned[i]) or 
+            np.isnan(s1_w_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,37 +69,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: close > 4h R1 + price > 4h EMA50 + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_4h_aligned[i] and 
+            # LONG: close > weekly R1 + price > 1d EMA200 + volume spike
+            if (close[i] > r1_w_aligned[i] and 
+                close[i] > ema_200_1d_aligned[i] and 
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: close < 4h S1 + price < 4h EMA50 + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_4h_aligned[i] and 
+            # SHORT: close < weekly S1 + price < 1d EMA200 + volume spike
+            elif (close[i] < s1_w_aligned[i] and 
+                  close[i] < ema_200_1d_aligned[i] and 
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: close < 4h pivot P
-            pp = (ph + pl + pc) / 3.0
-            pp_aligned = align_htf_to_ltf(prices, df_4h, pp)
-            if close[i] < pp_aligned[i]:
+            # EXIT LONG: close < weekly pivot P
+            if close[i] < pw_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: close > 4h pivot P
-            pp = (ph + pl + pc) / 3.0
-            pp_aligned = align_htf_to_ltf(prices, df_4h, pp)
-            if close[i] > pp_aligned[i]:
+            # EXIT SHORT: close > weekly pivot P
+            if close[i] > pw_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
