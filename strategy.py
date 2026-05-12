@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hTrend_VolumeFilter"
-timeframe = "4h"
+name = "1h_4h1d_Confluence_Momentum"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,46 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h trend: EMA50
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 4h EMA trend
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Daily Camarilla levels from previous day
+    # 1d RSI for momentum filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Previous day's Camarilla levels
-    prev_close = np.concatenate([[close_1d[0]], close_1d[:-1]])
-    prev_high = np.concatenate([[high_1d[0]], high_1d[:-1]])
-    prev_low = np.concatenate([[low_1d[0]], low_1d[:-1]])
+    # 1h RSI for entry timing
+    delta_1h = np.diff(close, prepend=close[0])
+    gain_1h = np.where(delta_1h > 0, delta_1h, 0)
+    loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
+    avg_gain_1h = pd.Series(gain_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_1h = pd.Series(loss_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_1h = avg_gain_1h / (avg_loss_1h + 1e-10)
+    rsi_1h = 100 - (100 / (1 + rs_1h))
     
-    range_ = prev_high - prev_low
-    camarilla_h4 = prev_close + 1.1 * range_ / 2  # H4
-    camarilla_l4 = prev_close - 1.1 * range_ / 2  # L4
-    camarilla_h3 = prev_close + 1.1 * range_ / 4  # H3
-    camarilla_l3 = prev_close - 1.1 * range_ / 4  # L3
-    
-    # Align Camarilla levels (these are based on previous day's data)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Volume confirmation: volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1h ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma_1h = pd.Series(atr_1h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure EMA has enough data
+    start_idx = 30  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(atr_ma_1h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,35 +67,49 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume filter
-        vol_filter = volume[i] > vol_ma[i]
+        # Session filter: 08-20 UTC
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volatility filter: only trade when ATR is above its MA (avoid low volatility chop)
+        vol_filter = atr_1h[i] > atr_ma_1h[i]
         
         if position == 0:
-            # Long: 12h uptrend + price breaks above H3 + volume
-            if (close[i] > ema_12h_aligned[i] and 
-                close[i] > camarilla_h3_aligned[i] and 
+            # Long: 4h uptrend + 1d RSI not overbought + 1h RSI oversold bounce
+            if (close[i] > ema_4h_aligned[i] and 
+                rsi_1d_aligned[i] < 70 and 
+                rsi_1h[i] < 30 and 
                 vol_filter):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: 12h downtrend + price breaks below L3 + volume
-            elif (close[i] < ema_12h_aligned[i] and 
-                  close[i] < camarilla_l3_aligned[i] and 
+            # Short: 4h downtrend + 1d RSI not oversold + 1h RSI overbought bounce
+            elif (close[i] < ema_4h_aligned[i] and 
+                  rsi_1d_aligned[i] > 30 and 
+                  rsi_1h[i] > 70 and 
                   vol_filter):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below L3 or trend changes
-            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_12h_aligned[i]:
+            # Exit long: 4h trend breaks OR 1h RSI overbought
+            if close[i] < ema_4h_aligned[i] or rsi_1h[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: price breaks above H3 or trend changes
-            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_12h_aligned[i]:
+            # Exit short: 4h trend breaks OR 1h RSI oversold
+            if close[i] > ema_4h_aligned[i] or rsi_1h[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
