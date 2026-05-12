@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_RSIVolumeTrend_4h1d"
-timeframe = "1h"
+name = "6h_Aroon_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,50 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h trend filter: 4h EMA50
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # 1d volume filter: 1d volume > 1.2x 14-day average
+    # Load 1d data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_avg_14d = pd.Series(volume_1d).rolling(window=14, min_periods=14).mean().values
-    vol_filter_1d = volume_1d > (1.2 * vol_avg_14d)
-    vol_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_filter_1d)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # RSI(14) on 1h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # Aroon oscillator: measures trend strength
+    period = 25
+    high_rolling = pd.Series(high).rolling(window=period).apply(lambda x: np.argmax(x), raw=True)
+    low_rolling = pd.Series(low).rolling(window=period).apply(lambda x: np.argmin(x), raw=True)
+    aroon_up = ((period - high_rolling) / period) * 100
+    aroon_down = ((period - low_rolling) / period) * 100
+    aroon_osc = aroon_up - aroon_down  # -100 to 100
     
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 150  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_filter_1d_aligned[i]) or
-            np.isnan(rsi[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if not session_filter[i]:
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(aroon_osc[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,27 +53,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI < 40 (oversold) + above 4h EMA50 + high 1d volume
-            if rsi[i] < 40 and close[i] > ema_50_4h_aligned[i] and vol_filter_1d_aligned[i]:
-                signals[i] = 0.20
+            # Long: Aroon up > 50 (strong uptrend) + price above 1d EMA34 + volume filter
+            if aroon_osc[i] > 50 and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 60 (overbought) + below 4h EMA50 + high 1d volume
-            elif rsi[i] > 60 and close[i] < ema_50_4h_aligned[i] and vol_filter_1d_aligned[i]:
-                signals[i] = -0.20
+            # Short: Aroon down > 50 (strong downtrend) + price below 1d EMA34 + volume filter
+            elif aroon_osc[i] < -50 and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 60 or below 4h EMA50
-            if rsi[i] > 60 or close[i] < ema_50_4h_aligned[i]:
+            # Exit long: Aroon down > 50 (trend reversal) or price below EMA34
+            if aroon_osc[i] < -50 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 40 or above 4h EMA50
-            if rsi[i] < 40 or close[i] > ema_50_4h_aligned[i]:
+            # Exit short: Aroon up > 50 (trend reversal) or price above EMA34
+            if aroon_osc[i] > 50 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
