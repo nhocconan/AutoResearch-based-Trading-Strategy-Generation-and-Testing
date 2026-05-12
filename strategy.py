@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_1D_Camarilla_R1_S1_Breakout_TrendVol_v2
-Hypothesis: 12-hour breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
+4h_1D_Camarilla_R1_S1_Breakout_TrendVol
+Hypothesis: 4-hour breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
 Only takes long when price breaks above R1 with volume spike and daily uptrend, short when breaks below S1 with volume spike and daily downtrend.
-Uses tighter entry conditions (requires volume spike >2.5x 30-period average and momentum confirmation via 3-period ROC > 0) to reduce trade frequency.
-Targets 20-40 trades per year on 12h timeframe to avoid overtrading and fee drag.
+Uses tight entry conditions (trend + volume + level break) to target 25-50 trades per year on 4h timeframe, avoiding overtrading.
 Works in bull markets via trend-following breaks and in bear markets via counter-trend reversals at extreme daily levels.
 """
 
-name = "12h_1D_Camarilla_R1_S1_Breakout_TrendVol_v2"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1_S1_Breakout_TrendVol"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,15 +25,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >2.5x 30-period average (more selective than original 2.0x 20-period)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
-    
-    # Momentum confirmation: 3-period ROC > 0 (avoids chop)
-    roc = np.zeros_like(close)
-    roc[3:] = (close[3:] - close[:-3]) / close[:-3]
-    momentum_up = roc > 0
-    momentum_down = roc < 0
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     # Daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
@@ -53,14 +46,14 @@ def generate_signals(prices):
     R1_1d = prev_close_1d + 1.1 * rang_1d * 1.0 / 4
     S1_1d = prev_close_1d - 1.1 * rang_1d * 1.0 / 4
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
     S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         if (np.isnan(R1_1d_aligned[i]) or 
             np.isnan(S1_1d_aligned[i]) or 
             np.isnan(ema_50_1d_aligned[i])):
@@ -72,18 +65,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + volume spike + daily uptrend + upward momentum
+            # LONG: Price breaks above R1 + volume spike + price above daily EMA50 (daily uptrend)
             if (close[i] > R1_1d_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > ema_50_1d_aligned[i] and
-                momentum_up[i]):
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + volume spike + daily downtrend + downward momentum
+            # SHORT: Price breaks below S1 + volume spike + price below daily EMA50 (daily downtrend)
             elif (close[i] < S1_1d_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < ema_50_1d_aligned[i] and
-                  momentum_down[i]):
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
