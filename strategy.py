@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Pivot_Reversion_With_Trend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,36 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== 1d Trend Filter (HTF) =====
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # ===== Weekly Trend Filter (HTF) =====
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # ===== Pivot Points from Previous Day (1d) =====
+    # ===== Daily Pivot Points (Camarilla from previous day) =====
+    df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     close_1d_prev = np.roll(close_1d, 1)
     close_1d_prev[0] = close_1d[0]
     
-    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
-    r1 = pivot + (high_1d - low_1d)
-    s1 = pivot - (high_1d - low_1d)
+    # Camarilla levels (based on previous day)
+    range_1d = high_1d - low_1d
+    r3 = close_1d_prev + range_1d * 1.1 / 2
+    s3 = close_1d_prev - range_1d * 1.1 / 2
     
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # ===== Volume Spike Filter =====
+    # ===== Volume Spike Filter (12h) =====
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)
-    
-    # ===== ATR for Entry Quality =====
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,9 +50,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_spike[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,30 +61,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price touches S1 + above 1d EMA20 + volume spike + strong close
-            if (low[i] <= s1_aligned[i] and
-                close[i] > ema20_1d_aligned[i] and
-                vol_spike[i] and
-                (close[i] - low[i]) > 0.3 * atr[i]):
+            # Long: Price touches S3 + above weekly EMA50 + volume spike
+            if (low[i] <= s3_aligned[i] and
+                close[i] > ema50_1w_aligned[i] and
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price touches R1 + below 1d EMA20 + volume spike + strong close
-            elif (high[i] >= r1_aligned[i] and
-                  close[i] < ema20_1d_aligned[i] and
-                  vol_spike[i] and
-                  (high[i] - close[i]) > 0.3 * atr[i]):
+            # Short: Price touches R3 + below weekly EMA50 + volume spike
+            elif (high[i] >= r3_aligned[i] and
+                  close[i] < ema50_1w_aligned[i] and
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price reaches pivot or closes below EMA20
-            if high[i] >= pivot_aligned[i] or close[i] < ema20_1d_aligned[i]:
+            # Exit long: Price reaches R3 or closes below weekly EMA50
+            if high[i] >= r3_aligned[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price reaches pivot or closes above EMA20
-            if low[i] <= pivot_aligned[i] or close[i] > ema20_1d_aligned[i]:
+            # Exit short: Price reaches S3 or closes above weekly EMA50
+            if low[i] <= s3_aligned[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
