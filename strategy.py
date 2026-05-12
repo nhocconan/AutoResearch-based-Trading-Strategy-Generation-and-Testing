@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h1d_Confluence_Momentum"
-timeframe = "1h"
+name = "6h_WeeklyPivot_TrendBreak_1dVolatilityFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,49 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Weekly pivot points (calculated from previous week)
+    df_1w = get_htf_data(prices, '1w')
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
+    pivot_w = (high_w + low_w + close_w) / 3.0
+    r1_w = 2 * pivot_w - low_w
+    s1_w = 2 * pivot_w - high_w
+    r2_w = pivot_w + (high_w - low_w)
+    s2_w = pivot_w - (high_w - low_w)
+    # Weekly trend: close above/below pivot
+    weekly_trend_up = close_w > pivot_w
+    weekly_trend_down = close_w < pivot_w
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
+    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
     
-    # 1d RSI for momentum filter
+    # Daily volatility filter: ATR(14) normalized by price
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # 1h RSI for entry timing
-    delta_1h = np.diff(close, prepend=close[0])
-    gain_1h = np.where(delta_1h > 0, delta_1h, 0)
-    loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
-    avg_gain_1h = pd.Series(gain_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1h = pd.Series(loss_1h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1h = avg_gain_1h / (avg_loss_1h + 1e-10)
-    rsi_1h = 100 - (100 / (1 + rs_1h))
-    
-    # 1h ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma_1h = pd.Series(atr_1h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_norm = atr14 / close_1d
+    atr_norm_aligned = align_htf_to_ltf(prices, df_1d, atr_norm)
+    
+    # Align weekly pivot levels
+    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
+    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # ensure indicators have enough data
+    start_idx = 14  # ensure ATR has enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(atr_ma_1h[i]):
+        if np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]) or np.isnan(atr_norm_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,49 +66,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volatility filter: only trade when ATR is above its MA (avoid low volatility chop)
-        vol_filter = atr_1h[i] > atr_ma_1h[i]
+        # Volatility filter: only trade when volatility is above median (avoid choppy markets)
+        vol_median = np.nanmedian(atr_norm_aligned[:i+1])
+        vol_filter = atr_norm_aligned[i] > vol_median if not np.isnan(vol_median) else True
         
         if position == 0:
-            # Long: 4h uptrend + 1d RSI not overbought + 1h RSI oversold bounce
-            if (close[i] > ema_4h_aligned[i] and 
-                rsi_1d_aligned[i] < 70 and 
-                rsi_1h[i] < 30 and 
+            # Long: weekly trend up + price breaks above R1 + volatility filter
+            if (weekly_trend_up_aligned[i] and 
+                close[i] > r1_w_aligned[i] and 
                 vol_filter):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + 1d RSI not oversold + 1h RSI overbought bounce
-            elif (close[i] < ema_4h_aligned[i] and 
-                  rsi_1d_aligned[i] > 30 and 
-                  rsi_1h[i] > 70 and 
+            # Short: weekly trend down + price breaks below S1 + volatility filter
+            elif (weekly_trend_down_aligned[i] and 
+                  close[i] < s1_w_aligned[i] and 
                   vol_filter):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: 4h trend breaks OR 1h RSI overbought
-            if close[i] < ema_4h_aligned[i] or rsi_1h[i] > 70:
+            # Exit long: price crosses below weekly pivot OR weekly trend changes
+            if close[i] < pivot_w_aligned[i] or not weekly_trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: 4h trend breaks OR 1h RSI oversold
-            if close[i] > ema_4h_aligned[i] or rsi_1h[i] < 30:
+            # Exit short: price crosses above weekly pivot OR weekly trend changes
+            if close[i] > pivot_w_aligned[i] or not weekly_trend_down_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
