@@ -1,12 +1,10 @@
-# -*- coding: utf-8 -*-
-#!/usr/bin/env python3
-"""
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Use Camarilla pivot levels (R1, S1) from the daily chart for breakout entries on 12h. Trade only in the direction of the daily EMA34 trend, with volume confirmation (>1.3x 20-period average volume). Exit when price returns to the daily pivot (PP) or reverses via opposite Camarilla level touch. Designed to work in both bull and bear markets by aligning with the daily trend and requiring volume to avoid false breakouts. Target: 15-30 trades/year.
-"""
+# 1d_KAMA_Trend_With_Volume_Confirmation
+# Hypothesis: Use Kaufman's Adaptive Moving Average (KAMA) on daily timeframe to capture trend direction, with weekly trend filter and volume confirmation to reduce false signals. 
+# Works in both bull and bear markets by requiring alignment between daily KAMA trend and weekly trend, plus volume confirmation for entry.
+# Target: 15-25 trades/year on daily timeframe.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_KAMA_Trend_With_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,54 +16,43 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels and trend filter (call once before loop)
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Get weekly data for trend filter (call once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
+    close_weekly = df_weekly['close'].values
+    sma20_weekly = pd.Series(close_weekly).rolling(window=20, min_periods=20).mean().values
+    sma20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma20_weekly)
 
-    # Calculate Camarilla levels from previous daily bar
-    # Using (H, L, C) of completed daily bar to avoid look-ahead
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
+    # KAMA on daily (ER=10, Fast=2, Slow=30)
+    change = np.abs(np.diff(close, k=10))
+    change = np.concatenate([[np.nan]*10, change])
+    volatility = np.abs(np.diff(close))
+    volatility = np.concatenate([[np.nan], volatility])
+    vol10 = pd.Series(volatility).rolling(window=10, min_periods=1).sum().values
+    er = np.where(vol10 != 0, change / vol10, 0)
+    sc = (er * (2/2 - 1/30) + 1/30) ** 2
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # start at index 9
+    for i in range(10, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
 
-    # Camarilla levels: based on previous day's range
-    # R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12
-    # PP = (H+L+C)/3
-    rng = daily_high - daily_low
-    camarilla_pp = (daily_high + daily_low + daily_close) / 3.0
-    camarilla_r1 = daily_close + rng * 1.1 / 12.0
-    camarilla_s1 = daily_close - rng * 1.1 / 12.0
-
-    # Align Camarilla levels to 12h timeframe (available after daily bar close)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_daily, camarilla_pp)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_daily, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_daily, camarilla_s1)
-
-    # Daily EMA34 for trend filter
-    ema34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
-
-    # Volume confirmation: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        pp = camarilla_pp_aligned[i]
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        ema34_val = ema34_daily_aligned[i]
+    for i in range(20, n):
+        kama_val = kama[i]
+        sma20w_val = sma20_weekly_aligned[i]
         vol_avg_val = vol_avg_20[i]
+        close_val = close[i]
 
-        if np.isnan(pp) or np.isnan(r1) or np.isnan(s1) or np.isnan(ema34_val) or np.isnan(vol_avg_val):
+        if np.isnan(kama_val) or np.isnan(sma20w_val) or np.isnan(vol_avg_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,26 +61,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above R1 + daily uptrend + volume confirmation
-            if close[i] > r1 and close[i] > ema34_val and volume[i] > vol_avg_val * 1.3:
+            # LONG: Price above KAMA + weekly uptrend + volume confirmation
+            if close_val > kama_val and close_val > sma20w_val and volume[i] > vol_avg_val * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1 + daily downtrend + volume confirmation
-            elif close[i] < s1 and close[i] < ema34_val and volume[i] > vol_avg_val * 1.3:
+            # SHORT: Price below KAMA + weekly downtrend + volume confirmation
+            elif close_val < kama_val and close_val < sma20w_val and volume[i] > vol_avg_val * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to PP or breaks below S1 (reversal)
-            if close[i] <= pp or close[i] < s1:
+            # EXIT LONG: Price below KAMA or weekly downtrend
+            if close_val < kama_val or close_val < sma20w_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to PP or breaks above R1 (reversal)
-            if close[i] >= pp or close[i] > r1:
+            # EXIT SHORT: Price above KAMA or weekly uptrend
+            if close_val > kama_val or close_val > sma20w_val:
                 signals[i] = 0.0
                 position = 0
             else:
