@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1d_RSI_Extreme_Trend_Filter
-# Hypothesis: Daily RSI extremes with 1-week EMA trend filter and volume confirmation. 
-# Long when RSI < 30 and price > weekly EMA20 with volume > 1.5x 20-day average. 
-# Short when RSI > 70 and price < weekly EMA20 with volume spike. 
-# Exit when RSI returns to neutral (40-60 range). Designed for low frequency (10-25 trades/year) to avoid fee drag.
-# Works in bull/bear markets by combining mean reversion (RSI extremes) with trend filter (weekly EMA).
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R1/S1 breakout from daily levels with 1d EMA trend filter and volume spike confirmation on 12h timeframe.
+# Uses Camarilla pivot levels (R1, S1) calculated from prior day's OHLC. Long when price breaks above R1 with uptrend (price > EMA34) and volume spike.
+# Short when price breaks below S1 with downtrend (price < EMA34) and volume spike. Designed for low trade frequency (12-37/year) to avoid fee drag.
+# Works in bull/bear markets by following daily EMA trend direction. Exit on opposite Camarilla level touch (S1 for long exit, R1 for short exit).
 
-name = "1d_RSI_Extreme_Trend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,39 +23,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla levels and EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
 
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate weekly EMA20 for trend filter
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate Camarilla levels for each day: based on prior day's OHLC
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    # We use prior day's values to avoid look-ahead
+    rng_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + 1.1 * rng_1d / 12
+    camarilla_s1 = close_1d - 1.1 * rng_1d / 12
 
-    # Calculate daily RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align Camarilla levels to 12h timeframe (use prior day's levels for current day)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
-    # Calculate volume threshold (1.5x 20-day SMA)
+    # Get 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Calculate volume spike threshold (2.0x 20-period SMA on 12h)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_threshold = volume_sma20 * 1.5
+    volume_spike_threshold = volume_sma20 * 2.0
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(volume_sma20[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,30 +68,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI oversold (<30) with uptrend (price > weekly EMA20) and volume spike
-            if (rsi_values[i] < 30 and 
-                close[i] > ema20_1w_aligned[i] and 
-                volume[i] > volume_threshold[i]):
+            # LONG: price breaks above R1 with uptrend and volume spike
+            if (close[i] > camarilla_r1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume[i] > volume_sma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought (>70) with downtrend (price < weekly EMA20) and volume spike
-            elif (rsi_values[i] > 70 and 
-                  close[i] < ema20_1w_aligned[i] and 
-                  volume[i] > volume_threshold[i]):
+            # SHORT: price breaks below S1 with downtrend and volume spike
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume[i] > volume_sma20[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (>=40) or turns bearish
-            if rsi_values[i] >= 40:
+            # EXIT LONG: price touches or crosses below S1 (opposite level)
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (<=60) or turns bullish
-            if rsi_values[i] <= 60:
+            # EXIT SHORT: price touches or crosses above R1 (opposite level)
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
