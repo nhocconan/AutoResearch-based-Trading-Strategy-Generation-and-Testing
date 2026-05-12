@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WilliamsAlligator_ElderRay_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,40 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Williams Alligator ===
+    # === 1d Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Smoothed medians: SMA of median price (H+L)/2
-    median_1d = (high_1d + low_1d) / 2
-    jaw = pd.Series(median_1d).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median_1d).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median_1d).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Camarilla R1, S1 levels
+    rango = high_1d - low_1d
+    camarilla_r1 = close_1d + (rango * 1.1 / 12)
+    camarilla_s1 = close_1d - (rango * 1.1 / 12)
     
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === 1d Elder Ray (Bull/Bear Power) ===
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    # === 1d EMA34 trend filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # === 1d Volume spike filter ===
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or
-            np.isnan(bear_power_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,29 +60,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Alligator alignment + Elder Ray confirmation
-            # Bullish: Lips > Teeth > Jaw AND Bull Power > 0
-            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and
-                bull_power_aligned[i] > 0):
+            # Long: Close above R1 + above daily EMA34 + volume spike
+            if (close[i] > camarilla_r1_aligned[i] and
+                close[i] > ema34_1d_aligned[i] and
+                vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Bearish: Lips < Teeth < Jaw AND Bear Power < 0
-            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and
-                  bear_power_aligned[i] < 0):
+            # Short: Close below S1 + below daily EMA34 + volume spike
+            elif (close[i] < camarilla_s1_aligned[i] and
+                  close[i] < ema34_1d_aligned[i] and
+                  vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator reverses OR Bear Power turns negative
-            if (lips_aligned[i] < teeth_aligned[i] or
-                bear_power_aligned[i] < 0):
+            # Exit long: Close below S1 or below EMA34
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator reverses OR Bull Power turns positive
-            if (lips_aligned[i] > teeth_aligned[i] or
-                bull_power_aligned[i] > 0):
+            # Exit short: Close above R1 or above EMA34
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
