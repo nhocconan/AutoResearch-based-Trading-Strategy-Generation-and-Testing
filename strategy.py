@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Donchian_Breakout_Volume_Trend
-# Hypothesis: On 4h timeframe, use Donchian channel breakouts (20-period) as primary entry signals.
-# Filter with 1d EMA50 trend and volume confirmation (current volume > 1.5x 20-period average).
-# Exit on opposite Donchian band touch or when trend reverses.
-# Designed to work in both bull and bear markets by following the higher timeframe trend.
-# Target: 20-50 trades/year to minimize fee drag while capturing significant moves.
+# 1d_KAMA_Trend_RSI_Filter
+# Hypothesis: On 1d timeframe, use KAMA (Kaufman Adaptive Moving Average) to capture medium-term trend.
+# Enter long when price > KAMA and RSI > 50 (bullish momentum).
+# Enter short when price < KAMA and RSI < 50 (bearish momentum).
+# Exit when price crosses KAMA in opposite direction.
+# Uses weekly trend filter to avoid counter-trend trades, targeting 10-20 trades/year for low friction.
+# Works in bull via KAMA uptrend and in bear via KAMA downtrend with RSI filter.
 
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,26 +17,42 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # KAMA calculation (10-day ER, 2/30 smoothing)
+    price_diff = np.abs(np.diff(close, prepend=close[0]))
+    direction = np.abs(close - np.roll(close, 10))
+    volatility = np.sum(price_diff.reshape(-1, 10), axis=1)
+    er = np.where(volatility != 0, direction / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Load daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # RSI calculation (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    daily_close = df_1d['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    weekly_close = df_1w['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,9 +65,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(daily_ema50_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(weekly_ema50_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,32 +74,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        upper_channel = high_roll[i]
-        lower_channel = low_roll[i]
-        daily_trend = daily_ema50_aligned[i]
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        weekly_trend = weekly_ema50_aligned[i]
         vol_confirm = volume_confirm[i]
         
         if position == 0:
-            # LONG: Price breaks above upper Donchian band with volume confirmation and daily uptrend
-            if close[i] > upper_channel and close[i] > daily_trend and vol_confirm:
+            # LONG: Price above KAMA, RSI > 50, and weekly uptrend
+            if close[i] > kama_val and rsi_val > 50 and close[i] > weekly_trend and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian band with volume confirmation and daily downtrend
-            elif close[i] < lower_channel and close[i] < daily_trend and vol_confirm:
+            # SHORT: Price below KAMA, RSI < 50, and weekly downtrend
+            elif close[i] < kama_val and rsi_val < 50 and close[i] < weekly_trend and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price touches lower Donchian band or trend turns down
-            if close[i] < lower_channel or close[i] < daily_trend:
+            # EXIT LONG: Price crosses below KAMA
+            if close[i] < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price touches upper Donchian band or trend turns up
-            if close[i] > upper_channel or close[i] > daily_trend:
+            # EXIT SHORT: Price crosses above KAMA
+            if close[i] > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
