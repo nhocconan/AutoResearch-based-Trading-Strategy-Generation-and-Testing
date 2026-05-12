@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1d_WeeklyDonchian_Breakout_Volume
-# Hypothesis: Weekly Donchian channel breakouts on daily timeframe, confirmed by volume spike.
-# Weekly highs/lows act as strong support/resistance levels. Breakouts with volume indicate
-# institutional participation. Works in both bull and bear markets by capturing momentum
-# shifts. Low frequency (target 10-25 trades/year) minimizes fee drag.
+# 6h_Chaikin_Oscillator_Momentum_With_Trend_Filter
+# Hypothesis: Chaikin Oscillator (3,10) crossing zero indicates short-term momentum shifts in accumulation/distribution.
+# Confirmed by daily trend (EMA50) to avoid counter-trend trades. Volume-weighted ensures institutional participation.
+# Designed for 6h timeframe with low trade frequency (<30/year) to minimize fee drag.
+# Works in both bull and bear markets by following the higher timeframe trend.
 
-name = "1d_WeeklyDonchian_Breakout_Volume"
-timeframe = "1d"
+name = "6h_Chaikin_Oscillator_Momentum_With_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,41 +18,41 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate 20-period weekly Donchian channels
-    high_series = pd.Series(weekly_high)
-    low_series = pd.Series(weekly_low)
-    weekly_high_20 = high_series.rolling(window=20, min_periods=20).max().values
-    weekly_low_20 = low_series.rolling(window=20, min_periods=20).min().values
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Avoid division by zero
+    hl_range = high - low
+    mf_multiplier = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0.0)
+    money_flow_volume = mf_multiplier * volume
 
-    # Align weekly Donchian levels to daily timeframe
-    weekly_high_20_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high_20)
-    weekly_low_20_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low_20)
+    # Chaikin Oscillator = EMA(3) of MFV - EMA(10) of MFV
+    mfv_series = pd.Series(money_flow_volume)
+    ema3 = mfv_series.ewm(span=3, adjust=False, min_periods=3).mean()
+    ema10 = mfv_series.ewm(span=10, adjust=False, min_periods=10).mean()
+    chaikin_osc = (ema3 - ema10).values
 
-    # Volume spike: 2x 20-day SMA
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(40, n):  # Start after 20-week lookback + buffer
+    for i in range(10, n):  # Start after EMA10 needs 10 bars
         # Skip if any required data is NaN
-        if (np.isnan(weekly_high_20_aligned[i]) or np.isnan(weekly_low_20_aligned[i]) or 
-            np.isnan(volume_sma20[i])):
+        if (np.isnan(chaikin_osc[i]) or np.isnan(chaikin_osc[i-1]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,26 +61,28 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above weekly Donchian high with volume spike
-            if close[i] > weekly_high_20_aligned[i] and volume[i] > volume_sma20[i]:
+            # LONG: Chaikin Oscillator crosses above zero with uptrend
+            if (chaikin_osc[i-1] <= 0 and chaikin_osc[i] > 0 and
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly Donchian low with volume spike
-            elif close[i] < weekly_low_20_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: Chaikin Oscillator crosses below zero with downtrend
+            elif (chaikin_osc[i-1] >= 0 and chaikin_osc[i] < 0 and
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below weekly Donchian low
-            if close[i] < weekly_low_20_aligned[i]:
+            # EXIT LONG: Chaikin Oscillator crosses below zero
+            if chaikin_osc[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above weekly Donchian high
-            if close[i] > weekly_high_20_aligned[i]:
+            # EXIT SHORT: Chaikin Oscillator crosses above zero
+            if chaikin_osc[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
