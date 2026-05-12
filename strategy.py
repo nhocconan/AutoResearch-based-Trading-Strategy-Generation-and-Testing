@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_1D_Camarilla_R1_S1_Breakout_Pullback_Reentry
-# Hypothesis: Breakouts from daily Camarilla R1/S1 levels with pullback confirmation and re-entry on trend continuation.
-# In bull markets: buy pullbacks to R1 in uptrend; in bear markets: sell rallies to S1 in downtrend.
-# Uses EMA trend filter and volume confirmation to avoid false breakouts. Targets 25-40 trades/year.
+# 4h_1D_Camarilla_R1_S1_Breakout_TrendVolume
+# Hypothesis: 4-hour breakouts from daily-derived Camarilla R1/S1 levels with volume spike confirmation and daily trend filter.
+# Works in bull markets via breakout continuation and in bear markets via mean-reversion from extremes.
+# Targets 20-50 trades per year by requiring strict confluence of conditions.
 
-name = "4h_1D_Camarilla_R1_S1_Breakout_Pullback_Reentry"
+name = "4h_1D_Camarilla_R1_S1_Breakout_TrendVolume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,9 +22,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume confirmation: >1.8x 20-period average
+    # Volume spike: >2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     # Daily data
     df_1d = get_htf_data(prices, '1d')
@@ -47,13 +47,8 @@ def generate_signals(prices):
     R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
     S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
-    # Track breakout levels for pullback entry
-    breakout_high = np.full(n, np.nan)
-    breakout_low = np.full(n, np.nan)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    breakout_active = False  # Track if we have an active breakout level
     
     for i in range(50, n):
         if (np.isnan(R1_1d_aligned[i]) or 
@@ -62,60 +57,40 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                breakout_active = False
             else:
                 signals[i] = 0.0
             continue
         
         if position == 0:
-            # Check for new breakout
-            bullish_breakout = (close[i] > R1_1d_aligned[i] and 
-                               volume_confirm[i] and 
-                               close[i] > ema_34_1d_aligned[i])
-            bearish_breakout = (close[i] < S1_1d_aligned[i] and 
-                               volume_confirm[i] and 
-                               close[i] < ema_34_1d_aligned[i])
-            
-            if bullish_breakout:
-                breakout_high[i] = R1_1d_aligned[i]  # Store pullback level
-                breakout_active = True
-                signals[i] = 0.0  # Wait for pullback
-            elif bearish_breakout:
-                breakout_low[i] = S1_1d_aligned[i]   # Store pullback level
-                breakout_active = True
-                signals[i] = 0.0  # Wait for pullback
+            # LONG: Price breaks above R1 + volume spike + price above daily EMA34 (uptrend)
+            if (close[i] > R1_1d_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema_34_1d_aligned[i]):
+                signals[i] = 0.30
+                position = 1
+            # SHORT: Price breaks below S1 + volume spike + price below daily EMA34 (downtrend)
+            elif (close[i] < S1_1d_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_34_1d_aligned[i]):
+                signals[i] = -0.30
+                position = -1
             else:
                 signals[i] = 0.0
-                breakout_active = False
-        
         elif position == 1:
-            # Long position: exit on trend reversal or re-entry on pullback
-            if close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: Price re-enters previous day's H-L range OR closes below daily EMA34
+            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
+               close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                breakout_active = False
             else:
-                # Look for pullback to breakout level for re-entry
-                pullback_level = breakout_high[i]
-                if not np.isnan(pullback_level) and low[i] <= pullback_level:
-                    # Re-enter on pullback
-                    signals[i] = 0.25
-                else:
-                    signals[i] = 0.25  # Hold position
-        
+                signals[i] = 0.30
         elif position == -1:
-            # Short position: exit on trend reversal or re-entry on pullback
-            if close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: Price re-enters previous day's H-L range OR closes above daily EMA34
+            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
+               close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                breakout_active = False
             else:
-                # Look for pullback to breakout level for re-entry
-                pullback_level = breakout_low[i]
-                if not np.isnan(pullback_level) and high[i] >= pullback_level:
-                    # Re-enter on pullback
-                    signals[i] = -0.25
-                else:
-                    signals[i] = -0.25  # Hold position
+                signals[i] = -0.30
     
     return signals
