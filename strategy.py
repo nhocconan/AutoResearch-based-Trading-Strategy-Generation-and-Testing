@@ -1,6 +1,12 @@
+# 4h_VWAP_Deviation_MeanReversion_1dTrend
+# Mean reversion to VWAP with daily trend filter. Works in both bull and bear by trading pullbacks to VWAP in trending markets.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years)
+# VWAP deviation >2σ triggers mean reversion entries when price is away from VWAP but aligned with daily trend.
+# Exit when price returns to VWAP or trend breaks. Uses 0.25 position size to manage drawdown.
+
 #!/usr/bin/env python3
-name = "6h_Retracement_VWAP_Deviation_12hTrend"
-timeframe = "6h"
+name = "4h_VWAP_Deviation_MeanReversion_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,45 +23,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h VWAP ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
-    
-    # Typical price and VWAP
-    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
-    cum_vol_tp = np.nancumsum(volume_12h * typical_price_12h)
-    cum_vol = np.nancumsum(volume_12h)
-    vwap_12h = np.divide(cum_vol_tp, cum_vol, out=np.full_like(cum_vol_tp, np.nan), where=cum_vol!=0)
+    # === 4h VWAP ===
+    typical_price = (high + low + close) / 3.0
+    cum_vol_tp = np.nancumsum(volume * typical_price)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_vol_tp, cum_vol, out=np.full_like(cum_vol_tp, np.nan), where=cum_vol!=0)
     
     # VWAP deviation (%)
-    vwap_dev_12h = (close_12h - vwap_12h) / vwap_12h * 100.0
+    vwap_dev = (close - vwap) / vwap * 100.0
     
-    # Align VWAP deviation to 6h
-    vwap_dev_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_dev_12h)
+    # Rolling std of VWAP deviation (20 periods)
+    vwap_dev_series = pd.Series(vwap_dev)
+    vwap_dev_std = vwap_dev_series.rolling(window=20, min_periods=20).std().values
     
-    # === 12h Trend (EMA50) ===
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # === 6h VWAP for entry timing ===
-    typical_price_6h = (high + low + close) / 3.0
-    cum_vol_tp_6h = np.nancumsum(volume * typical_price_6h)
-    cum_vol_6h = np.nancumsum(volume)
-    vwap_6h = np.divide(cum_vol_tp_6h, cum_vol_6h, out=np.full_like(cum_vol_tp_6h, np.nan), where=cum_vol_6h!=0)
+    # === Daily Trend (EMA50) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 50)  # Ensure enough data
+    start_idx = max(30, 50)  # Ensure enough data for VWAP std and EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vwap_dev_12h_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or
-            np.isnan(vwap_6h[i])):
+        if (np.isnan(vwap_dev[i]) or 
+            np.isnan(vwap_dev_std[i]) or
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,27 +59,30 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Entry conditions: VWAP deviation > 2 standard deviations
+        dev_threshold = 2.0 * vwap_dev_std[i]
+        
         if position == 0:
-            # Long: Price below VWAP (oversold) but 12h trend up
-            if (close[i] < vwap_6h[i] and 
-                close[i] > ema50_12h_aligned[i]):
+            # Long: Price significantly below VWAP (-2σ) but daily trend up
+            if (vwap_dev[i] < -dev_threshold and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price above VWAP (overbought) but 12h trend down
-            elif (close[i] > vwap_6h[i] and 
-                  close[i] < ema50_12h_aligned[i]):
+            # Short: Price significantly above VWAP (+2σ) but daily trend down
+            elif (vwap_dev[i] > dev_threshold and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses above VWAP or trend breaks
-            if close[i] > vwap_6h[i] or close[i] < ema50_12h_aligned[i]:
+            # Exit long: Price returns to VWAP or trend breaks down
+            if vwap_dev[i] > -0.5 * dev_threshold or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses below VWAP or trend breaks
-            if close[i] < vwap_6h[i] or close[i] > ema50_12h_aligned[i]:
+            # Exit short: Price returns to VWAP or trend breaks up
+            if vwap_dev[i] < 0.5 * dev_threshold or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
