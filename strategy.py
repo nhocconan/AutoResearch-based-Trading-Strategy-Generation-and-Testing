@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume
-Hypothesis: Breakout above weekly R1 or below weekly S1 with weekly EMA20 trend filter and daily volume confirmation. Designed for 7-25 trades/year on 1d timeframe to work in both bull and bear markets by using strong weekly institutional levels and filtering with weekly trend and volume.
+12h_Weekly_Camarilla_R1S1_Breakout_WeeklyTrend_Volume
+Hypothesis: Breakout above weekly R1 or below weekly S1 with weekly EMA20 trend filter and daily volume confirmation. Designed for 12-37 trades/year on 12h timeframe to work in both bull and bear markets by using strong weekly institutional levels and filtering with weekly trend and volume.
 """
 
-name = "1d_Weekly_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_Weekly_Camarilla_R1S1_Breakout_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -37,7 +37,7 @@ def generate_signals(prices):
     r1_weekly = close_weekly + hl_range_weekly * 1.1 / 12
     s1_weekly = close_weekly - hl_range_weekly * 1.1 / 12
 
-    # Align to daily timeframe (values from previous week's close)
+    # Align to 12h timeframe (values from previous week's close)
     r1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, r1_weekly)
     s1_weekly_aligned = align_htf_to_ltf(prices, df_weekly, s1_weekly)
 
@@ -45,8 +45,9 @@ def generate_signals(prices):
     ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
 
-    # Daily volume confirmation: volume > 1.5x 20-day average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily volume confirmation: volume > 1.5x 20-day average (using daily proxy from 12h)
+    # Since we're on 12h, we use 10-period average to approximate 20d on daily
+    vol_avg_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,7 +56,7 @@ def generate_signals(prices):
         r1_val = r1_weekly_aligned[i]
         s1_val = s1_weekly_aligned[i]
         ema20_val = ema20_weekly_aligned[i]
-        vol_avg_val = vol_avg_20[i]
+        vol_avg_val = vol_avg_10[i]
 
         if np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema20_val) or np.isnan(vol_avg_val):
             if position != 0:
