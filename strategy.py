@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Trix_Volume_Trend_Filter
-# Hypothesis: Use TRIX (1-period ROC of triple-smoothed EMA) to detect momentum on 4h, confirmed by 12h trend (EMA50) and volume spikes (>2x 20-period average). Enter long when TRIX crosses above zero and price > 12h EMA50 with volume spike; short when TRIX crosses below zero and price < 12h EMA50 with volume spike. Exit on TRIX zero-cross reverse. Targets 20-50 trades/year to minimize fee drift and work in both bull/bear via trend filter.
+# 1h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Use 1d trend (close > EMA50) as filter, 4h Camarilla levels (R3/S3) for breakout direction, and 1h volume spike (>2x 20-period avg) for entry timing. Trades only during 08-20 UTC session. Targets 15-37 trades/year on 1h to avoid fee drag. Works in bull/bear via 1d trend filter.
 
-name = "4h_Trix_Volume_Trend_Filter"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -15,25 +15,49 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Session filter: 08-20 UTC (precomputed for efficiency)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate TRIX on 4h (15-period EMA applied 3 times + 1-period ROC)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = ema3.pct_change(1) * 100  # 1-period ROC as percentage
-    trix_values = trix.values
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Get 4h data for Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+
+    # Calculate previous 4h bar's Camarilla levels
+    # Shift by 1 to use only completed 4h bar
+    ph = np.roll(high_4h, 1)
+    pl = np.roll(low_4h, 1)
+    pc = np.roll(close_4h, 1)
+    ph[0] = high_4h[0]
+    pl[0] = low_4h[0]
+    pc[0] = close_4h[0]
+
+    # Camarilla formulas
+    R3 = pc + (ph - pl) * 1.1 / 4
+    S3 = pc - (ph - pl) * 1.1 / 4
+
+    # Align to 1h
+    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
 
     # Volume confirmation: volume > 2x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -41,10 +65,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(15, n):
-        # Skip if any required value is NaN
-        if (np.isnan(trix_values[i]) or np.isnan(trix_values[i-1]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
+    for i in range(1, n):  # Start from 1 to avoid roll issues
+        # Skip if any required value is NaN or outside session
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or np.isnan(vol_avg_20[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,33 +78,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX crosses above zero + price > 12h EMA50 + volume spike
-            if (trix_values[i-1] <= 0 and trix_values[i] > 0 and 
-                close[i] > ema50_12h_aligned[i] and
+            # LONG: Close > R3 (breakout) + price > 1d EMA50 + volume spike
+            if (close[i] > R3_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and
                 volume[i] > vol_avg_20[i] * 2.0):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # SHORT: TRIX crosses below zero + price < 12h EMA50 + volume spike
-            elif (trix_values[i-1] >= 0 and trix_values[i] < 0 and 
-                  close[i] < ema50_12h_aligned[i] and
+            # SHORT: Close < S3 (breakdown) + price < 1d EMA50 + volume spike
+            elif (close[i] < S3_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and
                   volume[i] > vol_avg_20[i] * 2.0):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero
-            if trix_values[i] < 0:
+            # EXIT LONG: Close < S3 (reversal below S3) or trend fails
+            if close[i] < S3_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero
-            if trix_values[i] > 0:
+            # EXIT SHORT: Close > R3 (reversal above R3) or trend fails
+            if close[i] > R3_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
