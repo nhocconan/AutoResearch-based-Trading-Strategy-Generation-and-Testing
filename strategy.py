@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1d_WeeklyPivot_1wTrend_Volume
-# Hypothesis: Trade daily breakouts of weekly pivot levels (R1/S1) aligned with weekly trend and volume.
-# Weekly pivot defines structural support/resistance; weekly EMA50 filters trend direction.
-# Volume confirms breakout momentum. Designed for low frequency (10-20 trades/year) to survive
-# both bull and bear markets by following higher timeframe structure.
+# 6h_PivotRange_MeanReversion_1dTrend
+# Hypothesis: Mean reversion within weekly pivot range (S2 to R2) with 1d trend filter.
+# In ranging markets, price tends to revert to weekly pivot; in trending markets,
+# we only take trades in direction of 1d EMA50. Designed for low frequency and robustness.
 
-name = "1d_WeeklyPivot_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_PivotRange_MeanReversion_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,22 +22,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Weekly EMA50 for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # === 1d EMA50 for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Weekly pivot levels (R1, S1) ===
-    # Calculate from weekly OHLC (previous completed week)
+    # === Weekly pivot levels (S2, R2) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
     wk_high = df_1w['high'].values
     wk_low = df_1w['low'].values
     wk_close = df_1w['close'].values
     
-    # Shift by 1 to use previous week's data
     wk_high_prev = np.roll(wk_high, 1)
     wk_low_prev = np.roll(wk_low, 1)
     wk_close_prev = np.roll(wk_close, 1)
@@ -47,25 +48,29 @@ def generate_signals(prices):
     wk_close_prev[0] = np.nan
     
     pivot = (wk_high_prev + wk_low_prev + wk_close_prev) / 3.0
-    r1 = pivot + (wk_high_prev - wk_low_prev) / 2.0
-    s1 = pivot - (wk_high_prev - wk_low_prev) / 2.0
+    r2 = pivot + (wk_high_prev - wk_low_prev)
+    s2 = pivot - (wk_high_prev - wk_low_prev)
     
-    # Align weekly levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # === Volume confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === Weekly range width for dynamic sizing ===
+    range_width = r2_aligned - s2_aligned
+    # Avoid division by zero
+    range_width = np.where(range_width == 0, np.nan, range_width)
+    
+    # Position within weekly range (0 = S2, 1 = R2)
+    pos_in_range = (close - s2_aligned) / range_width
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are stable
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(pos_in_range[i]) or np.isnan(range_width[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,36 +78,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA50
-        trend_up = close[i] > ema_50_1w_aligned[i]
-        trend_down = close[i] < ema_50_1w_aligned[i]
+        # Trend filter
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakout_down = close[i] < s1_aligned[i]
-        
-        # Volume filter: above average
-        vol_ok = volume[i] > vol_ma_20[i]
+        # Mean reversion signals within weekly range
+        # Long near S2 (oversold), Short near R2 (overbought)
+        long_signal = pos_in_range[i] < 0.3  # Near support
+        short_signal = pos_in_range[i] > 0.7  # Near resistance
         
         if position == 0:
-            # LONG: breakout above R1, uptrend, volume confirmation
-            if breakout_up and trend_up and vol_ok:
+            # In ranging market: take both directions
+            # In trending market: only take trades in trend direction
+            if long_signal and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakout below S1, downtrend, volume confirmation
-            elif breakout_down and trend_down and vol_ok:
+            elif short_signal and trend_down:
                 signals[i] = -0.25
                 position = -1
+            # Also take counter-trend at extremes if trend is weak (price near extreme but not strong trend)
+            elif long_signal and not trend_down:  # Not in strong downtrend
+                signals[i] = 0.20
+                position = 1
+            elif short_signal and not trend_up:  # Not in strong uptrend
+                signals[i] = -0.20
+                position = -1
         elif position == 1:
-            # EXIT LONG: breakdown below S1 or trend reversal
-            if breakout_down or not trend_up:
+            # EXIT LONG: near R2 or trend reversal to down
+            if short_signal or trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: breakout above R1 or trend reversal
-            if breakout_up or not trend_down:
+            # EXIT SHORT: near S2 or trend reversal to up
+            if long_signal or trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
