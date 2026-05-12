@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_R1_S1_Breakout_TrendVol_v1
-Hypothesis: Daily breakouts from weekly Camarilla R1/S1 levels with weekly EMA50 trend filter and volume spike confirmation.
-Only takes long when price breaks above R1 with volume spike and weekly uptrend, short when breaks below S1 with volume spike and weekly downtrend.
-Designed for low trade frequency (target: 10-30 trades/year) to minimize fee drag and work in both bull and bear markets.
+6h_12h_1d_BollingerBreakout_TrendVol_v1
+Hypothesis: 6-hour breakouts from Bollinger Bands (20,2) with 12-hour trend filter and volume spike confirmation.
+Only takes long when price breaks above upper band with volume spike and 12h uptrend, short when breaks below lower band with volume spike and 12h downtrend.
+Uses Bollinger Bands instead of Camarilla to avoid saturated family, with focus on 6h timeframe to reduce trade frequency and improve robustness.
 """
 
-name = "1d_1w_Camarilla_R1_S1_Breakout_TrendVol_v1"
-timeframe = "1d"
+name = "6h_12h_1d_BollingerBreakout_TrendVol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -28,42 +28,28 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Bollinger Bands (20,2)
+    ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper = ma + 2 * std
+    lower = ma - 2 * std
     
-    # Weekly data for Camarilla levels and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Weekly Camarilla R1 and S1 from previous weekly period
-    prev_close_1w = df_1w['close'].shift(1).values
-    prev_high_1w = df_1w['high'].shift(1).values
-    prev_low_1w = df_1w['low'].shift(1).values
-    rang_1w = prev_high_1w - prev_low_1w
-    R1_1w = prev_close_1w + 1.1 * rang_1w * 1.0 / 4
-    S1_1w = prev_close_1w - 1.1 * rang_1w * 1.0 / 4
-    
-    # Align weekly levels to daily timeframe
-    R1_1w_aligned = align_htf_to_ltf(prices, df_1w, R1_1w)
-    S1_1w_aligned = align_htf_to_ltf(prices, df_1w, S1_1w)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(R1_1w_aligned[i]) or 
-            np.isnan(S1_1w_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(upper[i]) or
+            np.isnan(lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,34 +58,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + volume spike + price above weekly EMA50 + ATR filter
-            if (close[i] > R1_1w_aligned[i] and 
+            # LONG: Price breaks above upper band + volume spike + price above 12h EMA50
+            if (close[i] > upper[i] and 
                 volume_spike[i] and 
-                close[i] > ema_50_1w_aligned[i] and
-                close[i] > low[i] + 0.5 * atr[i]):  # price above low + half ATR
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + volume spike + price below weekly EMA50 + ATR filter
-            elif (close[i] < S1_1w_aligned[i] and 
+            # SHORT: Price breaks below lower band + volume spike + price below 12h EMA50
+            elif (close[i] < lower[i] and 
                   volume_spike[i] and 
-                  close[i] < ema_50_1w_aligned[i] and
-                  close[i] < high[i] - 0.5 * atr[i]):  # price below high - half ATR
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters previous weekly period's H-L range OR closes below weekly EMA50
-            if (close[i] < R1_1w_aligned[i] and close[i] > S1_1w_aligned[i]) or \
-               close[i] < ema_50_1w_aligned[i]:
+            # EXIT LONG: Price re-enters Bollinger Bands OR closes below 12h EMA50
+            if (close[i] < upper[i] and close[i] > lower[i]) or \
+               close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters previous weekly period's H-L range OR closes above weekly EMA50
-            if (close[i] < R1_1w_aligned[i] and close[i] > S1_1w_aligned[i]) or \
-               close[i] > ema_50_1w_aligned[i]:
+            # EXIT SHORT: Price re-enters Bollinger Bands OR closes above 12h EMA50
+            if (close[i] < upper[i] and close[i] > lower[i]) or \
+               close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
