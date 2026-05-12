@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_ADX_IchimokuCloud_Breakout
-# Hypothesis: Trend following strategy using 6h ADX to filter strong trends, with 1d Ichimoku cloud as dynamic support/resistance.
-# Enters long when price breaks above cloud in uptrend (ADX>25), short when breaks below cloud in downtrend (ADX>25).
-# Uses volume confirmation to avoid false breakouts. Designed for low frequency (20-40 trades/year) to work in both bull and bear markets
-# by capturing strong trends while avoiding whipsaws in ranging conditions. ADX ensures we only trade when trend is strong enough.
+# 4h_TRIX_VolumeSpike_Regime
+# Hypothesis: TRIX momentum combined with volume spikes and Choppiness regime filter.
+# TRIX captures short-term momentum, volume confirms strength, and Choppiness distinguishes trending/ranging markets.
+# In trending markets (CHOP < 38.2), follow TRIX crossovers; in ranging (CHOP > 61.8), fade extremes.
+# Designed for low frequency (20-40 trades/year) to survive both bull and bear markets by adapting to regime.
 
-name = "6h_ADX_IchimokuCloud_Breakout"
-timeframe = "6h"
+name = "4h_TRIX_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,85 +23,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Ichimoku Cloud ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
-        return np.zeros(n)
+    # === TRIX (1-period ROC of EMA smoothed 3x) ===
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = 100 * (ema3.pct_change(periods=1))
+    trix_signal = trix.ewm(span=8, adjust=False, min_periods=8).mean()
+    trix_hist = trix - trix_signal
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    tenkan_sen = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
-                  pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    kijun_sen = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
-                 pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    senkou_b = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
-                 pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2).shift(26)
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a.values)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b.values)
-    
-    # === 6h ADX for trend strength ===
-    # Calculate ADX with 14-period smoothing
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    
-    # True Range
+    # === ATR for volatility ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Pad arrays to match original length
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
+    # === Choppiness Index (14-period) ===
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
     
-    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    def wilders_smooth(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    smoothed_plus_dm = wilders_smooth(plus_dm, 14)
-    smoothed_minus_dm = wilders_smooth(minus_dm, 14)
-    smoothed_tr = wilders_smooth(tr, 14)
-    
-    # Avoid division by zero
-    plus_di = 100 * smoothed_plus_dm / np.where(smoothed_tr == 0, 1, smoothed_tr)
-    minus_di = 100 * smoothed_minus_dm / np.where(smoothed_tr == 0, 1, smoothed_tr)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
-    adx = wilders_smooth(dx, 14)
-    
-    # === Volume confirmation (20-period average) ===
+    # === Volume spike (20-period avg) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix_hist[i]) or np.isnan(trix_signal[i]) or np.isnan(chop[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -109,39 +63,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        # Regime filter
+        trending = chop[i] < 38.2  # Trending market
+        ranging = chop[i] > 61.8   # Ranging market
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx[i] > 25
-        
-        # Breakout conditions relative to cloud
-        breakout_above_cloud = close[i] > cloud_top
-        breakout_below_cloud = close[i] < cloud_bottom
-        
-        # Volume filter: above average
+        # Volume confirmation
         vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: breakout above cloud, strong uptrend, volume confirmation
-            if breakout_above_cloud and strong_trend and vol_ok:
+            # LONG: TRIX histogram crosses above zero in trending market OR oversold bounce in ranging
+            if trending and trix_hist[i] > 0 and trix_hist[i-1] <= 0 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakout below cloud, strong downtrend, volume confirmation
-            elif breakout_below_cloud and strong_trend and vol_ok:
+            elif ranging and trix[i] < -0.5 and trix[i] > trix[i-1] and vol_ok:  # Oversold bounce
+                signals[i] = 0.25
+                position = 1
+            # SHORT: TRIX histogram crosses below zero in trending market OR overbought fade in ranging
+            elif trending and trix_hist[i] < 0 and trix_hist[i-1] >= 0 and vol_ok:
+                signals[i] = -0.25
+                position = -1
+            elif ranging and trix[i] > 0.5 and trix[i] < trix[i-1] and vol_ok:  # Overbought fade
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: price re-enters cloud or trend weakens
-            if close[i] < cloud_top or adx[i] < 20:
+            # EXIT LONG: TRIX histogram crosses below zero or volatility expansion
+            if trix_hist[i] < 0 and trix_hist[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price re-enters cloud or trend weakens
-            if close[i] > cloud_bottom or adx[i] < 20:
+            # EXIT SHORT: TRIX histogram crosses above zero or volatility expansion
+            if trix_hist[i] > 0 and trix_hist[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
