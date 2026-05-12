@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_R1S1_Breakout_Volume_Trend
-Hypothesis: Camarilla R1/S1 levels from 12h act as strong support/resistance in trending markets.
-Price breaking above R1 or below S1 with volume confirms trend continuation.
-In ranging markets, reversals occur at these levels.
-Uses 12h trend filter to avoid counter-trend trades.
-Works in bull/bear: trend filter adapts to market direction.
-Timeframe: 4h balances trade frequency with signal quality.
+1h 4H/1D Volatility Breakout with Volume Confirmation
+Hypothesis: In both bull and bear markets, volatility bursts (ATR expansion)
+combined with volume spikes often precede sustained directional moves.
+Use 4H trend for direction, 1H for entry timing via volatility/volume breakout.
+Volume confirmation filters false breakouts. Designed for low trade frequency.
 """
-name = "4h_12h_Camarilla_R1S1_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1h_VolVol_Breakout"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,44 +24,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H DATA FOR CAMARILLA PIVOTS ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === 4H TREND (EMA 21) ===
+    df_4h = get_htf_data(prices, '4h')
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    trend_4h = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate pivot and Camarilla levels for 12h
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
-    r1_12h = close_12h + (range_12h * 1.1 / 12)  # R1 = C + (H-L)*1.1/12
-    s1_12h = close_12h - (range_12h * 1.1 / 12)  # S1 = C - (H-L)*1.1/12
-    r2_12h = close_12h + (range_12h * 1.1 / 6)   # R2 = C + (H-L)*1.1/6
-    s2_12h = close_12h - (range_12h * 1.1 / 6)   # S2 = C - (H-L)*1.1/6
+    # === 1H ATR (21) FOR VOLATILITY BREAKOUT ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=21, min_periods=21).mean().values
     
-    # Align 12h levels to 4h timeframe
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
-    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
-    
-    # === 12H TREND FILTER (EMA 50) ===
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # === VOLUME CONFIRMATION (20-period) ===
+    # === 1H VOLUME (20) SPIKE ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)  # High threshold for rarity
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # For EMA 50
+    start_idx = 50  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
-            np.isnan(r2_12h_aligned[i]) or np.isnan(s2_12h_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trend_4h[i]) or np.isnan(atr[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,27 +59,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 with volume, only if above 12h EMA50 (uptrend)
-            if close[i] > r1_12h_aligned[i] and volume_spike[i] and close[i] > ema_50_12h_aligned[i]:
-                signals[i] = 0.25
+            # LONG: Uptrend + volatility breakout up + volume spike
+            if (close[i] > trend_4h[i] and 
+                close[i] > close[i-1] + 0.5 * atr[i] and
+                vol_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below S1 with volume, only if below 12h EMA50 (downtrend)
-            elif close[i] < s1_12h_aligned[i] and volume_spike[i] and close[i] < ema_50_12h_aligned[i]:
-                signals[i] = -0.25
+            # SHORT: Downtrend + volatility breakout down + volume spike
+            elif (close[i] < trend_4h[i] and 
+                  close[i] < close[i-1] - 0.5 * atr[i] and
+                  vol_spike[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or reaches R2
-            if close[i] < s1_12h_aligned[i] or close[i] > r2_12h_aligned[i]:
+            # EXIT LONG: Close below 4H trend OR volatility contraction
+            if close[i] < trend_4h[i] or (high[i] - low[i]) < 0.3 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or reaches S2
-            if close[i] > r1_12h_aligned[i] or close[i] < s2_12h_aligned[i]:
+            # EXIT SHORT: Close above 4H trend OR volatility contraction
+            if close[i] > trend_4h[i] or (high[i] - low[i]) < 0.3 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
