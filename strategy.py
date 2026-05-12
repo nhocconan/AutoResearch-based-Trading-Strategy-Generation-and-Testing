@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,13 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla pivot levels ===
+    # === 1d Data ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Camarilla R1, S1 levels
+    # === 1d Camarilla R1/S1 ===
     rango = high_1d - low_1d
     camarilla_r1 = close_1d + (rango * 1.1 / 12)
     camarilla_s1 = close_1d - (rango * 1.1 / 12)
@@ -31,19 +32,14 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === 1d EMA34 trend filter ===
+    # === 1d EMA34 Trend Filter ===
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === 1d Volume spike filter ===
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    # === 1d Volume Spike Filter ===
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (2.0 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
-    
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,27 +59,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Skip outside session
-        if not session_filter[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
             # Long: Close above R1 + above daily EMA34 + volume spike
             if (close[i] > camarilla_r1_aligned[i] and
                 close[i] > ema34_1d_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # Short: Close below S1 + below daily EMA34 + volume spike
             elif (close[i] < camarilla_s1_aligned[i] and
                   close[i] < ema34_1d_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: Close below S1 or below EMA34
@@ -91,13 +78,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Exit short: Close above R1 or above EMA34
             if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
