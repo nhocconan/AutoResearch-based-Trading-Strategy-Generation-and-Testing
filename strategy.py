@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Liquidity_Clearing_1dTrend
-Hypothesis: On 6h timeframe, identify daily liquidity zones (previous day's high/low) and look for price to clear these levels with volume confirmation in the direction of the 1d trend. In trending markets, liquidity sweeps often precede continuation. Uses 1d EMA50 for trend filter and 1d liquidity zones for entry/exit. Targets 15-30 trades per year to minimize fee drag while capturing trend continuation moves.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+Hypothesis: On 4h timeframe, buy when price touches Camarilla S1 level with 1d uptrend and volume spike; sell when price touches Camarilla R1 level with 1d downtrend and volume spike. Uses Camarilla pivot levels from daily timeframe for mean reversion in ranging markets, filtered by 1d EMA trend and volume confirmation to avoid false signals. Targets 20-40 trades per year to minimize fee drag while capturing high-probability reversals.
 """
 
-name = "6h_Liquidity_Clearing_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -22,7 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter and liquidity zones
+    # Get 1d data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -30,30 +30,41 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Camarilla pivot levels for previous day
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), R2 = C + ((H-L)*1.1/6), R1 = C + ((H-L)*1.1/12)
+    #          S1 = C - ((H-L)*1.1/12), S2 = C - ((H-L)*1.1/6), S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
+    # where C = (H+L+C)/3 (typical price)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
 
-    # Previous day's high/low for liquidity zones (use prior 1d bar's high/low)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    high_1d_prev[0] = np.nan  # first value invalid
-    low_1d_prev[0] = np.nan
+    # Calculate levels for previous day (to avoid look-ahead)
+    typical_price_prev = np.roll(typical_price_1d, 1)
+    range_prev = np.roll(range_1d, 1)
+    typical_price_prev[0] = np.nan
+    range_prev[0] = np.nan
 
-    # Align 1d liquidity zones to 6h timeframe
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d_prev)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d_prev)
+    # Camarilla levels
+    R1 = typical_price_prev + (range_prev * 1.1 / 12)
+    S1 = typical_price_prev - (range_prev * 1.1 / 12)
 
-    # Volume confirmation: volume > 1.5x 20-period average (approx 6 hours)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Volume confirmation: volume > 2.0x 24-period average (approx 6 hours)
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if any required value is NaN
-        if (np.isnan(high_1d_aligned[i]) or np.isnan(low_1d_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,30 +73,36 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price clears above 1d high + 1d uptrend + volume spike
-            if (close[i] > high_1d_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Price touches S1 + 1d uptrend + volume spike
+            if (low[i] <= S1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume[i] > vol_avg_24[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price clears below 1d low + 1d downtrend + volume spike
-            elif (close[i] < low_1d_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Price touches R1 + 1d downtrend + volume spike
+            elif (high[i] >= R1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume[i] > vol_avg_24[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price fails to hold above 1d low OR trend turns down
-            if close[i] < low_1d_aligned[i] or close[i] < ema50_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # EXIT LONG: Price crosses above typical price (mean reversion complete)
+            if close[i] >= typical_price_prev[np.searchsorted(df_1d.index, prices.index[i]) if i < len(prices) else -1]:
+                # Simplified exit: price reaches midpoint between S1 and R1
+                midpoint = (R1_aligned[i] + S1_aligned[i]) / 2
+                if close[i] >= midpoint:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price fails to hold below 1d high OR trend turns up
-            if close[i] > high_1d_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price crosses below typical price
+            midpoint = (R1_aligned[i] + S1_aligned[i]) / 2
+            if close[i] <= midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
