@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_TurtleSqueeze_1wTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,38 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1W DATA FOR TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === 1D DATA FOR CAMARILLA PIVOT AND TREND ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 1D Camarilla pivot levels (using previous day's range)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # === TURTLE SQUEEZE (6h) ===
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close_1d + (1.1/12) * (prev_high_1d - prev_low_1d)
+    camarilla_s1 = prev_close_1d - (1.1/12) * (prev_high_1d - prev_low_1d)
     
-    # Keltner channels (20-period ATR)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    keltner_upper = donchian_mid + (2.0 * atr)
-    keltner_lower = donchian_mid - (2.0 * atr)
+    # 1D EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Squeeze condition: Bollinger Bands inside Keltner (low volatility)
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = donchian_mid + (2.0 * bb_std)
-    bb_lower = donchian_mid - (2.0 * bb_std)
-    squeeze = (bb_upper <= keltner_upper) & (bb_lower >= keltner_lower)
+    # Align Camarilla levels and EMA to 12h timeframe
+    camarilla_r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)  # High volume breakout
+    volume_spike = volume > (vol_ma * 1.5)  # Moderate volume spike
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,9 +54,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_6h[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r1_12h[i]) or np.isnan(camarilla_s1_12h[i]) or 
+            np.isnan(ema34_1d_12h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +64,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Squeeze breakout above Donchian high + weekly uptrend + volume spike
-            if (squeeze[i-1] and  # was in squeeze
-                close[i] > donchian_high[i] and 
-                close[i] > ema50_1w_6h[i] and
+            # LONG: Price breaks above R1 + price above trend + volume confirmation
+            if (close[i] > camarilla_r1_12h[i] and 
+                close[i] > ema34_1d_12h[i] and
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Squeeze breakout below Donchian low + weekly downtrend + volume spike
-            elif (squeeze[i-1] and  # was in squeeze
-                  close[i] < donchian_low[i] and 
-                  close[i] < ema50_1w_6h[i] and
+            # SHORT: Price breaks below S1 + price below trend + volume confirmation
+            elif (close[i] < camarilla_s1_12h[i] and 
+                  close[i] < ema34_1d_12h[i] and
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price closes below Donchian midpoint OR squeeze fires
-            if close[i] < donchian_mid[i] or (not squeeze[i-1] and squeeze[i]):
+            # EXIT LONG: Price breaks below S1 OR price breaks below trend
+            if close[i] < camarilla_s1_12h[i] or close[i] < ema34_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Donchian midpoint OR squeeze fires
-            if close[i] > donchian_mid[i] or (not squeeze[i-1] and squeeze[i]):
+            # EXIT SHORT: Price breaks above R1 OR price breaks above trend
+            if close[i] > camarilla_r1_12h[i] or close[i] > ema34_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
