@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_AdaptiveKeltner_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,44 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Load daily data for trend filter and volatility calculation
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily Camarilla pivot levels
-    # Using previous day's OHLC to calculate today's levels (no look-ahead)
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]  # first bar
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
+    # Calculate ATR(14) on 6h data for dynamic bands
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar: no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    R3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    S3 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # Adaptive Keltner Channels: EMA(20) ± 2.0 * ATR
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_20 + 2.0 * atr
+    lower_keltner = ema_20 - 2.0 * atr
     
-    # Volume filter: current volume > 1.5x 20-day average
+    # Volume filter: current volume > 2.0x 20-period average (10 periods of 6h data)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_avg)
+    vol_filter = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_filter[i]) or 
-            np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(R3[i]) or np.isnan(S3[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_keltner[i]) or 
+            np.isnan(lower_keltner[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,24 +61,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1 + above weekly EMA50 + volume filter
-            if high[i] > R1[i] and close[i] > ema_50_1w_aligned[i] and vol_filter[i]:
+            # Long: breakout above upper Keltner + above daily EMA50 + volume filter
+            if close[i] > upper_keltner[i] and close[i] > ema_50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + below weekly EMA50 + volume filter
-            elif low[i] < S1[i] and close[i] < ema_50_1w_aligned[i] and vol_filter[i]:
+            # Short: breakdown below lower Keltner + below daily EMA50 + volume filter
+            elif close[i] < lower_keltner[i] and close[i] < ema_50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below S1 or below weekly EMA50
-            if low[i] < S1[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: breakdown below EMA(20) or below daily EMA50
+            if close[i] < ema_20[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above R1 or above weekly EMA50
-            if high[i] > R1[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: breakout above EMA(20) or above daily EMA50
+            if close[i] > ema_20[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
