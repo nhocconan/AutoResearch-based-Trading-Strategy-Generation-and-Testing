@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Chop_Adapted_Donchian_Breakout"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_ElderRay_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,33 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D DATA FOR REGIME FILTER (CHOP) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === WEEKLY DATA FOR TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Chop Index (14-period)
-    # True Range for 1d
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First value
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Williams Alligator on weekly (3 SMAs: 13, 8, 5)
+    # Jaw (13-period, 8-bar shift)
+    sma13_1w = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().values
+    jaw_1w = np.roll(sma13_1w, 8)  # shift forward 8 bars
+    jaw_1w[:8] = np.nan  # first 8 invalid
     
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Teeth (8-period, 5-bar shift)
+    sma8_1w = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().values
+    teeth_1w = np.roll(sma8_1w, 5)  # shift forward 5 bars
+    teeth_1w[:5] = np.nan  # first 5 invalid
     
-    chop = 100 * np.log10(atr14.sum() / (highest_high_14 - lowest_low_14)) / np.log10(14)
-    chop = np.where((highest_high_14 - lowest_low_14) != 0, chop, 50)  # Avoid division by zero
-    chop_4h = align_htf_to_ltf(prices, df_1d, chop)
+    # Lips (5-period, 3-bar shift)
+    sma5_1w = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().values
+    lips_1w = np.roll(sma5_1w, 3)  # shift forward 3 bars
+    lips_1w[:3] = np.nan  # first 3 invalid
     
-    # === 4H DATA FOR DONCHIAN BREAKOUT ===
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Alligator components to daily
+    jaw_1d = align_htf_to_ltf(prices, df_1w, jaw_1w)
+    teeth_1d = align_htf_to_ltf(prices, df_1w, teeth_1w)
+    lips_1d = align_htf_to_ltf(prices, df_1w, lips_1w)
+    
+    # Weekly trend: bullish when Lips > Teeth > Jaw
+    weekly_bullish = (lips_1d > teeth_1d) & (teeth_1d > jaw_1d)
+    weekly_bearish = (lips_1d < teeth_1d) & (teeth_1d < jaw_1d)
+    
+    # === DAILY DATA FOR ELDER RAY ===
+    # Calculate 13-period EMA for Elder Ray
+    ema13_1d = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power_1d = high - ema13_1d
+    bear_power_1d = low - ema13_1d
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,12 +63,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for all indicators
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(chop_4h[i]) or np.isnan(highest_high_20[i]) or 
-            np.isnan(lowest_low_20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_1d[i]) or np.isnan(teeth_1d[i]) or np.isnan(lips_1d[i]) or
+            np.isnan(bull_power_1d[i]) or np.isnan(bear_power_1d[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,37 +76,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Regime filter: Chop > 61.8 = ranging (mean revert), Chop < 38.2 = trending (trend follow)
-        is_ranging = chop_4h[i] > 61.8
-        is_trending = chop_4h[i] < 38.2
-        
         if position == 0:
-            # In ranging market: mean reversion at Donchian extremes
-            if is_ranging:
-                if low[i] <= lowest_low_20[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif high[i] >= highest_high_20[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # In trending market: breakout in direction of trend
-            elif is_trending:
-                if high[i] > highest_high_20[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif low[i] < lowest_low_20[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # LONG: Bullish weekly trend + strong bull power + volume confirmation
+            if weekly_bullish[i] and (bull_power_1d[i] > 0) and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Bearish weekly trend + strong bear power + volume confirmation
+            elif weekly_bearish[i] and (bear_power_1d[i] < 0) and volume_spike[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit long: price reaches opposite Donchian band or volatility drops
-            if high[i] >= highest_high_20[i] or chop_4h[i] > 50:  # Exit at upper band or when ranging
+            # EXIT LONG: Weekly trend turns bearish OR bull power turns negative
+            if weekly_bearish[i] or (bull_power_1d[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price reaches opposite Donchian band or volatility drops
-            if low[i] <= lowest_low_20[i] or chop_4h[i] > 50:  # Exit at lower band or when ranging
+            # EXIT SHORT: Weekly trend turns bullish OR bear power turns positive
+            if weekly_bullish[i] or (bear_power_1d[i] >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
