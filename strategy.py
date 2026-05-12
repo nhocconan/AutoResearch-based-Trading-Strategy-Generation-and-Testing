@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,13 +17,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12H DATA FOR TREND FILTER ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === 4H DATA FOR TREND FILTER ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # 12H EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 4H EMA50 for trend filter
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
     # === 1D DATA FOR CAMARILLA PIVOTS ===
     df_1d = get_htf_data(prices, '1d')
@@ -40,13 +40,16 @@ def generate_signals(prices):
     r1 = prev_close + range_hl * 1.1 / 12
     s1 = prev_close - range_hl * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 1h timeframe
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
+    
+    # === SESSION FILTER (08-20 UTC) ===
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema50_12h_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,32 +66,42 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if position == 0:
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if position == 0 and in_session:
             # LONG: Break above R1 with volume, trend up
-            if (close[i] > r1_4h[i] and 
-                close[i] > ema50_12h_4h[i] and  # Uptrend filter
+            if (close[i] > r1_1h[i] and 
+                close[i] > ema50_4h_aligned[i] and  # Uptrend filter
                 volume_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # SHORT: Break below S1 with volume, trend down
-            elif (close[i] < s1_4h[i] and 
-                  close[i] < ema50_12h_4h[i] and  # Downtrend filter
+            elif (close[i] < s1_1h[i] and 
+                  close[i] < ema50_4h_aligned[i] and  # Downtrend filter
                   volume_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # EXIT LONG: Trend breaks down
-            if close[i] < ema50_12h_4h[i]:
+            if close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # EXIT SHORT: Trend breaks up
-            if close[i] > ema50_12h_4h[i]:
+            if close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
+        else:
+            # Outside session or no signal: stay flat
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
     
     return signals
