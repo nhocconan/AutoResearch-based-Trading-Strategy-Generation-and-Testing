@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_1dCloud_Filter
-Hypothesis: Ichimoku Tenkan/Kijun cross on 6h with 1d cloud filter captures trend continuation. 
-Long when TK cross bullish + price above 1d cloud; short when TK cross bearish + price below 1d cloud.
-Uses volume filter to avoid false breaks. Designed for 15-25 trades/year to minimize fee drag while 
-working in both bull and bear regimes by requiring alignment with higher timeframe trend.
+12h_Volume_Weighted_RSI_Trend_Filter
+Hypothesis: Combines RSI momentum with volume-weighted price action on 12h timeframe to capture sustained trends while avoiding whipsaws. Uses volume-weighted RSI (VW-RSI) to identify overextended conditions, with trend confirmation from 1d EMA50. Volume confirmation ensures institutional participation. Designed for 12-30 trades/year to minimize fee drag while working in both bull (trend continuation) and bear (mean reversion at extremes) regimes.
 """
 
-name = "6h_Ichimoku_TK_Cross_1dCloud_Filter"
-timeframe = "6h"
+name = "12h_Volume_Weighted_RSI_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,79 +22,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 6h data for Ichimoku calculations
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 52:
-        return np.zeros(n)
-
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
-
-    # Get 1d data for cloud
+    # Get 1d data for trend context (call once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
 
-    # Calculate Ichimoku components on 6h
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(high_6h).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_6h).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Calculate 1d EMA50 for trend
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(high_6h).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_6h).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Calculate 12-period RSI on close prices
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    
+    for i in range(15, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:14] = 50  # Neutral before enough data
 
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_6h).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_6h).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-
-    # Align Ichimoku components to original 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_6h, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_6h, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_6h, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_6h, senkou_b)
-
-    # Calculate 1d cloud (using same Ichimoku but on 1d)
-    period9_high_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_1d = (period9_high_1d + period9_low_1d) / 2
-
-    period26_high_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_1d = (period26_high_1d + period26_low_1d) / 2
-
-    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
-
-    period52_high_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b_1d = ((period52_high_1d + period52_low_1d) / 2)
-
-    # Align 1d cloud to 6h timeframe with proper delay (26 periods for Senkou)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-
-    # Calculate volume filter (20-period average)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume-weighted RSI (VW-RSI)
+    # Weight RSI by volume to emphasize moves with participation
+    vol_weight = volume / (np.mean(volume) + 1e-10)  # Avoid division by zero
+    vw_rsi = rsi * vol_weight
+    vw_rsi = np.clip(vw_rsi, 0, 100)  # Keep in RSI bounds
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(52, n):
-        # Skip if any values are NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
-            np.isnan(vol_avg_20[i])):
+    for i in range(50, n):
+        vw_rsi_val = vw_rsi[i]
+        ema50_val = ema50_1d_aligned[i]
+        vol_ma = np.mean(volume[max(0, i-20):i+1])  # 20-period volume average
+
+        if np.isnan(vw_rsi_val) or np.isnan(ema50_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -105,38 +76,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Determine cloud boundaries (Senkou A and B)
-        cloud_top = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        cloud_bottom = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-
-        # TK cross signals
-        tk_cross_bullish = tenkan_aligned[i] > kijun_aligned[i]
-        tk_cross_bearish = tenkan_aligned[i] < kijun_aligned[i]
-
-        # Volume filter
-        volume_ok = volume[i] > vol_avg_20[i]
-
         if position == 0:
-            # LONG: Bullish TK cross + price above cloud + volume
-            if tk_cross_bullish and close[i] > cloud_top and volume_ok:
+            # LONG: VW-RSI > 60 (bullish momentum with volume) + price above 1d EMA50 (uptrend)
+            if vw_rsi_val > 60 and close[i] > ema50_val:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish TK cross + price below cloud + volume
-            elif tk_cross_bearish and close[i] < cloud_bottom and volume_ok:
+            # SHORT: VW-RSI < 40 (bearish momentum with volume) + price below 1d EMA50 (downtrend)
+            elif vw_rsi_val < 40 and close[i] < ema50_val:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bearish TK cross or price drops below cloud
-            if tk_cross_bearish or close[i] < cloud_bottom:
+            # EXIT LONG: VW-RSI < 50 (loss of bullish momentum) or trend reversal
+            if vw_rsi_val < 50 or close[i] < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bullish TK cross or price rises above cloud
-            if tk_cross_bullish or close[i] > cloud_top:
+            # EXIT SHORT: VW-RSI > 50 (loss of bearish momentum) or trend reversal
+            if vw_rsi_val > 50 or close[i] > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
