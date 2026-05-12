@@ -1,85 +1,101 @@
 #!/usr/bin/env python3
 """
-4h_WilliamsAlligator_TopBottom_Filter
-Hypothesis: Williams Alligator identifies market direction via jaw/teeth/lips alignment. 
-Enters long when lips cross above teeth AND price > 8-period EMA (bullish alignment).
-Enters short when lips cross below teeth AND price < 8-period EMA (bearish alignment).
-Uses 1-day Williams Fractals to filter counter-trend trades: only long above recent bullish fractal,
-short below recent bearish fractal. Designed for low trade frequency (20-40/year) to minimize fee drag.
+1d_KAMA_Trend_With_RSI_Filter
+Hypothesis: KAMA adapts to market efficiency, filtering noise in chop and catching trends. 
+Combined with RSI(2) for mean-reversion entries in the direction of KAMA trend on daily timeframe.
+Designed for low trade frequency (10-25/year) to minimize fee drag, works in both bull and bear regimes.
 """
 
-name = "4h_WilliamsAlligator_TopBottom_Filter"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_alligator(close):
-    """Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMMA"""
-    # Smoothed Moving Average (SMMA) approximation using EMA with alpha=1/period
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        alpha = 1.0 / period
-        res = np.zeros_like(arr)
-        res[0] = arr[0]
-        for i in range(1, len(arr)):
-            res[i] = alpha * arr[i] + (1 - alpha) * res[i-1]
-        return res
+def calculate_kama(close, er_length=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, n=er_length))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
     
-    jaw = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)  # Red line
-    lips = smma(close, 5)   # Green line
-    return jaw, teeth, lips
+    # Handle edge cases
+    er = np.zeros_like(close)
+    er[er_length:] = change[er_length-1:] / np.maximum(volatility[er_length-1:], 1e-10)
+    
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    
+    kama = np.zeros_like(close)
+    kama[:] = np.nan
+    kama[er_length] = close[er_length]
+    
+    for i in range(er_length + 1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    return kama
+
+def calculate_rsi(close, length=2):
+    """Calculate RSI with Wilder's smoothing"""
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    
+    # Wilder's smoothing
+    avg_gain[length] = np.mean(gain[:length])
+    avg_loss[length] = np.mean(loss[:length])
+    
+    for i in range(length + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+        avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Pad beginning
+    rsi_full = np.full_like(close, np.nan)
+    rsi_full[length:] = rsi[length:]
+    
+    return rsi_full
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Williams Fractals
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
 
-    # Calculate Williams Fractals on daily data
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values,
-    )
-    # Need 2-bar confirmation for fractals (Williams requires 2 bars after close)
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
-
-    # Calculate Alligator on 4h data
-    jaw, teeth, lips = calculate_alligator(close)
+    # Calculate KAMA on daily data
+    kama = calculate_kama(close, er_length=10, fast=2, slow=30)
+    
+    # Calculate RSI(2)
+    rsi = calculate_rsi(close, length=2)
+    
+    # Calculate weekly EMA20 for trend filter
+    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):  # Start after Alligator warmup (max period 13+8+5+8 for safety)
-        # Get aligned values for current 4h bar
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
-        close_val = close[i]
-        bearish_fractal_val = bearish_fractal_aligned[i]
-        bullish_fractal_val = bullish_fractal_aligned[i]
+    for i in range(30, n):  # Start after warmup
+        # Get aligned values for current day
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        ema20_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val) or
-            np.isnan(bearish_fractal_val) or np.isnan(bullish_fractal_val)):
+        if (np.isnan(kama_val) or np.isnan(rsi_val) or 
+            np.isnan(ema20_aligned)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,28 +104,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Lips above Teeth (bullish alignment) AND price above recent bullish fractal
-            if (lips_val > teeth_val and 
-                close_val > bullish_fractal_val):
+            # LONG: Price > KAMA (trend up) + RSI(2) < 10 (oversold) + weekly uptrend
+            if (close[i] > kama_val and 
+                rsi_val < 10 and 
+                close[i] > ema20_aligned):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Lips below Teeth (bearish alignment) AND price below recent bearish fractal
-            elif (lips_val < teeth_val and 
-                  close_val < bearish_fractal_val):
+            # SHORT: Price < KAMA (trend down) + RSI(2) > 90 (overbought) + weekly downtrend
+            elif (close[i] < kama_val and 
+                  rsi_val > 90 and 
+                  close[i] < ema20_aligned):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Lips cross below Teeth OR price drops below bullish fractal
-            if (lips_val < teeth_val or close_val < bullish_fractal_val):
+            # EXIT LONG: Price < KAMA or RSI(2) > 50 (mean reversion complete)
+            if (close[i] < kama_val or rsi_val > 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Lips cross above Teeth OR price rises above bearish fractal
-            if (lips_val > teeth_val or close_val > bearish_fractal_val):
+            # EXIT SHORT: Price > KAMA or RSI(2) < 50 (mean reversion complete)
+            if (close[i] > kama_val or rsi_val < 50):
                 signals[i] = 0.0
                 position = 0
             else:
