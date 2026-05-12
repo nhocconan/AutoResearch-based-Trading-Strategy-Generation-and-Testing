@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_PriceChannel_Exit
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise - in trending markets it follows price closely, in ranging markets it stays flat. 
-Combined with Donchian channel exits and volume confirmation, this should capture trends while avoiding whipsaws in both bull and bear markets.
-Uses 4h timeframe with 1d trend filter for higher reliability.
+4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeS
+Hypothesis: Price breaking above/below Camarilla R3/S3 levels (derived from 12h high-low-close) with 12h EMA trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. R3/S3 levels represent stronger support/resistance than R1/S1, reducing false signals. Works in bull/bear by following 12h trend direction. Target: 20-150 trades over 4 years.
 """
 
-name = "4h_KAMA_Trend_With_PriceChannel_Exit"
+name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeS"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,57 +17,50 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # KAMA parameters
-    fast_ema = 2
-    slow_ema = 30
+    # Calculate Camarilla levels from 12h data
+    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    # where C = close, H = high, L = low of previous 12h period
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate Efficiency Ratio and Smoothing Constant
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    vol = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    # Shift by 1 to use previous 12h period's data
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    prev_close_12h[0] = np.nan
+    prev_high_12h[0] = np.nan
+    prev_low_12h[0] = np.nan
     
-    # Handle array dimensions
-    change = np.concatenate([np.full(10, np.nan), change])
-    vol = np.concatenate([np.full(10, np.nan), vol])
+    camarilla_upper = prev_close_12h + (prev_high_12h - prev_low_12h) * 1.1 / 4
+    camarilla_lower = prev_close_12h - (prev_high_12h - prev_low_12h) * 1.1 / 4
     
-    er = np.where(vol != 0, change / vol, 0)
-    sc = np.power(er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1), 2)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_upper_aligned = align_htf_to_ltf(prices, df_12h, camarilla_upper)
+    camarilla_lower_aligned = align_htf_to_ltf(prices, df_12h, camarilla_lower)
     
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # 12h EMA34 trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
-    # Get 1d EMA trend filter
-    close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    
-    # Donchian channel for exit (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: 1.5x average volume
+    # Volume spike: >1.5x 20-period average (4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup
-        if (np.isnan(kama[i]) or np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(volume_spike[i])):
+    for i in range(34, n):  # Start after EMA34 warmup
+        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,30 +69,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price above KAMA (trending up) + 1d EMA uptrend + volume spike
-            if (close[i] > kama[i] and 
-                close[i] > ema_20_1d_aligned[i] and 
+            # LONG: Price breaks above Camarilla R3 + 12h EMA34 uptrend + volume spike
+            if (close[i] > camarilla_upper_aligned[i] and 
+                close[i] > ema_34_12h_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA (trending down) + 1d EMA downtrend + volume spike
-            elif (close[i] < kama[i] and 
-                  close[i] < ema_20_1d_aligned[i] and 
+            # SHORT: Price breaks below Camarilla S3 + 12h EMA34 downtrend + volume spike
+            elif (close[i] < camarilla_lower_aligned[i] and 
+                  close[i] < ema_34_12h_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Donchian low (trend exhaustion)
-            if close[i] < low_20[i]:
+            # EXIT LONG: Price closes below Camarilla S3 (reversal level)
+            if close[i] < camarilla_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Donchian high (trend exhaustion)
-            if close[i] > high_20[i]:
+            # EXIT SHORT: Price closes above Camarilla R3 (reversal level)
+            if close[i] > camarilla_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
