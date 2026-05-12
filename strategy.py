@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 12h_WilliamsAlligator_Trend_Filter
-# Hypothesis: 12h Williams Alligator indicator with 1d trend filter and volume confirmation.
-# The Williams Alligator (three SMAs) identifies trend direction: price above alligator lines = uptrend,
-# price below = downtrend. Combined with 1d EMA trend filter to avoid counter-trend trades and volume
-# confirmation for breakout strength. Designed for 50-150 total trades over 4 years (12-37/year) to
-# minimize fee drag. Works in bull/bear by following 1d trend and using Alligator for trend confirmation.
+# 6h_LongTermBreakout_VolumeConfirm
+# Hypothesis: 6h price breaks above/below 20-period high/low (Donchian) with 1-day trend filter (EMA50) and volume spike confirmation.
+# Uses 1-day EMA50 to filter trend direction (avoid counter-trend trades) and volume > 1.5x 20-period average to confirm strength.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull/bear by following 1-day trend.
 
-name = "12h_WilliamsAlligator_Trend_Filter"
-timeframe = "12h"
+name = "6h_LongTermBreakout_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,37 +22,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 12h data for Williams Alligator (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
+    # Get 6h data for Donchian channels
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 20:
         return np.zeros(n)
 
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
 
-    # Get 1d data for EMA trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
     close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
 
-    # Calculate Williams Alligator lines (SMAs with specific periods)
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    # Using SMA with min_periods for proper warmup
-    jaw = pd.Series(close_12h).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close_12h).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close_12h).rolling(window=5, min_periods=5).mean().values
+    # Calculate Donchian channels (20-period high/low) on 6h
+    high_max_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
 
-    # Align Alligator lines to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    # Align 6h Donchian channels and 1d EMA50 to 6t timeframe
+    high_max_20_aligned = align_htf_to_ltf(prices, df_6h, high_max_20)
+    low_min_20_aligned = align_htf_to_ltf(prices, df_6h, low_min_20)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Calculate 12h volume SMA20 for volume confirmation
+    # Calculate 6h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
@@ -64,8 +57,8 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(ema20_1d_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(high_max_20_aligned[i]) or np.isnan(low_min_20_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,30 +67,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above all Alligator lines (lips > teeth > jaw) in 1d uptrend with volume spike
-            if (close[i] > lips_aligned[i] and lips_aligned[i] > teeth_aligned[i] and 
-                teeth_aligned[i] > jaw_aligned[i] and close[i] > ema20_1d_aligned[i] and 
-                volume[i] > volume_sma20[i]):
+            # LONG: Break above 20-period high in 1-day uptrend with volume spike
+            if close[i] > high_max_20_aligned[i] and close[i] > ema50_1d_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below all Alligator lines (jaw > teeth > lips) in 1d downtrend with volume spike
-            elif (close[i] < jaw_aligned[i] and jaw_aligned[i] > teeth_aligned[i] and 
-                  teeth_aligned[i] > lips_aligned[i] and close[i] < ema20_1d_aligned[i] and 
-                  volume[i] > volume_sma20[i]):
+            # SHORT: Break below 20-period low in 1-day downtrend with volume spike
+            elif close[i] < low_min_20_aligned[i] and close[i] < ema50_1d_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Alligator teeth (trend weakening)
-            if close[i] < teeth_aligned[i]:
+            # EXIT LONG: Price closes below 20-period low (reversal signal)
+            if close[i] < low_min_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Alligator teeth (trend weakening)
-            if close[i] > teeth_aligned[i]:
+            # EXIT SHORT: Price closes above 20-period high (reversal signal)
+            if close[i] > high_max_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
