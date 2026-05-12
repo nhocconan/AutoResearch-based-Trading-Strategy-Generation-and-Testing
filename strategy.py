@@ -1,11 +1,14 @@
-# 12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER
-# Strategy: Camarilla pivot breakout on 12h with 1d trend filter and volume confirmation
-# Rationale: Camarilla R3/S3 levels act as strong support/resistance. Breakouts with
-# volume and 1d trend alignment capture momentum while avoiding counter-trend trades.
-# Works in bull/bear markets via trend filter. Target: 15-30 trades/year on 12h.
+#!/usr/bin/env python3
+# 4H_MACD_RSI_CONFLUENCE_1D_TREND_FILTER
+# Hypothesis: MACD(12,26,9) + RSI(14) confluence with 1d EMA50 trend filter.
+# In 1d uptrend: long when MACD line crosses above signal line and RSI > 50.
+# In 1d downtrend: short when MACD line crosses below signal line and RSI < 50.
+# Uses volume confirmation (>1.5x 20-period average) to filter false breakouts.
+# Works in both bull and bear markets: trend filter avoids counter-trend trades,
+# MACD/RSI captures momentum within trend. Target: 20-30 trades/year on 4h timeframe.
 
-name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER"
-timeframe = "12h"
+name = "4H_MACD_RSI_CONFLUENCE_1D_TREND_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,43 +20,48 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and trend filter
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each day
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    camarilla_r3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low'])
-    camarilla_s3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low'])
+    # EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # EMA34 for trend filter
-    ema34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # MACD on price
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean()
+    macd_line = (ema12 - ema26).values
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
     
-    # Average volume for confirmation (20-period)
-    avg_vol = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Align to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
-    avg_vol_aligned = align_htf_to_ltf(prices, df_1d, avg_vol)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_conf = volume > (1.5 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure indicators are stable
+    start_idx = 35  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(avg_vol_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(macd_line[i]) or 
+            np.isnan(signal_line[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,33 +70,36 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 with volume and 1d uptrend
-            vol_condition = volume[i] > 1.5 * avg_vol_aligned[i]  # 50% above average
-            if (close[i] > camarilla_r3_aligned[i] and 
-                vol_condition and 
-                close[i] > ema34_aligned[i]):
+            # LONG: 1d uptrend + MACD bullish cross + RSI > 50 + volume confirmation
+            if (close[i] > ema50_1d_aligned[i] and 
+                macd_line[i] > signal_line[i] and 
+                macd_line[i-1] <= signal_line[i-1] and  # bullish cross
+                rsi[i] > 50 and 
+                vol_conf[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with volume and 1d downtrend
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  vol_condition and 
-                  close[i] < ema34_aligned[i]):
+            # SHORT: 1d downtrend + MACD bearish cross + RSI < 50 + volume confirmation
+            elif (close[i] < ema50_1d_aligned[i] and 
+                  macd_line[i] < signal_line[i] and 
+                  macd_line[i-1] >= signal_line[i-1] and  # bearish cross
+                  rsi[i] < 50 and 
+                  vol_conf[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 or trend reversal
-            if (close[i] < camarilla_s3_aligned[i] or 
-                close[i] < ema34_aligned[i]):
+            # EXIT LONG: Trend reversal or MACD bearish cross
+            if (close[i] <= ema50_1d_aligned[i] or 
+                (macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 or trend reversal
-            if (close[i] > camarilla_r3_aligned[i] or 
-                close[i] > ema34_aligned[i]):
+            # EXIT SHORT: Trend reversal or MACD bullish cross
+            if (close[i] >= ema50_1d_aligned[i] or 
+                (macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1])):
                 signals[i] = 0.0
                 position = 0
             else:
