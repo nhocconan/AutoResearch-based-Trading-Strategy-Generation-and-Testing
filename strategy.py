@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h Camarilla Pivot R1/S1 Breakout with Volume Spike and Daily Trend Filter
-Hypothesis: Camarilla pivot levels (R1/S1) act as intraday support/resistance.
-Breaks with volume confirmation and daily EMA trend filter capture breakouts
-in both bull and bear markets while avoiding false signals. Designed for low
-trade frequency (target: 20-50 trades/year) to minimize fee drag.
+12h Donchian Breakout with Daily Trend and Volume Confirmation
+Hypothesis: Donchian channel breakouts on 12h timeframe capture sustained moves,
+filtered by daily trend and volume spikes to avoid false breakouts. Designed for
+low trade frequency (target: 12-37 trades/year) to minimize fee drift in both
+bull and bear markets.
 """
-name = "4h_Camarilla_R1_S1_Breakout_DailyTrend_Volume"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_DailyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,32 +29,24 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_1d = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === DAILY CAMARILLA PIVOT LEVELS ===
-    # Typical price for pivot calculation
-    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    # Pivot point
-    pivot = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    # R1 and S1 levels
-    r1 = pivot + (1.1/12) * (df_1d['high'].values - df_1d['low'].values)
-    s1 = pivot - (1.1/12) * (df_1d['high'].values - df_1d['low'].values)
-    # Align to 4h timeframe
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # === 12H DONCHIAN CHANNEL (20) ===
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # === 4H VOLUME (20) SPIKE ===
+    # === 12H VOLUME (20) SPIKE ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure all indicators ready
+    start_idx = max(34, donchian_period, 20)  # Warmup for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trend_1d[i]) or np.isnan(pivot_4h[i]) or np.isnan(r1_4h[i]) or 
-            np.isnan(s1_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trend_1d[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +55,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Above daily EMA + break above R1 + volume spike
+            # LONG: Above daily EMA + break above Donchian high + volume spike
             if (close[i] > trend_1d[i] and 
-                close[i] > r1_4h[i] and
+                close[i] > donchian_high[i] and
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Below daily EMA + break below S1 + volume spike
+            # SHORT: Below daily EMA + break below Donchian low + volume spike
             elif (close[i] < trend_1d[i] and 
-                  close[i] < s1_4h[i] and
+                  close[i] < donchian_low[i] and
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Close below pivot OR volume dries up
-            if close[i] < pivot_4h[i] or volume[i] < vol_ma[i] * 0.5:
+            # EXIT LONG: Close below Donchian low OR volume dries up
+            if close[i] < donchian_low[i] or volume[i] < vol_ma[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above pivot OR volume dries up
-            if close[i] > pivot_4h[i] or volume[i] < vol_ma[i] * 0.5:
+            # EXIT SHORT: Close above Donchian high OR volume dries up
+            if close[i] > donchian_high[i] or volume[i] < vol_ma[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
