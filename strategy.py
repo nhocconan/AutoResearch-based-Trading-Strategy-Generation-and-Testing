@@ -1,69 +1,86 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_Volume_Confirmation
-Hypothesis: On 1d timeframe, buy when KAMA trend turns up and volume > 2x average, sell when KAMA trend turns down and volume > 2x average. Uses volume confirmation to avoid false trend changes, targeting low trade frequency (<25/year) to minimize fee drag while capturing trends in both bull and bear markets.
+6h_RSI_Divergence_Pivot_Reversal
+Hypothesis: On 6h timeframe, use daily RSI divergence (bullish/bearish) at 1d pivot levels (S1/S2/R1/R2) for mean-reversion entries in both bull and bear markets. Divergence signals exhaustion, pivots provide support/resistance, and 6h timeframe avoids excessive trading. Target 15-35 trades/year with disciplined exits.
 """
 
-name = "1d_KAMA_Trend_With_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_RSI_Divergence_Pivot_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_rsi(close, period=14):
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_pivots(high, low, close):
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    return pivot, r1, r2, s1, s2
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter (optional, but can add confluence)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for RSI and pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
 
-    # KAMA parameters
-    er_len = 10
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=er_len))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Handle edge cases for ER calculation
-    er = np.zeros_like(close)
-    for i in range(er_len, len(close)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
+    # Calculate 1d RSI
+    rsi_1d = calculate_rsi(close_1d, 14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
 
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 1d pivots (using prior day's HLC)
+    pivot, r1, r2, s1, s2 = calculate_pivots(high_1d, low_1d, close_1d)
+    # Align pivot levels (use prior day's values for current day)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
 
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # RSI divergence detection: look for price making new high/low while RSI does not
+    # Bullish divergence: price makes lower low, RSI makes higher low
+    # Bearish divergence: price makes higher high, RSI makes lower high
+    lookback = 6  # 6 periods (~1.5 days on 6h chart)
+    price_low_6 = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    price_high_6 = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    rsi_low_6 = pd.Series(rsi_1d_aligned).rolling(window=lookback, min_periods=lookback).min().values
+    rsi_high_6 = pd.Series(rsi_1d_aligned).rolling(window=lookback, min_periods=lookback).max().values
 
-    # Weekly EMA for trend filter (optional)
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    bullish_div = (low == price_low_6) & (rsi_1d_aligned > rsi_low_6)
+    bearish_div = (high == price_high_6) & (rsi_1d_aligned < rsi_high_6)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required value is NaN
-        if (np.isnan(kama[i]) or np.isnan(kama[i-1]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,28 +89,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: KAMA turning up + volume spike
-            if (kama[i] > kama[i-1] and 
-                volume[i] > vol_avg_20[i] * 2.0):
+            # LONG: Bullish RSI divergence at or near S1/S2 support
+            if bullish_div[i] and (close[i] <= s1_aligned[i] * 1.005 or close[i] <= s2_aligned[i] * 1.005):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA turning down + volume spike
-            elif (kama[i] < kama[i-1] and 
-                  volume[i] > vol_avg_20[i] * 2.0):
+            # SHORT: Bearish RSI divergence at or near R1/R2 resistance
+            elif bearish_div[i] and (close[i] >= r1_aligned[i] * 0.995 or close[i] >= r2_aligned[i] * 0.995):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA turns down
-            if kama[i] < kama[i-1]:
+            # EXIT LONG: Price reaches pivot or RSI shows bearish divergence
+            if close[i] >= pivot_aligned[i] or bearish_div[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA turns up
-            if kama[i] > kama[i-1]:
+            # EXIT SHORT: Price reaches pivot or RSI shows bullish divergence
+            if close[i] <= pivot_aligned[i] or bullish_div[i]:
                 signals[i] = 0.0
                 position = 0
             else:
