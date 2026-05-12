@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,13 +35,13 @@ def generate_signals(prices):
     r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
     s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike on 12h: current volume > 1.8x 30-period average
+    # Volume spike on 4h: current volume > 2.0x 30-period average (stricter than before)
     vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    vol_spike = volume > (1.8 * vol_avg)
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
