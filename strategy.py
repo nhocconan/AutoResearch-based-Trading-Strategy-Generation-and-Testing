@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1D_Camarilla_R1S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Breakout at daily Camarilla R1/S1 levels (tighter than R3/S3) with volume confirmation and 1d EMA trend filter.
-# Uses tighter levels for higher probability entries in both bull and bear markets, targeting 20-50 trades/year on 4h.
-# Includes exit on trend reversal or price re-entering the range to limit drawdowns.
 
-name = "4h_1D_Camarilla_R1S1_Breakout_1dTrend_VolumeS"
+# 4h_1D_Keltner_Breakout_Volume_Momentum
+# Hypothesis: Breakout above/below 20-period Keltner Channel on 4h with 1d trend filter and volume confirmation.
+# Keltner Channel adapts to volatility, providing dynamic support/resistance. Works in both bull and bear markets
+# by requiring trend alignment and volume confirmation to avoid false breakouts. Targets 20-40 trades/year.
+
+name = "4h_1D_Keltner_Breakout_Volume_Momentum"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -32,16 +33,19 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Calculate Camarilla R1 and S1 levels from previous 1d OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate 4h Keltner Channel (20-period ATR, 2.0 multiplier)
+    atr_period = 20
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # No previous close for first bar
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    ema_middle = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    keltner_upper = ema_middle + (2.0 * atr)
+    keltner_lower = ema_middle - (2.0 * atr)
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,10 +54,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(keltner_upper[i]) or
+            np.isnan(keltner_lower[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,26 +70,26 @@ def generate_signals(prices):
         bearish_trend = close[i] < ema_1d_aligned[i]
 
         if position == 0:
-            # LONG: Break above Camarilla R1 with bullish trend and volume confirmation
-            if close[i] > camarilla_r1_aligned[i] and bullish_trend and volume_ok[i]:
+            # LONG: Break above Keltner upper with bullish trend and volume confirmation
+            if close[i] > keltner_upper[i] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Camarilla S1 with bearish trend and volume confirmation
-            elif close[i] < camarilla_s1_aligned[i] and bearish_trend and volume_ok[i]:
+            # SHORT: Break below Keltner lower with bearish trend and volume confirmation
+            elif close[i] < keltner_lower[i] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R1 or trend turns bearish
-            if close[i] < camarilla_r1_aligned[i] or not bullish_trend:
+            # EXIT LONG: Price re-enters below middle line or trend turns bearish
+            if close[i] < ema_middle[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S1 or trend turns bullish
-            if close[i] > camarilla_s1_aligned[i] or not bearish_trend:
+            # EXIT SHORT: Price re-enters above middle line or trend turns bullish
+            if close[i] > ema_middle[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
