@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Breakout_TrendFilter_VolumeConfirm
-Hypothesis: Price breaking above/below Keltner Channel (EMA20 + ATRx2) with EMA50 trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. Keltner adapts to volatility, EMA50 ensures trend alignment, and volume filter adds confirmation. Target: 20-40 trades/year per symbol. Works in bull/bear by following trend direction.
+6h_RSI_Streak_With_Volume_Confirmation
+Hypothesis: RSI streak (consecutive closes above/below previous close) identifies overextended moves. 
+Combined with volume confirmation (1.5x average) and 1d trend filter (EMA50), it captures mean-reversion 
+opportunities in both bull and bear markets. RSI streak >2 indicates exhaustion, while volume spike 
+confirms participation. Works in ranging markets where streaks frequently occur.
 """
 
-name = "4h_Keltner_Breakout_TrendFilter_VolumeConfirm"
-timeframe = "4h"
+name = "6h_RSI_Streak_With_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,34 +20,45 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Keltner Channel: EMA20 ± ATR(10)*2
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    kc_upper = ema_20 + (2 * atr_10)
-    kc_lower = ema_20 - (2 * atr_10)
+    # RSI Streak: count consecutive closes > previous close (bullish streak) 
+    # or < previous close (bearish streak)
+    price_changes = np.diff(close, prepend=close[0])
+    bullish_streak = np.where(price_changes > 0, 1, 0)
+    bearish_streak = np.where(price_changes < 0, 1, 0)
+    
+    # Calculate consecutive streaks
+    bull_streak_count = np.zeros(n)
+    bear_streak_count = np.zeros(n)
+    
+    for i in range(1, n):
+        if price_changes[i] > 0:
+            bull_streak_count[i] = bull_streak_count[i-1] + 1
+            bear_streak_count[i] = 0
+        elif price_changes[i] < 0:
+            bear_streak_count[i] = bear_streak_count[i-1] + 1
+            bull_streak_count[i] = 0
+        else:
+            bull_streak_count[i] = 0
+            bear_streak_count[i] = 0
     
     # Volume spike: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # EMA50 trend filter (same timeframe)
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA50 trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(ema_50[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,30 +67,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Keltner Upper + EMA50 uptrend + volume spike
-            if (close[i] > kc_upper[i] and 
-                close[i] > ema_50[i] and 
-                volume_spike[i]):
+            # LONG: Bearish streak exhaustion (>2) + volume spike + above 1d EMA50
+            if (bear_streak_count[i] >= 2 and 
+                volume_spike[i] and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Keltner Lower + EMA50 downtrend + volume spike
-            elif (close[i] < kc_lower[i] and 
-                  close[i] < ema_50[i] and 
-                  volume_spike[i]):
+            # SHORT: Bullish streak exhaustion (>2) + volume spike + below 1d EMA50
+            elif (bull_streak_count[i] >= 2 and 
+                  volume_spike[i] and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below EMA20 (middle of Keltner)
-            if close[i] < ema_20[i]:
+            # EXIT LONG: Bullish streak resumes or price drops below 1d EMA50
+            if (bull_streak_count[i] >= 1 or 
+                close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above EMA20 (middle of Keltner)
-            if close[i] > ema_20[i]:
+            # EXIT SHORT: Bearish streak resumes or price rises above 1d EMA50
+            if (bear_streak_count[i] >= 1 or 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
