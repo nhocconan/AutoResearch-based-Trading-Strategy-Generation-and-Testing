@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_ADX_VWAP_Pullback_1dTrend
-# Hypothesis: Pullbacks to VWAP during strong trends (ADX>25) on 6h, filtered by 1d EMA trend.
-# Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend).
-# Uses ADX for trend strength and VWAP for mean reversion within trend.
-# Target: 20-40 trades/year.
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Camarilla pivot R1/S1 breakouts on 4h with 12h EMA trend filter and volume confirmation.
+# Works in bull (breakouts follow trend) and bear (mean-reversion at extremes via trend filter).
+# Target: 20-40 trades/year. Uses proven Camarilla structure with volume and trend filters.
 
-name = "6h_ADX_VWAP_Pullback_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,58 +22,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # === 12h Trend Filter ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # 50-period EMA on 1d for trend direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_12h = df_12h['close'].values
+    # 50-period EMA on 12h for trend direction
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # === ADX(14) for trend strength ===
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # === Camarilla Pivot Levels (from previous day) ===
+    # Calculate daily pivot from previous day's OHLC
+    # We'll use the daily timeframe for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # Previous day's OHLC for Camarilla calculation
+    prev_day_high = df_1d['high'].shift(1).values  # previous day high
+    prev_day_low = df_1d['low'].shift(1).values    # previous day low
+    prev_day_close = df_1d['close'].shift(1).values # previous day close
     
-    # Smoothed values
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Align daily data to 4h timeframe
+    prev_day_high_aligned = align_htf_to_ltf(prices, df_1d, prev_day_high)
+    prev_day_low_aligned = align_htf_to_ltf(prices, df_1d, prev_day_low)
+    prev_day_close_aligned = align_htf_to_ltf(prices, df_1d, prev_day_close)
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / atr_14
-    di_minus = 100 * dm_minus_14 / atr_14
+    # Camarilla calculations
+    # Pivot = (H + L + C) / 3
+    pivot = (prev_day_high_aligned + prev_day_low_aligned + prev_day_close_aligned) / 3.0
+    # Range = H - L
+    range_val = prev_day_high_aligned - prev_day_low_aligned
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # R1 = C + (H-L) * 1.1/12
+    r1 = prev_day_close_aligned + range_val * 1.1 / 12.0
+    # S1 = C - (H-L) * 1.1/12
+    s1 = prev_day_close_aligned - range_val * 1.1 / 12.0
     
-    # === VWAP (typical price * volume) / cumulative volume ===
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.nancumsum(pv)
-    cum_vol = np.nancumsum(volume)
-    vwap = cum_pv / cum_vol
+    # === Volume Confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx[i]) or 
-            np.isnan(vwap[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(prev_day_high_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,35 +79,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend direction from 1d EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Trend direction
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
-        # Strong trend filter
-        strong_trend = adx[i] > 25
-        
-        # Distance from VWAP (normalized by price)
-        dist_from_vwap = (close[i] - vwap[i]) / vwap[i]
+        # Volume filter: above average
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: Pullback to VWAP in strong uptrend
-            if (trend_up and strong_trend and dist_from_vwap < -0.005):
+            # LONG: Price breaks above R1 with volume and uptrend
+            if (close[i] > r1[i] and vol_ok and trend_up):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Pullback to VWAP in strong downtrend
-            elif (trend_down and strong_trend and dist_from_vwap > 0.005):
+            # SHORT: Price breaks below S1 with volume and downtrend
+            elif (close[i] < s1[i] and vol_ok and trend_down):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Trend weakens or price goes above VWAP
-            if (not trend_up or not strong_trend or dist_from_vwap > 0.002):
+            # EXIT LONG: Price returns to pivot or trend changes
+            if (close[i] < pivot[i] or not trend_up):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend weakens or price goes below VWAP
-            if (not trend_down or not strong_trend or dist_from_vwap < -0.002):
+            # EXIT SHORT: Price returns to pivot or trend changes
+            if (close[i] > pivot[i] or not trend_down):
                 signals[i] = 0.0
                 position = 0
             else:
