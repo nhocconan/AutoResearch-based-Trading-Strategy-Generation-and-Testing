@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1H_MULTI_TIMEFRAME_CAMARILLA_BREAKOUT_VOLUME_FILTER
-# Hypothesis: Camarilla pivot levels on 4h and daily timeframes provide institutional support/resistance levels.
-# Combined with volume spike confirmation on 1h and trend filter from daily EMA50.
-# Works in both bull and bear markets: breaks above resistance in uptrend, breakdown below support in downtrend.
-# Target: 15-35 trades/year on 1h timeframe by using 4h/1d for direction and 1h for precise entry timing.
+# 6H_EHLERS_FISHER_TRANSFORM_1D_TREND_FILTER
+# Hypothesis: Ehlers Fisher Transform identifies extreme price reversals in oscillator form.
+# On 6h timeframe, we use 1D trend filter to avoid counter-trend trades.
+# Fisher crosses above -1.5 signal potential long reversals from oversold.
+# Fisher crosses below +1.5 signal potential short reversals from overbought.
+# Works in both bull and bear markets by catching reversals at extremes.
+# Target: 15-25 trades/year on 6h timeframe.
 
-name = "1H_MULTI_TIMEFRAME_CAMARILLA_BREAKOUT_VOLUME_FILTER"
-timeframe = "1h"
+name = "6H_EHLERS_FISHER_TRANSFORM_1D_TREND_FILTER"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,90 +20,104 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load higher timeframe data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    if len(df_4h) < 10 or len(df_1d) < 10:
+    # Daily data for trend filter and Fisher Transform
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for 4h timeframe (based on previous day's range)
-    # Camarilla equations for 4h: use previous day's high, low, close
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate daily median price for Fisher Transform
+    hl2 = (df_1d['high'].values + df_1d['low'].values) / 2
     
-    # Daily high/low/close for Camarilla calculation
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Ehlers Fisher Transform (9-period)
+    # Step 1: Normalize price to -1 to +1 range over lookback period
+    length = 9
+    highest_high = np.full(len(hl2), np.nan)
+    lowest_low = np.full(len(hl2), np.nan)
     
-    # Calculate Camarilla levels for 4h timeframe using daily OHLC
-    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
-    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    camarilla_r4 = daily_close + (daily_high - daily_low) * 1.1 / 2
-    camarilla_r3 = daily_close + (daily_high - daily_low) * 1.1 / 4
-    camarilla_r2 = daily_close + (daily_high - daily_low) * 1.1 / 6
-    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
-    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
-    camarilla_s2 = daily_close - (daily_high - daily_low) * 1.1 / 6
-    camarilla_s3 = daily_close - (daily_high - daily_low) * 1.1 / 4
-    camarilla_s4 = daily_close - (daily_high - daily_low) * 1.1 / 2
+    for i in range(length-1, len(hl2)):
+        highest_high[i] = np.max(hl2[i-length+1:i+1])
+        lowest_low[i] = np.min(hl2[i-length+1:i+1])
     
-    # Align Camarilla levels to 1h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Avoid division by zero
+    diff = highest_high - lowest_low
+    diff[diff == 0] = 1e-10
     
-    # Calculate EMA50 on daily timeframe for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Normalized price
+    normalized = np.where(np.isnan(highest_high), np.nan, 
+                         2 * ((hl2 - lowest_low) / diff) - 1)
     
-    # Calculate volume spike on 1h timeframe (current volume > 2x 20-period average)
-    vol_ma = pd.Series(prices['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_spike = prices['volume'].values > (2.0 * vol_ma)
+    # Smooth normalized price (optional but recommended)
+    smoothed = np.full(len(normalized), np.nan)
+    alpha = 0.5  # Smoothing factor
+    for i in range(len(normalized)):
+        if np.isnan(normalized[i]):
+            smoothed[i] = np.nan
+        elif i == 0:
+            smoothed[i] = normalized[i]
+        else:
+            smoothed[i] = alpha * normalized[i] + (1 - alpha) * smoothed[i-1]
     
-    # Session filter: 08-20 UTC (already datetime64[ms] in index)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Fisher Transform
+    # Clamp smoothed values to avoid domain error in log
+    smoothed_clamped = np.clip(smoothed, -0.999, 0.999)
+    fisher = np.where(np.isnan(smoothed_clamped), np.nan,
+                     0.5 * np.log((1 + smoothed_clamped) / (1 - smoothed_clamped)))
+    
+    # EMA34 for trend filter
+    ema34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align to 6h timeframe
+    fisher_aligned = align_htf_to_ltf(prices, df_1d, fisher)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 30  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_aligned[i]) or np.isnan(vol_ma[i])):
-            signals[i] = 0.0
+        if (np.isnan(fisher_aligned[i]) or np.isnan(ema34_aligned[i]) or 
+            i == 0):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
         
-        # Apply session filter
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
-        # Entry conditions: Camarilla breakout with volume spike and trend filter
-        close_price = prices['close'].values[i]
-        
-        # LONG: Price breaks above R1 with volume spike in uptrend (price > EMA50)
-        if (close_price > r1_aligned[i] and 
-            volume_spike[i] and 
-            close_price > ema50_aligned[i]):
-            signals[i] = 0.20
-        
-        # SHORT: Price breaks below S1 with volume spike in downtrend (price < EMA50)
-        elif (close_price < s1_aligned[i] and 
-              volume_spike[i] and 
-              close_price < ema50_aligned[i]):
-            signals[i] = -0.20
-        
-        else:
-            signals[i] = 0.0
+        if position == 0:
+            # LONG: Fisher crosses above -1.5 (coming from oversold) in uptrend
+            if (fisher_aligned[i] > -1.5 and fisher_aligned[i-1] <= -1.5 and 
+                close[i] > ema34_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Fisher crosses below +1.5 (coming from overbought) in downtrend
+            elif (fisher_aligned[i] < 1.5 and fisher_aligned[i-1] >= 1.5 and 
+                  close[i] < ema34_aligned[i]):
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # EXIT LONG: Fisher crosses below +1.5 or trend reversal
+            if (fisher_aligned[i] < 1.5 and fisher_aligned[i-1] >= 1.5) or \
+               close[i] <= ema34_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: Fisher crosses above -1.5 or trend reversal
+            if (fisher_aligned[i] > -1.5 and fisher_aligned[i-1] <= -1.5) or \
+               close[i] >= ema34_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
