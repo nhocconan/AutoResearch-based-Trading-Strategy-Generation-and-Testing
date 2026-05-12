@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6H_WEEKLY_PIVOT_REVERSAL_WITH_VOLUME_CONFIRMATION
-Hypothesis: Price reverses at weekly pivot levels (S3/R3) with volume exhaustion signals.
-In bull markets: buy at S3 with volume drying up on down moves.
-In bear markets: sell at R3 with volume drying up on up moves.
-Uses volume divergence (current volume < 50% of 20-period average) as exhaustion filter.
-Targets 15-35 trades/year with controlled risk via weekly pivot structure.
+4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
+Hypothesis: Camarilla R3/S3 breakout with 1-day volume spike confirmation.
+Works in bull/bear markets by only taking breakouts with above-average volume,
+which filters out false breakouts and targets institutional participation.
+Designed for ~20-40 trades/year on 4h to minimize fee drag.
 """
-name = "6H_WEEKLY_PIVOT_REVERSAL_WITH_VOLUME_CONFIRMATION"
-timeframe = "6h"
+name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,55 +16,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 1:
+    # Calculate Camarilla levels from previous day
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    # We need previous day's OHLC
+    prev_day_close = close
+    prev_day_high = high
+    prev_day_low = low
+    
+    # Shift to get previous day's values (since we're on 4h timeframe)
+    # For 4h data, we need to look back to previous daily candle
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        camarilla_r3[i] = prev_day_close[i-1] + (prev_day_high[i-1] - prev_day_low[i-1]) * 1.1 / 2
+        camarilla_s3[i] = prev_day_close[i-1] - (prev_day_high[i-1] - prev_day_low[i-1]) * 1.1 / 2
+    
+    # 1d data for volume spike confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using previous week's data)
-    # Pivot = (H + L + C) / 3
-    # S1 = 2*P - H, S2 = P - (H - L), S3 = P - 2*(H - L)
-    # R1 = 2*P - L, R2 = P + (H - L), R3 = P + 2*(H - L)
-    wk_high = df_w['high'].values
-    wk_low = df_w['low'].values
-    wk_close = df_w['close'].values
-    
-    pivot = (wk_high + wk_low + wk_close) / 3
-    s3 = pivot - 2 * (wk_high - wk_low)
-    r3 = pivot + 2 * (wk_high - wk_low)
-    
-    # Align weekly pivot levels to 6h timeframe (1 week = 28 * 6h bars)
-    s3_aligned = align_htf_to_ltf(prices, df_w, s3)
-    r3_aligned = align_htf_to_ltf(prices, df_w, r3)
-    
-    # Volume exhaustion: current volume < 50% of 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma_20  # Current volume / 20-period average
-    
-    # RSI for overbought/oversold confirmation (14-period)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    vol_1d = df_1d['volume'].values
+    vol_ma_20d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = vol_1d / vol_ma_20d  # Current volume / 20-day average
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
-        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(rsi_values[i])):
+    for i in range(1, n):  # Start from 1 to have previous day data
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+            np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,30 +63,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price at or below S3 with RSI oversold and volume exhaustion
-            if (low[i] <= s3_aligned[i] and 
-                rsi_values[i] < 30 and 
-                vol_ratio[i] < 0.5):
+            # LONG: Break above R3 with volume spike
+            if (high[i] > camarilla_r3[i] and 
+                vol_spike_aligned[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at or above R3 with RSI overbought and volume exhaustion
-            elif (high[i] >= r3_aligned[i] and 
-                  rsi_values[i] > 70 and 
-                  vol_ratio[i] < 0.5):
+            # SHORT: Break below S3 with volume spike
+            elif (low[i] < camarilla_s3[i] and 
+                  vol_spike_aligned[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above pivot or RSI overbought
-            if close[i] > pivot[i] or rsi_values[i] > 70:
+            # EXIT LONG: Price crosses below S3 (reversion to mean)
+            if close[i] < camarilla_s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below pivot or RSI oversold
-            if close[i] < pivot[i] or rsi_values[i] < 30:
+            # EXIT SHORT: Price crosses above R3 (reversion to mean)
+            if close[i] > camarilla_r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
