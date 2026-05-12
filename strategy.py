@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Triple_Confirmation
-# Hypothesis: KAMA direction + RSI(14) extreme + volume spike (2x avg) for trend-following entries in 4h.
-# Uses KAMA for adaptive trend direction, RSI for momentum confirmation, and volume to filter false breakouts.
-# Exits when KAMA reverses. Designed for 20-30 trades/year with low turnover to minimize fee drag.
-# Works in bull/bear markets by following adaptive trend; avoids whipsaw via volume confirmation.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_1dVol
+# Hypothesis: 1h price breaks daily Camarilla R1/S1 levels with 4h trend filter (EMA20) and 1d volume spike confirmation.
+# Uses daily pivots for key support/resistance, 4h EMA20 for trend direction (avoids counter-trend trades), and 1d volume spike (2x avg) to confirm breakout strength.
+# Designed for 15-30 trades/year on 1h timeframe by requiring multiple confluence factors.
+# Works in bull/bear markets by following 4h trend direction - only takes longs in 4h uptrend, shorts in 4h downtrend.
+# Exits when price crosses 4h EMA20 (trend reversal) to avoid giving back profits.
 
-name = "4h_KAMA_Triple_Confirmation"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVol"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,44 +24,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Calculate KAMA (adaptive trend)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])).reshape(-1, 1), axis=1)  # placeholder, will fix
-    # Correct ER calculation
-    er = np.zeros_like(close)
-    for i in range(10, len(close)):
-        if i >= 10:
-            direction = np.abs(close[i] - close[i-10])
-            volatility_sum = np.sum(np.abs(np.diff(close[i-9:i+1])))
-            er[i] = direction / volatility_sum if volatility_sum != 0 else 0
-    # Avoid division by zero
-    er = np.where(np.isnan(er), 0, er)
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Get 1d data for Camarilla pivots and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
 
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
 
-    # Volume spike: 2x 20-period average
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_sma20 * 2.0)
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+
+    close_4h = df_4h['close'].values
+
+    # Calculate daily volume SMA20 for volume confirmation
+    volume_1d_series = pd.Series(volume_1d)
+    volume_sma20_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike_threshold = volume_sma20_1d * 2.0  # Require 2x average daily volume
+
+    # Calculate 4h EMA20 for trend filter
+    close_4h_series = pd.Series(close_4h)
+    ema20_4h = close_4h_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+
+    # Calculate daily Camarilla pivot levels: R1, S1
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+
+    # Align HTF data to 1h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    volume_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_sma20_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(ema20_4h_aligned[i]) or np.isnan(volume_sma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,33 +76,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: KAMA up, RSI > 50, volume spike
-            if (close[i] > kama[i] and 
-                rsi[i] > 50 and 
-                volume_spike[i]):
-                signals[i] = 0.25
+            # LONG: Breakout above R1 in 4h uptrend with volume spike
+            if (close[i] > r1_1d_aligned[i] and 
+                close[i] > ema20_4h_aligned[i] and 
+                volume_1d[-1] > volume_sma20_1d_aligned[i]):  # Use latest daily volume
+                signals[i] = 0.20
                 position = 1
-            # SHORT: KAMA down, RSI < 50, volume spike
-            elif (close[i] < kama[i] and 
-                  rsi[i] < 50 and 
-                  volume_spike[i]):
-                signals[i] = -0.25
+            # SHORT: Breakdown below S1 in 4h downtrend with volume spike
+            elif (close[i] < s1_1d_aligned[i] and 
+                  close[i] < ema20_4h_aligned[i] and 
+                  volume_1d[-1] > volume_sma20_1d_aligned[i]):  # Use latest daily volume
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA reverses down
-            if close[i] < kama[i]:
+            # EXIT LONG: Price closes below 4h EMA20 (trend reversal)
+            if close[i] < ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: KAMA reverses up
-            if close[i] > kama[i]:
+            # EXIT SHORT: Price closes above 4h EMA20 (trend reversal)
+            if close[i] > ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
