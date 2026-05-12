@@ -1,18 +1,19 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_RSI_Chop_Filter
-# Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a dynamic trend filter.
-# In trending markets, KAMA closely follows price; in ranging markets, it smooths out noise.
-# Combined with RSI for momentum and Choppiness Index for regime detection, this strategy aims to capture
-# strong trends while avoiding whipsaws in choppy conditions. Works in both bull and bear markets by
-# following the adaptive trend and using RSI extremes for entry timing.
+# 6h_Keltner_MeanReversion_RangeFilter
+# Hypothesis: Mean reversion on 6h using Keltner Channel (EMA-based) with 12h trend filter.
+# In ranging markets (12h ADX < 25), price tends to revert to EMA20 from Keltner extremes.
+# In trending markets (12h ADX >= 25), we avoid mean reversion to prevent whipsaw.
+# Works in both bull and bear by adapting to regime via ADX.
+# Uses volume confirmation to avoid false reversals.
 
-name = "4h_KAMA_Trend_RSI_Chop_Filter"
-timeframe = "4h"
+name = "6h_Keltner_MeanReversion_RangeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,39 +25,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === KAMA (10, 2, 30) ===
-    close_s = pd.Series(close)
-    change = abs(close_s - close_s.shift(10))
-    volatility = abs(close_s - close_s.shift(1)).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # === RSI (14) ===
-    delta = pd.Series(close).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === Choppiness Index (14) ===
-    atr = pd.Series(np.maximum(high - low, np.maximum(abs(high - close_s.shift(1)), abs(low - close_s.shift(1))))).rolling(window=14, min_periods=14).mean()
-    high_roll = pd.Series(high).rolling(window=14, min_periods=14).max()
-    low_roll = pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10((atr.rolling(window=14, min_periods=14).sum() / (high_roll - low_roll))) / np.log10(14)
-    
-    # === 1d Trend Filter (EMA 34) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # === 12h ADX for regime filter ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                       np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+    dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                        np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed values (Wilder's smoothing)
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[1:period+1])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    dpi = wilder_smooth(dm_plus, 14)
+    dmi = wilder_smooth(dm_minus, 14)
+    
+    # DX and ADX
+    dx = np.where((dpi + dmi) != 0, 100 * np.abs(dpi - dmi) / (dpi + dmi), np.nan)
+    adx = wilder_smooth(dx, 14)
+    
+    # Align ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    
+    # === 6h Keltner Channel (EMA20, ATRx2) ===
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_6 = pd.Series(high - low).ewm(span=6, adjust=False, min_periods=6).mean().values
+    upper_keltner = ema20 + 2 * atr_6
+    lower_keltner = ema20 - 2 * atr_6
+    
+    # === Volume confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,7 +85,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(ema20[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,41 +94,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Range regime: 12h ADX < 25
+        range_market = adx_aligned[i] < 25
         
-        # KAMA trend: price above/below KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        
-        # Chop regime: chop > 61.8 = ranging, chop < 38.2 = trending
-        chop_trending = chop[i] < 38.2
-        chop_ranging = chop[i] > 61.8
+        # Volume filter: above average
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: price above both KAMA and 1d EMA, RSI oversold, trending market
-            if price_above_kama and price_above_ema and rsi_oversold and chop_trending:
+            # LONG: price at lower Keltner, in range, volume confirmation
+            if range_market and vol_ok and close[i] <= lower_keltner[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price below both KAMA and 1d EMA, RSI overbought, trending market
-            elif price_below_kama and price_below_ema and rsi_overbought and chop_trending:
+            # SHORT: price at upper Keltner, in range, volume confirmation
+            elif range_market and vol_ok and close[i] >= upper_keltner[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: price below KAMA or RSI overbought
-            if price_below_kama or rsi[i] > 70:
+            # EXIT LONG: price crosses EMA20 or regime changes to trend
+            if close[i] >= ema20[i] or not range_market:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price above KAMA or RSI oversold
-            if price_above_kama or rsi[i] < 30:
+            # EXIT SHORT: price crosses EMA20 or regime changes to trend
+            if close[i] <= ema20[i] or not range_market:
                 signals[i] = 0.0
                 position = 0
             else:
