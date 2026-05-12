@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_1dTrend_Volume
-# Hypothesis: Trade 6h breakouts of weekly pivot levels (R2/S2) aligned with daily trend and volume.
-# Weekly pivot defines structural support/resistance; daily EMA50 filters trend direction.
+# 6h_PivotFlow_1dTrend
+# Hypothesis: Trade 6h breakouts of daily pivot levels (R1/S1) aligned with weekly trend and volume.
+# Uses daily pivot points (from previous day) as dynamic support/resistance. Weekly EMA200 filters trend direction.
 # Volume confirms breakout momentum. Designed for low frequency (15-30 trades/year) to survive
 # both bull and bear markets by following higher timeframe structure.
 
-name = "6h_WeeklyPivot_1dTrend_Volume"
+name = "6h_PivotFlow_1dTrend"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,44 +23,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d EMA50 for trend filter ===
+    # === 1d pivot points (from previous day) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === Weekly pivot levels (R2, S2) ===
-    # Calculate from weekly OHLC (previous completed week)
+    # Use previous day's OHLC for today's pivot
+    high_1d_prev = np.roll(high_1d, 1)
+    low_1d_prev = np.roll(low_1d, 1)
+    close_1d_prev = np.roll(close_1d, 1)
+    high_1d_prev[0] = np.nan
+    low_1d_prev[0] = np.nan
+    close_1d_prev[0] = np.nan
+    
+    pivot = (high_1d_prev + low_1d_prev + close_1d_prev) / 3.0
+    r1 = 2 * pivot - low_1d_prev
+    s1 = 2 * pivot - high_1d_prev
+    
+    # Align daily pivots to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # === Weekly EMA200 for trend filter ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    # Use previous week's OHLC for current week's pivot
-    wk_high = df_1w['high'].values
-    wk_low = df_1w['low'].values
-    wk_close = df_1w['close'].values
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Shift by 1 to use previous week's data
-    wk_high_prev = np.roll(wk_high, 1)
-    wk_low_prev = np.roll(wk_low, 1)
-    wk_close_prev = np.roll(wk_close, 1)
-    wk_high_prev[0] = np.nan
-    wk_low_prev[0] = np.nan
-    wk_close_prev[0] = np.nan
-    
-    pivot = (wk_high_prev + wk_low_prev + wk_close_prev) / 3.0
-    r2 = pivot + (wk_high_prev - wk_low_prev)
-    s2 = pivot - (wk_high_prev - wk_low_prev)
-    
-    # Align weekly levels to 6h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # === Volume confirmation (24-period average) ===
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === Volume confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,8 +67,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,35 +76,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA200
+        trend_up = close[i] > ema_200_1w_aligned[i]
+        trend_down = close[i] < ema_200_1w_aligned[i]
         
         # Breakout conditions
-        breakout_up = close[i] > r2_aligned[i]
-        breakout_down = close[i] < s2_aligned[i]
+        breakout_up = close[i] > r1_aligned[i]
+        breakout_down = close[i] < s1_aligned[i]
         
         # Volume filter: above average
-        vol_ok = volume[i] > vol_ma_24[i]
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: breakout above R2, uptrend, volume confirmation
+            # LONG: breakout above R1, uptrend, volume confirmation
             if breakout_up and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakout below S2, downtrend, volume confirmation
+            # SHORT: breakout below S1, downtrend, volume confirmation
             elif breakout_down and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: breakdown below S2 or trend reversal
+            # EXIT LONG: breakdown below S1 or trend reversal
             if breakout_down or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: breakout above R2 or trend reversal
+            # EXIT SHORT: breakout above R1 or trend reversal
             if breakout_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
