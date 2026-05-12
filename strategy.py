@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian_20_1wTrend_1dVolumeSpike"
-timeframe = "12h"
+name = "1h_Donchian_Breakout_4hTrend_1dVolumeSpike"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,23 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1w trend filter (EMA34) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # === 4h Donchian breakout (20-bar) ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    lookback = 20
+    upper_4h = np.full(len(high_4h), np.nan)
+    lower_4h = np.full(len(low_4h), np.nan)
+    for i in range(lookback, len(high_4h)):
+        upper_4h[i] = np.max(high_4h[i-lookback:i])
+        lower_4h[i] = np.min(low_4h[i-lookback:i])
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
     
-    # === 1d volume spike filter ===
+    # === 4h Trend filter: EMA50 (must be above for long, below for short) ===
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # === 1d Volume spike filter ===
     df_1d = get_htf_data(prices, '1d')
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
-    # === 12h Donchian(20) channel ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # === Session filter: 08-20 UTC ===
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -42,10 +52,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1w_aligned[i]) or 
-            np.isnan(vol_spike_1d_aligned[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i])):
+        if (np.isnan(upper_4h_aligned[i]) or 
+            np.isnan(lower_4h_aligned[i]) or
+            np.isnan(ema50_4h_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,32 +63,40 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if position == 0:
-            # Long: Price breaks above Donchian high + above weekly EMA34 + volume spike
-            if (close[i] > highest_high[i] and
-                close[i] > ema34_1w_aligned[i] and
-                vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = 0.25
-                position = 1
-            # Short: Price breaks below Donchian low + below weekly EMA34 + volume spike
-            elif (close[i] < lowest_low[i] and
-                  close[i] < ema34_1w_aligned[i] and
-                  vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Exit long: Price falls below Donchian low or below weekly EMA34
-            if close[i] < lowest_low[i] or close[i] < ema34_1w_aligned[i]:
+        if in_session[i]:
+            if position == 0:
+                # Long: Close above upper Donchian + above 4h EMA50 + daily volume spike
+                if (close[i] > upper_4h_aligned[i] and
+                    close[i] > ema50_4h_aligned[i] and
+                    vol_spike_1d_aligned[i] > 0.5):
+                    signals[i] = 0.20
+                    position = 1
+                # Short: Close below lower Donchian + below 4h EMA50 + daily volume spike
+                elif (close[i] < lower_4h_aligned[i] and
+                      close[i] < ema50_4h_aligned[i] and
+                      vol_spike_1d_aligned[i] > 0.5):
+                    signals[i] = -0.20
+                    position = -1
+            elif position == 1:
+                # Exit long: Close below lower Donchian or below EMA50
+                if close[i] < lower_4h_aligned[i] or close[i] < ema50_4h_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20
+            elif position == -1:
+                # Exit short: Close above upper Donchian or above EMA50
+                if close[i] > upper_4h_aligned[i] or close[i] > ema50_4h_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20
+        else:
+            # Outside session: close positions
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit short: Price rises above Donchian high or above weekly EMA34
-            if close[i] > highest_high[i] or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
