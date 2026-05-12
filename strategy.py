@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "1h_Adaptive_Supertrend_v2"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,29 +17,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla pivot levels ===
+    # === 4h Supertrend trend filter ===
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # ATR calculation for Supertrend
+    atr_period = 10
+    tr_4h = np.maximum(high_4h[1:] - low_4h[1:], 
+                       np.maximum(np.abs(high_4h[1:] - close_4h[:-1]), 
+                                  np.abs(low_4h[1:] - close_4h[:-1])))
+    tr_4h = np.concatenate([[np.nan], tr_4h])
+    atr_4h = pd.Series(tr_4h).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    # Supertrend calculation
+    multiplier = 3.0
+    hl2_4h = (high_4h + low_4h) / 2
+    upperband_4h = hl2_4h + multiplier * atr_4h
+    lowerband_4h = hl2_4h - multiplier * atr_4h
+    
+    supertrend_4h = np.full_like(close_4h, np.nan)
+    direction_4h = np.full_like(close_4h, np.nan)
+    
+    for i in range(1, len(close_4h)):
+        if np.isnan(atr_4h[i]) or np.isnan(upperband_4h[i-1]) or np.isnan(lowerband_4h[i-1]):
+            supertrend_4h[i] = np.nan
+            direction_4h[i] = np.nan
+        else:
+            if close_4h[i-1] > upperband_4h[i-1]:
+                direction_4h[i] = 1
+            elif close_4h[i-1] < lowerband_4h[i-1]:
+                direction_4h[i] = -1
+            else:
+                direction_4h[i] = direction_4h[i-1]
+            
+            if direction_4h[i] == 1:
+                upperband_4h[i] = min(upperband_4h[i], upperband_4h[i-1])
+                lowerband_4h[i] = lowerband_4h[i-1]
+                if close_4h[i] < lowerband_4h[i]:
+                    direction_4h[i] = -1
+                    upperband_4h[i] = hl2_4h[i] + multiplier * atr_4h[i]
+                    lowerband_4h[i] = hl2_4h[i] - multiplier * atr_4h[i]
+                supertrend_4h[i] = upperband_4h[i] if direction_4h[i] == 1 else lowerband_4h[i]
+            else:
+                lowerband_4h[i] = max(lowerband_4h[i], lowerband_4h[i-1])
+                upperband_4h[i] = upperband_4h[i-1]
+                if close_4h[i] > upperband_4h[i]:
+                    direction_4h[i] = 1
+                    upperband_4h[i] = hl2_4h[i] + multiplier * atr_4h[i]
+                    lowerband_4h[i] = hl2_4h[i] - multiplier * atr_4h[i]
+                supertrend_4h[i] = upperband_4h[i] if direction_4h[i] == 1 else lowerband_4h[i]
+    
+    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h)
+    direction_4h_aligned = align_htf_to_ltf(prices, df_4h, direction_4h)
+    
+    # === 1d ADX trend strength filter ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R1, S1 levels
-    rango = high_1d - low_1d
-    camarilla_r1 = close_1d + (rango * 1.1 / 12)
-    camarilla_s1 = close_1d - (rango * 1.1 / 12)
+    # ADX calculation
+    adx_period = 14
+    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
+                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
+                                  np.abs(low_1d[1:] - close_1d[:-1])))
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_1d = pd.Series(tr_1d).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values
     
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    plus_dm_1d = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                          np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    plus_dm_1d = np.concatenate([[0], plus_dm_1d])
+    minus_dm_1d = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                           np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    minus_dm_1d = np.concatenate([[0], minus_dm_1d])
     
-    # === 1d EMA34 trend filter ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    plus_di_1d = 100 * pd.Series(plus_dm_1d).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values / atr_1d
+    minus_di_1d = 100 * pd.Series(minus_dm_1d).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values / atr_1d
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = pd.Series(dx_1d).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values
     
-    # === 1d Volume spike filter ===
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === 1h Volume spike filter ===
+    vol_avg_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1h = volume > (1.5 * vol_avg_1h)
+    
+    # === Session filter: 08-20 UTC ===
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,10 +114,20 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(supertrend_4h_aligned[i]) or 
+            np.isnan(direction_4h_aligned[i]) or
+            np.isnan(adx_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,31 +136,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above R1 + above daily EMA34 + volume spike
-            if (close[i] > camarilla_r1_aligned[i] and
-                close[i] > ema34_1d_aligned[i] and
-                vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = 0.25
+            # Long: Supertrend uptrend + ADX > 25 + volume spike
+            if (direction_4h_aligned[i] == 1 and
+                adx_1d_aligned[i] > 25 and
+                vol_spike_1h[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: Close below S1 + below daily EMA34 + volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and
-                  close[i] < ema34_1d_aligned[i] and
-                  vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = -0.25
+            # Short: Supertrend downtrend + ADX > 25 + volume spike
+            elif (direction_4h_aligned[i] == -1 and
+                  adx_1d_aligned[i] > 25 and
+                  vol_spike_1h[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: Close below S1 or below EMA34
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Supertrend downtrend or ADX < 20
+            if direction_4h_aligned[i] == -1 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: Close above R1 or above EMA34
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Supertrend uptrend or ADX < 20
+            if direction_4h_aligned[i] == 1 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
