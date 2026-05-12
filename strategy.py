@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_Confirm"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_Confirm_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -39,9 +39,9 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume spike: current volume > 2.0x 20-period average
+    # Volume spike: current volume > 2.5x 20-period average (stricter filter)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)
+    vol_spike = volume > (2.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
