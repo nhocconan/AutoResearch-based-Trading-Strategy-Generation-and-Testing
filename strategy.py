@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_Momentum_Volume_Spike
-Hypothesis: TRIX (1-period ROC of EMA) captures momentum shifts. Combined with volume spike (>2x 20-period average) and price above/below EMA50 for trend filter. Designed for 4h timeframe to capture medium-term momentum moves in both bull and bear markets. Low trade frequency expected due to strict volume and momentum conditions.
+1h_4h1d_Camarilla_R1S1_Breakout_Volume_Switch
+Hypothesis: On 1h, breakouts of 4h/1d Camarilla R1/S1 levels trigger entries when confirmed by multi-timeframe trend alignment (4h EMA > 1d EMA for long, < for short) and volume surge (1.5x 20-period average). Exits on opposite level breach or trend flip. Designed for low-frequency, high-conviction trades in both bull and bear markets via trend filter and volume confirmation. Targets 15-35 trades/year.
 """
 
-name = "4h_TRIX_Momentum_Volume_Spike"
-timeframe = "4h"
+name = "1h_4h1d_Camarilla_R1S1_Breakout_Volume_Switch"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,27 +22,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate TRIX: 1-period ROC of triple EMA (15-period EMA applied 3 times)
-    close_s = pd.Series(close)
-    ema1 = close_s.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    # TRIX = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
-    trix_raw = (ema3 - ema3.shift(1)) / ema3.shift(1) * 100
-    trix = trix_raw.fillna(0).values  # Replace NaN with 0 for stability
+    # Get 4h and 1d data (call once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_4h) < 20 or len(df_1d) < 20:
+        return np.zeros(n)
 
-    # EMA50 for trend filter
-    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h Camarilla R1/S1
+    hh_4h = df_4h['high'].values
+    ll_4h = df_4h['low'].values
+    cc_4h = df_4h['close'].values
+    r1_4h = cc_4h + (hh_4h - ll_4h) * 1.1 / 12
+    s1_4h = cc_4h - (hh_4h - ll_4h) * 1.1 / 12
 
-    # Volume average (20-period)
+    # Calculate 1d Camarilla R1/S1
+    hh_1d = df_1d['high'].values
+    ll_1d = df_1d['low'].values
+    cc_1d = df_1d['close'].values
+    r1_1d = cc_1d + (hh_1d - ll_1d) * 1.1 / 12
+    s1_1d = cc_1d - (hh_1d - ll_1d) * 1.1 / 12
+
+    # Calculate 4h EMA20 for trend
+    close_4h = pd.Series(cc_4h)
+    ema20_4h = close_4h.ewm(span=20, adjust=False, min_periods=20).mean().values
+
+    # Calculate 1d EMA20 for trend
+    close_1d = pd.Series(cc_1d)
+    ema20_1d = close_1d.ewm(span=20, adjust=False, min_periods=20).mean().values
+
+    # Volume confirmation: 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start from 20 to have enough data for indicators
-        # Skip if any required data is invalid
-        if np.isnan(trix[i]) or np.isnan(ema50[i]) or np.isnan(vol_avg_20[i]):
+    for i in range(20, n):
+        # Get aligned values for current 1h bar
+        r1_4h_a = align_htf_to_ltf(prices, df_4h, r1_4h)[i]
+        s1_4h_a = align_htf_to_ltf(prices, df_4h, s1_4h)[i]
+        r1_1d_a = align_htf_to_ltf(prices, df_1d, r1_1d)[i]
+        s1_1d_a = align_htf_to_ltf(prices, df_1d, s1_1d)[i]
+        ema20_4h_a = align_htf_to_ltf(prices, df_4h, ema20_4h)[i]
+        ema20_1d_a = align_htf_to_ltf(prices, df_1d, ema20_1d)[i]
+        vol_avg_val = vol_avg_20[i]
+
+        # Skip if any required data is NaN
+        if (np.isnan(r1_4h_a) or np.isnan(s1_4h_a) or np.isnan(r1_1d_a) or 
+            np.isnan(s1_1d_a) or np.isnan(ema20_4h_a) or np.isnan(ema20_1d_a) or 
+            np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -51,33 +78,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Positive TRIX momentum + price above EMA50 + volume spike
-            if (trix[i] > 0 and 
-                close[i] > ema50[i] and 
-                volume[i] > vol_avg_20[i] * 2.0):
-                signals[i] = 0.25
+            # LONG: Break above 4h R1 with bullish 4h>1d trend and volume surge
+            if (close[i] > r1_4h_a and 
+                ema20_4h_a > ema20_1d_a and 
+                volume[i] > vol_avg_val * 1.5):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Negative TRIX momentum + price below EMA50 + volume spike
-            elif (trix[i] < 0 and 
-                  close[i] < ema50[i] and 
-                  volume[i] > vol_avg_20[i] * 2.0):
-                signals[i] = -0.25
+            # SHORT: Break below 4h S1 with bearish 4h<1d trend and volume surge
+            elif (close[i] < s1_4h_a and 
+                  ema20_4h_a < ema20_1d_a and 
+                  volume[i] > vol_avg_val * 1.5):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Negative TRIX momentum or price below EMA50
-            if (trix[i] < 0 or close[i] < ema50[i]):
+            # EXIT LONG: Price breaks below 4h S1 or trend flips bearish
+            if (close[i] < s1_4h_a or ema20_4h_a < ema20_1d_a):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Positive TRIX momentum or price above EMA50
-            if (trix[i] > 0 or close[i] > ema50[i]):
+            # EXIT SHORT: Price breaks above 4h R1 or trend flips bullish
+            if (close[i] > r1_4h_a or ema20_4h_a > ema20_1d_a):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
