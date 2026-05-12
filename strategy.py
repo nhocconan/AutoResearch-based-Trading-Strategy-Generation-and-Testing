@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 1d_Camarilla_R1S1_Breakout_1wEMA50_TrendFilter
-# Hypothesis: On 1d timeframe, enter long when price closes above weekly R1 with close > weekly EMA50.
-# Enter short when price closes below weekly S1 with close < weekly EMA50.
-# Exit when price crosses weekly EMA50 (trend reversal).
-# Uses weekly EMA for trend filter to reduce whipsaw and improve performance in both bull and bear markets.
-# Targets 15-25 trades/year for low fee drift.
+# 6h_MultiTimeframe_Stochastic_Signal_with_12hTrend
+# Hypothesis: Use 6h Stochastic oscillator for mean-reversion entries (oversold/overbought) but only in the direction of 12h trend.
+# Long when 6h Stochastic < 20 and 12h close > 12h EMA50 (uptrend).
+# Short when 6h Stochastic > 80 and 12h close < 12h EMA50 (downtrend).
+# Exit when Stochastic crosses back above 50 (long) or below 50 (short) to avoid overstaying.
+# Uses volume confirmation to avoid low-liquidity whipsaws.
+# Targets 15-25 trades/year to minimize fee drag.
 
-name = "1d_Camarilla_R1S1_Breakout_1wEMA50_TrendFilter"
-timeframe = "1d"
+name = "6h_MultiTimeframe_Stochastic_Signal_with_12hTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,30 +25,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data for Camarilla pivot calculation and EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 55:
         return np.zeros(n)
     
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate pivot point and range
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_range = weekly_high - weekly_low
+    # Calculate 12h EMA50 for trend
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla R1 and S1 levels
-    r1 = weekly_pivot + weekly_range * 1.083
-    s1 = weekly_pivot - weekly_range * 1.083
+    # Align 12h EMA50 to 6h timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate weekly EMA50
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 6h Stochastic (14,3,3)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
     
-    # Align weekly levels and weekly EMA50 to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Avoid division by zero
+    denom = highest_high - lowest_low
+    denom = np.where(denom == 0, 1e-10, denom)
+    
+    k_percent = 100 * ((close - lowest_low) / denom)
+    
+    # Smooth K to get D (3-period SMA of K)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
     
     # Volume confirmation: 20-period moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,12 +57,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are stable
+    start_idx = 100  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(d_percent[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,32 +70,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema1w_trend = ema50_1w_aligned[i]
+        ema12h_trend = ema50_12h_aligned[i]
+        stoch_d = d_percent[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: Price closes above R1 with close > weekly EMA50 and volume > 20MA
-            if close[i] > r1_val and close[i] > ema1w_trend and volume[i] > vol_ma_val:
+            # LONG: Oversold Stochastic + 12h uptrend + volume confirmation
+            if stoch_d < 20 and close[i] > ema12h_trend and volume[i] > vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below S1 with close < weekly EMA50 and volume > 20MA
-            elif close[i] < s1_val and close[i] < ema1w_trend and volume[i] > vol_ma_val:
+            # SHORT: Overbought Stochastic + 12h downtrend + volume confirmation
+            elif stoch_d > 80 and close[i] < ema12h_trend and volume[i] > vol_ma_val:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below weekly EMA50 (trend reversal)
-            if close[i] < ema1w_trend:
+            # EXIT LONG: Stochastic crosses back above 50 (mean reversion complete)
+            if stoch_d > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above weekly EMA50 (trend reversal)
-            if close[i] > ema1w_trend:
+            # EXIT SHORT: Stochastic crosses back below 50 (mean reversion complete)
+            if stoch_d < 50:
                 signals[i] = 0.0
                 position = 0
             else:
