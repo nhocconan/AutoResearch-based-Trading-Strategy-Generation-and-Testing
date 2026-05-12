@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_4H_Camarilla_R2_S2_Breakout_1dEMA34_Trend_VolumeS"
-timeframe = "4h"
+name = "12h_12h_Camarilla_R2_S2_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,27 +17,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Data for EMA34 trend ===
+    # === 1d Data for trend and Camarilla levels ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # === 1d EMA34 for trend ===
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Daily data for Camarilla levels ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels (R2, S2) from previous day
-    # R2 = Close + (High - Low) * 1.1/2
-    # S2 = Close - (High - Low) * 1.1/2
+    # === Daily Camarilla levels (R2, S2) from previous day ===
     camarilla_range = (high_1d - low_1d) * 1.1
     r2_level = close_1d + camarilla_range / 2.0
     s2_level = close_1d - camarilla_range / 2.0
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 12h
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2_level)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2_level)
     
