@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Supertrend_Filter_1dTrend_VolumeBreakout
-# Hypothesis: 6h Supertrend (10,3) filters trend direction, combined with 1d EMA20 for higher timeframe trend alignment, and volume spike breakouts for entry. Exits when Supertrend flips or volume drops. Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drift. Works in bull/bear by requiring alignment between 6s momentum, 1d trend, and volume confirmation.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA trend filter and volume spike confirmation.
+# Uses 1d EMA for trend direction to avoid counter-trend trades, and volume spikes to confirm breakout strength.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull/bear by following 1d trend.
+# Uses 12h close for breakout detection and 1d EMA for trend filter.
 
-name = "6h_Supertrend_Filter_1dTrend_VolumeBreakout"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,14 +23,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 6h data for Supertrend and price action
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 2:
+    # Get 12h data for price action and Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
 
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
 
     # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -38,38 +41,16 @@ def generate_signals(prices):
     ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
 
-    # Calculate ATR for Supertrend
-    tr1 = high_6h - low_6h
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate Camarilla levels for 12h timeframe
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_upper = close_12h + (high_12h - low_12h) * 1.1 / 12
+    camarilla_lower = close_12h - (high_12h - low_12h) * 1.1 / 12
 
-    # Calculate Supertrend
-    basic_ub = (high_6h + low_6h) / 2 + 3 * atr
-    basic_lb = (high_6h + low_6h) / 2 - 3 * atr
-    final_ub = np.zeros_like(basic_ub)
-    final_lb = np.zeros_like(basic_lb)
-    supertrend = np.zeros_like(close_6h)
-    direction = np.ones_like(close_6h)  # 1 for uptrend, -1 for downtrend
+    # Align Camarilla levels to 12h timeframe
+    camarilla_upper_aligned = align_htf_to_ltf(prices, df_12h, camarilla_upper)
+    camarilla_lower_aligned = align_htf_to_ltf(prices, df_12h, camarilla_lower)
 
-    for i in range(1, len(close_6h)):
-        final_ub[i] = basic_ub[i] if (basic_ub[i] < final_ub[i-1] or close_6h[i-1] > final_ub[i-1]) else final_ub[i-1]
-        final_lb[i] = basic_lb[i] if (basic_lb[i] > final_lb[i-1] or close_6h[i-1] < final_lb[i-1]) else final_lb[i-1]
-
-        if direction[i-1] == 1:
-            supertrend[i] = final_ub[i] if close_6h[i] <= final_ub[i] else final_lb[i]
-            direction[i] = -1 if close_6h[i] <= final_ub[i] else 1
-        else:
-            supertrend[i] = final_lb[i] if close_6h[i] >= final_lb[i] else final_ub[i]
-            direction[i] = 1 if close_6h[i] >= final_lb[i] else -1
-
-    # Align Supertrend and direction to LTF
-    supertrend_aligned = align_htf_to_ltf(prices, df_6h, supertrend)
-    direction_aligned = align_htf_to_ltf(prices, df_6h, direction)
-
-    # Calculate 6h volume SMA20 for volume confirmation
+    # Calculate 12h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
@@ -79,7 +60,7 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]) or
+        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or
             np.isnan(ema20_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -89,26 +70,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Supertrend uptrend, price above 1d EMA, and volume spike
-            if direction_aligned[i] == 1 and close[i] > ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
+            # LONG: Breakout above Camarilla R1 in 1d uptrend with volume spike
+            if close[i] > camarilla_upper_aligned[i] and close[i] > ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Supertrend downtrend, price below 1d EMA, and volume spike
-            elif direction_aligned[i] == -1 and close[i] < ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: Breakdown below Camarilla S1 in 1d downtrend with volume spike
+            elif close[i] < camarilla_lower_aligned[i] and close[i] < ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Supertrend flips to downtrend or volume drops below average
-            if direction_aligned[i] == -1 or volume[i] < volume_sma20[i]:
+            # EXIT LONG: Price closes below Camarilla S1 (reversal signal)
+            if close[i] < camarilla_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Supertrend flips to uptrend or volume drops below average
-            if direction_aligned[i] == 1 or volume[i] < volume_sma20[i]:
+            # EXIT SHORT: Price closes above Camarilla R1 (reversal signal)
+            if close[i] > camarilla_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
