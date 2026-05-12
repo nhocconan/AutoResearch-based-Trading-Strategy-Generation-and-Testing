@@ -1,11 +1,14 @@
-# 12h_WeeklyPivot_Breakout_TrendVolume
-# Hypothesis: 12h price breaks weekly pivot resistance/support with 1d EMA trend filter and volume spike confirmation.
-# Uses weekly pivots as institutional support/resistance levels, effective in both bull and bear markets.
-# Weekly trend filter (1d EMA) prevents counter-trend trades. Volume confirms breakout strength.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+#!/usr/bin/env python3
+# 4h_Stochastic_Reversal_TrendFilter
+# Hypothesis: 4h Stochastic oscillator identifies overbought/oversold conditions for mean reversion.
+# Uses 1d EMA as trend filter to trade only in direction of higher timeframe trend.
+# In uptrend: buy when Stochastic crosses above 20 from below (oversold bounce).
+# In downtrend: sell when Stochastic crosses below 80 from above (overbought rejection).
+# Designed for 20-50 trades/year with clear entry/exit rules to minimize fee drag.
+# Works in bull/bear markets by following 1d trend direction.
 
-name = "12h_WeeklyPivot_Breakout_TrendVolume"
-timeframe = "12h"
+name = "4h_Stochastic_Reversal_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,30 +17,21 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
 
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
 
-    # Get 1w data for weekly pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get 4h data for price action and Stochastic calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 14:
         return np.zeros(n)
 
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-
-    # Calculate weekly pivot points (standard formula)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
 
     # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -46,27 +40,30 @@ def generate_signals(prices):
 
     close_1d = df_1d['close'].values
     ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-
-    # Align weekly pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-
-    # Align 1d EMA to 12h timeframe
     ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
 
-    # Calculate 12h volume SMA20 for volume confirmation
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
+    # Calculate Stochastic Oscillator (14,3,3)
+    # %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    k_percent = np.where((highest_high - lowest_low) != 0,
+                         ((close_4h - lowest_low) / (highest_high - lowest_low)) * 100,
+                         50)  # Avoid division by zero, set to neutral 50
+    # %D = 3-period SMA of %K
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+
+    # Align Stochastic and EMA to 4h timeframe
+    k_percent_aligned = align_htf_to_ltf(prices, df_4h, k_percent)
+    d_percent_aligned = align_htf_to_ltf(prices, df_4h, d_percent)
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema20_1d_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(k_percent_aligned[i]) or np.isnan(d_percent_aligned[i]) or
+            np.isnan(ema20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,26 +72,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above R1 in 1d uptrend with volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
+            # LONG: In uptrend (price > 1d EMA20), Stochastic crosses above 20 from below
+            if (close[i] > ema20_1d_aligned[i] and
+                k_percent_aligned[i] > 20 and d_percent_aligned[i-1] <= 20 and
+                k_percent_aligned[i-1] <= 20):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 in 1d downtrend with volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: In downtrend (price < 1d EMA20), Stochastic crosses below 80 from above
+            elif (close[i] < ema20_1d_aligned[i] and
+                  k_percent_aligned[i] < 80 and d_percent_aligned[i-1] >= 80 and
+                  k_percent_aligned[i-1] >= 80):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below pivot (mean reversion to pivot)
-            if close[i] < pivot_aligned[i]:
+            # EXIT LONG: Stochastic crosses below 80 (overbought) or trend reversal
+            if (k_percent_aligned[i] < 80 and d_percent_aligned[i-1] >= 80) or \
+               (close[i] < ema20_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above pivot (mean reversion to pivot)
-            if close[i] > pivot_aligned[i]:
+            # EXIT SHORT: Stochastic crosses above 20 (oversold) or trend reversal
+            if (k_percent_aligned[i] > 20 and d_percent_aligned[i-1] <= 20) or \
+               (close[i] > ema20_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
