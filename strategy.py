@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Breakout above Camarilla R1 or below S1 from daily pivot, filtered by 1d EMA34 trend and volume confirmation (2x 20-period avg). Exit on opposite touch of S1/R1 to reduce whipsaw. Uses tighter entry (R1/S1 instead of R3/S3) with stronger trend filter to capture swings in both bull and bear markets while limiting trades to 20-40/year.
+# 4h_Combined_Camarilla_Donchian_Breakout_1dTrend_Volume
+# Hypothesis: Combine strengths of Camarilla R1/S1 and Donchian(20) breakouts with 1d EMA34 trend filter and volume confirmation (2x 20-period avg). This dual-trigger approach increases signal reliability while maintaining low trade frequency. Works in bull markets via breakouts and bear markets via mean-reversion at extreme levels. Target: 25-40 trades/year.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+name = "4h_Combined_Camarilla_Donchian_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -45,6 +45,10 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
     
+    # Calculate Donchian channels (20-period) from 4h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -61,7 +65,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(high_20[i]) or np.isnan(low_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,26 +84,29 @@ def generate_signals(prices):
         vol_confirm = volume_confirm[i]
         
         if position == 0:
-            # LONG: Break above R1 with uptrend and volume confirmation
-            if close[i] > r1_aligned[i] and trend_up and vol_confirm:
+            # LONG: Either Camarilla R1 breakout OR Donchian upper breakout with uptrend and volume
+            long_condition = ((close[i] > r1_aligned[i]) or (close[i] > high_20[i])) and trend_up and vol_confirm
+            # SHORT: Either Camarilla S1 breakdown OR Donchian lower breakdown with downtrend and volume
+            short_condition = ((close[i] < s1_aligned[i]) or (close[i] < low_20[i])) and trend_down and vol_confirm
+            
+            if long_condition:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 with downtrend and volume confirmation
-            elif close[i] < s1_aligned[i] and trend_down and vol_confirm:
+            elif short_condition:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 (opposite level)
-            if close[i] < s1_aligned[i]:
+            # EXIT LONG: Price crosses below Donchian low OR Camarilla S1
+            if close[i] < low_20[i] or close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1
-            if close[i] > r1_aligned[i]:
+            # EXIT SHORT: Price crosses above Donchian high OR Camarilla R1
+            if close[i] > high_20[i] or close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
