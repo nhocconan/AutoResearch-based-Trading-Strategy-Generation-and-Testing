@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 12h_KAMA_RSI_ChopFilter_v2
-# Hypothesis: On 12h timeframe, use KAMA direction as primary trend filter,
-# RSI(14) for momentum confirmation, and Choppiness Index(14) to filter ranging markets.
-# Long when KAMA rising, RSI > 50, and CHOP > 61.8 (ranging market - mean reversion setup).
-# Short when KAMA falling, RSI < 50, and CHOP > 61.8.
-# Exit when KAMA direction reverses or RSI crosses 50.
-# Uses 1d ATR for volatility normalization and 1d EMA34 as higher timeframe trend confirmation.
-# Designed for low trade frequency (15-25/year) to minimize fee drag in ranging/low volatility markets.
+# 1h_4H_Momentum_With_DailyTrend_Filter
+# Hypothesis: On 1h timeframe, use 4h momentum (close > 4h open) as signal direction,
+# filtered by daily trend (close > daily EMA50). Enter long when both align.
+# Enter short when 4h momentum negative and price < daily EMA50.
+# Uses volume confirmation to avoid false signals.
+# Targets 15-30 trades/year to minimize fee drag.
+# Works in bull (momentum + trend) and bear (counter-trend rejections via EMA filter).
 
-name = "12h_KAMA_RSI_ChopFilter_v2"
-timeframe = "12h"
+name = "1h_4H_Momentum_With_DailyTrend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -21,85 +20,41 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ===== KAUFMAN ADAPTIVE MOVING AVERAGE (KAMA) =====
-    # Fast EMA period = 2, Slow EMA period = 30
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close))
-    
-    er = np.zeros_like(change)
-    for i in range(len(change)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # ===== RSI(14) =====
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # ===== CHOPPINESS INDEX (14) =====
-    atr = np.zeros_like(close)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Avoid division by zero
-    chop = np.where((highest_high - lowest_low) > 0,
-                    100 * np.log10(np.sum(tr[-14:]) / (highest_high - lowest_low)) / np.log10(14),
-                    50)
-    # For efficiency, compute rolling sum of TR
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(14)
-    chop = np.where((highest_high - lowest_low) > 0, chop, 50)
-    
-    # ===== HIGHER TIMEFRAME DATA (1d) =====
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Load 4h data for momentum calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 4h momentum: close > open
+    momentum_4h = (df_4h['close'] > df_4h['open']).astype(float).values
     
-    # 1d ATR for volatility normalization
-    atr_1d = pd.Series(df_1d['high'].values - df_1d['low'].values).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Load daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 4h momentum and daily EMA50 to 1h timeframe
+    momentum_4h_aligned = align_htf_to_ltf(prices, df_4h, momentum_4h)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation: 24-period moving average (1 day of 1h bars)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 100  # Warmup period
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(momentum_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -107,39 +62,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # KAMA direction: 1 if rising, -1 if falling
-        kama_direction = 1 if kama[i] > kama[i-1] else -1
+        mom = momentum_4h_aligned[i]
+        ema50 = ema50_1d_aligned[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: KAMA rising, RSI > 50, CHOP > 61.8 (ranging market), price > 1d EMA34
-            if (kama_direction == 1 and 
-                rsi[i] > 50 and 
-                chop[i] > 61.8 and 
-                close[i] > ema34_1d_aligned[i]):
-                signals[i] = 0.25
+            # LONG: Positive 4h momentum AND price > daily EMA50 AND volume above average
+            if mom > 0.5 and close[i] > ema50 and volume[i] > vol_ma_val:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: KAMA falling, RSI < 50, CHOP > 61.8 (ranging market), price < 1d EMA34
-            elif (kama_direction == -1 and 
-                  rsi[i] < 50 and 
-                  chop[i] > 61.8 and 
-                  close[i] < ema34_1d_aligned[i]):
-                signals[i] = -0.25
+            # SHORT: Negative 4h momentum AND price < daily EMA50 AND volume above average
+            elif mom < 0.5 and close[i] < ema50 and volume[i] > vol_ma_val:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA falling OR RSI < 50
-            if kama_direction == -1 or rsi[i] < 50:
+            # EXIT LONG: Either momentum turns negative OR price crosses below daily EMA50
+            if mom < 0.5 or close[i] < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: KAMA rising OR RSI > 50
-            if kama_direction == 1 or rsi[i] > 50:
+            # EXIT SHORT: Either momentum turns positive OR price crosses above daily EMA50
+            if mom > 0.5 or close[i] > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
