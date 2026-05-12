@@ -1,11 +1,12 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 12h_Donchian_Breakout_Trend_Volume
-# Hypothesis: Donchian(20) breakouts on 12h timeframe with 1d EMA200 trend filter and volume confirmation
-# capture strong momentum moves. Works in bull markets via long breakouts above upper band and in bear markets
-# via short breakdowns below lower band. Volume ensures breakout validity, trend filter avoids counter-trend trades.
+# 4h_Combined_Signal_Trend_Momentum
+# Hypothesis: Combining EMA trend, RSI momentum, and volume confirmation on 4h timeframe
+# with 12h EMA filter reduces false signals and captures momentum in both bull and bear markets.
+# Uses tight entry conditions to limit trades and avoid fee drag.
 
-name = "12h_Donchian_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_Combined_Signal_Trend_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,45 +23,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Data for Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_12h = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # === Donchian Channel (20) on 12h ===
-    # We need 12h data to calculate Donchian, then align to 12h timeframe
+    # === 12h Trend Filter ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Donchian channels on 12h data
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # === EMA Trend (4h) ===
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align Donchian levels to 12h timeframe (already aligned since we're using 12h data)
-    # But we need to align to the original 12h price index
-    donchian_high_12h = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_12h = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # === RSI Momentum (4h) ===
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === Volume Spike (20-period) on 12h ===
+    # === Volume Confirmation (4h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    vol_ratio = volume / (vol_ma + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure all indicators ready
+    start_idx = 60  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_200_12h[i]) or np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_4h[i]) or np.isnan(ema_20[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,24 +65,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Close breaks above upper Donchian + above 1d EMA200 + volume spike
-            if close[i] > donchian_high_12h[i] and close[i] > ema_200_12h[i] and vol_spike[i]:
+            # LONG: Price above EMA20, RSI > 50 and rising, above 12h EMA50, volume above average
+            if (close[i] > ema_20[i] and 
+                rsi[i] > 50 and rsi[i] > rsi[i-1] and 
+                close[i] > ema_50_4h[i] and 
+                vol_ratio[i] > 1.2):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below lower Donchian + below 1d EMA200 + volume spike
-            elif close[i] < donchian_low_12h[i] and close[i] < ema_200_12h[i] and vol_spike[i]:
+            # SHORT: Price below EMA20, RSI < 50 and falling, below 12h EMA50, volume above average
+            elif (close[i] < ema_20[i] and 
+                  rsi[i] < 50 and rsi[i] < rsi[i-1] and 
+                  close[i] < ema_50_4h[i] and 
+                  vol_ratio[i] > 1.2):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Close below lower Donchian or trend change (below 1d EMA200)
-            if close[i] < donchian_low_12h[i] or close[i] < ema_200_12h[i]:
+            # EXIT LONG: Price below EMA20 or trend change (below 12h EMA50) or RSI < 40
+            if (close[i] < ema_20[i] or 
+                close[i] < ema_50_4h[i] or 
+                rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above upper Donchian or trend change (above 1d EMA200)
-            if close[i] > donchian_high_12h[i] or close[i] > ema_200_12h[i]:
+            # EXIT SHORT: Price above EMA20 or trend change (above 12h EMA50) or RSI > 60
+            if (close[i] > ema_20[i] or 
+                close[i] > ema_50_4h[i] or 
+                rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
