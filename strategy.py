@@ -1,8 +1,9 @@
-# 160074: 1h_Camarilla_R3_S3_Breakout_4hEMA12_Trend_VolumeSession
-# Hypothesis: Price breaking above/below Camarilla R3/S3 levels with 4-hour EMA12 trend filter, volume confirmation, and session filter (08-20 UTC) captures strong trending moves while reducing noise. Uses 1h timeframe with 4h EMA12 trend filter for higher timeframe context. Session filter avoids low-liquidity periods. Target: 15-37 trades/year (60-150 over 4 years) by using tight entry conditions.
+#!/usr/bin/env python3
+# 160075: 6h_RSI_Trend_Reversal_With_Volume_Confirmation
+# Hypothesis: RSI(14) extreme readings (>70 or <30) combined with 1-week EMA50 trend filter and volume confirmation captures mean-reversion in ranging markets while avoiding false signals in strong trends. Works in bull/bear by following higher timeframe trend direction. Uses 6h timeframe with weekly EMA50 for trend context.
 
-name = "1h_Camarilla_R3_S3_Breakout_4hEMA12_Trend_VolumeSession"
-timeframe = "1h"
+name = "6h_RSI_Trend_Reversal_With_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -11,52 +12,38 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
 
-    # Calculate 4-hour high, low, close for Camarilla levels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # 1-week EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
 
-    # Calculate Camarilla levels: R3, S3
-    # R3 = close + 1.1 * (high - low) / 2
-    # S3 = close - 1.1 * (high - low) / 2
-    camarilla_range = high_4h - low_4h
-    r3_level = close_4h + 1.1 * camarilla_range / 2
-    s3_level = close_4h - 1.1 * camarilla_range / 2
-
-    # Align Camarilla levels to 1h timeframe
-    r3_level_aligned = align_htf_to_ltf(prices, df_4h, r3_level)
-    s3_level_aligned = align_htf_to_ltf(prices, df_4h, s3_level)
-
-    # 4h EMA12 trend filter
-    ema_12_4h = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_12_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_12_4h)
+    # RSI(14) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
 
     # Volume confirmation: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
 
-    # Session filter: 08-20 UTC (precomputed for efficiency)
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
-
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(35, n):  # Start after EMA12 warmup and session filter
-        if (np.isnan(r3_level_aligned[i]) or np.isnan(s3_level_aligned[i]) or 
-            np.isnan(ema_12_4h_aligned[i]) or np.isnan(volume_confirm[i]) or
-            not session_filter[i]):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,33 +52,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R3 + EMA12 uptrend + volume confirmation + session
-            if (close[i] > r3_level_aligned[i] and 
-                close[i] > ema_12_4h_aligned[i] and 
+            # LONG: RSI oversold (<30) + weekly uptrend + volume confirmation
+            if (rsi[i] < 30 and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume_confirm[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + EMA12 downtrend + volume confirmation + session
-            elif (close[i] < s3_level_aligned[i] and 
-                  close[i] < ema_12_4h_aligned[i] and 
+            # SHORT: RSI overbought (>70) + weekly downtrend + volume confirmation
+            elif (rsi[i] > 70 and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume_confirm[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below EMA12 (trend reversal)
-            if close[i] < ema_12_4h_aligned[i]:
+            # EXIT LONG: RSI overbought (>70) or trend reversal
+            if rsi[i] > 70 or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above EMA12 (trend reversal)
-            if close[i] > ema_12_4h_aligned[i]:
+            # EXIT SHORT: RSI oversold (<30) or trend reversal
+            if rsi[i] < 30 or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
