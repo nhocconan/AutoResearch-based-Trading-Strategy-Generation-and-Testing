@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 4h_200EMA_VWAP_Pullback
-# Hypothesis: On 4h timeframe, enter long when price pulls back to 200EMA during uptrend (price > VWAP) and short when price rallies to 200EMA during downtrend (price < VWAP).
-# Uses VWAP as trend filter and 200EMA as dynamic support/resistance. Works in bull markets (buy dips) and bear markets (sell rallies) by following institutional trend.
-# Designed for 15-40 trades/year to avoid fee drag. Uses volume-weighted price for institutional-grade trend detection.
+# 4h_Donchian_Breakout_Volume_Trend_1d
+# Hypothesis: 4-hour Donchian channel breakout with daily trend filter and volume confirmation.
+# Works in bull markets by capturing upward breakouts and in bear markets by capturing downward breakdowns.
+# Daily trend filter avoids whipsaws in range markets; volume confirms institutional interest.
+# Designed for 20-50 trades per year to minimize fee drag.
 
-name = "4h_200EMA_VWAP_Pullback"
+name = "4h_Donchian_Breakout_Volume_Trend_1d"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,26 +18,36 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate VWAP (volume-weighted average price)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = vwap_num / vwap_den
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
 
-    # Calculate 200 EMA on close
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+
+    # Calculate 4h Donchian channels (20-period)
+    high_4h = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_4h = pd.Series(low).rolling(window=20, min_periods=20).min().values
+
+    # Volume confirmation: current volume > 1.5x average of last 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(200, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if np.isnan(vwap[i]) or np.isnan(ema_200[i]):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(high_4h[i]) or np.isnan(low_4h[i]) or
+            np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -44,31 +55,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter: price above/below VWAP
-        above_vwap = close[i] > vwap[i]
-        below_vwap = close[i] < vwap[i]
+        # Daily trend filter
+        bullish_trend = close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_1d_aligned[i]
 
         if position == 0:
-            # LONG: Price pulls back to 200EMA from above during uptrend (price > VWAP)
-            if close[i] <= ema_200[i] and close[i-1] > ema_200[i-1] and above_vwap:
+            # LONG: Price breaks above Donchian upper with bullish daily trend and volume confirmation
+            if high[i] > high_4h[i-1] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price rallies to 200EMA from below during downtrend (price < VWAP)
-            elif close[i] >= ema_200[i] and close[i-1] < ema_200[i-1] and below_vwap:
+            # SHORT: Price breaks below Donchian lower with bearish daily trend and volume confirmation
+            elif low[i] < low_4h[i-1] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 200EMA or trend changes
-            if close[i] < ema_200[i] and close[i-1] >= ema_200[i-1] or not above_vwap:
+            # EXIT LONG: Price breaks below Donchian lower or daily trend turns bearish
+            if low[i] < low_4h[i-1] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 200EMA or trend changes
-            if close[i] > ema_200[i] and close[i-1] <= ema_200[i-1] or not below_vwap:
+            # EXIT SHORT: Price breaks above Donchian upper or daily trend turns bullish
+            if high[i] > high_4h[i-1] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
