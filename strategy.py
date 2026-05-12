@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Filtered"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -41,10 +41,6 @@ def generate_signals(prices):
     vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
-    # === 4h Volume filter (to avoid low-volume false breakouts) ===
-    vol_avg_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike_4h = volume > (1.5 * vol_avg_4h)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -64,18 +60,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above R1 + above daily EMA34 + volume spike (both 1d and 4h)
+            # Long: Close above R1 + above daily EMA34 + volume spike
             if (close[i] > camarilla_r1_aligned[i] and
                 close[i] > ema34_1d_aligned[i] and
-                vol_spike_1d_aligned[i] > 0.5 and
-                vol_spike_4h[i]):
+                vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 + below daily EMA34 + volume spike (both 1d and 4h)
+            # Short: Close below S1 + below daily EMA34 + volume spike
             elif (close[i] < camarilla_s1_aligned[i] and
                   close[i] < ema34_1d_aligned[i] and
-                  vol_spike_1d_aligned[i] > 0.5 and
-                  vol_spike_4h[i]):
+                  vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
