@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_4H_RSI_34_SMA_50_Crossover_1dTrend_VolumeConfirm
-# Hypothesis: On 4h timeframe, buy when RSI(34) crosses above SMA(50) with volume > 1.5x average and 1d EMA50 trending up; sell when RSI crosses below SMA with volume confirmation and 1d EMA50 trending down. Uses 1d trend filter to avoid counter-trend trades and volume confirmation to ensure breakout strength. Targets 20-40 trades per year to minimize fee drift. Works in bull via momentum and in bear via short signals during downtrends.
+# 4h_HTF_Pivot_Breakout_Volume_Trend
+# Hypothesis: On 4h timeframe, buy when price breaks above daily pivot point with volume >1.5x average and 1d EMA50 trending up; sell when price breaks below daily pivot point with volume >1.5x average and 1d EMA50 trending down. Uses ADX(14) > 20 trend filter to reduce false breakouts in ranging markets. Pivot point provides objective support/resistance, volume confirms breakout strength, and trend filter ensures alignment with higher timeframe momentum. Targets 20-40 trades per year to minimize fee drag and improve generalization across bull/bear markets.
 
-name = "4h_4H_RSI_34_SMA_50_Crossover_1dTrend_VolumeConfirm"
+name = "4h_HTF_Pivot_Breakout_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,51 +20,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
+    # Get 1d data for pivot point and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate RSI(34)
-    def rsi(close, period=34):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        return 100 - (100 / (1 + rs))
+    # Calculate daily pivot point: P = (H + L + C) / 3
+    pivot_point = (high_1d + low_1d + close_1d) / 3.0
 
-    rsi_34 = rsi(close, 34)
+    # Use previous day's pivot (shift by 1) to avoid look-ahead
+    pivot_prev = np.roll(pivot_point, 1)
+    pivot_prev[0] = np.nan
 
-    # Calculate SMA(50)
-    sma_50 = np.convolve(close, np.ones(50)/50, mode='same')
-    # Adjust for edges: use expanding mean for first 50 periods
-    for i in range(50):
-        sma_50[i] = np.mean(close[:i+1])
+    # Align pivot point to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev)
 
     # 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_avg_20 = np.convolve(volume, np.ones(20)/20, mode='same')
-    for i in range(20):
-        vol_avg_20[i] = np.mean(volume[:i+1])
+    # 1d ADX(14) for trend strength filter
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    def smooth_wilder(arr, period):
+        result = np.zeros_like(arr)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    tr_smooth = smooth_wilder(tr, 14)
+    plus_dm_smooth = smooth_wilder(plus_dm, 14)
+    minus_dm_smooth = smooth_wilder(minus_dm, 14)
+    
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 
+                  0)
+    adx = smooth_wilder(dx, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+
+    # Volume confirmation: volume > 1.5x 20-period average (approx 10 hours)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(rsi_34[i]) or np.isnan(sma_50[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_avg_20[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,30 +97,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI crosses above SMA + 1d uptrend + volume spike
-            if (rsi_34[i] > sma_50[i] and rsi_34[i-1] <= sma_50[i-1] and
-                close[i] > ema50_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Price breaks above pivot + 1d uptrend + volume spike + ADX > 20
+            if (close[i] > pivot_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume[i] > vol_avg_20[i] * 1.5 and
+                adx_aligned[i] > 20):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI crosses below SMA + 1d downtrend + volume spike
-            elif (rsi_34[i] < sma_50[i] and rsi_34[i-1] >= sma_50[i-1] and
-                  close[i] < ema50_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Price breaks below pivot + 1d downtrend + volume spike + ADX > 20
+            elif (close[i] < pivot_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume[i] > vol_avg_20[i] * 1.5 and
+                  adx_aligned[i] > 20):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI crosses below SMA OR trend turns down
-            if rsi_34[i] < sma_50[i] and rsi_34[i-1] >= sma_50[i-1] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price breaks below pivot OR trend turns down OR ADX weakens
+            if close[i] < pivot_aligned[i] or close[i] < ema50_1d_aligned[i] or adx_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI crosses above SMA OR trend turns up
-            if rsi_34[i] > sma_50[i] and rsi_34[i-1] <= sma_50[i-1] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above pivot OR trend turns up OR ADX weakens
+            if close[i] > pivot_aligned[i] or close[i] > ema50_1d_aligned[i] or adx_aligned[i] < 15:
                 signals[i] = 0.0
                 position = 0
             else:
