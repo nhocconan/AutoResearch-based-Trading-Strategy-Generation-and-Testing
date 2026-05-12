@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 6h_Donchian_20_WeeklyTrend_DailyVolume
-# Hypothesis: Use weekly trend (via weekly close > weekly SMA20) and daily volume breakout
-# to enter Donchian(20) breakouts on 6h timeframe. Long when weekly uptrend, daily volume > 1.5x avg,
-# and price breaks above 20-period high. Short when weekly downtrend, daily volume > 1.5x avg,
-# and price breaks below 20-period low. Exit when price crosses the 20-period midpoint.
-# Weekly trend filters noise, daily volume confirms momentum, Donchian provides clear breakout levels.
-# Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets.
-# Targets ~20-30 trades/year by requiring weekly trend alignment + volume surge + breakout.
+# 12h_ThreeWhiteSoldiers_ThreeBlackCrows_Trend_Volume
+# Hypothesis: Use 12h Three White Soldiers / Three Black Crows patterns for trend continuation entries.
+# Enter long on Three White Soldiers with volume confirmation and 1d uptrend.
+# Enter short on Three Black Crows with volume confirmation and 1d downtrend.
+# Exit when pattern breaks or trend reverses.
+# This strategy captures momentum continuation with strict pattern recognition to limit trades.
+# Works in bull markets (continuation of uptrends) and bear markets (continuation of downtrends).
+# Targets 15-25 trades/year by requiring rare candlestick patterns.
 
-name = "6h_Donchian_20_WeeklyTrend_DailyVolume"
-timeframe = "6h"
+name = "12h_ThreeWhiteSoldiers_ThreeBlackCrows_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,49 +18,50 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
-        return np.zeros(n)
-
-    # Get daily data for volume confirmation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
 
-    # Weekly trend: close > SMA20
-    weekly_sma20 = pd.Series(df_1w['close']).rolling(window=20, min_periods=20).mean().values
-    weekly_trend_up = df_1w['close'].values > weekly_sma20
-    weekly_trend_down = df_1w['close'].values < weekly_sma20
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
-    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
+    # Daily trend filter: EMA34
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Daily volume: current volume > 1.5x average of last 5 days
-    daily_volume_avg = pd.Series(df_1d['volume']).rolling(window=5, min_periods=5).mean().values
-    daily_volume_ok = df_1d['volume'].values > (1.5 * daily_volume_avg)
-    daily_volume_ok_aligned = align_htf_to_ltf(prices, df_1d, daily_volume_ok)
+    # Volume confirmation: current volume > 1.5x average of last 2 periods (1 day)
+    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    volume_ok = volume > (1.5 * vol_ma)
 
-    # Donchian channel (20-period) on 6h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    mid_20 = (high_20 + low_20) / 2.0
+    # Three White Soldiers: three consecutive bullish candles with higher closes
+    bullish = close > open_
+    higher_close = close > np.roll(close, 1)
+    three_white_soldiers = bullish & np.roll(bullish, 1) & np.roll(bullish, 2) & \
+                           higher_close & np.roll(higher_close, 1) & np.roll(higher_close, 2)
+
+    # Three Black Crows: three consecutive bearish candles with lower closes
+    bearish = close < open_
+    lower_close = close < np.roll(close, 1)
+    three_black_crows = bearish & np.roll(bearish, 1) & np.roll(bearish, 2) & \
+                        lower_close & np.roll(lower_close, 1) & np.roll(lower_close, 2)
+
+    # Align daily trend to 12h timeframe
+    price_above_ema = close > ema_34_aligned
+    price_below_ema = close < ema_34_aligned
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(mid_20[i]) or
-            np.isnan(weekly_trend_up_aligned[i]) or np.isnan(weekly_trend_down_aligned[i]) or
-            np.isnan(daily_volume_ok_aligned[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,26 +70,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: weekly uptrend, volume breakout, price breaks above Donchian high
-            if weekly_trend_up_aligned[i] and daily_volume_ok_aligned[i] and close[i] > high_20[i]:
+            # LONG: Three White Soldiers with volume and uptrend
+            if three_white_soldiers[i] and volume_ok[i] and price_above_ema[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: weekly downtrend, volume breakout, price breaks below Donchian low
-            elif weekly_trend_down_aligned[i] and daily_volume_ok_aligned[i] and close[i] < low_20[i]:
+            # SHORT: Three Black Crows with volume and downtrend
+            elif three_black_crows[i] and volume_ok[i] and price_below_ema[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below midpoint
-            if close[i] < mid_20[i]:
+            # EXIT LONG: pattern breaks or trend turns down
+            if not three_white_soldiers[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above midpoint
-            if close[i] > mid_20[i]:
+            # EXIT SHORT: pattern breaks or trend turns up
+            if not three_black_crows[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
