@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-12H_CAMARILLA_R3_S3_BREAKOUT_1D_WEEKLY_TREND_FILTER
-Hypothesis: On 12h timeframe, take long when price breaks above 1-day Camarilla R3 with volume spike and weekly trend up (EMA20 > EMA50), short when breaks below S3 with volume spike and weekly trend down (EMA20 < EMA50). Exit when price crosses opposite S3/R3. Uses weekly EMA trend filter to avoid counter-trend trades, reducing whipsaw in ranging markets. Designed for ~15-25 trades/year on 12h to minimize fee drag.
+4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
+Hypothesis: Camarilla R3/S3 breakout with 1-day volume spike confirmation.
+Works in bull/bear markets by only taking breakouts with above-average volume,
+which filters out false breakouts and targets institutional participation.
+Designed for ~20-40 trades/year on 4h to minimize fee drag.
 """
-name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_WEEKLY_TREND_FILTER"
-timeframe = "12h"
+name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,12 +24,20 @@ def generate_signals(prices):
     close = prices['close'].values
     
     # Calculate Camarilla levels from previous day
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    # We need previous day's OHLC
+    prev_day_close = close
+    prev_day_high = high
+    prev_day_low = low
+    
+    # Shift to get previous day's values (since we're on 4h timeframe)
+    # For 4h data, we need to look back to previous daily candle
     camarilla_r3 = np.full(n, np.nan)
     camarilla_s3 = np.full(n, np.nan)
     
     for i in range(1, n):
-        camarilla_r3[i] = close[i-1] + (high[i-1] - low[i-1]) * 1.1 / 2
-        camarilla_s3[i] = close[i-1] - (high[i-1] - low[i-1]) * 1.1 / 2
+        camarilla_r3[i] = prev_day_close[i-1] + (prev_day_high[i-1] - prev_day_low[i-1]) * 1.1 / 2
+        camarilla_s3[i] = prev_day_close[i-1] - (prev_day_high[i-1] - prev_day_low[i-1]) * 1.1 / 2
     
     # 1d data for volume spike confirmation
     df_1d = get_htf_data(prices, '1d')
@@ -38,23 +49,12 @@ def generate_signals(prices):
     vol_spike = vol_1d / vol_ma_20d  # Current volume / 20-day average
     vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
     
-    # Weekly EMA trend filter (EMA20 > EMA50 = uptrend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema20_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(1, n):  # Start from 1 to have previous day data
         if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(vol_spike_aligned[i]) or np.isnan(ema20_aligned[i]) or np.isnan(ema50_aligned[i])):
+            np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,16 +63,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above R3 with volume spike and weekly uptrend
+            # LONG: Break above R3 with volume spike
             if (high[i] > camarilla_r3[i] and 
-                vol_spike_aligned[i] > 1.5 and
-                ema20_aligned[i] > ema50_aligned[i]):
+                vol_spike_aligned[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S3 with volume spike and weekly downtrend
+            # SHORT: Break below S3 with volume spike
             elif (low[i] < camarilla_s3[i] and 
-                  vol_spike_aligned[i] > 1.5 and
-                  ema20_aligned[i] < ema50_aligned[i]):
+                  vol_spike_aligned[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
