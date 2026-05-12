@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Keltner_Channel_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,32 +17,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Data for trend filter ===
+    # === 1d Data for trend and Camarilla calculation ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # === 1d EMA34 for trend ===
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Keltner Channel (4h) ===
-    # ATR
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # === Camarilla levels from previous 1d candle ===
+    # Calculate Camarilla levels using previous day's range
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    range_1d = prev_high_1d - prev_low_1d
     
-    atr_period = 20
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
+    r4 = prev_close_1d + (range_1d * 1.1 / 2)
+    s4 = prev_close_1d - (range_1d * 1.1 / 2)
     
-    # EMA for middle line
-    ema_period = 20
-    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
-    
-    multiplier = 2.0
-    upper_band = ema + (multiplier * atr)
-    lower_band = ema - (multiplier * atr)
+    # Align to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # === Volume spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,9 +54,9 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(ema[i]) or
-            np.isnan(upper_band[i]) or
-            np.isnan(lower_band[i])):
+            np.isnan(r4_aligned[i]) or
+            np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,28 +65,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above upper Keltner band + volume spike + 1d trend up
-            if (close[i] > upper_band[i] and 
+            # Long: price breaks above R4 + volume spike + 1d trend up
+            if (close[i] > r4_aligned[i] and 
                 volume_spike[i] and
                 close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Keltner band + volume spike + 1d trend down
-            elif (close[i] < lower_band[i] and 
+            # Short: price breaks below S4 + volume spike + 1d trend down
+            elif (close[i] < s4_aligned[i] and 
                   volume_spike[i] and
                   close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below EMA (middle line) or trend breaks
-            if close[i] < ema[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: price crosses below S4 or trend breaks
+            if close[i] < s4_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above EMA (middle line) or trend breaks
-            if close[i] > ema[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: price crosses above R4 or trend breaks
+            if close[i] > r4_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
