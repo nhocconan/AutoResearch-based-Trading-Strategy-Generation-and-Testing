@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 12h_ThreeWhiteSoldiers_ThreeBlackCrows_Trend_Volume
-# Hypothesis: Use 12h Three White Soldiers / Three Black Crows patterns for trend continuation entries.
-# Enter long on Three White Soldiers with volume confirmation and 1d uptrend.
-# Enter short on Three Black Crows with volume confirmation and 1d downtrend.
-# Exit when pattern breaks or trend reverses.
-# This strategy captures momentum continuation with strict pattern recognition to limit trades.
-# Works in bull markets (continuation of uptrends) and bear markets (continuation of downtrends).
-# Targets 15-25 trades/year by requiring rare candlestick patterns.
+# 4h_TRIX_ZeroCross_TrendFilter_Volume
+# Hypothesis: Use TRIX (15) zero cross as momentum signal with 1d EMA50 trend filter and volume confirmation.
+# Long when TRIX crosses above zero with rising volume and price above daily EMA50.
+# Short when TRIX crosses below zero with rising volume and price below daily EMA50.
+# Exit when TRIX returns to zero or trend reverses.
+# Works in bull markets (captures momentum) and bear markets (shorts during downtrends).
+# Targets 20-30 trades/year by requiring zero cross, volume spike, and trend alignment.
 
-name = "12h_ThreeWhiteSoldiers_ThreeBlackCrows_Trend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_ZeroCross_TrendFilter_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,10 +17,9 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -29,39 +27,42 @@ def generate_signals(prices):
 
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Daily trend filter: EMA34
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-
-    # Volume confirmation: current volume > 1.5x average of last 2 periods (1 day)
-    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Calculate TRIX (15,9,9) - triple EMA of 1-period % change
+    # ROC = (close - close.shift(1)) / close.shift(1)
+    roc = np.diff(close, prepend=close[0]) / np.where(close[:-1] == 0, 1e-10, close[:-1])
+    roc = np.append(roc[1:], 0)  # align length
+    
+    # EMA1 of ROC
+    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA2 of EMA1
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # EMA3 of EMA2 = TRIX
+    trix = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values * 100  # scale to percentage
+    
+    # TRIX zero cross signals
+    trix_above = trix > 0
+    trix_below = trix < 0
+    trix_cross_up = (trix > 0) & (np.roll(trix, 1) <= 0)  # crossed above zero
+    trix_cross_down = (trix < 0) & (np.roll(trix, 1) >= 0)  # crossed below zero
+    
+    # Daily trend filter: EMA50
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: current volume > 1.5x average of last 6 periods (1.5 days)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     volume_ok = volume > (1.5 * vol_ma)
-
-    # Three White Soldiers: three consecutive bullish candles with higher closes
-    bullish = close > open_
-    higher_close = close > np.roll(close, 1)
-    three_white_soldiers = bullish & np.roll(bullish, 1) & np.roll(bullish, 2) & \
-                           higher_close & np.roll(higher_close, 1) & np.roll(higher_close, 2)
-
-    # Three Black Crows: three consecutive bearish candles with lower closes
-    bearish = close < open_
-    lower_close = close < np.roll(close, 1)
-    three_black_crows = bearish & np.roll(bearish, 1) & np.roll(bearish, 2) & \
-                        lower_close & np.roll(lower_close, 1) & np.roll(lower_close, 2)
-
-    # Align daily trend to 12h timeframe
-    price_above_ema = close > ema_34_aligned
-    price_below_ema = close < ema_34_aligned
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after warmup
+    for i in range(60, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(trix[i]) or np.isnan(ema_50_aligned[i]) or 
+            np.isnan(volume_ok[i]) or np.isnan(trix_cross_up[i]) or np.isnan(trix_cross_down[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,27 +70,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Check trend alignment from daily EMA50
+        price_above_ema = close[i] > ema_50_aligned[i]
+        price_below_ema = close[i] < ema_50_aligned[i]
+
         if position == 0:
-            # LONG: Three White Soldiers with volume and uptrend
-            if three_white_soldiers[i] and volume_ok[i] and price_above_ema[i]:
+            # LONG: TRIX crosses above zero with volume and uptrend
+            if trix_cross_up[i] and volume_ok[i] and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Three Black Crows with volume and downtrend
-            elif three_black_crows[i] and volume_ok[i] and price_below_ema[i]:
+            # SHORT: TRIX crosses below zero with volume and downtrend
+            elif trix_cross_down[i] and volume_ok[i] and price_below_ema:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: pattern breaks or trend turns down
-            if not three_white_soldiers[i] or close[i] < ema_34_aligned[i]:
+            # EXIT LONG: TRIX returns to zero or trend turns down
+            if trix[i] <= 0 or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: pattern breaks or trend turns up
-            if not three_black_crows[i] or close[i] > ema_34_aligned[i]:
+            # EXIT SHORT: TRIX returns to zero or trend turns up
+            if trix[i] >= 0 or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
