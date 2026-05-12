@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Breakout above R1 or below S1 from daily Camarilla pivots with 1d EMA50 trend filter and volume confirmation. Designed for 12-37 trades/year on 12h timeframe to work in both bull and bear markets by using strong institutional levels and filtering with 1d trend and volume.
+4h_Camarilla_R1S1_Breakout_12hTrend_Volume_Limited
+Hypothesis: Breakout above R1 or below S1 from daily Camarilla pivots with 12h EMA200 trend filter and volume confirmation. 
+Uses longer-term EMA200 for stronger trend filtering to reduce trades and improve robustness across bull/bear markets.
+Designed for 20-30 trades/year on 4h timeframe.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume_Limited"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -37,27 +39,31 @@ def generate_signals(prices):
     r1_1d = close_1d + hl_range * 1.1 / 12
     s1_1d = close_1d - hl_range * 1.1 / 12
 
-    # Align to 12h timeframe (values from previous day's close)
+    # Align to 4h timeframe (values from previous day's close)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
 
-    # Get 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Get 12h data for trend filter (EMA200 for stronger filtering)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 200:
+        return np.zeros(n)
+    close_12h = df_12h['close'].values
+    ema200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
 
-    # Volume confirmation: 12h volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 4h volume > 2x 30-period average (stricter)
+    vol_avg_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(100, n):
         r1_val = r1_1d_aligned[i]
         s1_val = s1_1d_aligned[i]
-        ema50_val = ema50_1d_aligned[i]
-        vol_avg_val = vol_avg_20[i]
+        ema200_val = ema200_12h_aligned[i]
+        vol_avg_val = vol_avg_30[i]
 
-        if np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema50_val) or np.isnan(vol_avg_val):
+        if np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema200_val) or np.isnan(vol_avg_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,32 +72,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above R1 + uptrend + volume confirmation
-            if close[i] > r1_val and close[i] > ema50_val and volume[i] > vol_avg_val * 1.5:
+            # LONG: Close above R1 + uptrend (above EMA200) + volume confirmation
+            if close[i] > r1_val and close[i] > ema200_val and volume[i] > vol_avg_val * 2.0:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below S1 + downtrend + volume confirmation
-            elif close[i] < s1_val and close[i] < ema50_val and volume[i] > vol_avg_val * 1.5:
+            # SHORT: Close below S1 + downtrend (below EMA200) + volume confirmation
+            elif close[i] < s1_val and close[i] < ema200_val and volume[i] > vol_avg_val * 2.0:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below EMA50 or Camarilla S3 (strong reversal)
-            camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1/4  # S3 level
-            s3_aligned = align_htf_to_ltf(prices, df_1d, 
-                                np.full_like(close_1d, camarilla_s3))
-            if close[i] < ema50_val or close[i] < s3_aligned[i]:
+            # EXIT LONG: Close below EMA200 or below S1 (re-entry level)
+            if close[i] < ema200_val or close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above EMA50 or Camarilla R3 (strong reversal)
-            camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1/4  # R3 level
-            r3_aligned = align_htf_to_ltf(prices, df_1d, 
-                                np.full_like(close_1d, camarilla_r3))
-            if close[i] > ema50_val or close[i] > r3_aligned[i]:
+            # EXIT SHORT: Close above EMA200 or above R1 (re-entry level)
+            if close[i] > ema200_val or close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
