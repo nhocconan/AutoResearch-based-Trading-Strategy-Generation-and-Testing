@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1D_Keltner_Breakout_Trend_Volume
-# Hypothesis: Breakouts above/below Keltner Channel (2*ATR) on 12h with 1d trend filter and volume confirmation.
-# Works in bull/bear markets: In uptrends, buy upper band breakouts; in downtrends, sell lower band breakouts.
-# Volume ensures breakout validity, reducing false signals. Designed for 12h to limit trade frequency.
+# 4h_1D_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts at daily Camarilla R1/S1 levels with 1d EMA trend filter and volume confirmation.
+# Works in bull/bear markets: In uptrends, buy R1 breakouts; in downtrends, sell S1 breakdowns.
+# Volume ensures breakout validity, reducing false signals. Designed for 4h to limit trade frequency.
 
-name = "12h_1D_Keltner_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,41 +22,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 12h data for Keltner Channel and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-
-    # 12h ATR(20) for Keltner Channel
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
-    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
-    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
-    atr_20_12h = tr.rolling(window=20, min_periods=20).mean().values
-
-    # 12h EMA20 for Keltner middle line
-    ema_20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-
-    # Keltner upper and lower bands (2*ATR)
-    keltner_upper = ema_20_12h + 2 * atr_20_12h
-    keltner_lower = ema_20_12h - 2 * atr_20_12h
-
-    # Align Keltner bands to 12h timeframe
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_12h, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_12h, keltner_lower)
-
-    # 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-
-    # Get 1d data for trend filter (using EMA50)
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
 
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+
+    # Get 1d data for Camarilla pivot levels
+    # Using previous day's data to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,9 +54,8 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(volume_ok[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,33 +63,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filters
-        uptrend_12h = close[i] > ema_50_12h_aligned[i]
-        uptrend_1d = close[i] > ema_50_1d_aligned[i]
-        downtrend_12h = close[i] < ema_50_12h_aligned[i]
-        downtrend_1d = close[i] < ema_50_1d_aligned[i]
+        # Trend filter from 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
 
         if position == 0:
-            # LONG: Break above Keltner upper band in uptrend (both timeframes) with volume
-            if (close[i] > keltner_upper_aligned[i] and uptrend_12h and uptrend_1d and volume_ok[i]):
+            # LONG: Break above Camarilla R1 in uptrend with volume confirmation
+            if (close[i] > camarilla_r1_aligned[i] and uptrend and volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Keltner lower band in downtrend (both timeframes) with volume
-            elif (close[i] < keltner_lower_aligned[i] and downtrend_12h and downtrend_1d and volume_ok[i]):
+            # SHORT: Break below Camarilla S1 in downtrend with volume confirmation
+            elif (close[i] < camarilla_s1_aligned[i] and downtrend and volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters Keltner channel (below upper band) or trend reversal
-            if close[i] < keltner_upper_aligned[i] or not (uptrend_12h and uptrend_1d):
+            # EXIT LONG: Price re-enters Camarilla range (below R1) or trend reversal
+            if close[i] < camarilla_r1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters Keltner channel (above lower band) or trend reversal
-            if close[i] > keltner_lower_aligned[i] or not (downtrend_12h and downtrend_1d):
+            # EXIT SHORT: Price re-enters Camarilla range (above S1) or trend reversal
+            if close[i] > camarilla_s1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
