@@ -1,8 +1,11 @@
-# 6h_1D_Camarilla_R3S3_Breakout_1wTrend
-# Hypothesis: Breakouts above daily R3 or below daily S3 on 6h timeframe with volume confirmation and weekly EMA trend filter. Uses weekly timeframe for trend direction to capture longer-term bias and reduce whipsaw. Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag while capturing strong momentum moves in both bull and bear markets.
+#!/usr/bin/env python3
+# 12h_1W_Camarilla_R3S3_Breakout_Trend_Volume
+# Hypothesis: Breakouts above weekly R3 or below weekly S3 on 12h timeframe with volume confirmation and weekly EMA34 trend filter.
+# Uses weekly timeframe for both trend and pivot levels to reduce noise and avoid overtrading. Designed for 12-37 trades/year.
+# Weekly trend filter helps capture major trend moves while avoiding counter-trend noise in both bull and bear markets.
 
-name = "6h_1D_Camarilla_R3S3_Breakout_1wTrend"
-timeframe = "6h"
+name = "12h_1W_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,36 +22,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-
-    # Get weekly data for trend filter
+    # Get weekly data for trend filter and Camarilla levels
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
-
-    # Calculate daily Camarilla levels (R3 and S3) based on previous day
-    prev_high_1d = np.roll(df_1d['high'].values, 1)
-    prev_low_1d = np.roll(df_1d['low'].values, 1)
-    prev_close_1d = np.roll(df_1d['close'].values, 1)
-    prev_high_1d[0] = df_1d['high'].values[0]
-    prev_low_1d[0] = df_1d['low'].values[0]
-    prev_close_1d[0] = df_1d['close'].values[0]
-    
-    rang_1d = prev_high_1d - prev_low_1d
-    R3 = prev_close_1d + rang_1d * 1.1 / 4
-    S3 = prev_close_1d - rang_1d * 1.1 / 4
-
-    # Align daily levels to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
 
     # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
     ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+
+    # Calculate weekly Camarilla levels (R3 and S3) based on previous week
+    prev_high = np.roll(df_1w['high'].values, 1)
+    prev_low = np.roll(df_1w['low'].values, 1)
+    prev_close = np.roll(df_1w['close'].values, 1)
+    prev_high[0] = df_1w['high'].values[0]
+    prev_low[0] = df_1w['low'].values[0]
+    prev_close[0] = df_1w['close'].values[0]
+    
+    rang = prev_high - prev_low
+    R3 = prev_close + rang * 1.1 / 4
+    S3 = prev_close - rang * 1.1 / 4
+
+    # Align weekly levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,8 +57,8 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+            np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
