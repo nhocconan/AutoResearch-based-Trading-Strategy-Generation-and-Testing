@@ -1,45 +1,40 @@
 #!/usr/bin/env python3
-# 1d_WilliamsAlligator_1wTrend
-# Hypothesis: Use Williams Alligator (Jaw, Teeth, Lips) on weekly timeframe to determine trend direction,
-# filtered by daily price position relative to the Alligator's Teeth (SMMA8) and volume confirmation.
-# Go long when price > Teeth and Lips > Jaw (bullish alignment), short when price < Teeth and Lips < Jaw (bearish alignment).
-# Exit on opposite signal or when price crosses Jaw. Designed for low frequency (<25 trades/year) to avoid fee drag.
-# Williams Alligator uses smoothed moving averages (SMMA) which are less noisy and better for trend identification.
+# 12h_TRIX_1dTrend_Volume
+# Hypothesis: Use TRIX (12-period) on 12h for momentum, filtered by 1d EMA34 trend and volume spike.
+# TRIX > 0 indicates bullish momentum, TRIX < 0 bearish. Enter long when TRIX crosses above 0
+# with price above 1d EMA34 and volume above average; enter short on cross below 0 with price
+# below 1d EMA34 and volume confirmation. Exit on TRIX cross back through zero or trend failure.
+# Designed for low frequency (15-35 trades/year) to avoid fee drag. Works in bull (catch momentum)
+# and bear (catch reversals) with trend filter and volume confirmation.
 
-name = "1d_WilliamsAlligator_1wTrend"
-timeframe = "1d"
+name = "12h_TRIX_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smoothed_moving_average(data, period):
-    """
-    Calculate Smoothed Moving Average (SMMA).
-    SMMA is similar to EMA but with different smoothing factor.
-    SMMA today = (SMMA yesterday * (period-1) + price today) / period
-    """
-    n = len(data)
-    smma = np.full(n, np.nan)
-    if n == 0:
-        return smma
-    # Initialize with SMA for first value
-    smma[0] = np.mean(data[:min(period, n)])
-    for i in range(1, n):
-        smma[i] = (smma[i-1] * (period-1) + data[i]) / period
-    return smma
+def ema(series, period):
+    """Calculate Exponential Moving Average."""
+    return pd.Series(series).ewm(span=period, adjust=False).mean().values
 
-def williams_alligator(high, low, close):
+def trix(close, period=12):
     """
-    Calculate Williams Alligator indicator.
-    Returns Jaw (SMMA13), Teeth (SMMA8), Lips (SMMA5) of median price.
+    Calculate TRIX indicator.
+    TRIX = EMA(EMA(EMA(close, period), period), period)
+    Returns percentage change: (EMA3 - EMA3_prev) / EMA3_prev * 100
     """
-    median_price = (high + low) / 2
-    jaw = smoothed_moving_average(median_price, 13)  # Jaw: Blue line (13-period)
-    teeth = smoothed_moving_average(median_price, 8)  # Teeth: Red line (8-period)
-    lips = smoothed_moving_average(median_price, 5)   # Lips: Green line (5-period)
-    return jaw, teeth, lips
+    ema1 = ema(close, period)
+    ema2 = ema(ema1, period)
+    ema3 = ema(ema2, period)
+    
+    # Calculate percentage change
+    trix_raw = np.zeros_like(ema3)
+    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    trix_raw[0] = 0
+    
+    return trix_raw
 
 def generate_signals(prices):
     n = len(prices)
@@ -51,38 +46,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Alligator trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Alligator on weekly data
-    jaw_1w, teeth_1w, lips_1w = williams_alligator(high_1w, low_1w, close_1w)
+    # Calculate TRIX on 12h data
+    trix_val = trix(close, 12)
     
-    # Daily EMA for volatility filter (optional)
-    ema_50_d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily EMA34 for trend filter
+    ema_34_1d = ema(close_1d, 34)
     
     # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align weekly Alligator lines to daily timeframe
-    jaw_1w_aligned = align_htf_to_ltf(prices, df_1w, jaw_1w)
-    teeth_1w_aligned = align_htf_to_ltf(prices, df_1w, teeth_1w)
-    lips_1w_aligned = align_htf_to_ltf(prices, df_1w, lips_1w)
+    # Align daily data to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 40  # Ensure indicators are stable (34 EMA + buffer)
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(jaw_1w_aligned[i]) or np.isnan(teeth_1w_aligned[i]) or np.isnan(lips_1w_aligned[i]) or 
-            np.isnan(ema_50_d[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(trix_val[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,38 +80,40 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: Alligator alignment
-        # Bullish: Lips > Teeth > Jaw (green above red above blue)
-        bullish_alignment = lips_1w_aligned[i] > teeth_1w_aligned[i] > jaw_1w_aligned[i]
-        # Bearish: Lips < Teeth < Jaw (green below red below blue)
-        bearish_alignment = lips_1w_aligned[i] < teeth_1w_aligned[i] < jaw_1w_aligned[i]
-        
-        # Price relative to Teeth (8-period SMMA)
-        price_above_teeth = close[i] > teeth_1w_aligned[i]
-        price_below_teeth = close[i] < teeth_1w_aligned[i]
+        # Trend filter: price above/below daily EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
         
         # Volume filter
         vol_ok = volume[i] > vol_ma_20[i]
         
+        # TRIX signals: momentum direction
+        trix_pos = trix_val[i] > 0
+        trix_neg = trix_val[i] < 0
+        
+        # TRIX cross zero (momentum shift)
+        trix_cross_up = trix_val[i] > 0 and trix_val[i-1] <= 0
+        trix_cross_down = trix_val[i] < 0 and trix_val[i-1] >= 0
+        
         if position == 0:
-            # LONG: Bullish alignment AND price above Teeth AND volume confirmation
-            if bullish_alignment and price_above_teeth and vol_ok:
+            # LONG: TRIX crosses above zero, price above daily EMA34, volume confirmation
+            if trix_cross_up and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish alignment AND price below Teeth AND volume confirmation
-            elif bearish_alignment and price_below_teeth and vol_ok:
+            # SHORT: TRIX crosses below zero, price below daily EMA34, volume confirmation
+            elif trix_cross_down and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Bearish alignment OR price crosses below Jaw
-            if bearish_alignment or close[i] < jaw_1w_aligned[i]:
+            # EXIT LONG: TRIX crosses below zero (momentum fails) or trend fails
+            if trix_cross_down or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bullish alignment OR price crosses above Jaw
-            if bullish_alignment or close[i] > jaw_1w_aligned[i]:
+            # EXIT SHORT: TRIX crosses above zero (momentum fails) or trend fails
+            if trix_cross_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
