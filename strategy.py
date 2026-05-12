@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_12h_1d_MarketStructure_Breakout
-# Hypothesis: Combines 6h market structure (HH/HL/LH/LL) with 12h trend filter and volume confirmation.
-# Uses higher timeframe structure to avoid false breakouts, targeting 20-40 trades per year.
-# Works in bull/bear markets by following 12h trend direction while using 6s structure for precise entries.
+# 4h_12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn
+# Hypothesis: Combines Camarilla R3/S3 pivot breakout from 1d with 12h EMA34 trend filter and volume confirmation.
+# Uses 1d pivot levels for high-probability breakouts, 12h EMA34 to filter trend direction, and volume spike to confirm momentum.
+# Works in bull/bear markets by following 12h trend direction while using 1d pivots for precise entry/exit.
 # Volume spike confirms institutional interest in breakouts.
 
-name = "6h_12h_1d_MarketStructure_Breakout"
-timeframe = "6h"
+name = "4h_12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,47 +23,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.8x 20-period average (on 6h timeframe)
+    # Volume spike: >1.8x 20-period average (on 4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.8 * vol_ma)
     
-    # 1d data for market structure (swing points)
+    # 1d data for Camarilla pivot levels (R3, S3)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate swing highs/lows on daily timeframe
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Swing high: higher than 2 bars before and after
-    swing_high = np.zeros(len(high_1d), dtype=bool)
-    swing_low = np.zeros(len(low_1d), dtype=bool)
-    for i in range(2, len(high_1d)-2):
-        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            swing_high[i] = True
-        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            swing_low[i] = True
+    # Calculate Camarilla levels for each day
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
+    camarilla_r4 = np.full(len(close_1d), np.nan)
+    camarilla_s4 = np.full(len(close_1d), np.nan)
     
-    # Last swing high/low levels
-    last_swing_high = np.full(len(high_1d), np.nan)
-    last_swing_low = np.full(len(low_1d), np.nan)
+    for i in range(len(close_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]):
+            continue
+        rang = high_1d[i] - low_1d[i]
+        camarilla_r3[i] = close_1d[i] + rang * 1.1 / 4
+        camarilla_s3[i] = close_1d[i] - rang * 1.1 / 4
+        camarilla_r4[i] = close_1d[i] + rang * 1.1 / 2
+        camarilla_s4[i] = close_1d[i] - rang * 1.1 / 2
     
-    last_high = np.nan
-    last_low = np.nan
-    for i in range(len(high_1d)):
-        if swing_high[i]:
-            last_high = high_1d[i]
-        if swing_low[i]:
-            last_low = low_1d[i]
-        last_swing_high[i] = last_high
-        last_swing_low[i] = last_low
-    
-    # Align swing levels to 6h timeframe
-    swing_high_aligned = align_htf_to_ltf(prices, df_1d, last_swing_high)
-    swing_low_aligned = align_htf_to_ltf(prices, df_1d, last_swing_low)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # 12h data for trend filter (EMA34)
     df_12h = get_htf_data(prices, '12h')
@@ -77,8 +69,8 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(swing_high_aligned[i]) or
-            np.isnan(swing_low_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
             np.isnan(ema_34_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -88,14 +80,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above swing high + volume spike + price above 12h EMA34
-            if (close[i] > swing_high_aligned[i] and 
+            # LONG: Price breaks above R3 + volume spike + price above 12h EMA34
+            if (close[i] > r3_aligned[i] and 
                 volume_spike[i] and 
                 close[i] > ema_34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below swing low + volume spike + price below 12h EMA34
-            elif (close[i] < swing_low_aligned[i] and 
+            # SHORT: Price breaks below S3 + volume spike + price below 12h EMA34
+            elif (close[i] < s3_aligned[i] and 
                   volume_spike[i] and 
                   close[i] < ema_34_12h_aligned[i]):
                 signals[i] = -0.25
@@ -103,16 +95,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below swing high OR closes below 12h EMA34
-            if (close[i] < swing_high_aligned[i]) or \
+            # EXIT LONG: Price re-enters below R3 OR closes below 12h EMA34
+            if (close[i] < r3_aligned[i]) or \
                close[i] < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above swing low OR closes above 12h EMA34
-            if (close[i] > swing_low_aligned[i]) or \
+            # EXIT SHORT: Price re-enters above S3 OR closes above 12h EMA34
+            if (close[i] > s3_aligned[i]) or \
                close[i] > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
