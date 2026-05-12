@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_PriceChannel_Volume_Trend_Filter
-# Hypothesis: Use 20-period Donchian channels for trend direction and breakout signals, filtered by 12h EMA trend and volume spikes (>1.5x 20-period average). This combines price structure with volume confirmation to reduce false breakouts. Targets 20-40 trades/year to minimize fee drag while capturing sustained moves in both bull and bear markets.
+# 6h_MACD_Trend_Filter
+# Hypothesis: MACD(12,26,9) on 6m timeframe captures medium-term momentum; confirmed by 1w trend filter (price > 200-period EMA) and volume spikes (>1.5x 50-period average). Enter long when MACD line crosses above signal line and price > 1w EMA200 with volume spike; short when MACD line crosses below signal line and price < 1w EMA200 with volume spike. Exit on MACD reverse crossover. Targets 15-35 trades/year to minimize fee drag and work in both bull/bear markets via trend filter.
 
-name = "4h_PriceChannel_Volume_Trend_Filter"
-timeframe = "4h"
+name = "6h_MACD_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,30 +20,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate Donchian channels (20-period) on 4h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate MACD on 6h
+    fast_period = 12
+    slow_period = 26
+    signal_period = 9
 
-    # Calculate 12h EMA20 for trend filter
-    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
+    ema_fast = pd.Series(close).ewm(span=fast_period, adjust=False, min_periods=fast_period).mean().values
+    ema_slow = pd.Series(close).ewm(span=slow_period, adjust=False, min_periods=slow_period).mean().values
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=signal_period, adjust=False, min_periods=signal_period).mean().values
 
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1w EMA200 for trend filter
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+
+    # Volume confirmation: volume > 1.5x 50-period average
+    vol_avg_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(max(fast_period, slow_period, signal_period), n):
         # Skip if any required value is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema20_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_avg_50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -52,30 +58,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above upper Donchian + above 12h EMA20 + volume spike
-            if (close[i] > highest_high[i] and 
-                close[i] > ema20_12h_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: MACD line crosses above signal line + price > 1w EMA200 + volume spike
+            if (macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1] and
+                close[i] > ema200_1w_aligned[i] and
+                volume[i] > vol_avg_50[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian + below 12h EMA20 + volume spike
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema20_12h_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: MACD line crosses below signal line + price < 1w EMA200 + volume spike
+            elif (macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1] and
+                  close[i] < ema200_1w_aligned[i] and
+                  volume[i] > vol_avg_50[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below lower Donchian (trend reversal)
-            if close[i] < lowest_low[i]:
+            # EXIT LONG: MACD line crosses below signal line
+            if macd_line[i] < signal_line[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above upper Donchian (trend reversal)
-            if close[i] > highest_high[i]:
+            # EXIT SHORT: MACD line crosses above signal line
+            if macd_line[i] > signal_line[i]:
                 signals[i] = 0.0
                 position = 0
             else:
