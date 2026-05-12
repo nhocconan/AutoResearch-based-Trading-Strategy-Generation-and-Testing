@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Keltner_Channel_Pullback_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,33 +17,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d EMA20 (Keltner middle) ===
+    # === Weekly pivot levels (from daily data) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly pivot from last 5 daily candles (prior week)
+    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().shift(1).values
+    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().shift(1).values
+    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().shift(1).values
     
-    # === ATR(10) for Keltner channels ===
-    atr_1d = np.zeros_like(close_1d)
-    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    tr_1d[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
+    r4 = weekly_high + 3 * (pivot - weekly_low)
+    s4 = weekly_low - 3 * (weekly_high - pivot)
     
-    # Keltner channels: upper = EMA20 + 2*ATR, lower = EMA20 - 2*ATR
-    keltner_upper_1d = ema20_1d + 2.0 * atr_1d
-    keltner_lower_1d = ema20_1d - 2.0 * atr_1d
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # === 1d Volume spike filter ===
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = volume_1d > (1.8 * vol_avg_1d)
+    # === 1d trend filter (EMA50) ===
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align to 4h
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    keltner_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper_1d)
-    keltner_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower_1d)
+    # === 1d volume spike filter ===
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
@@ -53,9 +59,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(keltner_upper_1d_aligned[i]) or
-            np.isnan(keltner_lower_1d_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or
+            np.isnan(s4_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or
             np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,28 +72,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Pullback to lower Keltner + above EMA20 + volume spike
-            if (low[i] <= keltner_lower_1d_aligned[i] and
-                close[i] > ema20_1d_aligned[i] and
+            # Long: Close above R4 + above daily EMA50 + volume spike
+            if (close[i] > r4_aligned[i] and
+                close[i] > ema50_1d_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Pullback to upper Keltner + below EMA20 + volume spike
-            elif (high[i] >= keltner_upper_1d_aligned[i] and
-                  close[i] < ema20_1d_aligned[i] and
+            # Short: Close below S4 + below daily EMA50 + volume spike
+            elif (close[i] < s4_aligned[i] and
+                  close[i] < ema50_1d_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below EMA20 or pullback to upper band
-            if close[i] < ema20_1d_aligned[i] or high[i] >= keltner_upper_1d_aligned[i]:
+            # Exit long: Close below pivot or below EMA50
+            if close[i] < pivot_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above EMA20 or pullback to lower band
-            if close[i] > ema20_1d_aligned[i] or low[i] <= keltner_lower_1d_aligned[i]:
+            # Exit short: Close above pivot or above EMA50
+            if close[i] > pivot_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
