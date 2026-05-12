@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_RSI_2_Trend_Stop"
-timeframe = "4h"
+name = "1d_Donchian_20_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,29 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily EMA200 for trend filter
-    df_1d = get_hef_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # 1 week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # RSI(2) on 4h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # EMA(50) on 1w for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Donchian channel (20-period) on daily
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume spike: current volume > 2.0x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
-        if np.isnan(ema200_1d_aligned[i]):
+        # Skip if data not ready
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -48,24 +50,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI < 10 and price > EMA200 (oversold in uptrend)
-            if rsi[i] < 10 and close[i] > ema200_1d_aligned[i]:
+            # Long: price breaks above Donchian high + 1w trend up + volume spike
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema50_1w_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 90 and price < EMA200 (overbought in downtrend)
-            elif rsi[i] > 90 and close[i] < ema200_1d_aligned[i]:
+            # Short: price breaks below Donchian low + 1w trend down + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema50_1w_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 60 or price < EMA200
-            if rsi[i] > 60 or close[i] < ema200_1d_aligned[i]:
+            # Exit long: price closes below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 40 or price > EMA200
-            if rsi[i] < 40 or close[i] > ema200_1d_aligned[i]:
+            # Exit short: price closes above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
