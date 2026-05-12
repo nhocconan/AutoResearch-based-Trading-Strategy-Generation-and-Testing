@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-# 4h_12h_1d_Trix_VolumeSpike_Regime
-# Hypothesis: Combines TRIX momentum (12h) with volume spike and Choppiness regime filter on 4h.
-# Goes long when TRIX turns positive (bullish momentum) with volume spike in low-chop (trending) market.
-# Goes short when TRIX turns negative (bearish momentum) with volume spike in low-chop market.
-# Uses 1d ADX to confirm trend strength (ADX > 25) to avoid whipsaws in ranging markets.
-# Designed for low trade frequency (<100/year) to minimize fee drag and improve generalization.
+"""
+6h_1w_1d_Momentum_Reversal_With_Volume
+Hypothesis: Combines weekly momentum (RSI) with daily mean reversion (CCI) on 6h timeframe.
+- Long when: Weekly RSI < 40 (weak momentum) AND Daily CCI < -100 (oversold) AND 6h volume spike
+- Short when: Weekly RSI > 60 (strong momentum) AND Daily CCI > 100 (overbought) AND 6h volume spike
+- Uses volume spike to confirm momentum shift
+- Designed for low trade frequency (20-50 trades/year) to work in both bull and bear markets
+- Weekly RSI avoids chasing momentum; Daily CCI captures mean reversion opportunities
+"""
 
-name = "4h_12h_1d_Trix_VolumeSpike_Regime"
-timeframe = "4h"
+name = "6h_1w_1d_Momentum_Reversal_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,103 +19,60 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.8x 30-period average (to reduce trade frequency)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Volume spike: >2x 50-period average (on 6h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # 1h data for Choppiness index (regime filter)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 20:
+    # Weekly data for RSI momentum filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    close_1h = df_1h['close'].values
+    close_1w = df_1w['close'].values
+    # Calculate RSI(14) on weekly data
+    delta = pd.Series(close_1w).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_values = rsi_1w.values
     
-    # True Range
-    tr1 = high_1h[1:] - low_1h[1:]
-    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
-    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align index
-    
-    # ATR(14)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # +DM and -DM
-    up_move = high_1h[1:] - high_1h[:-1]
-    down_move = low_1h[:-1] - low_1h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed +DM, -DM, TR
-    def smooth(val, period):
-        smoothed = np.zeros_like(val)
-        smoothed[:] = np.nan
-        if len(val) >= period:
-            # First value: simple average
-            smoothed[period-1] = np.nansum(val[:period])
-            # Wilder smoothing
-            for i in range(period, len(val)):
-                smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + val[i]
-        return smoothed
-    
-    smoothed_plus_dm = smooth(plus_dm, 14)
-    smoothed_minus_dm = smooth(minus_dm, 14)
-    smoothed_tr = smooth(tr, 14)
-    
-    # +DI and -DI
-    plus_di = 100 * smoothed_plus_dm / smoothed_tr
-    minus_di = 100 * smoothed_minus_dm / smoothed_tr
-    
-    # DX and ADX
-    dx = np.zeros_like(close_1h)
-    dx[:] = np.nan
-    di_sum = plus_di + minus_di
-    mask = di_sum > 0
-    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / di_sum[mask]
-    
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_trending = adx > 25  # trending market filter
-    
-    # 12h data for TRIX
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Daily data for CCI mean reversion
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # TRIX: EMA of EMA of EMA of close, then ROC
-    ema1 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Calculate CCI(20) on daily data
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    sma_tp = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean()
+    mad = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci_1d = (tp_1d - sma_tp) / (0.015 * mad)
+    cci_1d_values = cci_1d.values
     
-    # Rate of change of triple EMA
-    trix = np.zeros_like(ema3)
-    trix[:] = np.nan
-    trix[12:] = (ema3[12:] - ema3[:-12]) / ema3[:-12] * 100
-    
-    # Align indicators to 4h timeframe
-    volume_spike_aligned = align_htf_to_ltf(prices, prices, volume_spike)  # already 4h
-    adx_trending_aligned = align_htf_to_ltf(prices, df_1h, adx_trending)
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
+    # Align all indicators to 6h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
+    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
-        if (np.isnan(trix_aligned[i]) or 
-            np.isnan(adx_trending_aligned[i])):
+    for i in range(100, n):
+        if (np.isnan(rsi_1w_aligned[i]) or
+            np.isnan(cci_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -121,34 +81,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: TRIX turns positive (>0) + volume spike + trending market (ADX>25)
-            if (trix_aligned[i] > 0 and 
-                trix_aligned[i-1] <= 0 and  # crossed above zero
-                volume_spike_aligned[i] and
-                adx_trending_aligned[i]):
+            # LONG: Weak weekly momentum + daily oversold + volume spike
+            if (rsi_1w_aligned[i] < 40 and 
+                cci_1d_aligned[i] < -100 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX turns negative (<0) + volume spike + trending market
-            elif (trix_aligned[i] < 0 and 
-                  trix_aligned[i-1] >= 0 and  # crossed below zero
-                  volume_spike_aligned[i] and
-                  adx_trending_aligned[i]):
+            # SHORT: Strong weekly momentum + daily overbought + volume spike
+            elif (rsi_1w_aligned[i] > 60 and 
+                  cci_1d_aligned[i] > 100 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX turns negative OR loss of trend
-            if (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0) or \
-               (not adx_trending_aligned[i]):
+            # EXIT LONG: Weekly momentum strengthens OR daily overbought
+            if (rsi_1w_aligned[i] > 50) or \
+               (cci_1d_aligned[i] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX turns positive OR loss of trend
-            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0) or \
-               (not adx_trending_aligned[i]):
+            # EXIT SHORT: Weekly momentum weakens OR daily oversold
+            if (rsi_1w_aligned[i] < 50) or \
+               (cci_1d_aligned[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
