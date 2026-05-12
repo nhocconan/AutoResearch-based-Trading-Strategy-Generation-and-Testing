@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -41,6 +41,10 @@ def generate_signals(prices):
     vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -59,18 +63,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Skip outside session
+        if not session_filter[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:
             # Long: Close above R1 + above daily EMA34 + volume spike
             if (close[i] > camarilla_r1_aligned[i] and
                 close[i] > ema34_1d_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: Close below S1 + below daily EMA34 + volume spike
             elif (close[i] < camarilla_s1_aligned[i] and
                   close[i] < ema34_1d_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Exit long: Close below S1 or below EMA34
@@ -78,13 +91,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Exit short: Close above R1 or above EMA34
             if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
