@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4H_DONCHIAN_BREAKOUT_12HTREND_VOLUME_CONFIRMATION
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-# Long when price breaks above upper band in bullish trend (price > 12h EMA50), short when below lower band in bearish trend.
-# Uses volume spike (2x 24-period average) for confirmation. Target 20-50 trades/year to avoid fee drag.
+# 1H_CAMARILLA_PIVOT_BREAKOUT_4H_TREND_1D_VOLUME_FILTER
+# Hypothesis: Use Camarilla pivot levels (R3/S3) on 4h for directional bias, breakout on 1h with volume confirmation.
+# Only trade when 1d trend is aligned (price above/below EMA34). Reduces false breakouts in chop.
+# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+# Works in bull/bear by using 1d trend filter and volume confirmation to avoid whipsaws.
 
-name = "4H_DONCHIAN_BREAKOUT_12HTREND_VOLUME_CONFIRMATION"
-timeframe = "4h"
+name = "1H_CAMARILLA_PIVOT_BREAKOUT_4H_TREND_1D_VOLUME_FILTER"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,34 +23,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h data for Camarilla pivot levels (R3/S3)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate Camarilla levels for each 4h bar
+    # Pivot = (H+L+C)/3
+    # R3 = Pivot + 1.1*(H-L)
+    # S3 = Pivot - 1.1*(H-L)
+    pivot_4h = (high_4h + low_4h + close_4h) / 3
+    r3_4h = pivot_4h + 1.1 * (high_4h - low_4h)
+    s3_4h = pivot_4h - 1.1 * (high_4h - low_4h)
     
-    # 4h Donchian(20) channels
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # 1d data for trend filter and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Volume spike detection (2x 24-period average)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > vol_ma * 2.0
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # 1d volume moving average (20-period) for volume filter
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all HTF indicators to 1h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # 1h volume spike: current volume > 1.5 * 20-period MA
+    vol_ma_1h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > vol_ma_1h * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 20  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma_aligned[i]) or 
+            np.isnan(vol_ma_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,33 +82,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper Donchian band with volume confirmation in bullish trend
-            if (close[i] > upper[i] and vol_spike[i] and 
-                close[i] > ema50_12h_aligned[i]):
-                signals[i] = 0.25
+            # LONG: Price breaks above R3 with volume confirmation and uptrend
+            if (close[i] > r3_aligned[i] and vol_spike[i] and 
+                close[i] > ema34_aligned[i] and volume[i] > vol_ma_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below lower Donchian band with volume confirmation in bearish trend
-            elif (close[i] < lower[i] and vol_spike[i] and 
-                  close[i] < ema50_12h_aligned[i]):
-                signals[i] = -0.25
+            # SHORT: Price breaks below S3 with volume confirmation and downtrend
+            elif (close[i] < s3_aligned[i] and vol_spike[i] and 
+                  close[i] < ema34_aligned[i] and volume[i] > vol_ma_aligned[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to middle of Donchian channel (mean reversion)
-            middle = (upper[i] + lower[i]) / 2.0
-            if close[i] < middle:
+            # EXIT LONG: Price returns to S3 (mean reversion to opposite level)
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price returns to middle of Donchian channel
-            middle = (upper[i] + lower[i]) / 2.0
-            if close[i] > middle:
+            # EXIT SHORT: Price returns to R3
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
