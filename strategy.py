@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 1h_4h1d_Trend_Filtered_TripleMA_Cross
-# Hypothesis: On 1h timeframe, use 4h and 1d moving averages to establish trend direction.
-# Enter long when 1h EMA(8) > EMA(21) AND 4h EMA(21) > EMA(55) AND 1d EMA(55) > EMA(89).
-# Enter short when 1h EMA(8) < EMA(21) AND 4h EMA(21) < EMA(55) AND 1d EMA(55) < EMA(89).
-# Add volume confirmation (volume > 20-period average) and session filter (08:00-20:00 UTC).
-# Exit on opposite signal or when any trend condition fails.
-# Designed to reduce false signals in chop by requiring alignment across multiple timeframes.
-# Works in both bull and bear markets by following the higher timeframe trend.
+# 6h_RankMomentum_20_50_Trend
+# Hypothesis: Rank-based momentum filtering using cross-sectional ranking of 20-period returns
+# against 50-period median to identify persistent trends. Combines with weekly trend filter
+# (price above/below weekly 200 EMA) and volume confirmation. The rank mechanism adapts to
+# changing volatility regimes and avoids lookback window sensitivity. Designed for 6H timeframe
+# to capture multi-day momentum while limiting trade frequency. Works in bull/bear by following
+# higher timeframe trend direction.
 
-name = "1h_4h1d_Trend_Filtered_TripleMA_Cross"
-timeframe = "1h"
+name = "6h_RankMomentum_20_50_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,57 +25,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 4h EMA (21, 55) for trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 55:
+    # === Weekly Trend Filter (200 EMA) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema55_4h = pd.Series(close_4h).ewm(span=55, adjust=False, min_periods=55).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-    ema55_4h_aligned = align_htf_to_ltf(prices, df_4h, ema55_4h)
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # === 1d EMA (55, 89) for trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 89:
-        return np.zeros(n)
+    # === Rank Momentum (20 vs 50) ===
+    # 20-period returns
+    returns_20 = np.zeros_like(close)
+    returns_20[20:] = (close[20:] - close[:-20]) / close[:-20]
+    # 50-period median of returns for adaptive threshold
+    returns_50_median = pd.Series(returns_20).rolling(window=50, min_periods=50).median().values
+    # Rank signal: 1 if return > median, -1 if return < median, 0 otherwise
+    rank_signal = np.sign(returns_20 - returns_50_median)
     
-    close_1d = df_1d['close'].values
-    ema55_1d = pd.Series(close_1d).ewm(span=55, adjust=False, min_periods=55).mean().values
-    ema89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
-    ema55_1d_aligned = align_htf_to_ltf(prices, df_1d, ema55_1d)
-    ema89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
-    
-    # === 1h EMA (8, 21) for entry signal ===
-    ema8_1h = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # === Volume confirmation (20-period average) ===
+    # === Volume Confirmation (20-period average) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # === Session filter: 08:00-20:00 UTC ===
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Ensure all indicators are stable
+    start_idx = 100  # Ensure indicators are stable
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         # Skip if any critical data is not ready
-        if (np.isnan(ema8_1h[i]) or np.isnan(ema21_1h[i]) or 
-            np.isnan(ema21_4h_aligned[i]) or np.isnan(ema55_4h_aligned[i]) or
-            np.isnan(ema55_1d_aligned[i]) or np.isnan(ema89_1d_aligned[i]) or
+        if (np.isnan(ema_200_1w_aligned[i]) or 
+            np.isnan(rank_signal[i]) or
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -85,40 +63,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend alignment conditions
-        bullish_alignment = (ema8_1h[i] > ema21_1h[i]) and \
-                           (ema21_4h_aligned[i] > ema55_4h_aligned[i]) and \
-                           (ema55_1d_aligned[i] > ema89_1d_aligned[i])
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_200_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_200_1w_aligned[i]
         
-        bearish_alignment = (ema8_1h[i] < ema21_1h[i]) and \
-                           (ema21_4h_aligned[i] < ema55_4h_aligned[i]) and \
-                           (ema55_1d_aligned[i] < ema89_1d_aligned[i])
-        
-        # Volume filter
+        # Volume filter: above average
         vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: bullish alignment + volume
-            if bullish_alignment and vol_ok:
-                signals[i] = 0.20
+            # LONG: Positive rank momentum, weekly uptrend, volume confirmation
+            if rank_signal[i] > 0 and weekly_uptrend and vol_ok:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: bearish alignment + volume
-            elif bearish_alignment and vol_ok:
-                signals[i] = -0.20
+            # SHORT: Negative rank momentum, weekly downtrend, volume confirmation
+            elif rank_signal[i] < 0 and weekly_downtrend and vol_ok:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: bearish alignment or volume fails
-            if bearish_alignment or not vol_ok:
+            # EXIT LONG: Rank turns negative or weekly trend breaks
+            if rank_signal[i] < 0 or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: bullish alignment or volume fails
-            if bullish_alignment or not vol_ok:
+            # EXIT SHORT: Rank turns positive or weekly trend breaks
+            if rank_signal[i] > 0 or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
