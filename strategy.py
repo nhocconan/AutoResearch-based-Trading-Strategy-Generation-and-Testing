@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3
-# Hypothesis: Trading breakouts from daily Camarilla R1/S1 levels in the direction of the daily trend, with volume confirmation requiring 2.0x average volume to significantly reduce trade frequency and avoid fee drag. Designed to work in both bull and bear markets by following higher-timeframe trend.
+# 12h_1D_Camarilla_R1S1_Breakout_Trend_VolumeS
+# Hypothesis: Trade breakouts from daily Camarilla R1/S1 levels on 12h timeframe in the direction of the daily trend, with volume confirmation requiring 1.5x average volume. Uses stricter entry conditions to target 50-150 total trades over 4 years, avoiding fee drag while maintaining edge in bull and bear markets by following higher-timeframe trend.
 
-name = "4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3"
-timeframe = "4h"
+name = "12h_1D_Camarilla_R1S1_Breakout_Trend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -34,7 +34,7 @@ def generate_signals(prices):
     r1 = close_1d + 1.1 * camarilla_range / 12
     s1 = close_1d - 1.1 * camarilla_range / 12
 
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
@@ -42,10 +42,10 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate 4h volume SMA20 for volume confirmation (with spike filter)
+    # Calculate 12h volume SMA20 for volume confirmation (with spike filter)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0  # Require 2.0x average volume to reduce trades
+    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
