@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,23 +17,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # ===== 12h EMA50 Trend (HTF) =====
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
     # ===== Daily Camarilla Pivot Levels =====
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
     
-    # Camarilla R3 and S3 levels
-    camarilla_range = high_1d - low_1d
-    camarilla_r3 = close_1d + camarilla_range * 1.1 / 4
-    camarilla_s3 = close_1d - camarilla_range * 1.1 / 4
+    R1 = close_1d + (range_1d * 1.0 / 12)
+    S1 = close_1d - (range_1d * 1.0 / 12)
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # ===== Daily Trend Filter (EMA34) =====
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # ===== Daily Volume Spike Filter =====
     vol_1d = df_1d['volume'].values
@@ -41,15 +42,19 @@ def generate_signals(prices):
     vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
+    # ===== Session Filter: 08-20 UTC =====
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
+        # Skip if data not ready
+        if (np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or
             np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -58,29 +63,40 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # Long: Close above R3 + above daily EMA34 + volume spike
-            if (close[i] > camarilla_r3_aligned[i] and
-                close[i] > ema34_1d_aligned[i] and
+            # Long: Break above R1 + above 12h EMA50 + daily volume spike
+            if (close[i] > R1_aligned[i] and
+                close[i] > ema50_12h_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S3 + below daily EMA34 + volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and
-                  close[i] < ema34_1d_aligned[i] and
+            # Short: Break below S1 + below 12h EMA50 + daily volume spike
+            elif (close[i] < S1_aligned[i] and
+                  close[i] < ema50_12h_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below R3 or below daily EMA34
-            if close[i] < camarilla_r3_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Break below S1 or closes below 12h EMA50
+            if close[i] < S1_aligned[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above S3 or above daily EMA34
-            if close[i] > camarilla_s3_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Break above R1 or closes above 12h EMA50
+            if close[i] > R1_aligned[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
