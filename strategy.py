@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1W_Camarilla_R3S3_Breakout_Volume_Trend
-# Hypothesis: Breakouts above weekly R3 or below weekly S3 on 12h timeframe with volume confirmation and 1d EMA trend filter. Uses weekly timeframe for pivot levels and daily timeframe for trend to reduce noise and avoid overtrading. Designed for 12-37 trades/year to minimize fee drag while capturing strong momentum moves in both bull and bear markets.
+# 4h_1D_Camarilla_R3S3_Breakout_Volume_Trend_v3
+# Hypothesis: Breakouts above daily R3 or below daily S3 on 4h timeframe with volume confirmation and 1d EMA34 trend filter.
+# Uses daily timeframe for both trend and pivot levels to reduce noise and avoid overtrading.
+# Designed for 20-50 trades/year to minimize fee drag while capturing strong momentum moves in both bull and bear markets.
 
-name = "12h_1W_Camarilla_R3S3_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R3S3_Breakout_Volume_Trend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,12 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-
-    # Get daily data for trend filter
+    # Get daily data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -35,26 +32,21 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Calculate weekly close for pivot calculation
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-
-    # Calculate weekly pivot-based levels (R3 and S3) based on previous week
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
-    prev_high[0] = high_1w[0]
-    prev_low[0] = low_1w[0]
-    prev_close[0] = close_1w[0]
+    # Calculate daily Camarilla levels (R3 and S3) based on previous day
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
     
     rang = prev_high - prev_low
     R3 = prev_close + rang * 1.1 / 4
     S3 = prev_close - rang * 1.1 / 4
 
-    # Align weekly levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
+    # Align daily levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
