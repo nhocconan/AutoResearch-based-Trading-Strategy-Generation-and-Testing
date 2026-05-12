@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # 4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 4h breakout of daily Camarilla R1/S1 levels with 1-day trend filter and volume confirmation.
-# Uses daily trend (close vs SMA50) to filter direction, reducing false breakouts.
-# Volume spike (>1.5x 20-period average) confirms breakout strength.
-# Designed for 20-40 trades/year to minimize fee drag while maintaining edge in bull/bear markets.
-# Daily trend filter ensures alignment with higher timeframe momentum.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# The 1d EMA34 provides trend direction to avoid counter-trend trades, while volume spikes confirm breakout strength.
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag. Works in bull/bear by following 1d trend.
+# Uses Camarilla pivot levels (R1/S1) from daily data for precise entry/exit levels.
 
 name = "4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
@@ -24,9 +23,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot levels and trend filter
+    # Get 1d data for Camarilla pivot levels and EMA34 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
 
     high_1d = df_1d['high'].values
@@ -41,13 +40,13 @@ def generate_signals(prices):
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
 
-    # Calculate 1-day SMA50 for trend filter
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    # Calculate EMA34 for 1d trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
 
-    # Align 1d data to 4h timeframe
+    # Align Camarilla levels and EMA34 to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
     # Calculate 4h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
@@ -57,10 +56,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(34, n):
         # Skip if any required data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(sma50_1d_aligned[i]) or np.isnan(volume_sma20[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,12 +68,12 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Breakout above R1 in daily uptrend with volume spike
-            if close[i] > r1_aligned[i] and close[i] > sma50_1d_aligned[i] and volume[i] > volume_sma20[i]:
+            # LONG: Breakout above R1 in 1d uptrend with volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 in daily downtrend with volume spike
-            elif close[i] < s1_aligned[i] and close[i] < sma50_1d_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: Breakdown below S1 in 1d downtrend with volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = -0.25
                 position = -1
             else:
