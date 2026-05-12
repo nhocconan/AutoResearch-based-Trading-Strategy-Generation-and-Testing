@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Donchian_Breakout_1dTrend_Volume
-# Hypothesis: Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation. 
-# Long when price breaks above 20-period high with volume spike and daily uptrend.
-# Short when price breaks below 20-period low with volume spike and daily downtrend.
-# Uses tight entry conditions to limit trades (<100/year) and avoid fee drag. Works in bull markets via breakouts in uptrends and in bear markets via breakdowns in downtrends.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels from daily timeframe identify key support/resistance levels. 
+# Long when price breaks above R3 with volume spike and daily uptrend, short when price breaks below S3 with volume spike and daily downtrend.
+# Uses daily Camarilla levels calculated from prior day's OHLC, volume > 1.5x 20-period average for confirmation,
+# and daily EMA50 for trend filter. Designed for 4h timeframe to limit trades and avoid overtrading.
+# Works in bull markets via breakouts in uptrends and in bear markets via breakdowns in downtrends.
 
-name = "12h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,18 +24,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
+    # Get daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
+
+    # Calculate Camarilla levels from prior day's OHLC
+    # Camarilla formulas: 
+    # R4 = Close + ((High - Low) * 1.5000)
+    # R3 = Close + ((High - Low) * 1.1250)
+    # R2 = Close + ((High - Low) * 1.0000)
+    # R1 = Close + ((High - Low) * 0.5000)
+    # PP = (High + Low + Close) / 3
+    # S1 = Close - ((High - Low) * 0.5000)
+    # S2 = Close - ((High - Low) * 1.0000)
+    # S3 = Close - ((High - Low) * 1.1250)
+    # S4 = Close - ((High - Low) * 1.5000)
+    
+    # We need prior day's data to calculate today's levels (no look-ahead)
+    # Shift the OHLC data by 1 to use previous day's values
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate Camarilla levels using prior day's data
+    R3 = prev_close + ((prev_high - prev_low) * 1.1250)
+    S3 = prev_close - ((prev_high - prev_low) * 1.1250)
+    
+    # Handle first day where we don't have prior data
+    R3[0] = np.nan
+    S3[0] = np.nan
 
     # Daily EMA50 trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,7 +72,7 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,26 +86,26 @@ def generate_signals(prices):
         price_below_daily_ema = close[i] < ema_50_1d_aligned[i]
 
         if position == 0:
-            # LONG: Price breaks above 20-period high with volume spike and daily uptrend
-            if close[i] > highest_high[i] and volume_ok[i] and price_above_daily_ema:
+            # LONG: Price breaks above R3 with volume spike and daily uptrend
+            if close[i] > R3_aligned[i] and volume_ok[i] and price_above_daily_ema:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 20-period low with volume spike and daily downtrend
-            elif close[i] < lowest_low[i] and volume_ok[i] and price_below_daily_ema:
+            # SHORT: Price breaks below S3 with volume spike and daily downtrend
+            elif close[i] < S3_aligned[i] and volume_ok[i] and price_below_daily_ema:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 20-period low or trend turns down
-            if close[i] < lowest_low[i] or not price_above_daily_ema:
+            # EXIT LONG: Price breaks below S3 or trend turns down
+            if close[i] < S3_aligned[i] or not price_above_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 20-period high or trend turns up
-            if close[i] > highest_high[i] or not price_below_daily_ema:
+            # EXIT SHORT: Price breaks above R3 or trend turns up
+            if close[i] > R3_aligned[i] or not price_below_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
