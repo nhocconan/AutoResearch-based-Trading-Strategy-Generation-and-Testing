@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_R3S3_Breakout_Volume
-# Hypothesis: Trade 12h breakouts of daily Camarilla R3/S3 levels with volume confirmation and trend filter from 1d EMA50.
-# The Camarilla R3/S3 levels represent strong intraday support/resistance; breakouts with volume indicate momentum.
-# Daily EMA50 ensures alignment with the higher timeframe trend, reducing false signals in choppy markets.
-# Designed for low frequency (15-30 trades/year) to survive both bull and bear markets by following higher timeframe structure.
+# 6h_ADX_IchimokuCloud_Breakout
+# Hypothesis: Trend following strategy using 6h ADX to filter strong trends, with 1d Ichimoku cloud as dynamic support/resistance.
+# Enters long when price breaks above cloud in uptrend (ADX>25), short when breaks below cloud in downtrend (ADX>25).
+# Uses volume confirmation to avoid false breakouts. Designed for low frequency (20-40 trades/year) to work in both bull and bear markets
+# by capturing strong trends while avoiding whipsaws in ranging conditions. ADX ensures we only trade when trend is strong enough.
 
-name = "12h_1d_Camarilla_R3S3_Breakout_Volume"
-timeframe = "12h"
+name = "6h_ADX_IchimokuCloud_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,40 +23,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d EMA50 for trend filter ===
+    # === 1d Ichimoku Cloud ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === Daily Camarilla levels (R3, S3) ===
-    # Calculate from daily OHLC (previous completed day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Use previous day's OHLC for current day's Camarilla
-    high_prev = np.roll(high_1d, 1)
-    low_prev = np.roll(low_1d, 1)
-    close_prev = np.roll(close_1d, 1)
-    high_prev[0] = np.nan
-    low_prev[0] = np.nan
-    close_prev[0] = np.nan
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
     
-    # Calculate Camarilla levels
-    range_prev = high_prev - low_prev
-    r3 = close_prev + range_prev * 1.1 / 2
-    s3 = close_prev - range_prev * 1.1 / 2
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
     
-    # Align daily levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
     
-    # === Volume confirmation (24-period average) ===
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
+                 pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a.values)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b.values)
+    
+    # === 6h ADX for trend strength ===
+    # Calculate ADX with 14-period smoothing
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Pad arrays to match original length
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    tr = np.concatenate([[0], tr])
+    
+    # Smooth with Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    def wilders_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    smoothed_plus_dm = wilders_smooth(plus_dm, 14)
+    smoothed_minus_dm = wilders_smooth(minus_dm, 14)
+    smoothed_tr = wilders_smooth(tr, 14)
+    
+    # Avoid division by zero
+    plus_di = 100 * smoothed_plus_dm / np.where(smoothed_tr == 0, 1, smoothed_tr)
+    minus_di = 100 * smoothed_minus_dm / np.where(smoothed_tr == 0, 1, smoothed_tr)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
+    adx = wilders_smooth(dx, 14)
+    
+    # === Volume confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,8 +99,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,36 +109,39 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Determine cloud boundaries (Senkou Span A and B)
+        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
+        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
         
-        # Breakout conditions
-        breakout_up = close[i] > r3_aligned[i]
-        breakout_down = close[i] < s3_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx[i] > 25
+        
+        # Breakout conditions relative to cloud
+        breakout_above_cloud = close[i] > cloud_top
+        breakout_below_cloud = close[i] < cloud_bottom
         
         # Volume filter: above average
-        vol_ok = volume[i] > vol_ma_24[i]
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: breakout above R3, uptrend, volume confirmation
-            if breakout_up and trend_up and vol_ok:
+            # LONG: breakout above cloud, strong uptrend, volume confirmation
+            if breakout_above_cloud and strong_trend and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakout below S3, downtrend, volume confirmation
-            elif breakout_down and trend_down and vol_ok:
+            # SHORT: breakout below cloud, strong downtrend, volume confirmation
+            elif breakout_below_cloud and strong_trend and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: breakdown below S3 or trend reversal
-            if breakout_down or not trend_up:
+            # EXIT LONG: price re-enters cloud or trend weakens
+            if close[i] < cloud_top or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: breakout above R3 or trend reversal
-            if breakout_up or not trend_down:
+            # EXIT SHORT: price re-enters cloud or trend weakens
+            if close[i] > cloud_bottom or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
