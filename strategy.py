@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,48 +12,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Ichimoku components
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Load daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Ichimoku components (9, 26, 52)
-    tenkan_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max()
-    tenkan_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min()
-    tenkan_sen = (tenkan_high + tenkan_low) / 2
+    # Calculate Camarilla pivot levels from previous day
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    kijun_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max()
-    kijun_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min()
-    kijun_sen = (kijun_high + kijun_low) / 2
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
-    senkou_b_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max()
-    senkou_b_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min()
-    senkou_b = ((senkou_b_high + senkou_b_low) / 2).shift(26)
-    
-    # Convert to numpy arrays
-    tenkan_sen_arr = tenkan_sen.values
-    kijun_sen_arr = kijun_sen.values
-    senkou_a_arr = senkou_a.values
-    senkou_b_arr = senkou_b.values
-    
-    # Align to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_arr)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_arr)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_arr)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_arr)
-    
-    # Weekly trend filter: price above/below weekly EMA50
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,9 +57,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,40 +67,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Ichimoku signals
-        tenkan = tenkan_sen_aligned[i]
-        kijun = kijun_sen_aligned[i]
-        senkou_a = senkou_a_aligned[i]
-        senkou_b = senkou_b_aligned[i]
-        
-        # Cloud top and bottom
-        cloud_top = max(senkou_a, senkou_b)
-        cloud_bottom = min(senkou_a, senkou_b)
-        
-        # Bullish: Tenkan > Kijun and price above cloud
-        # Bearish: Tenkan < Kijun and price below cloud
-        bullish_setup = tenkan > kijun and close[i] > cloud_top
-        bearish_setup = tenkan < kijun and close[i] < cloud_bottom
-        
         if position == 0:
-            # Long: bullish setup + above weekly EMA50 + volume filter
-            if bullish_setup and close[i] > ema_50_1w_aligned[i] and vol_filter[i]:
+            # Long: breakout above Camarilla R3 + above weekly EMA50 + volume filter
+            if high[i] > camarilla_r3_aligned[i] and close[i] > ema_50_1w_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish setup + below weekly EMA50 + volume filter
-            elif bearish_setup and close[i] < ema_50_1w_aligned[i] and vol_filter[i]:
+            # Short: breakdown below Camarilla S3 + below weekly EMA50 + volume filter
+            elif low[i] < camarilla_s3_aligned[i] and close[i] < ema_50_1w_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: bearish setup or price below weekly EMA50
-            if bearish_setup or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: breakdown below Camarilla S3 or below weekly EMA50
+            if low[i] < camarilla_s3_aligned[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: bullish setup or price above weekly EMA50
-            if bullish_setup or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: breakout above Camarilla R3 or above weekly EMA50
+            if high[i] > camarilla_r3_aligned[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
