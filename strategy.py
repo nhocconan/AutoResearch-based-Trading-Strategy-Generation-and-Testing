@@ -1,14 +1,10 @@
-#!/usr/bin/env python3
-"""
-6h_VWAP_Trend_Follower
-Hypothesis: Use VWAP deviation from 6h price with 12h trend filter and volume confirmation to capture trends. 
-VWAP acts as dynamic support/resistance; price reverting to VWAP in trending markets offers high-probability entries.
-Works in bull/bear markets by filtering with 12h trend and requiring volume spikes to avoid chop. 
-Target: 15-30 trades/year per symbol.
-"""
+# 4h_Keltner_Trend_Breakout_Volume
+# Hypothesis: Breakouts from Keltner Channel (ATR-based) with 1d trend filter and volume spike capture momentum moves.
+# Works in bull markets via breakouts and in bear via mean reversion touches of the middle line (EMA).
+# Target: 20-40 trades/year per symbol.
 
-name = "6h_VWAP_Trend_Follower"
-timeframe = "6h"
+name = "4h_Keltner_Trend_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,38 +21,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter (call once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for trend filter (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    # 12h EMA50 for trend
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    close_1d = df_1d['close'].values
+    # 1d EMA50 for trend
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Calculate VWAP for 6h (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = vwap_num / vwap_den
-    # Avoid division by zero at start
-    vwap = np.where(vwap_den == 0, typical_price, vwap)
+    # Calculate ATR for Keltner Channel (20-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
 
-    # VWAP deviation as percentage
-    vwap_dev = (close - vwap) / vwap * 100.0
+    # EMA20 for Keltner middle line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
 
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Keltner Channel bounds
+    keltner_upper = ema20 + 2 * atr
+    keltner_lower = ema20 - 2 * atr
+
+    # Volume confirmation: volume > 2x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        vwap_dev_val = vwap_dev[i]
-        ema50_val = ema50_12h_aligned[i]
-        vol_avg_val = vol_avg_20[i]
-
-        if np.isnan(vwap_dev_val) or np.isnan(ema50_val) or np.isnan(vol_avg_val):
+    for i in range(20, n):
+        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,29 +61,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price below VWAP (oversold) + 12h uptrend + volume spike
-            if vwap_dev_val < -0.5 and close[i] > ema50_val and volume[i] > vol_avg_val * 1.5:
-                signals[i] = 0.25
+            # LONG: Close breaks above Keltner Upper + 1d uptrend + volume spike
+            if close[i] > keltner_upper[i] and close[i] > ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Price above VWAP (overbought) + 12h downtrend + volume spike
-            elif vwap_dev_val > 0.5 and close[i] < ema50_val and volume[i] > vol_avg_val * 1.5:
-                signals[i] = -0.25
+            # SHORT: Close breaks below Keltner Lower + 1d downtrend + volume spike
+            elif close[i] < keltner_lower[i] and close[i] < ema50_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above VWAP or 12h trend turns down
-            if vwap_dev_val > 0.0 or close[i] < ema50_val:
+            # EXIT LONG: Close crosses below EMA20 (middle line) or 1d trend turns down
+            if close[i] < ema20[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Price crosses below VWAP or 12h trend turns up
-            if vwap_dev_val < 0.0 or close[i] > ema50_val:
+            # EXIT SHORT: Close crosses above EMA20 (middle line) or 1d trend turns up
+            if close[i] > ema20[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
 
     return signals
