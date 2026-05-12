@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Keltner_RSI_Trend_Follow
-# Hypothesis: In trending markets, price pulls back to the Keltner Channel middle line (EMA)
-# with RSI showing exhaustion, then continues in trend direction. Works in bull via pullback longs
-# and in bear via pullback shorts. Trend filter from 1d EMA50 avoids counter-trend trades.
-# Uses 4h timeframe for balanced trade frequency (~20-50/year). Volume confirmation adds robustness.
-# Risk control via trailing stop using ATR-based channel width.
+# 12h Daily Camarilla Pivot Breakout with Volume Confirmation
+# Hypothesis: Daily Camarilla pivot levels act as strong support/resistance on 12h timeframe.
+# Breakouts above R3 or below S3 with volume confirmation signal trend continuation.
+# Works in bull/bear markets by capturing momentum after pivot level breaks.
+# Uses 1d timeframe for pivot calculation, 12h for execution to limit trade frequency.
 
-name = "4h_Keltner_RSI_Trend_Follow"
-timeframe = "4h"
+name = "12h_DailyCamarilla_R3S3_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,48 +23,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4H INDICATORS ===
-    # EMA20 for Keltner middle and trend
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # ATR for Keltner width
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    keltner_middle = ema20
-    keltner_upper = ema20 + 2 * atr
-    keltner_lower = ema20 - 2 * atr
-    
-    # RSI(14) for momentum exhaustion
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 1D TREND FILTER ===
+    # === DAILY DATA FOR CAMARILLA PIVOT LEVELS ===
     df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ma * 1.2
+    # Daily pivot point (standard calculation)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels: R3/S3 are most significant for breakouts
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + range_1d * 1.1 / 4
+    s3_1d = close_1d - range_1d * 1.1 / 4
+    
+    # Align daily levels to 12h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # === VOLUME CONFIRMATION (20-period) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)  # Strong volume filter to reduce trades
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure EMA50 and RSI ready
+    start_idx = 20  # For volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(keltner_middle[i]) or np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or np.isnan(rsi[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,30 +61,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Pullback to middle in uptrend with RSI < 40 and volume
-            if (close[i] > ema50_1d_aligned[i] and  # Uptrend filter
-                low[i] <= keltner_middle[i] * 1.002 and  # Touched or slightly below middle
-                rsi[i] < 40 and  # Momentum exhaustion
-                volume_ok[i]):
+            # LONG: Break above R3 with volume
+            if close[i] > r3_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Pullback to middle in downtrend with RSI > 60 and volume
-            elif (close[i] < ema50_1d_aligned[i] and  # Downtrend filter
-                  high[i] >= keltner_middle[i] * 0.998 and  # Touched or slightly above middle
-                  rsi[i] > 60 and  # Momentum exhaustion
-                  volume_ok[i]):
+            # SHORT: Break below S3 with volume
+            elif close[i] < s3_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Close below keltner lower or RSI > 70 (overbought)
-            if close[i] < keltner_lower[i] or rsi[i] > 70:
+            # EXIT LONG: Price falls back below R3 (failed breakout) or reaches opposite S3
+            if close[i] < r3_1d_aligned[i] or close[i] < s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above keltner upper or RSI < 30 (oversold)
-            if close[i] > keltner_upper[i] or rsi[i] < 30:
+            # EXIT SHORT: Price rises back above S3 (failed breakout) or reaches opposite R3
+            if close[i] > s3_1d_aligned[i] or close[i] > r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
