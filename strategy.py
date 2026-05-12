@@ -1,12 +1,14 @@
-# 4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter
-# Hypothesis: On 4h timeframe, enter long when price closes above daily R1 with close > daily EMA34.
+#!/usr/bin/env python3
+# 1h_Camarilla_R1S1_Breakout_1dTrend_Session
+# Hypothesis: On 1h timeframe, enter long when price closes above daily R1 with close > daily EMA34.
 # Enter short when price closes below daily S1 with close < daily EMA34.
 # Exit when price crosses daily EMA34 (trend reversal).
-# Uses close-based filters only to avoid look-ahead. Targets 25-35 trades/year for low fee drag.
+# Uses daily trend filter and Camarilla pivots for direction, 1h only for entry timing.
+# Session filter (08-20 UTC) reduces noise trades. Targets 15-37 trades/year for low fee drag.
 # Works in bull markets via breakouts and in bear via short reversals at S1.
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_1dTrend_Session"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -43,7 +45,7 @@ def generate_signals(prices):
     # 1-day EMA34 for trend filter
     ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily levels to 4h timeframe
+    # Align daily levels to 1h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -51,15 +53,31 @@ def generate_signals(prices):
     # Volume confirmation: 20-period moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Pre-compute session hours for 08-20 UTC filter
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     start_idx = 60  # Ensure indicators are stable
     
     for i in range(start_idx, n):
+        # Session filter: only trade between 08:00 and 20:00 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
         # Skip if any critical data is not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not in_session:
+            # Outside session: flatten position
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,13 +91,13 @@ def generate_signals(prices):
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: Price closes above R1 with close > daily EMA34
-            if close[i] > r1_val and close[i] > ema1d_trend:
-                signals[i] = 0.25
+            # LONG: Price closes above R1 with close > daily EMA34 and volume > 20MA
+            if close[i] > r1_val and close[i] > ema1d_trend and volume[i] > vol_ma_val:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price closes below S1 with close < daily EMA34
-            elif close[i] < s1_val and close[i] < ema1d_trend:
-                signals[i] = -0.25
+            # SHORT: Price closes below S1 with close < daily EMA34 and volume > 20MA
+            elif close[i] < s1_val and close[i] < ema1d_trend and volume[i] > vol_ma_val:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
@@ -89,13 +107,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # EXIT SHORT: Price closes above daily EMA34 (trend reversal)
             if close[i] > ema1d_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
