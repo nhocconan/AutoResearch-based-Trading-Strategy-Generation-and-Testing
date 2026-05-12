@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Use 1d trend (EMA50) and volume confirmation to filter 4h Camarilla R3/S3 breakouts.
-# This avoids overtrading by requiring alignment with daily trend and volume confirmation.
-# Designed for 20-50 trades per year per symbol, works in both bull and bear markets.
+# 6h_ADX_Trend_Strength_With_Volume_Spike
+# Hypothesis: Combine ADX trend strength with volume spike on 6h timeframe. ADX > 25 indicates strong trend, while volume > 2x average confirms momentum.
+# Enter long when price > EMA20, ADX > 25, and volume spike; short when price < EMA20, ADX > 25, and volume spike.
+# Exit when trend weakens (ADX < 20) or price crosses EMA20 in opposite direction.
+# Designed for 12-30 trades/year per symbol, works in both bull and bear via ADX trend filter.
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_ADX_Trend_Strength_With_Volume_Spike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,39 +22,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # ADX calculation
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1]) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
+            minus_dm[i] = max(0, low[i-1] - low[i]) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth TR, +DM, -DM
+        atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        
+        # Initial values
+        atr[period] = np.mean(tr[1:period+1])
+        plus_dm_sum = np.sum(plus_dm[1:period+1])
+        minus_dm_sum = np.sum(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_sum = plus_dm_sum - (plus_dm_sum/period) + plus_dm[i]
+            minus_dm_sum = minus_dm_sum - (minus_dm_sum/period) + minus_dm[i]
+            
+            plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
+        
+        dx = np.zeros_like(high)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        dx[np.isnan(dx) | np.isinf(dx)] = 0
+        
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
 
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate ADX
+    adx = calculate_adx(high, low, close, 14)
 
-    # Calculate Camarilla levels from previous 1d bar
-    prev_1d_high = df_1d['high'].shift(1).values
-    prev_1d_low = df_1d['low'].shift(1).values
-    prev_1d_close = df_1d['close'].shift(1).values
+    # EMA20 for trend direction
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
 
-    # Calculate R3 and S3 levels
-    r3 = prev_1d_close + 1.1 * (prev_1d_high - prev_1d_low) / 2
-    s3 = prev_1d_close - 1.1 * (prev_1d_high - prev_1d_low) / 2
-
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-
-    # Volume confirmation: current volume > 1.5x average of last 4 periods (16 hours)
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    # Volume spike: current volume > 2x average of last 6 periods (6 hours)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(adx[i]) or np.isnan(ema_20[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,31 +85,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from 1d EMA50
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # Trend strength filter
+        strong_trend = adx[i] > 25
+        weak_trend = adx[i] < 20
 
         if position == 0:
-            # LONG: Close breaks above R3 AND uptrend AND volume
-            if close[i] > r3_aligned[i] and price_above_ema and volume_ok[i]:
+            # LONG: Price above EMA20, strong trend, volume spike
+            if close[i] > ema_20[i] and strong_trend and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S3 AND downtrend AND volume
-            elif close[i] < s3_aligned[i] and price_below_ema and volume_ok[i]:
+            # SHORT: Price below EMA20, strong trend, volume spike
+            elif close[i] < ema_20[i] and strong_trend and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close falls back below R3 OR trend turns down
-            if close[i] < r3_aligned[i] or not price_above_ema:
+            # EXIT LONG: Trend weakens or price crosses below EMA20
+            if weak_trend or close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close rises back above S3 OR trend turns up
-            if close[i] > s3_aligned[i] or not price_below_ema:
+            # EXIT SHORT: Trend weakens or price crosses above EMA20
+            if weak_trend or close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
