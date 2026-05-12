@@ -1,10 +1,11 @@
-# #!/usr/bin/env python3
-# 4h_TRIX_VolumeSpike_TrendFilter
-# Hypothesis: 4h TRIX momentum combined with volume spike and 1d trend filter for high-probability trend entries.
-# TRIX filters noise and identifies momentum shifts; volume confirms breakout strength; 1d trend avoids counter-trend trades.
-# Designed for 20-50 trades per year to minimize fee drag while capturing sustained momentum moves.
+#!/usr/bin/env python3
+# 4h_Donchian_Breakout_TrendVolume
+# Hypothesis: 4h Donchian channel breakout with 1d EMA trend filter and volume spike confirmation.
+# The 1d EMA provides trend direction to avoid counter-trend trades, while volume spikes confirm breakout strength.
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag. Works in bull/bear by following 1d trend.
+# Uses 4h ATR for Donchian channel width and volume confirmation for signal strength.
 
-name = "4h_TRIX_VolumeSpike_TrendFilter"
+name = "4h_Donchian_Breakout_TrendVolume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,49 +19,56 @@ def generate_signals(prices):
         return np.zeros(n)
 
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 4h data for TRIX calculation
+    # Get 4h data for price action and ATR
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    if len(df_4h) < 2:
         return np.zeros(n)
 
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
 
-    # Get 1d data for trend filter
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
 
     close_1d = df_1d['close'].values
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
 
-    # Calculate TRIX: triple EMA of log returns
-    # TRIX = EMA(EMA(EMA(log(close)), 15), 15), 15) * 100
-    log_close = np.log(close_4h)
-    ema1 = pd.Series(log_close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3 * 100  # Scale for readability
+    # Calculate ATR for Donchian channel width
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
 
-    # Align TRIX to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_4h, trix)
+    # Calculate Donchian channels: 20-period high/low
+    high_max = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
 
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align Donchian channels to 4h timeframe
+    high_max_aligned = align_htf_to_ltf(prices, df_4h, high_max)
+    low_min_aligned = align_htf_to_ltf(prices, df_4h, low_min)
 
     # Calculate 4h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0  # Require 2x average volume for strong confirmation
+    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(volume_sma20[i])):
+        if (np.isnan(high_max_aligned[i]) or np.isnan(low_min_aligned[i]) or
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,26 +77,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX crosses above zero in 1d uptrend with volume spike
-            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and close[i] > ema50_1d_aligned[i] and volume[i] > volume_sma20[i]:
+            # LONG: Breakout above Donchian upper in 1d uptrend with volume spike
+            if close[i] > high_max_aligned[i] and close[i] > ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero in 1d downtrend with volume spike
-            elif trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and close[i] < ema50_1d_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: Breakdown below Donchian lower in 1d downtrend with volume spike
+            elif close[i] < low_min_aligned[i] and close[i] < ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero (momentum fade)
-            if trix_aligned[i] < 0 and trix_aligned[i-1] >= 0:
+            # EXIT LONG: Price closes below Donchian lower (reversal signal)
+            if close[i] < low_min_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero (momentum fade)
-            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0:
+            # EXIT SHORT: Price closes above Donchian upper (reversal signal)
+            if close[i] > high_max_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
