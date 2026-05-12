@@ -1,5 +1,11 @@
+# 4h_WeeklyDonchian_Breakout_DailyTrend_Volume
+# Weekly Donchian(20) breakout with daily trend filter and volume confirmation
+# Works in bull: catches breakouts; in bear: trend filter avoids false signals
+# Volume confirmation reduces false breakouts
+# Target: 20-50 trades/year on 4h
+
 #!/usr/bin/env python3
-name = "4h_RSI_Overbought_Oversold_With_Trend_Filter"
+name = "4h_WeeklyDonchian_Breakout_DailyTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,26 +23,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) with proper Wilder smoothing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # Load weekly data for Donchian channel
+    df_1w = get_htf_data(prices, '1w')
     
-    # Wilder smoothing: alpha = 1/period
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Weekly Donchian(20) - high and low of past 20 weekly candles
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = np.nan  # Not enough data
+    # Calculate weekly Donchian channels
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Load 1d data for trend filter (EMA 50)
+    # Align weekly Donchian levels to 4h (wait for weekly close)
+    donchian_high = align_htf_to_ltf(prices, df_1w, high_20)
+    donchian_low = align_htf_to_ltf(prices, df_1w, low_20)
+    
+    # Load daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
+    
+    # Daily EMA(50) for trend filter
     close_1d = df_1d['close'].values
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
@@ -48,11 +53,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,31 +67,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI oversold (<30) + price above 1d EMA50 + volume spike
-            if (rsi[i] < 30 and 
+            # Long: price breaks above weekly Donchian high + daily trend up + volume spike
+            if (close[i] > donchian_high[i] and 
                 close[i] > ema50_1d_aligned[i] and 
                 vol_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short: RSI overbought (>70) + price below 1d EMA50 + volume spike
-            elif (rsi[i] > 70 and 
+            # Short: price breaks below weekly Donchian low + daily trend down + volume spike
+            elif (close[i] < donchian_low[i] and 
                   close[i] < ema50_1d_aligned[i] and 
                   vol_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: RSI crosses above 50 (momentum shift)
-            if rsi[i] > 50:
+            # Exit long: price closes below weekly Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: RSI crosses below 50 (momentum shift)
-            if rsi[i] < 50:
+            # Exit short: price closes above weekly Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
