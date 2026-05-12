@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_Pivot_Volume_Trend
+# 12h_Camarilla_Pivot_Volume_Trend_v2
 # Hypothesis: On 12h timeframe, use daily Camarilla pivot levels (S3/S4 for shorts, R3/R4 for longs) as entry triggers.
 # Enter long when price breaks above R4 with volume confirmation and 1-week EMA50 uptrend.
 # Enter short when price breaks below S4 with volume confirmation and 1-week EMA50 downtrend.
@@ -7,7 +7,7 @@
 # Uses weekly trend filter to avoid counter-trend trades, targeting 15-25 trades/year for low friction.
 # Works in bull via R4 breakouts and in bear via S4 breakdowns with trend alignment.
 
-name = "12h_Camarilla_Pivot_Volume_Trend"
+name = "12h_Camarilla_Pivot_Volume_Trend_v2"
 timeframe = "12h"
 leverage = 1.0
 
