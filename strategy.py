@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1D_RSI_Pullback_WeeklyTrend"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== RSI(14) Pullback Logic =====
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # ===== Daily Camarilla Pivot Levels =====
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Camarilla R3 and S3 levels
+    camarilla_range = high_1d - low_1d
+    camarilla_r3 = close_1d + camarilla_range * 1.1 / 4
+    camarilla_s3 = close_1d - camarilla_range * 1.1 / 4
     
-    # ===== Weekly Trend Filter =====
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # ===== Daily Trend Filter (EMA34) =====
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # ===== Daily Volume Spike Filter =====
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)
-    
-    # ===== Session Filter: 08-20 UTC =====
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure SMA50 ready
+    start_idx = 40
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(rsi[i]) or 
-            np.isnan(sma50_1w_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if (np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,28 +59,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI < 40 (oversold pullback) + above weekly SMA50 + volume spike
-            if (rsi[i] < 40 and
-                close[i] > sma50_1w_aligned[i] and
-                vol_spike[i]):
+            # Long: Close above R3 + above daily EMA34 + volume spike
+            if (close[i] > camarilla_r3_aligned[i] and
+                close[i] > ema34_1d_aligned[i] and
+                vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 60 (overbought pullback) + below weekly SMA50 + volume spike
-            elif (rsi[i] > 60 and
-                  close[i] < sma50_1w_aligned[i] and
-                  vol_spike[i]):
+            # Short: Close below S3 + below daily EMA34 + volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and
+                  close[i] < ema34_1d_aligned[i] and
+                  vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 60 or closes below weekly SMA50
-            if rsi[i] > 60 or close[i] < sma50_1w_aligned[i]:
+            # Exit long: Close below R3 or below daily EMA34
+            if close[i] < camarilla_r3_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 40 or closes above weekly SMA50
-            if rsi[i] < 40 or close[i] > sma50_1w_aligned[i]:
+            # Exit short: Close above S3 or above daily EMA34
+            if close[i] > camarilla_s3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
