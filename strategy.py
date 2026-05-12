@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
-Hypothesis: Camarilla R3/S3 breakout with 1-day volume spike confirmation on 12h timeframe.
+4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
+Hypothesis: Camarilla R3/S3 breakout with 1-day volume spike confirmation.
 Works in bull/bear markets by only taking breakouts with above-average volume,
 which filters out false breakouts and targets institutional participation.
-Designed for ~15-30 trades/year on 12h to minimize fee drag.
+Designed for ~20-40 trades/year on 4h to minimize fee drag.
 """
-name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
-timeframe = "12h"
+name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,12 +26,18 @@ def generate_signals(prices):
     # Calculate Camarilla levels from previous day
     # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
     # We need previous day's OHLC
+    prev_day_close = close
+    prev_day_high = high
+    prev_day_low = low
+    
+    # Shift to get previous day's values (since we're on 4h timeframe)
+    # For 4h data, we need to look back to previous daily candle
     camarilla_r3 = np.full(n, np.nan)
     camarilla_s3 = np.full(n, np.nan)
     
     for i in range(1, n):
-        camarilla_r3[i] = close[i-1] + (high[i-1] - low[i-1]) * 1.1 / 2
-        camarilla_s3[i] = close[i-1] - (high[i-1] - low[i-1]) * 1.1 / 2
+        camarilla_r3[i] = prev_day_close[i-1] + (prev_day_high[i-1] - prev_day_low[i-1]) * 1.1 / 2
+        camarilla_s3[i] = prev_day_close[i-1] - (prev_day_high[i-1] - prev_day_low[i-1]) * 1.1 / 2
     
     # 1d data for volume spike confirmation
     df_1d = get_htf_data(prices, '1d')
