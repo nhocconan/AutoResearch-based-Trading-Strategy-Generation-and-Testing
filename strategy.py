@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Choppiness_Index_Donchian_Breakout_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,36 +17,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Choppiness Index for regime filter ===
+    # === 1d Data for trend filter ===
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range for 1d
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]
+    # === 1d EMA34 for trend ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # ATR(14) for 1d
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Highest high and lowest low over 14 periods for 1d
-    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop calculation
-    sum_tr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_tr_1d / (hh_1d - ll_1d)) / np.log10(14)
-    chop[hh_1d == ll_1d] = 50  # Avoid division by zero
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # === 4h Donchian Channel (20) for breakout ===
-    period_dc = 20
-    upper_dc = pd.Series(high).rolling(window=period_dc, min_periods=period_dc).max().values
-    lower_dc = pd.Series(low).rolling(window=period_dc, min_periods=period_dc).min().values
+    # === 1d Camarilla Pivot Points (R1, S1) ===
+    pivot = (high_1d + low_1d + close_1d) / 3
+    r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # === Volume spike detection (20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,13 +41,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 14, 20)  # Ensure enough data for all indicators
+    start_idx = max(200, 34)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(upper_dc[i]) or
-            np.isnan(lower_dc[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,31 +55,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        chop_val = chop_1d_aligned[i]
-        
         if position == 0:
-            # Long: Donchian breakout up + chop > 61.8 (range) + volume spike
-            if (close[i] > upper_dc[i] and 
-                chop_val > 61.8 and
-                volume_spike[i]):
+            # Long: Break above R1 + volume spike + 1d trend up
+            if (close[i] > r1_aligned[i] and 
+                volume_spike[i] and
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down + chop > 61.8 (range) + volume spike
-            elif (close[i] < lower_dc[i] and 
-                  chop_val > 61.8 and
-                  volume_spike[i]):
+            # Short: Break below S1 + volume spike + 1d trend down
+            elif (close[i] < s1_aligned[i] and 
+                  volume_spike[i] and
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Donchian breakout down or chop < 38.2 (trend)
-            if close[i] < lower_dc[i] or chop_val < 38.2:
+            # Exit long: Price closes below S1 or trend breaks
+            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Donchian breakout up or chop < 38.2 (trend)
-            if close[i] > upper_dc[i] or chop_val < 38.2:
+            # Exit short: Price closes above R1 or trend breaks
+            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
