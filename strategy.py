@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Vortex_Trend_Reversal_Volume
-# Hypothesis: Vortex indicator detects trend reversals; long when VI+ > VI- and price above 1d EMA34, short when VI- > VI+ and price below EMA34, with volume confirmation (>1.5x 20-period average). Exit on Vortex crossover. Designed for 25-40 trades/year with clear trend and volume to avoid false signals. Works in bull via trend continuation and bear via reversals at extremes.
+# 4h_ADX_Trend_Reversal_Volume
+# Hypothesis: Combines ADX trend strength with RSI mean reversion and volume confirmation.
+# Long when ADX > 25 (trending) and RSI < 30 (oversold) with volume > 1.5x average.
+# Short when ADX > 25 and RSI > 70 (overbought) with volume confirmation.
+# Uses 1d timeframe for ADX/RSI to avoid noise, 4h for execution.
+# Designed for 20-40 trades/year with strong trend and value conditions to avoid false signals.
 
-name = "4h_Vortex_Trend_Reversal_Volume"
+name = "4h_ADX_Trend_Reversal_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Vortex and trend filter
+    # Load 1d data for ADX and RSI
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -29,7 +33,8 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Vortex indicator (VI+ and VI-) on 1d data
+    # Calculate ADX components on 1d data
+    # True Range
     tr1 = np.maximum(high_1d[1:] - low_1d[1:], 
                      np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), 
                                 np.abs(low_1d[1:] - close_1d[:-1])))
@@ -37,23 +42,63 @@ def generate_signals(prices):
                                    np.abs(high_1d[0] - close_1d[0]), 
                                    np.abs(low_1d[0] - close_1d[0])])], tr1])
     
-    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
-    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
-    vm_plus = np.concatenate([[high_1d[0] - low_1d[0]], vm_plus])
-    vm_minus = np.concatenate([[high_1d[0] - low_1d[0]], vm_minus])
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
     
-    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / \
-              pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / \
-               pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Handle first element
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Align Vortex indicators to 4h timeframe
-    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
+    # Smooth TR, DM+ and DM- with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])  # First value is simple average
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    period = 14
+    tr_smooth = wilder_smooth(tr, period)
+    dm_plus_smooth = wilder_smooth(dm_plus, period)
+    dm_minus_smooth = wilder_smooth(dm_minus, period)
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    # Handle division by zero
+    dx = np.where((di_plus + di_minus) != 0, dx, 0)
+    
+    # ADX is smoothed DX
+    adx = wilder_smooth(dx, period)
+    
+    # Calculate RSI on 1d data
+    delta = np.diff(close_1d)
+    delta = np.concatenate([[0], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing for RSI
+    def rsi_wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    avg_gain = rsi_wilder_smooth(gain, 14)
+    avg_loss = rsi_wilder_smooth(loss, 14)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align indicators to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,8 +111,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(rsi_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,36 +120,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        vi_plus_val = vi_plus_aligned[i]
-        vi_minus_val = vi_minus_aligned[i]
-        ema34_val = ema34_1d_aligned[i]
+        adx_val = adx_aligned[i]
+        rsi_val = rsi_aligned[i]
         vol_confirm = volume_confirm[i]
         
-        # Get aligned 1d close for trend filter
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        close_1d_current = close_1d_aligned[i]
-        
         if position == 0:
-            # LONG: VI+ > VI- (bullish trend) and price above EMA34 with volume confirmation
-            if vi_plus_val > vi_minus_val and close_1d_current > ema34_val and vol_confirm:
+            # LONG: Strong trend (ADX > 25) + oversold (RSI < 30) + volume confirmation
+            if adx_val > 25 and rsi_val < 30 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: VI- > VI+ (bearish trend) and price below EMA34 with volume confirmation
-            elif vi_minus_val > vi_plus_val and close_1d_current < ema34_val and vol_confirm:
+            # SHORT: Strong trend (ADX > 25) + overbought (RSI > 70) + volume confirmation
+            elif adx_val > 25 and rsi_val > 70 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: VI- crosses above VI+ (trend reversal to bearish)
-            if vi_minus_val > vi_plus_val:
+            # EXIT LONG: Trend weakening (ADX < 20) or overbought (RSI > 70)
+            if adx_val < 20 or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: VI+ crosses above VI- (trend reversal to bullish)
-            if vi_plus_val > vi_minus_val:
+            # EXIT SHORT: Trend weakening (ADX < 20) or oversold (RSI < 30)
+            if adx_val < 20 or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
