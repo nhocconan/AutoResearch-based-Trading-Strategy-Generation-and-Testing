@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_Pivot_Squeeze_Trend"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Weekly SMA200 for trend filter
-    sma_200_1w = pd.Series(close_1w).rolling(window=200, min_periods=200).mean().values
-    sma_200_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_200_1w)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Daily high, low, close for Camarilla calculation
-    daily_high = prices['high'].values
-    daily_low = prices['low'].values
-    daily_close = prices['close'].values
+    # Load 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels from previous day
-    camarilla_high = np.roll(daily_high, 1)
-    camarilla_low = np.roll(daily_low, 1)
-    camarilla_close = np.roll(daily_close, 1)
+    camarilla_high = np.zeros(n)
+    camarilla_low = np.zeros(n)
+    for i in range(n):
+        if i == 0:
+            camarilla_high[i] = np.nan
+            camarilla_low[i] = np.nan
+        else:
+            ph = high_1d[i-1]
+            pl = low_1d[i-1]
+            pc = close_1d[i-1]
+            camarilla_high[i] = pc + 1.1 * (ph - pl) / 2  # R3 level
+            camarilla_low[i] = pc - 1.1 * (ph - pl) / 2   # S3 level
     
-    # Previous day's range
-    prev_range = camarilla_high - camarilla_low
-    
-    # Camarilla levels (using previous day's data)
-    r4 = camarilla_close + (prev_range * 1.1 / 2)
-    r3 = camarilla_close + (prev_range * 1.1 / 4)
-    r2 = camarilla_close + (prev_range * 1.1 / 6)
-    r1 = camarilla_close + (prev_range * 1.1 / 12)
-    s1 = camarilla_close - (prev_range * 1.1 / 12)
-    s2 = camarilla_close - (prev_range * 1.1 / 6)
-    s3 = camarilla_close - (prev_range * 1.1 / 4)
-    s4 = camarilla_close - (prev_range * 1.1 / 2)
-    
-    # Bollinger Band width for squeeze detection (20-period)
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    
-    # Squeeze condition: BB width below 20-period average
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
+    # Align Camarilla levels to 6h
+    camarilla_high_aligned = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_aligned = align_htf_to_ltf(prices, df_1d, camarilla_low)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,14 +56,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(sma_200_1w_aligned[i]) or 
-            np.isnan(squeeze[i]) or
-            np.isnan(vol_filter[i]) or
-            np.isnan(r1[i]) or np.isnan(s1[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(camarilla_high_aligned[i]) or
+            np.isnan(camarilla_low_aligned[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,24 +72,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 during squeeze + weekly uptrend + volume
-            if close[i] > r1[i] and squeeze[i] and close[i] > sma_200_1w_aligned[i] and vol_filter[i]:
+            # Long: break above R3 + above 12h EMA50 + volume spike
+            if close[i] > camarilla_high_aligned[i] and close[i] > ema_50_12h_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 during squeeze + weekly downtrend + volume
-            elif close[i] < s1[i] and squeeze[i] and close[i] < sma_200_1w_aligned[i] and vol_filter[i]:
+            # Short: break below S3 + below 12h EMA50 + volume spike
+            elif close[i] < camarilla_low_aligned[i] and close[i] < ema_50_12h_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price falls below S1 or squeeze breaks down
-            if close[i] < s1[i] or not squeeze[i]:
+            # Exit long: price below R3 or below 12h EMA50
+            if close[i] < camarilla_high_aligned[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price rises above R1 or squeeze breaks down
-            if close[i] > r1[i] or not squeeze[i]:
+            # Exit short: price above S3 or above 12h EMA50
+            if close[i] > camarilla_low_aligned[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
