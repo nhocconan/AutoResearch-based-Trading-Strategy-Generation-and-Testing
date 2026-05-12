@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
-# 12h_1D_Camarilla_R3S3_Breakout_Trend_Volume
-# Hypothesis: Breakout above Camarilla R3 or below S3 on 12h with 1d trend filter and volume confirmation.
-# Camarilla levels derived from 1d provide strong support/resistance. Works in both bull and bear markets
-# by requiring trend alignment and volume confirmation to avoid false breakouts. Targets 15-30 trades/year.
+# 4h_1D_TRIX_VolumeSpike_Regime
+# Hypothesis: TRIX momentum on 4h with 1d trend filter, volume spike, and Choppiness regime filter.
+# TRIX filters noise and identifies momentum shifts. Volume spike confirms conviction.
+# Choppiness regime filter avoids whipsaws in ranging markets. Works in bull/bear by requiring
+# alignment with 1d trend and volatility regime. Targets 20-40 trades/year.
 
-name = "12h_1D_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_1D_TRIX_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,45 +24,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate Camarilla levels from previous 1d bar
-    # H, L, C from previous 1d bar
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
-    # Shift by 1 to use previous day's data
-    ph = np.roll(d_high, 1)
-    pl = np.roll(d_low, 1)
-    pc = np.roll(d_close, 1)
-    ph[0] = pl[0] = pc[0] = np.nan  # First value invalid
-
-    # Camarilla R3 and S3
-    camarilla_r3 = pc + 1.1 * (ph - pl) / 6
-    camarilla_s3 = pc - 1.1 * (ph - pl) / 6
-
-    # Align to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-
     # Calculate 1d EMA for trend filter
-    ema_1d = pd.Series(d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Volume confirmation: current volume > 1.5x average of last 20 periods
+    # Calculate TRIX on 4h (15-period EMA of 15-period EMA of 15-period EMA)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix[0] = 0  # First value has no previous
+
+    # Volume confirmation: current volume > 2.0x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    volume_ok = volume > (2.0 * vol_ma)
+
+    # Choppiness regime filter (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop[np.isnan(chop) | np.isinf(chop)] = 50  # Default to neutral
+    chop[highest_high - lowest_low == 0] = 50   # Avoid division by zero
+    chop_trending = chop < 38.2  # Trending regime
+    chop_ranging = chop > 61.8   # Ranging regime
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(15, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(trix[i]) or
+            np.isnan(volume_ok[i]) or np.isnan(chop_trending[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,26 +81,26 @@ def generate_signals(prices):
         bearish_trend = close[i] < ema_1d_aligned[i]
 
         if position == 0:
-            # LONG: Break above Camarilla R3 with bullish trend and volume confirmation
-            if close[i] > camarilla_r3_aligned[i] and bullish_trend and volume_ok[i]:
+            # LONG: TRIX turning up in trending regime with bullish trend and volume spike
+            if trix[i] > trix[i-1] and trix[i] > 0 and chop_trending[i] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Camarilla S3 with bearish trend and volume confirmation
-            elif close[i] < camarilla_s3_aligned[i] and bearish_trend and volume_ok[i]:
+            # SHORT: TRIX turning down in trending regime with bearish trend and volume spike
+            elif trix[i] < trix[i-1] and trix[i] < 0 and chop_trending[i] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below Camarilla R3 or trend turns bearish
-            if close[i] < camarilla_r3_aligned[i] or not bullish_trend:
+            # EXIT LONG: TRIX turns down OR trend turns bearish OR enters ranging market
+            if trix[i] < trix[i-1] or not bullish_trend or chop_ranging[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above Camarilla S3 or trend turns bullish
-            if close[i] > camarilla_s3_aligned[i] or not bearish_trend:
+            # EXIT SHORT: TRIX turns up OR trend turns bullish OR enters ranging market
+            if trix[i] > trix[i-1] or not bearish_trend or chop_ranging[i]:
                 signals[i] = 0.0
                 position = 0
             else:
