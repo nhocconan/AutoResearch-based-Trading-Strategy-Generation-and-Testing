@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1d_WeeklyPivot_1wTrend_Volume
-# Hypothesis: Trade daily breakouts of weekly pivot levels (R1/S1) aligned with weekly trend and volume.
-# Weekly pivot defines key support/resistance; weekly EMA50 filters long-term trend direction.
-# Volume confirms breakout momentum. Designed for very low frequency (<15 trades/year) to minimize
-# fee decay and survive both bull and bear markets by following higher timeframe structure.
+# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Trade 12h breakouts of daily Camarilla pivot levels (R1/S1) aligned with daily trend and volume confirmation.
+# Uses daily Camarilla levels from previous day, daily EMA50 for trend filter, and volume spike confirmation.
+# Designed for low frequency (12-37 trades/year) to survive both bull and bear markets by following higher timeframe structure.
+# Focus on BTC/ETH as primary targets.
 
-name = "1d_WeeklyPivot_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,51 +23,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Weekly EMA50 for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # === Daily Camarilla pivot levels (R1, S1) from previous day ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Use previous day's OHLC for current day's Camarilla levels
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # === Weekly pivot levels (R1, S1) from previous completed week ===
-    if len(df_1w) < 1:
-        return np.zeros(n)
+    # Shift by 1 to use previous day's data
+    prev_high_prev = np.roll(prev_high, 1)
+    prev_low_prev = np.roll(prev_low, 1)
+    prev_close_prev = np.roll(prev_close, 1)
+    prev_high_prev[0] = np.nan
+    prev_low_prev[0] = np.nan
+    prev_close_prev[0] = np.nan
     
-    wk_high = df_1w['high'].values
-    wk_low = df_1w['low'].values
-    wk_close = df_1w['close'].values
+    # Calculate Camarilla levels
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    r1 = prev_close_prev + (prev_high_prev - prev_low_prev) * 1.1 / 12
+    s1 = prev_close_prev - (prev_high_prev - prev_low_prev) * 1.1 / 12
     
-    # Shift by 1 to use previous week's data
-    wk_high_prev = np.roll(wk_high, 1)
-    wk_low_prev = np.roll(wk_low, 1)
-    wk_close_prev = np.roll(wk_close, 1)
-    wk_high_prev[0] = np.nan
-    wk_low_prev[0] = np.nan
-    wk_close_prev[0] = np.nan
+    # Align daily levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    pivot = (wk_high_prev + wk_low_prev + wk_close_prev) / 3.0
-    r1 = pivot + (wk_high_prev - wk_low_prev)
-    s1 = pivot - (wk_high_prev - wk_low_prev)
+    # === Daily EMA50 for trend filter ===
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align weekly levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # === Volume confirmation (20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === Volume confirmation (24-period average on 12h) ===
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 100  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vol_ma_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,16 +75,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA50
-        trend_up = close[i] > ema_50_1w_aligned[i]
-        trend_down = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: price above/below daily EMA50
+        trend_up = close[i] > ema_50_1d_aligned[i]
+        trend_down = close[i] < ema_50_1d_aligned[i]
         
         # Breakout conditions
         breakout_up = close[i] > r1_aligned[i]
         breakout_down = close[i] < s1_aligned[i]
         
         # Volume filter: above average
-        vol_ok = volume[i] > vol_ma_20[i]
+        vol_ok = volume[i] > vol_ma_24[i]
         
         if position == 0:
             # LONG: breakout above R1, uptrend, volume confirmation
