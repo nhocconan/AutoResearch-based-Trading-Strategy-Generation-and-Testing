@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_RSI_MeanReversion_WeeklyTrend
-Hypothesis: Daily RSI mean reversion (buy oversold, sell overbought) filtered by weekly trend works in both bull and bear markets. Weekly EMA200 defines trend: long when RSI<30 and price>weekly EMA200, short when RSI>70 and price<weekly EMA200. Uses weekly trend filter to avoid counter-trend trades in strong trends, reducing false signals.
+4h_RSI_Divergence_1dTrend_VolumeFilter
+Hypothesis: RSI divergence (bullish/bearish) on 4h combined with 1d EMA trend filter and volume confirmation captures reversals in both bull and bear markets. Bullish divergence + 1d uptrend + volume spike = long; bearish divergence + 1d downtrend + volume spike = short. Uses RSI divergence for early reversal signals and 1d trend for filtering.
 """
 
-name = "1d_RSI_MeanReversion_WeeklyTrend"
-timeframe = "1d"
+name = "4h_RSI_Divergence_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,32 +17,38 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get weekly data for trend filter (call once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    # Weekly EMA200 for trend
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    close_1d = df_1d['close'].values
+    # 1d EMA34 for trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Daily RSI(14) for mean reversion signals
+    # Calculate RSI on 4h close
     delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
     avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    rsi = rsi.values
+
+    # Volume confirmation: volume > 2x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
-        if np.isnan(ema200_1w_aligned[i]) or np.isnan(rsi_values[i]):
+    for i in range(30, n):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -50,30 +56,50 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Bullish RSI divergence: price makes lower low, RSI makes higher low
+        bullish_div = False
+        if i >= 3:
+            # Check last 3 bars for bullish divergence
+            if low[i] < low[i-1] < low[i-2] and rsi[i] > rsi[i-1] > rsi[i-2]:
+                bullish_div = True
+            # Also check for divergence over 4 bars
+            elif low[i] < low[i-3] and rsi[i] > rsi[i-3]:
+                bullish_div = True
+
+        # Bearish RSI divergence: price makes higher high, RSI makes lower high
+        bearish_div = False
+        if i >= 3:
+            # Check last 3 bars for bearish divergence
+            if high[i] > high[i-1] > high[i-2] and rsi[i] < rsi[i-1] < rsi[i-2]:
+                bearish_div = True
+            # Also check for divergence over 4 bars
+            elif high[i] > high[i-3] and rsi[i] < rsi[i-3]:
+                bearish_div = True
+
         if position == 0:
-            # LONG: RSI oversold (<30) and price above weekly EMA200 (uptrend)
-            if rsi_values[i] < 30 and close[i] > ema200_1w_aligned[i]:
-                signals[i] = 0.25
+            # LONG: Bullish RSI divergence + 1d uptrend + volume spike
+            if bullish_div and close[i] > ema34_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
+                signals[i] = 0.30
                 position = 1
-            # SHORT: RSI overbought (>70) and price below weekly EMA200 (downtrend)
-            elif rsi_values[i] > 70 and close[i] < ema200_1w_aligned[i]:
-                signals[i] = -0.25
+            # SHORT: Bearish RSI divergence + 1d downtrend + volume spike
+            elif bearish_div and close[i] < ema34_1d_aligned[i] and volume[i] > vol_avg_20[i] * 2:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought (>70) or price below weekly EMA200 (trend change)
-            if rsi_values[i] > 70 or close[i] < ema200_1w_aligned[i]:
+            # EXIT LONG: Bearish RSI divergence or 1d trend turns down
+            if bearish_div or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: RSI oversold (<30) or price above weekly EMA200 (trend change)
-            if rsi_values[i] < 30 or close[i] > ema200_1w_aligned[i]:
+            # EXIT SHORT: Bullish RSI divergence or 1d trend turns up
+            if bullish_div or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
 
     return signals
