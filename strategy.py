@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 6h_Chaikin_Oscillator_Momentum_With_Trend_Filter
-# Hypothesis: Chaikin Oscillator (3,10) crossing zero indicates short-term momentum shifts in accumulation/distribution.
-# Confirmed by daily trend (EMA50) to avoid counter-trend trades. Volume-weighted ensures institutional participation.
-# Designed for 6h timeframe with low trade frequency (<30/year) to minimize fee drag.
-# Works in both bull and bear markets by following the higher timeframe trend.
+# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R1/S1 levels from 1d act as intraday support/resistance. Breakout with volume confirmation (>2x 20-period volume SMA) and 1d EMA50 trend filter ensures alignment with higher timeframe trend. Designed for low trade frequency (<25/year) to minimize fee drag in 12h timeframe. Works in bull/bear via trend filter and volatility-adjusted breakouts.
 
-name = "6h_Chaikin_Oscillator_Momentum_With_Trend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,36 +20,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
+    # Get 1d data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 5:
         return np.zeros(n)
 
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Avoid division by zero
-    hl_range = high - low
-    mf_multiplier = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0.0)
-    money_flow_volume = mf_multiplier * volume
+    # Calculate Camarilla levels (R1, S1) from previous 1d bar
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    rango_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + 1.1 * rango_1d / 12
+    camarilla_s1 = close_1d - 1.1 * rango_1d / 12
 
-    # Chaikin Oscillator = EMA(3) of MFV - EMA(10) of MFV
-    mfv_series = pd.Series(money_flow_volume)
-    ema3 = mfv_series.ewm(span=3, adjust=False, min_periods=3).mean()
-    ema10 = mfv_series.ewm(span=10, adjust=False, min_periods=10).mean()
-    chaikin_osc = (ema3 - ema10).values
+    # Align Camarilla levels to 12h timeframe (using previous 1d bar)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
-    # Daily EMA50 for trend filter
+    # 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+
+    # Volume confirmation: 2x 20-period volume SMA
+    volume_series = pd.Series(volume)
+    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_threshold = volume_sma20 * 2.0
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(10, n):  # Start after EMA10 needs 10 bars
+    for i in range(1, n):  # Start from 1 to access previous bar
         # Skip if any required data is NaN
-        if (np.isnan(chaikin_osc[i]) or np.isnan(chaikin_osc[i-1]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,28 +64,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Chaikin Oscillator crosses above zero with uptrend
-            if (chaikin_osc[i-1] <= 0 and chaikin_osc[i] > 0 and
+            # LONG: Close breaks above R1 with volume spike and uptrend
+            if (close[i] > camarilla_r1_aligned[i] and
+                volume[i] > volume_threshold[i] and
                 close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Chaikin Oscillator crosses below zero with downtrend
-            elif (chaikin_osc[i-1] >= 0 and chaikin_osc[i] < 0 and
+            # SHORT: Close breaks below S1 with volume spike and downtrend
+            elif (close[i] < camarilla_s1_aligned[i] and
+                  volume[i] > volume_threshold[i] and
                   close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Chaikin Oscillator crosses below zero
-            if chaikin_osc[i] < 0:
+            # EXIT LONG: Close breaks below S1 (reversal signal)
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Chaikin Oscillator crosses above zero
-            if chaikin_osc[i] > 0:
+            # EXIT SHORT: Close breaks above R1 (reversal signal)
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
