@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 6h_1W_1D_Telegraph_Signal_With_Volume_Filter
-# Hypothesis: Combines weekly trend (price above/below weekly VWAP) with daily momentum (RSI(14) > 50 for long, < 50 for short) and volume confirmation on 6h.
-# Weekly VWAP acts as institutional trend filter; daily RSI provides momentum entry; volume spike confirms conviction.
-# Works in bull markets (price above weekly VWAP + RSI > 50 + volume) and bear markets (price below weekly VWAP + RSI < 50 + volume).
-# Targets 15-35 trades/year with discrete sizing to minimize fee drag.
+# 12h_1D_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R1/S1 levels from 1d provide key support/resistance.
+# Breakout above R1 with 1d uptrend (close > EMA34) and volume spike = long.
+# Breakdown below S1 with 1d downtrend (close < EMA34) and volume spike = short.
+# Uses 1d for trend and Camarilla levels, 12h for entry timing.
+# Works in bull markets (follow 1d uptrend) and bear markets (follow 1d downtrend) by trading with institutional trend.
 
-name = "6h_1W_1D_Telegraph_Signal_With_Volume_Filter"
-timeframe = "6h"
+name = "12h_1D_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,49 +24,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for VWAP calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-
-    # Calculate VWAP on weekly data: typical price * volume, cumulative
-    typical_price_1w = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3.0
-    vwap_numerator = (typical_price_1w * df_1w['volume'].values).cumsum()
-    vwap_denominator = df_1w['volume'].values.cumsum()
-    vwap_1w = vwap_numerator / vwap_denominator
-
-    # Align weekly VWAP to 6h timeframe
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
-
-    # Get daily data for RSI calculation
+    # Get 1d data for Camarilla calculation and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
 
-    # Calculate RSI(14) on daily close
+    # Calculate EMA34 on 1d close for trend filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
 
-    # Align daily RSI to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate Camarilla levels from previous 1d bar
+    # Using high, low, close of completed 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla R1 = close + (high - low) * 1.12
+    # Camarilla S1 = close - (high - low) * 1.12
+    R1 = close_1d + (high_1d - low_1d) * 1.12
+    S1 = close_1d - (high_1d - low_1d) * 1.12
 
-    # Calculate 20-period volume average on 6h for volume spike detection
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma_20 * 1.5)  # 50% above average
+    # Align Camarilla levels and EMA34 to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Volume spike detection on 12h: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,26 +68,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above weekly VWAP, RSI > 50, volume spike
-            if close[i] > vwap_1w_aligned[i] and rsi_1d_aligned[i] > 50 and volume_spike[i]:
+            # LONG: Price breaks above R1, 1d uptrend, volume spike
+            if close[i] > R1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below weekly VWAP, RSI < 50, volume spike
-            elif close[i] < vwap_1w_aligned[i] and rsi_1d_aligned[i] < 50 and volume_spike[i]:
+            # SHORT: Price breaks below S1, 1d downtrend, volume spike
+            elif close[i] < S1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below weekly VWAP OR RSI < 40
-            if close[i] < vwap_1w_aligned[i] or rsi_1d_aligned[i] < 40:
+            # EXIT LONG: Price breaks below S1 or 1d trend turns down
+            if close[i] < S1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above weekly VWAP OR RSI > 60
-            if close[i] > vwap_1w_aligned[i] or rsi_1d_aligned[i] > 60:
+            # EXIT SHORT: Price breaks above R1 or 1d trend turns up
+            if close[i] > R1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
