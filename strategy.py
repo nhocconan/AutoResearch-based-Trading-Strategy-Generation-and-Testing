@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Breakouts from Camarilla R1/S1 levels on 4h timeframe, filtered by 1d EMA50 trend direction and confirmed by volume spikes (2x 12-bar average).
-# In bull markets, long entries occur when price breaks above R1 in an uptrend; in bear markets, short entries occur when price breaks below S1 in a downtrend.
-# Volume spike ensures institutional participation. Uses tight entry conditions to limit trades (~20-50/year) and avoid fee drag.
+# 1d_WeeklyDonchian_Breakout_Volume
+# Hypothesis: Weekly Donchian breakout (20-period) with volume confirmation filters for trending moves.
+# Works in bull markets via long entries on weekly highs and bear markets via short entries on weekly lows.
+# Volume spike ensures institutional participation, reducing false breakouts. Target: 10-25 trades/year.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,40 +22,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
+        return np.zeros(n)
 
-    # Calculate 1d EMA50 trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly Donchian channels (20-period)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
 
-    # Previous day's high, low, close for Camarilla levels
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Donchian upper: max(high, 20)
+    donchian_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    # Donchian lower: min(low, 20)
+    donchian_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
 
-    # Calculate Camarilla levels for today (based on previous day)
-    # R1 = close + (high - low) * 1.12 / 12
-    # S1 = close - (high - low) * 1.12 / 12
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.12 / 12
-    s1 = prev_close - camarilla_range * 1.12 / 12
+    # Align to daily timeframe (properly delayed for weekly bar close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
 
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Weekly trend filter: price above/below weekly EMA20
+    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).values
+    weekly_ema20_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema20)
 
-    # Volume spike: current > 2.0x average of last 12 bars (2 days on 4h)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Volume spike: current > 1.5x average of last 10 days
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after EMA50 warmup
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(20, n):  # Start after Donchian warmup
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(weekly_ema20_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,30 +63,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + 1d EMA50 uptrend + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_spike[i]):
+            # LONG: Price breaks above weekly Donchian high + volume spike + above weekly EMA20
+            if (close[i] > donchian_high_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > weekly_ema20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + 1d EMA50 downtrend + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: Price breaks below weekly Donchian low + volume spike + below weekly EMA20
+            elif (close[i] < donchian_low_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < weekly_ema20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or trend breaks
-            if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: Price breaks below weekly Donchian low or trend weakens
+            if close[i] < donchian_low_aligned[i] or close[i] < weekly_ema20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or trend breaks
-            if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above weekly Donchian high or trend weakens
+            if close[i] > donchian_high_aligned[i] or close[i] > weekly_ema20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
