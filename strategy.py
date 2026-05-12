@@ -2,7 +2,7 @@
 # 4h_Donchian20_Breakout_1dTrend_VolumeSpike
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation (1.5x average volume).
 # The 1d EMA50 provides trend direction to avoid counter-trend trades, while volume spikes confirm breakout strength.
-# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag. Works in bull/bear by following 1d trend.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull/bear by following 1d trend.
 # Uses Donchian channels from 4h data for breakout levels.
 
 name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike"
