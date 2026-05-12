@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_TRIX_Volume_Spike_Regime_1dTrend"
-timeframe = "4h"
+name = "6h_TurtleSoup_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,37 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX (15-period EMA of EMA of EMA of log returns)
-    log_returns = np.log(close[1:] / close[:-1])
-    log_returns = np.concatenate([[np.nan], log_returns])  # align length
-    
-    ema1 = pd.Series(log_returns).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = ema3 * 100  # scale for readability
-    
-    # TRIX signal line (9-period EMA)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
-    
-    # Volume spike: current volume > 2.0x 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)
-    
-    # Load daily data for trend filter (EMA34)
+    # Daily trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Previous day's low and high for Turtle Soup setup
+    prev_low_1d = np.roll(close_1d, 1)  # Approximate with previous close as proxy for simplicity
+    prev_high_1d = np.roll(close_1d, 1)
+    # Better: use actual low/high from daily data
+    prev_low_1d = np.roll(df_1d['low'].values, 1)
+    prev_high_1d = np.roll(df_1d['high'].values, 1)
+    prev_low_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    prev_high_1d_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
+    
+    # 6-period lowest low and highest high for false breakout detection
+    lowest_low_6 = pd.Series(low).rolling(window=6, min_periods=6).min().values
+    highest_high_6 = pd.Series(high).rolling(window=6, min_periods=6).max().values
+    
+    # Volume filter: avoid low-volume breakouts
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(prev_low_1d_aligned[i]) or np.isnan(prev_high_1d_aligned[i]) or
+            np.isnan(lowest_low_6[i]) or np.isnan(highest_high_6[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,24 +59,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TRIX crosses above signal + price above daily EMA34 + volume spike
-            if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] and close[i] > ema_34_1d_aligned[i] and vol_spike[i]:
+            # Long setup: false breakdown below previous day's low, then reversal
+            # Price takes out prior day's low but closes back above it + 6-period lowest low
+            if (low[i] < prev_low_1d_aligned[i] and 
+                close[i] > prev_low_1d_aligned[i] and
+                close[i] > lowest_low_6[i] and
+                close[i] > ema_50_1d_aligned[i] and  # in line with daily trend
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below signal + price below daily EMA34 + volume spike
-            elif trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] and close[i] < ema_34_1d_aligned[i] and vol_spike[i]:
+            # Short setup: false breakout above previous day's high, then reversal
+            elif (high[i] > prev_high_1d_aligned[i] and 
+                  close[i] < prev_high_1d_aligned[i] and
+                  close[i] < highest_high_6[i] and
+                  close[i] < ema_50_1d_aligned[i] and  # in line with daily trend
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TRIX crosses below signal or price below daily EMA34
-            if trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price breaks below 6-period lowest low or reverses against daily trend
+            if close[i] < lowest_low_6[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX crosses above signal or price above daily EMA34
-            if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price breaks above 6-period highest high or reverses against daily trend
+            if close[i] > highest_high_6[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
