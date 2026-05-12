@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1D_Camarilla_R4S4_Breakout_Volume
-# Hypothesis: Breakouts at daily Camarilla R4/S4 levels with volume confirmation on 12h timeframe.
-# Uses 1d timeframe for Camarilla levels and momentum confirmation, 12h for entry/exit.
-# Designed to work in both bull and bear markets by requiring volume confirmation and momentum alignment.
-# Targets 12-37 trades/year on 12h timeframe to avoid fee drag.
+# 4h_1D_1W_Camarilla_R4S4_Breakout_Trend_Volume
+# Hypothesis: Breakouts at weekly and daily Camarilla R4/S4 levels with volume confirmation and trend filter on 4h timeframe.
+# Uses 1w and 1d timeframes for trend confirmation and 4h for entry/exit.
+# Designed to work in both bull and bear markets by requiring volume confirmation and trend alignment.
+# Targets 20-50 trades/year on 4h timeframe to avoid fee drag.
 
-name = "12h_1D_Camarilla_R4S4_Breakout_Volume"
-timeframe = "12h"
+name = "4h_1D_1W_Camarilla_R4S4_Breakout_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -28,9 +28,19 @@ def generate_signals(prices):
     if len(df_1d) < 20:
         return np.zeros(n)
 
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+
+    # Calculate 1w EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+
     # Calculate 1d EMA for momentum filter
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
     # Calculate Camarilla R4 and S4 levels from previous 1d OHLC
@@ -53,8 +63,9 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
+            np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,31 +73,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Momentum filter: price above/below 50-period EMA on 1d
+        # Trend filter: price above/below 34-period EMA on 1w
+        bullish_trend = close[i] > ema_1w_aligned[i]
+        bearish_trend = close[i] < ema_1w_aligned[i]
+
+        # Momentum filter: price above/below 34-period EMA on 1d
         bullish_momentum = close[i] > ema_1d_aligned[i]
         bearish_momentum = close[i] < ema_1d_aligned[i]
 
         if position == 0:
-            # LONG: Break above Camarilla R4 with bullish momentum and volume confirmation
-            if (close[i] > camarilla_r4_aligned[i] and bullish_momentum and volume_ok[i]):
+            # LONG: Break above Camarilla R4 with bullish trend, momentum and volume confirmation
+            if (close[i] > camarilla_r4_aligned[i] and bullish_trend and bullish_momentum and volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Camarilla S4 with bearish momentum and volume confirmation
-            elif (close[i] < camarilla_s4_aligned[i] and bearish_momentum and volume_ok[i]):
+            # SHORT: Break below Camarilla S4 with bearish trend, momentum and volume confirmation
+            elif (close[i] < camarilla_s4_aligned[i] and bearish_trend and bearish_momentum and volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R4 or momentum turns bearish
-            if close[i] < camarilla_r4_aligned[i] or not bullish_momentum:
+            # EXIT LONG: Price re-enters below R4 or trend/momentum turns bearish
+            if close[i] < camarilla_r4_aligned[i] or not bullish_trend or not bullish_momentum:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S4 or momentum turns bullish
-            if close[i] > camarilla_s4_aligned[i] or not bearish_momentum:
+            # EXIT SHORT: Price re-enters above S4 or trend/momentum turns bullish
+            if close[i] > camarilla_s4_aligned[i] or not bearish_trend or not bearish_momentum:
                 signals[i] = 0.0
                 position = 0
             else:
