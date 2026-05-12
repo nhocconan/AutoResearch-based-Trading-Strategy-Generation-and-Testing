@@ -1,10 +1,15 @@
-# 4h_Combo_Filter_Strategy
-# Hypothesis: Combines 4h price momentum with 1d trend filter and volume spike to capture strong trends in both bull and bear markets.
-# Uses RSI for momentum, EMA for trend, and volume confirmation to reduce false signals.
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
+#!/usr/bin/env python3
+"""
+6h_RSI200_Trend_Breakout_With_Volume
+Hypothesis: Uses RSI(200) to define long-term trend (RSI>50 bullish, <50 bearish).
+Enters long when price breaks above 6h RSI(14) from oversold (<30) in bullish trend,
+or short when price breaks below 6h RSI(14) from overbought (>70) in bearish trend.
+Volume confirmation ensures momentum. Designed for low frequency and works in both
+bull/bear markets by aligning with long-term trend via RSI(200).
+"""
 
-name = "4h_Combo_Filter_Strategy"
-timeframe = "4h"
+name = "6h_RSI200_Trend_Breakout_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -13,53 +18,53 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
 
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1h data for momentum filter (RSI)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 14:
+    # Long-term trend: RSI(200) on daily closes (updated only when daily bar closes)
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 200:
         return np.zeros(n)
-    
-    # Get 1d data for trend filter (EMA)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-
-    # Calculate RSI on 1h closes (14-period)
-    close_1h = df_1h['close'].values
-    delta = np.diff(close_1h, prepend=close_1h[0])
+    close_d = df_d['close'].values
+    delta = np.diff(close_d, prepend=close_d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/200, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/200, adjust=False).mean().values
     rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1h, rsi)
+    rsi_200 = 100 - (100 / (1 + rs))
+    rsi_200 = np.where(avg_loss == 0, 100, rsi_200)  # handle zero loss
+    rsi_200 = np.where(avg_gain == 0, 0, rsi_200)    # handle zero gain
+    rsi_200_aligned = align_htf_to_ltf(prices, df_d, rsi_200)
 
-    # Calculate 50-period EMA on 1d closes for trend filter
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Entry signal: RSI(14) on 6h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14 = np.where(avg_loss == 0, 100, rsi_14)
+    rsi_14 = np.where(avg_gain == 0, 0, rsi_14)
 
-    # Volume confirmation: 20-period average on 4h data
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 24-period average (4 days of 6h data)
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        # Get aligned values for current 4h bar
-        rsi_val = rsi_aligned[i]
-        ema_trend = ema_50_aligned[i]
-        vol_avg_val = vol_avg_20[i]
-        
-        # Skip if any required data is NaN
-        if (np.isnan(rsi_val) or np.isnan(ema_trend) or np.isnan(vol_avg_val)):
+    for i in range(24, n):  # Start from 24 for volume average
+        rsi200_val = rsi_200_aligned[i]
+        rsi14_val = rsi_14[i]
+        vol_avg_val = vol_avg_24[i]
+
+        if np.isnan(rsi200_val) or np.isnan(rsi14_val) or np.isnan(vol_avg_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +73,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI > 55 (bullish momentum), price above EMA50 (uptrend), volume surge
-            if (rsi_val > 55 and 
-                close[i] > ema_trend and 
+            # LONG: RSI14 crosses above 30 from below in bullish long-term trend (RSI200>50) with volume
+            if (rsi_14[i-1] <= 30 and rsi14_val > 30 and 
+                rsi200_val > 50 and 
                 volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI < 45 (bearish momentum), price below EMA50 (downtrend), volume surge
-            elif (rsi_val < 45 and 
-                  close[i] < ema_trend and 
+            # SHORT: RSI14 crosses below 70 from above in bearish long-term trend (RSI200<50) with volume
+            elif (rsi_14[i-1] >= 70 and rsi14_val < 70 and 
+                  rsi200_val < 50 and 
                   volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI < 40 (momentum fading) or price below EMA50 (trend change)
-            if (rsi_val < 40 or close[i] < ema_trend):
+            # EXIT LONG: RSI14 crosses below 50 (momentum loss) or RSI200 turns bearish
+            if (rsi14_val < 50 or rsi200_val < 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI > 60 (momentum fading) or price above EMA50 (trend change)
-            if (rsi_val > 60 or close[i] > ema_trend):
+            # EXIT SHORT: RSI14 crosses above 50 (momentum loss) or RSI200 turns bullish
+            if (rsi14_val > 50 or rsi200_val > 50):
                 signals[i] = 0.0
                 position = 0
             else:
