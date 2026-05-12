@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1_S1_Breakout_TrendVol_v1
+12h_1d_Camarilla_R1_S1_Breakout_TrendVol_v2
 Hypothesis: 12-hour breakouts from Camarilla R1/S1 levels (based on 1-day price action) with 1-day trend filter and volume spike confirmation.
 This strategy targets 12h timeframe to reduce trade frequency while using 1d Camarilla levels (proven effective) and 1d trend for filter.
 Only takes long when price breaks above R1 with volume spike and 1d uptrend, short when breaks below S1 with volume spike and 1d downtrend.
 Designed to work in both bull and bear markets via trend filter and volume confirmation to avoid false breakouts.
 """
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_TrendVol_v1"
+name = "12h_1d_Camarilla_R1_S1_Breakout_TrendVol_v2"
 timeframe = "12h"
 leverage = 1.0
 
