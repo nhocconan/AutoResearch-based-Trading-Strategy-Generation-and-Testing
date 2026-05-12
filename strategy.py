@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_1D_SlopeOfLinearRegression_TrendFilter
-# Hypothesis: Use the slope of linear regression over 20 periods on 1d closes as a trend filter for 6b breakouts.
-# In strong trends (positive slope), buy breakouts above 20-period high; in weak trends (negative slope), sell breakdowns below 20-period low.
-# The slope acts as a smoothed trend strength indicator, reducing whipsaws in sideways markets.
-# Designed for 6h to limit trade frequency to 50-150 total trades over 4 years.
+# 12h_1D_Camarilla_R1S1_Breakout_12hTrend_Volume_v3
+# Hypothesis: Breakouts at daily Camarilla R1/S1 levels with 12h EMA20 trend filter and volume confirmation.
+# Works in bull/bear markets: In uptrends, buy R1 breakouts; in downtrends, sell S1 breakdowns.
+# Tightened entry conditions to reduce trade frequency and improve win rate.
 
-name = "6h_1D_SlopeOfLinearRegression_TrendFilter"
-timeframe = "6h"
+name = "12h_1D_Camarilla_R1S1_Breakout_12hTrend_Volume_v3"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -23,41 +22,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 60:
         return np.zeros(n)
 
-    # Calculate slope of linear regression over 20 periods on 1d closes
-    def linreg_slope(arr, window):
-        if len(arr) < window:
-            return np.full_like(arr, np.nan)
-        result = np.full(len(arr), np.nan)
-        for i in range(window - 1, len(arr)):
-            y = arr[i - window + 1:i + 1]
-            x = np.arange(window)
-            slope = np.polyfit(x, y, 1)[0]
-            result[i] = slope
-        return result
+    # 12h EMA20 trend filter (shorter period for better responsiveness)
+    ema_20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
 
-    slope_20 = linreg_slope(df_1d['close'].values, 20)
-    slope_20_aligned = align_htf_to_ltf(prices, df_1d, slope_20)
+    # Get 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
+        return np.zeros(n)
 
-    # 20-period high and low on 6h for breakout levels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous 1d OHLC
+    # Using previous day's data to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
 
-    # Volume confirmation: current volume > 1.3x average of last 20 periods
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+
+    # Volume confirmation: current volume > 2.0x average of last 20 periods (more stringent)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.3 * vol_ma)
+    volume_ok = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(slope_20_aligned[i]) or np.isnan(high_20[i]) or
-            np.isnan(low_20[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_20_12h_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,34 +68,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter: positive slope = uptrend, negative slope = downtrend
-        uptrend = slope_20_aligned[i] > 0
-        downtrend = slope_20_aligned[i] < 0
+        # Trend filter from 12h EMA20
+        uptrend = close[i] > ema_20_12h_aligned[i]
+        downtrend = close[i] < ema_20_12h_aligned[i]
 
         if position == 0:
-            # LONG: Break above 20-period high in uptrend with volume confirmation
-            if close[i] > high_20[i] and uptrend and volume_ok[i]:
-                signals[i] = 0.25
+            # LONG: Break above Camarilla R1 in uptrend with volume confirmation
+            if (close[i] > camarilla_r1_aligned[i] and uptrend and volume_ok[i]):
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Break below 20-period low in downtrend with volume confirmation
-            elif close[i] < low_20[i] and downtrend and volume_ok[i]:
-                signals[i] = -0.25
+            # SHORT: Break below Camarilla S1 in downtrend with volume confirmation
+            elif (close[i] < camarilla_s1_aligned[i] and downtrend and volume_ok[i]):
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below 20-period low or trend turns negative
-            if close[i] < low_20[i] or not uptrend:
+            # EXIT LONG: Price re-enters Camarilla range (below R1) or trend reversal
+            if close[i] < camarilla_r1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Price rises above 20-period high or trend turns positive
-            if close[i] > high_20[i] or not downtrend:
+            # EXIT SHORT: Price re-enters Camarilla range (above S1) or trend reversal
+            if close[i] > camarilla_s1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
 
     return signals
