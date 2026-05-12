@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4H_DONCHIAN_BREAKOUT_1D_TREND_AND_VOLUME
-# Hypothesis: Donchian(20) breakout with 1-day EMA trend filter and volume spike confirmation.
-# Works in bull/bear: EMA filter ensures trades align with higher timeframe trend,
-# while Donchian channels provide objective breakout levels. Volume spike confirms
-# institutional participation. Target: 25-40 trades/year.
+# 12H_MARKET_PROFILE_POINT_OF_CONTROL_1W_TREND_FILTER
+# Hypothesis: Uses the weekly Point of Control (POC) from Market Profile as a key support/resistance level.
+# Price is expected to revert to the POC after deviation, with the weekly trend (EMA34) filtering direction.
+# Works in both bull and bear markets: In uptrend, go long when price deviates below POC; in downtrend, go short when price deviates above POC.
+# Volume-weighted POC identifies institutional value areas, and trend alignment reduces counter-trend whipsaws.
+# Target: 15-25 trades/year on 12h timeframe.
 
-name = "4H_DONCHIAN_BREAKOUT_1D_TREND_AND_VOLUME"
-timeframe = "4h"
+name = "12H_MARKET_PROFILE_POINT_OF_CONTROL_1W_TREND_FILTER"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,36 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Weekly data for Point of Control (POC) calculation and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 1-day EMA for trend filter (34-period)
-    ema34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Weekly typical price and volume for POC (simplified as volume-weighted average price)
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    vp = typical_price * df_1w['volume']  # Volume * typical price
+    # POC = price level with highest volume (approximated by VWAP for stability)
+    poc = (vp.cumsum() / df_1w['volume'].cumsum()).values
     
-    # Donchian channel (20-period) on 4h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Weekly EMA for trend filter (34-period)
+    ema34 = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume spike detection (20-period volume MA on 4h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > vol_ma * 2.0  # Volume at least 2x average
-    
-    # Align EMA to 4h timeframe
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    # Align POC and EMA to 12h timeframe
+    poc_aligned = align_htf_to_ltf(prices, df_1w, poc)
+    ema34_aligned = align_htf_to_ltf(prices, df_1w, ema34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure indicators are stable
+    start_idx = 10  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(poc_aligned[i]) or np.isnan(ema34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,28 +58,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high with volume confirmation in bullish trend
-            if (close[i] > donchian_high[i] and vol_spike[i] and 
-                close[i] > ema34_aligned[i]):
+            # LONG: Price deviates below POC in uptrend (mean reversion to value area)
+            if (close[i] < poc_aligned[i] and close[i] > ema34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low with volume confirmation in bearish trend
-            elif (close[i] < donchian_low[i] and vol_spike[i] and 
-                  close[i] < ema34_aligned[i]):
+            # SHORT: Price deviates above POC in downtrend (mean reversion to value area)
+            elif (close[i] > poc_aligned[i] and close[i] < ema34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to Donchian low (mean reversion to lower band)
-            if close[i] < donchian_low[i]:
+            # EXIT LONG: Price returns to or exceeds POC
+            if close[i] >= poc_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to Donchian high (mean reversion to upper band)
-            if close[i] > donchian_high[i]:
+            # EXIT SHORT: Price returns to or goes below POC
+            if close[i] <= poc_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
