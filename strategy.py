@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_1d_Trix_VolumeSpike_ChopRegime
-Hypothesis: 4-hour TRIX momentum with volume spike confirmation and 1-day chop regime filter.
-Long when TRIX crosses above zero with volume spike in trending market (CHOP < 38.2).
-Short when TRIX crosses below zero with volume spike in trending market.
-Works in both bull and bear markets via regime filter that avoids whipsaw in ranging conditions.
+6h_1d_1w_Keltner_Breakout_VolumeTrend
+Hypothesis: 6-hour breakouts from Keltner Channel (ATR-based) with 1d trend filter and volume confirmation.
+Keltner Channel adapts to volatility, providing dynamic support/resistance that works in both bull and bear markets.
+Long when price breaks above upper Keltner band with volume spike and 1d uptrend.
+Short when price breaks below lower Keltner band with volume spike and 1d downtrend.
+Uses weekly context via 1d EMA200 filter to avoid counter-trend trades in strong trends.
+Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 """
 
-name = "4h_1d_Trix_VolumeSpike_ChopRegime"
-timeframe = "4h"
+name = "6h_1d_1w_Keltner_Breakout_VolumeTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,47 +27,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # TRIX on close (4h): EMA(EMA(EMA(close,12),12),12) - 1 period ROC
-    close_series = pd.Series(close)
-    ema1 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = ema3.pct_change() * 100  # percentage change
-    trix_values = trix.values
-    
-    # Volume spike: >1.8x 20-period average (on 4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: >1.8x 40-period average (on 6h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=40, min_periods=40).mean().values
     volume_spike = volume > (1.8 * vol_ma)
     
-    # 1d data for chop regime
+    # ATR for Keltner Channel (20-period, 2.0 multiplier)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    
+    # Keltner Channel: EMA20 center, ± ATR*2
+    ema_center = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    keltner_upper = ema_center + (2.0 * atr)
+    keltner_lower = ema_center - (2.0 * atr)
+    
+    # 1d data for trend filter and weekly context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Chopping index: 100 * log10(SUM(ATR,14) / (HHV - LLV)) / log10(14)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean()
-    hhvl = df_1d['high'].rolling(window=14, min_periods=14).max()
-    llvl = df_1d['low'].rolling(window=14, min_periods=14).min()
-    chop = 100 * (np.log10(atr.rolling(window=14, min_periods=14).sum()) - 
-                  np.log10(hhvl - llvl)) / np.log10(14)
-    chop_values = chop.values
+    # 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Trending regime: CHOP < 38.2
-    trending_regime = chop_values < 38.2
-    
-    # Align 1d data to 4h timeframe
-    trending_regime_aligned = align_htf_to_ltf(prices, df_1d, trending_regime)
+    # 1d EMA200 for weekly trend filter (avoid counter-trend)
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(trix_values[i]) or 
-            np.isnan(trending_regime_aligned[i])):
+    for i in range(100, n):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,32 +71,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: TRIX crosses above zero + volume spike + trending regime
-            if (trix_values[i] > 0 and trix_values[i-1] <= 0 and 
+            # LONG: Price breaks above upper Keltner + volume spike + price above 1d EMA50 + above EMA200
+            if (close[i] > keltner_upper[i] and 
                 volume_spike[i] and 
-                trending_regime_aligned[i]):
+                close[i] > ema_50_1d_aligned[i] and
+                close[i] > ema_200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero + volume spike + trending regime
-            elif (trix_values[i] < 0 and trix_values[i-1] >= 0 and 
+            # SHORT: Price breaks below lower Keltner + volume spike + price below 1d EMA50 + below EMA200
+            elif (close[i] < keltner_lower[i] and 
                   volume_spike[i] and 
-                  trending_regime_aligned[i]):
+                  close[i] < ema_50_1d_aligned[i] and
+                  close[i] < ema_200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero OR chop regime shifts to ranging
-            if (trix_values[i] < 0 and trix_values[i-1] >= 0) or \
-               not trending_regime_aligned[i]:
+            # EXIT LONG: Price re-enters Keltner channel OR closes below 1d EMA50
+            if (keltner_lower[i] < close[i] < keltner_upper[i]) or \
+               close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero OR chop regime shifts to ranging
-            if (trix_values[i] > 0 and trix_values[i-1] <= 0) or \
-               not trending_regime_aligned[i]:
+            # EXIT SHORT: Price re-enters Keltner channel OR closes above 1d EMA50
+            if (keltner_lower[i] < close[i] < keltner_upper[i]) or \
+               close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
