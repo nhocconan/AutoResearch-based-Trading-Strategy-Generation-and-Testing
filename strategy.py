@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Alpha
 # Hypothesis: Use 1d Camarilla pivot levels (R3/S3) for breakout signals with 1d EMA trend filter and volume spike confirmation.
 # Long when price breaks above R3 with price > 1d EMA and volume > 2x MA; short when price breaks below S3 with price < 1d EMA and volume > 2x MA.
