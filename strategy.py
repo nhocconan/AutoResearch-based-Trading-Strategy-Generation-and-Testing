@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1D_CCI_MeanReversion_1wTrend_Filter
-# Hypothesis: Mean reversion using CCI(20) on daily timeframe with weekly trend filter.
-# Long when CCI < -100 and weekly trend up; short when CCI > 100 and weekly trend down.
-# Works in both bull and bear markets by fading extremes in ranging markets while
-# respecting the higher timeframe trend. Target: 15-25 trades/year.
+# 12h_TRIX_ZeroCross_1dTrend_Volume
+# Hypothesis: TRIX zero-cross on 12h with 1d trend filter and volume confirmation.
+# TRIX (12-period) captures momentum shifts; zero-cross indicates trend changes.
+# Combined with 1d EMA34 trend filter to ensure alignment with higher timeframe trend.
+# Volume spike confirms institutional participation. Works in bull via long entries in uptrends,
+# and in bear via short entries in downtrends. Target: 12-37 trades/year.
 
-name = "1D_CCI_MeanReversion_1wTrend_Filter"
-timeframe = "1d"
+name = "12h_TRIX_ZeroCross_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,27 +22,33 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
 
-    # Calculate 1w EMA50 trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # CCI calculation (20-period) on daily
-    tp = (high + low + close) / 3.0
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (tp - sma_tp) / (0.015 * mad)
+    # TRIX (12,12,12) on 12h
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix[0] = 0  # first value has no previous
+
+    # Volume spike: current > 2.0x average of last 12 bars (6 days)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after EMA50 and CCI warmup
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(sma_tp[i]) or 
-            np.isnan(mad[i]) or np.isnan(cci[i])):
+    for i in range(12, n):  # Start after TRIX warmup
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(trix[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -50,26 +57,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: CCI < -100 + weekly uptrend
-            if cci[i] < -100 and close[i] > ema_50_1w_aligned[i]:
+            # LONG: TRIX crosses above zero + 1d EMA34 uptrend + volume spike
+            if (trix[i] > 0 and trix[i-1] <= 0 and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: CCI > 100 + weekly downtrend
-            elif cci[i] > 100 and close[i] < ema_50_1w_aligned[i]:
+            # SHORT: TRIX crosses below zero + 1d EMA34 downtrend + volume spike
+            elif (trix[i] < 0 and trix[i-1] >= 0 and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: CCI crosses above -50 or trend breaks
-            if cci[i] > -50 or close[i] < ema_50_1w_aligned[i]:
+            # EXIT LONG: TRIX crosses below zero or trend breaks
+            if (trix[i] < 0 and trix[i-1] >= 0) or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: CCI crosses below 50 or trend breaks
-            if cci[i] < 50 or close[i] > ema_50_1w_aligned[i]:
+            # EXIT SHORT: TRIX crosses above zero or trend breaks
+            if (trix[i] > 0 and trix[i-1] <= 0) or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
