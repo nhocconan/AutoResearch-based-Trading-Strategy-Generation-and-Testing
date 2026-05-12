@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_TrendVolume_v1
-# Hypothesis: 4h Keltner Channel breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Uses Keltner Channel (ATR-based) for dynamic support/resistance, 1d EMA34 for trend direction,
-# and volume spike (1.8x 20-period average) to confirm breakout strength. Designed for 25-40 trades/year.
+# 12h_Donchian20_Breakout_1dTrend_Volume
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses Donchian Channel (20-period high/low) for breakout detection, 1d EMA34 for trend direction,
+# and volume spike (1.8x 20-period average) to confirm breakout strength. Designed for 12-30 trades/year.
 # Works in bull/bear markets by following 1d trend direction. Exit on reversal signal (price crosses EMA34).
-# Targets BTC/ETH with tighter entry to avoid whipsaw and reduce trade frequency.
+# Focuses on BTC/ETH with tighter entry to avoid whipsaw and reduce trade frequency.
 
-name = "4h_Keltner_Breakout_TrendVolume_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,43 +24,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 4h data for price action
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 12h data for price action
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
 
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
 
     # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
     # Calculate 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate 4h ATR(10) for Keltner Channel
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.concatenate([[close_4h[0]], close_4h[:-1]]))
-    tr3 = np.abs(low_4h - np.concatenate([[close_4h[0]], close_4h[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Calculate 12h Donchian Channel (20-period)
+    high_max = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    donchian_upper = align_htf_to_ltf(prices, df_12h, high_max)
+    donchian_lower = align_htf_to_ltf(prices, df_12h, low_min)
 
-    # Calculate Keltner Channel: EMA20 ± 2*ATR
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    keltner_upper = ema20_4h + 2 * atr10
-    keltner_lower = ema20_4h - 2 * atr10
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_4h, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_4h, keltner_lower)
-
-    # Calculate 4h volume SMA20 for volume confirmation
+    # Calculate 12h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 1.8  # Require 1.8x average volume
@@ -70,7 +60,7 @@ def generate_signals(prices):
 
     for i in range(34, n):
         # Skip if any required data is NaN
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
             np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -80,14 +70,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Breakout above Keltner Upper in 1d uptrend with volume spike
-            if (close[i] > keltner_upper_aligned[i] and 
+            # LONG: Breakout above Donchian Upper in 1d uptrend with volume spike
+            if (close[i] > donchian_upper[i] and 
                 close[i] > ema34_1d_aligned[i] and 
                 volume[i] > volume_sma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below Keltner Lower in 1d downtrend with volume spike
-            elif (close[i] < keltner_lower_aligned[i] and 
+            # SHORT: Breakdown below Donchian Lower in 1d downtrend with volume spike
+            elif (close[i] < donchian_lower[i] and 
                   close[i] < ema34_1d_aligned[i] and 
                   volume[i] > volume_sma20[i]):
                 signals[i] = -0.25
