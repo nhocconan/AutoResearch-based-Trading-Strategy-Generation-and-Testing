@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_Volume_Filter
-# Hypothesis: KAMA adapts to market noise, providing smooth trend signals. In trending markets, price stays above/below KAMA with sustained direction. Combining KAMA trend with volume confirmation filters out whipsaws. Works in bull/bear markets by following the trend via KAMA direction, with volume spikes adding conviction. Targets ~30 trades/year to minimize fee drag.
+# 6h_Stochastic_RSI_WeeklyTrend
+# Hypothesis: Use Stochastic RSI on 6h for mean-reversion entries in oversold/overbought conditions,
+# filtered by weekly trend (EMA200) and volume confirmation. Enter long when StochRSI < 0.2,
+# price above weekly EMA200, and volume spike; short when StochRSI > 0.8, price below weekly EMA200,
+# and volume spike. Exit on StochRSI crossing back to neutral (0.5). Targets 20-40 trades/year
+# to minimize fee drag and profit from mean reversion in ranging markets while respecting weekly trend.
 
-name = "4h_KAMA_Trend_Volume_Filter"
-timeframe = "4h"
+name = "6h_Stochastic_RSI_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,39 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # ER = Efficiency Ratio = |net change| / sum(|changes|)
-    # SC = [ER * (fastest - slowest) + slowest]^2
-    # KAMA = prevKAMA + SC * (price - prevKAMA)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    abs_change = np.abs(np.diff(close, prepend=close[0]))
-    delta = np.abs(np.subtract(close, np.roll(close, 1)))
-    delta[0] = 0
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
 
-    er = np.abs(np.subtract(close, np.roll(close, 10))) / \
-         (np.abs(np.diff(close, n=10)) + 1e-10)  # avoid div by zero
-    er[0:10] = 0  # first 10 periods invalid
+    # Calculate Stochastic RSI (14,14,3,3) on 6h
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
 
-    sc = (er * (2/(2+2) - 2/(30+2)) + 2/(30+2)) ** 2
-    sc[0:10] = 0
+    # Stochastic RSI: (RSI - min(RSI)) / (max(RSI) - min(RSI)) over 14 periods
+    rsi_series = pd.Series(rsi)
+    min_rsi = rsi_series.rolling(window=14, min_periods=14).min().values
+    max_rsi = rsi_series.rolling(window=14, min_periods=14).max().values
+    stoch_rsi = (rsi - min_rsi) / (max_rsi - min_rsi + 1e-10)
 
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-
-    # Alternative vectorized approach using pandas for clarity and performance
-    close_series = pd.Series(close)
-    change = close_series.diff().abs()
-    volatility = change.rolling(window=10, min_periods=1).sum()
-    net_change = close_series.diff(periods=10).abs()
-    er = net_change / (volatility + 1e-10)
-    er = er.fillna(0)
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2  # 2/(2+2)=0.6667, 2/(30+2)=0.0645
-    kama_series = close_series.copy()
-    for i in range(1, len(close_series)):
-        kama_series.iloc[i] = kama_series.iloc[i-1] + sc.iloc[i] * (close_series.iloc[i] - kama_series.iloc[i-1])
-    kama = kama_series.values
+    # 200 EMA on weekly for trend filter
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
 
     # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,9 +56,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if any required value is NaN
-        if np.isnan(kama[i]) or np.isnan(vol_avg_20[i]):
+        if (np.isnan(stoch_rsi[i]) or np.isnan(ema200_1w_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,26 +68,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price > KAMA + volume confirmation
-            if close[i] > kama[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # LONG: StochRSI oversold (<0.2) + price > weekly EMA200 + volume spike
+            if (stoch_rsi[i] < 0.2 and 
+                close[i] > ema200_1w_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price < KAMA + volume confirmation
-            elif close[i] < kama[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # SHORT: StochRSI overbought (>0.8) + price < weekly EMA200 + volume spike
+            elif (stoch_rsi[i] > 0.8 and 
+                  close[i] < ema200_1w_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below KAMA
-            if close[i] < kama[i]:
+            # EXIT LONG: StochRSI crosses back above 0.5 (mean reversion complete)
+            if stoch_rsi[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above KAMA
-            if close[i] > kama[i]:
+            # EXIT SHORT: StochRSI crosses back below 0.5
+            if stoch_rsi[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
