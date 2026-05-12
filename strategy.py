@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 6H_EHLERS_FISHER_TRANSFORM_1D_TREND_FILTER
-# Hypothesis: Ehlers Fisher Transform identifies turning points in price cycles with minimal lag.
-# Combined with 1D trend filter to avoid counter-trend trades. Works in both bull and bear markets:
-# - In bull markets: captures pullback reversals within uptrend
-# - In bear markets: captures bounces within downtrend
-# Target: 20-30 trades/year on 6h timeframe.
+# 12H_DONCHIAN20_VOLUME_CONFIRMATION_1D_TREND_FILTER
+# Hypothesis: Donchian breakouts capture strong momentum moves; volume confirmation filters false breakouts;
+# 1D trend filter avoids counter-trend trades. Works in bull markets (breakout continuations) and bear markets
+# (sharp reversals after volatility spikes). Target: 15-30 trades/year on 12h timeframe.
 
-name = "6H_EHLERS_FISHER_TRANSFORM_1D_TREND_FILTER"
-timeframe = "6h"
+name = "12H_DONCHIAN20_VOLUME_CONFIRMATION_1D_TREND_FILTER"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,52 +20,31 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # Daily data for trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # EMA50 for trend filter
-    ema50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
+    # EMA34 for trend filter
+    ema34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Ehlers Fisher Transform (9-period)
-    price = (high + low) / 2
-    # Normalize price to 0-1 range over 9 periods
-    max_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    min_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    # Avoid division by zero
-    price_range = max_high - min_low
-    price_range = np.where(price_range == 0, 1, price_range)
-    value1 = 2 * ((price - min_low) / price_range - 0.5)
-    # Smooth value1
-    value2 = np.zeros_like(value1)
-    for i in range(9, n):
-        if i == 9:
-            value2[i] = value1[i]
-        else:
-            value2[i] = 0.33 * value1[i] + 0.67 * value2[i-1]
-    # Clamp to [-0.999, 0.999] to avoid math domain error
-    value2 = np.clip(value2, -0.999, 0.999)
-    # Fisher Transform
-    fish = 0.5 * np.log((1 + value2) / (1 - value2))
-    # Smooth Fisher
-    fish_smooth = np.zeros_like(fish)
-    for i in range(9, n):
-        if i == 9:
-            fish_smooth[i] = fish[i]
-        else:
-            fish_smooth[i] = 0.5 * fish[i] + 0.5 * fish_smooth[i-1]
+    # Average volume for confirmation (20-period)
+    vol_avg = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align to 12h timeframe
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure indicators are stable
+    start_idx = 20  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if np.isnan(ema50_aligned[i]) or np.isnan(fish_smooth[i]):
+        if np.isnan(ema34_aligned[i]) or np.isnan(vol_avg_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,34 +52,46 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if position == 0:
-            # LONG: Fisher crosses above -1.5 in uptrend
-            if (fish_smooth[i] > -1.5 and fish_smooth[i-1] <= -1.5 and 
-                close[i] > ema50_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Fisher crosses below +1.5 in downtrend
-            elif (fish_smooth[i] < 1.5 and fish_smooth[i-1] >= 1.5 and 
-                  close[i] < ema50_aligned[i]):
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # EXIT LONG: Fisher crosses below -1.5 or trend reversal
-            if (fish_smooth[i] < -1.5 and fish_smooth[i-1] >= -1.5) or \
-               (close[i] <= ema50_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # EXIT SHORT: Fisher crosses above +1.5 or trend reversal
-            if (fish_smooth[i] > 1.5 and fish_smooth[i-1] <= 1.5) or \
-               (close[i] >= ema50_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        # Donchian channels (20-period)
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
+            
+            # Volume confirmation: current volume > 1.5x average volume
+            vol_confirmed = volume[i] > 1.5 * vol_avg_aligned[i]
+            
+            if position == 0:
+                # LONG: Price breaks above Donchian high in uptrend with volume
+                if (close[i] > highest_high and 
+                    close[i] > ema34_aligned[i] and 
+                    vol_confirmed):
+                    signals[i] = 0.25
+                    position = 1
+                # SHORT: Price breaks below Donchian low in downtrend with volume
+                elif (close[i] < lowest_low and 
+                      close[i] < ema34_aligned[i] and 
+                      vol_confirmed):
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            elif position == 1:
+                # EXIT LONG: Price breaks below Donchian low or trend reversal
+                if (close[i] < lowest_low or 
+                    close[i] <= ema34_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # EXIT SHORT: Price breaks above Donchian high or trend reversal
+                if (close[i] > highest_high or 
+                    close[i] >= ema34_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
