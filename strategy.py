@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_1dTrend_Volume
-# Hypothesis: Trade 6h breakouts of weekly pivot levels (R2/S2) aligned with daily trend and volume.
-# Weekly pivot defines structural support/resistance; daily EMA50 filters trend direction.
-# Volume confirms breakout momentum. Designed for low frequency (15-30 trades/year) to survive
-# both bull and bear markets by following higher timeframe structure.
+# 12h_Vortex_1wTrend_Volume
+# Hypothesis: Trade 12h breakouts of Vortex crossovers aligned with weekly trend and volume.
+# Vortex identifies trend direction; weekly EMA50 filters long-term trend; volume confirms momentum.
+# Designed for low frequency (15-30 trades/year) to survive both bull and bear markets.
 
-name = "6h_WeeklyPivot_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Vortex_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,44 +22,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d EMA50 for trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === Weekly pivot levels (R2, S2) ===
-    # Calculate from weekly OHLC (previous completed week)
+    # === Weekly EMA50 for trend filter ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Use previous week's OHLC for current week's pivot
-    wk_high = df_1w['high'].values
-    wk_low = df_1w['low'].values
-    wk_close = df_1w['close'].values
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Shift by 1 to use previous week's data
-    wk_high_prev = np.roll(wk_high, 1)
-    wk_low_prev = np.roll(wk_low, 1)
-    wk_close_prev = np.roll(wk_close, 1)
-    wk_high_prev[0] = np.nan
-    wk_low_prev[0] = np.nan
-    wk_close_prev[0] = np.nan
+    # === Vortex Indicator (14-period) ===
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    pivot = (wk_high_prev + wk_low_prev + wk_close_prev) / 3.0
-    r2 = pivot + (wk_high_prev - wk_low_prev)
-    s2 = pivot - (wk_high_prev - wk_low_prev)
+    # +VM and -VM
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus[0] = np.nan
+    vm_minus[0] = np.nan
     
-    # Align weekly levels to 6h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    # Sum over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # === Volume confirmation (24-period average) ===
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # VI+ and VI-
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,8 +60,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,36 +68,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA50
+        trend_up = close[i] > ema_50_1w_aligned[i]
+        trend_down = close[i] < ema_50_1w_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > r2_aligned[i]
-        breakout_down = close[i] < s2_aligned[i]
+        # Vortex crossover signals
+        vi_cross_up = vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1]
+        vi_cross_down = vi_plus[i] < vi_minus[i] and vi_plus[i-1] >= vi_minus[i-1]
         
-        # Volume filter: above average
-        vol_ok = volume[i] > vol_ma_24[i]
+        # Volume filter: above 24-period average
+        vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+        vol_ok = not np.isnan(vol_ma_24[i]) and volume[i] > vol_ma_24[i]
         
         if position == 0:
-            # LONG: breakout above R2, uptrend, volume confirmation
-            if breakout_up and trend_up and vol_ok:
+            # LONG: VI+ crosses above VI-, uptrend, volume confirmation
+            if vi_cross_up and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakout below S2, downtrend, volume confirmation
-            elif breakout_down and trend_down and vol_ok:
+            # SHORT: VI- crosses above VI+, downtrend, volume confirmation
+            elif vi_cross_down and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: breakdown below S2 or trend reversal
-            if breakout_down or not trend_up:
+            # EXIT LONG: VI- crosses above VI+ or trend reversal
+            if vi_cross_down or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: breakout above R2 or trend reversal
-            if breakout_up or not trend_down:
+            # EXIT SHORT: VI+ crosses above VI- or trend reversal
+            if vi_cross_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
