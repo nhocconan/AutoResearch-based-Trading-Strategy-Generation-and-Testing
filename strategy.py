@@ -1,9 +1,11 @@
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS_v2
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume spike confirmation.
-# Uses price closes above/below EMA for trend filter to avoid look-ahead. Targets 20-40 trades/year.
+# 1d_RSI_Trend_Filtered
+# Hypothesis: On daily timeframe, RSI(14) with trend filter (EMA200) and volume confirmation reduces false signals in both bull and bear markets.
+# Trend filter ensures we only trade in direction of long-term trend, improving win rate.
+# Volume confirmation ensures breakouts have conviction.
+# Target: 15-25 trades/year to minimize fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS_v2"
-timeframe = "4h"
+name = "1d_RSI_Trend_Filtered"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -20,51 +22,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 4h data for price action
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for trend filter (EMA200)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
 
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
 
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate daily RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
 
-    # Get daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-
-    # Calculate Camarilla levels for each daily bar
-    # R1 = close + (high - low) * 1.12
-    # S1 = close - (high - low) * 1.12
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.12
-
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-
-    # Calculate 4h volume SMA20 for volume confirmation
+    # Calculate daily volume SMA20 for confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,26 +59,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Breakout above R1 in 12h uptrend with volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema50_12h_aligned[i] and volume[i] > volume_sma20[i]:
+            # LONG: RSI > 55 (bullish momentum) + price above EMA200 (uptrend) + volume confirmation
+            if rsi[i] > 55 and close[i] > ema200_1w_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 in 12h downtrend with volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema50_12h_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: RSI < 45 (bearish momentum) + price below EMA200 (downtrend) + volume confirmation
+            elif rsi[i] < 45 and close[i] < ema200_1w_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S1 (reversal signal)
-            if close[i] < s1_aligned[i]:
+            # EXIT LONG: RSI < 40 (loss of momentum) or price below EMA200 (trend change)
+            if rsi[i] < 40 or close[i] < ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R1 (reversal signal)
-            if close[i] > r1_aligned[i]:
+            # EXIT SHORT: RSI > 60 (loss of bearish momentum) or price above EMA200 (trend change)
+            if rsi[i] > 60 or close[i] > ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
