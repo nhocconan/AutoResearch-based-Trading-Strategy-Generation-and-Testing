@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
-# 4h_12h_1d_Camarilla_R4S4_Breakout_Trend_Filter_v2
+# 4h_12h_1d_Camarilla_R4S4_Breakout_Trend_Filter
 # Hypothesis: Uses 1d Camarilla R4/S4 levels as key support/resistance on 4h timeframe.
 # Enters long when price breaks above R4 with 12h uptrend and volume confirmation.
 # Enters short when price breaks below S4 with 12h downtrend and volume confirmation.
 # Uses 12h EMA50 as trend filter to avoid counter-trend trades.
-# Reduced sensitivity: only trade when price breaks AND closes beyond the level (more confirmation).
-# Target: 20-50 trades/year to avoid overtrading and fee drag.
+# Designed for low trade frequency (~50-150 total trades over 4 years) to minimize fee drag.
 # Works in bull/bear markets by following 12h trend while using 1d Camarilla breakouts for precise entries.
 
-name = "4h_12h_1d_Camarilla_R4S4_Breakout_Trend_Filter_v2"
+name = "4h_12h_1d_Camarilla_R4S4_Breakout_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -73,13 +71,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R4 with close confirmation + 12h EMA50 uptrend + volume spike
+            # LONG: Price breaks above R4 + 12h EMA50 uptrend + volume spike
             if (close[i] > camarilla_r4_aligned[i] and 
                 close[i] > ema_50_12h_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S4 with close confirmation + 12h EMA50 downtrend + volume spike
+            # SHORT: Price breaks below S4 + 12h EMA50 downtrend + volume spike
             elif (close[i] < camarilla_s4_aligned[i] and 
                   close[i] < ema_50_12h_aligned[i] and 
                   volume_spike[i]):
@@ -88,7 +86,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S4 OR closes below 12h EMA50
+            # EXIT LONG: Price breaks below S4 OR closes below 12h EMA50
             if (close[i] < camarilla_s4_aligned[i]) or \
                (close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
@@ -96,7 +94,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R4 OR closes above 12h EMA50
+            # EXIT SHORT: Price breaks above R4 OR closes above 12h EMA50
             if (close[i] > camarilla_r4_aligned[i]) or \
                (close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
