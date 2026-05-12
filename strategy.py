@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike
-# Hypothesis: 4-hour breakouts from daily-derived Camarilla R1/S1 levels with 12-hour trend filter and volume spike confirmation.
-# In bull markets, 12h uptrend supports long breakouts above R1; in bear markets, 12h downtrend supports short breakdowns below S1.
+# 1h_4h_1D_Camarilla_R1_S1_Breakout_TrendVolume
+# Hypothesis: 1-hour breakouts from daily-derived Camarilla R1/S1 levels with 4-hour trend filter and volume spike confirmation.
+# Uses 4h trend and daily levels for signal direction, 1h for entry timing precision.
 # Volume spike ensures institutional participation, reducing false breakouts.
-# Targets 20-50 trades per year by requiring confluence of 12h trend, daily level break, and volume spike.
+# Targets 15-30 trades per year by requiring confluence of 4h trend, daily level break, and volume spike.
+# Session filter (08-20 UTC) reduces noise trades outside active market hours.
 
-name = "4h_12h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1h_4h_1D_Camarilla_R1_S1_Breakout_TrendVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -32,14 +33,14 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # 12h EMA34 for trend filter
-    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 4h EMA34 for trend filter
+    ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
     # Daily Camarilla R1 and S1 from previous day
     prev_close_1d = df_1d['close'].shift(1).values
@@ -49,9 +50,13 @@ def generate_signals(prices):
     R1_1d = prev_close_1d + 1.1 * rang_1d * 1.0 / 4
     S1_1d = prev_close_1d - 1.1 * rang_1d * 1.0 / 4
     
-    # Align daily levels to 4h timeframe
+    # Align daily levels to 1h timeframe
     R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
     S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,7 +64,15 @@ def generate_signals(prices):
     for i in range(100, n):
         if (np.isnan(R1_1d_aligned[i]) or 
             np.isnan(S1_1d_aligned[i]) or 
-            np.isnan(ema_34_12h_aligned[i])):
+            np.isnan(ema_34_4h_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,35 +81,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + volume spike + price above 12h EMA34 (12h uptrend)
+            # LONG: Price breaks above R1 + volume spike + price above 4h EMA34 (4h uptrend)
             if (close[i] > R1_1d_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > ema_34_12h_aligned[i]):
-                signals[i] = 0.25
+                close[i] > ema_34_4h_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below S1 + volume spike + price below 12h EMA34 (12h downtrend)
+            # SHORT: Price breaks below S1 + volume spike + price below 4h EMA34 (4h downtrend)
             elif (close[i] < S1_1d_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < ema_34_12h_aligned[i]):
-                signals[i] = -0.25
+                  close[i] < ema_34_4h_aligned[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters previous day's H-L range OR closes below 12h EMA34
+            # EXIT LONG: Price re-enters previous day's H-L range OR closes below 4h EMA34
             if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
-               close[i] < ema_34_12h_aligned[i]:
+               close[i] < ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price re-enters previous day's H-L range OR closes above 12h EMA34
+            # EXIT SHORT: Price re-enters previous day's H-L range OR closes above 4h EMA34
             if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
-               close[i] > ema_34_12h_aligned[i]:
+               close[i] > ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
