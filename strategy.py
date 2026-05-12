@@ -1,13 +1,14 @@
-#/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike
-# Hypothesis: On 12h timeframe, enter long when price closes above weekly R1 with close > weekly EMA34 and volume > 2x average.
-# Enter short when price closes below weekly S1 with close < weekly EMA34 and volume > 2x average.
-# Exit when price crosses weekly EMA34 (trend reversal).
-# Uses weekly trend filter for long-term bias, works in bull markets via breakouts and in bear via short reversals at S1.
-# Targets 15-30 trades/year for low fee drag.
+#!/usr/bin/env python3
+# 1d_Donchian20_Breakout_1wTrend_Filter
+# Hypothesis: On 1d timeframe, enter long when price breaks above 20-day Donchian high
+# with weekly trend confirmation (price > weekly SMA50). Enter short when price breaks
+# below 20-day Donchian low with price < weekly SMA50. Exit on opposite Donchian break.
+# Uses weekly trend filter to avoid counter-trend trades in choppy markets. Targets
+# 15-25 trades/year for low fee drift. Works in bull via breakouts and in bear via
+# shorting breakdowns with trend filter.
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,35 +23,21 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Load weekly data for Camarilla pivot calculation and EMA34
+    # Load weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 35:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
     weekly_close = df_1w['close'].values
     
-    # Calculate pivot point and range
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_range = weekly_high - weekly_low
+    # Weekly SMA50 for trend filter
+    sma50_1w = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
     
-    # Camarilla R1 and S1 levels
-    r1 = weekly_pivot + weekly_range * 1.083
-    s1 = weekly_pivot - weekly_range * 1.083
-    
-    # 1-week EMA34 for trend filter
-    ema34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align weekly levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Volume confirmation: 20-period moving average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 20-day Donchian channels
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,8 +46,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(sma50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,32 +55,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema1w_trend = ema34_1w_aligned[i]
-        vol_ma_val = vol_ma[i]
-        
         if position == 0:
-            # LONG: Price closes above R1 with volume > 2x average and close > weekly EMA34
-            if close[i] > r1_val and close[i] > ema1w_trend and volume[i] > 2.0 * vol_ma_val:
+            # LONG: Price breaks above 20-day Donchian high with weekly uptrend
+            if close[i] > donch_high[i] and close[i] > sma50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below S1 with volume > 2x average and close < weekly EMA34
-            elif close[i] < s1_val and close[i] < ema1w_trend and volume[i] > 2.0 * vol_ma_val:
+            # SHORT: Price breaks below 20-day Donchian low with weekly downtrend
+            elif close[i] < donch_low[i] and close[i] < sma50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below weekly EMA34 (trend reversal)
-            if close[i] < ema1w_trend:
+            # EXIT LONG: Price breaks below 20-day Donchian low
+            if close[i] < donch_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above weekly EMA34 (trend reversal)
-            if close[i] > ema1w_trend:
+            # EXIT SHORT: Price breaks above 20-day Donchian high
+            if close[i] > donch_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
