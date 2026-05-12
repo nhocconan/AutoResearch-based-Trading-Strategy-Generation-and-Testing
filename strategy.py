@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-# 6h_12h_1d_Camarilla_R3S3_Breakout_Trend_Filter_v2
-# Hypothesis: Uses 1d Camarilla R3/S3 levels on 6h timeframe with 12h EMA34 trend filter and volume confirmation.
-# Enters long when price breaks above R3 with 12h uptrend and volume spike (>1.5x 20-bar avg).
-# Enters short when price breaks below S3 with 12h downtrend and volume spike.
-# Exits when price reverses to opposite S3/R3 level or closes beyond 12h EMA34.
-# Designed for low trade frequency (target: 50-150 total trades over 4 years) to minimize fee drag.
-# Works in bull/bear markets by following 12h trend while using 1d Camarilla breakouts for precise entries.
+"""
+1h_4d_1d_HeikinAshi_Trend_Pullback
+Hypothesis: Uses 4h Heikin-Ashi candles for trend identification and 1d Heikin-Ashi for higher timeframe confirmation.
+Enters long when 4h HA closes above open (bullish candle) with pullback to EMA21 on 1h, and 1d trend is up.
+Enters short when 4h HA closes below open (bearish candle) with pullback to EMA21 on 1h, and 1d trend is down.
+Uses 1h EMA21 as dynamic support/resistance for pullback entries.
+Designed for low trade frequency (~60-150 total trades over 4 years) by requiring multi-timeframe alignment and pullback to moving average.
+Works in bull/bear markets by following 1d trend while using 4h HA for entry timing and 1h for precision.
+"""
 
-name = "6h_12h_1d_Camarilla_R3S3_Breakout_Trend_Filter_v2"
-timeframe = "6h"
+name = "1h_4d_1d_HeikinAshi_Trend_Pullback"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,53 +19,61 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-period average (on 6h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # 1h EMA21 for dynamic support/resistance
+    close_s = pd.Series(close)
+    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Daily data for Camarilla pivot levels
+    # 4h Heikin-Ashi for trend identification
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    ha_close_4h = (df_4h['open'] + df_4h['high'] + df_4h['low'] + df_4h['close']) / 4
+    ha_open_4h = (df_4h['open'].shift(1, fill_value=df_4h['open'].iloc[0]) + df_4h['close'].shift(1, fill_value=df_4h['close'].iloc[0])) / 2
+    ha_high_4h = df_4h[['high', 'open', 'close']].max(axis=1)
+    ha_low_4h = df_4h[['low', 'open', 'close']].min(axis=1)
+    
+    # 4h HA bullish/bearish: close > open = bullish, close < open = bearish
+    ha_bullish_4h = ha_close_4h > ha_open_4h
+    ha_bearish_4h = ha_close_4h < ha_open_4h
+    
+    # 1d Heikin-Ashi for higher timeframe trend confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ha_close_1d = (df_1d['open'] + df_1d['high'] + df_1d['low'] + df_1d['close']) / 4
+    ha_open_1d = (df_1d['open'].shift(1, fill_value=df_1d['open'].iloc[0]) + df_1d['close'].shift(1, fill_value=df_1d['close'].iloc[0])) / 2
     
-    # Calculate Camarilla pivot levels for each day
-    # R3 = C + ((H-L) * 1.1/4)
-    # S3 = C - ((H-L) * 1.1/4)
-    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
-    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
+    # 1d HA trend: bullish if close > open, bearish if close < open
+    ha_bullish_1d = ha_close_1d > ha_open_1d
+    ha_bearish_1d = ha_close_1d < ha_open_1d
     
-    # 12h EMA34 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align all indicators to 6h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Align all indicators to 1h timeframe
+    ema_21_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), ema_21)  # Trivial alignment for same TF
+    ha_bullish_4h_aligned = align_htf_to_ltf(prices, df_4h, ha_bullish_4h.astype(float))
+    ha_bearish_4h_aligned = align_htf_to_ltf(prices, df_4h, ha_bearish_4h.astype(float))
+    ha_bullish_1d_aligned = align_htf_to_ltf(prices, df_1d, ha_bullish_1d.astype(float))
+    ha_bearish_1d_aligned = align_htf_to_ltf(prices, df_1d, ha_bearish_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_34_12h_aligned[i])):
+    for i in range(100, n):
+        if (np.isnan(ema_21_aligned[i]) or
+            np.isnan(ha_bullish_4h_aligned[i]) or
+            np.isnan(ha_bearish_4h_aligned[i]) or
+            np.isnan(ha_bullish_1d_aligned[i]) or
+            np.isnan(ha_bearish_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,35 +82,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 + 12h EMA34 uptrend + volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_34_12h_aligned[i] and 
-                volume_spike[i]):
-                signals[i] = 0.25
+            # LONG: 4h HA bullish, 1d HA bullish, price pulls back to EMA21 from below
+            if (ha_bullish_4h_aligned[i] and 
+                ha_bullish_1d_aligned[i] and
+                close[i] >= ema_21_aligned[i] * 0.998 and  # Allow small deviation below EMA
+                close[i] <= ema_21_aligned[i] * 1.002):    # Allow small deviation above EMA
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below S3 + 12h EMA34 downtrend + volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_34_12h_aligned[i] and 
-                  volume_spike[i]):
-                signals[i] = -0.25
+            # SHORT: 4h HA bearish, 1d HA bearish, price pulls back to EMA21 from above
+            elif (ha_bearish_4h_aligned[i] and 
+                  ha_bearish_1d_aligned[i] and
+                  close[i] >= ema_21_aligned[i] * 0.998 and  # Allow small deviation below EMA
+                  close[i] <= ema_21_aligned[i] * 1.002):    # Allow small deviation above EMA
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 OR closes below 12h EMA34
-            if (close[i] < camarilla_s3_aligned[i]) or \
-               (close[i] < ema_34_12h_aligned[i]):
+            # EXIT LONG: 4h HA turns bearish OR 1d HA turns bearish
+            if (not ha_bullish_4h_aligned[i]) or (not ha_bullish_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 OR closes above 12h EMA34
-            if (close[i] > camarilla_r3_aligned[i]) or \
-               (close[i] > ema_34_12h_aligned[i]):
+            # EXIT SHORT: 4h HA turns bullish OR 1d HA turns bullish
+            if (not ha_bearish_4h_aligned[i]) or (not ha_bearish_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
