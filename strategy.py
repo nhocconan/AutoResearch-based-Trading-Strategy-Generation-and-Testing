@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_Trix12_Volume"
-timeframe = "12h"
+name = "1d_Wilson_Trend_Follow"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,44 +9,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w Donchian channel (20-period)
+    # Wilson Bands: center = EMA(14), width = ATR(7) * 1.5
+    close_s = pd.Series(close)
+    high = prices['high'].values
+    low = prices['low'].values
+    
+    # EMA(14)
+    wilson_mid = close_s.ewm(span=14, adjust=False, min_periods=14).mean().values
+    # ATR(7)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr7 = pd.Series(tr).ewm(span=7, adjust=False, min_periods=7).mean().values
+    width = atr7 * 1.5
+    wilson_upper = wilson_mid + width
+    wilson_lower = wilson_mid - width
+    
+    # Weekly trend filter: EMA(21) on weekly close
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donch_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    donch_high_12h = align_htf_to_ltf(prices, df_1w, donch_high)
-    donch_low_12h = align_htf_to_ltf(prices, df_1w, donch_low)
+    weekly_close = df_1w['close'].values
+    weekly_ema21 = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    weekly_ema21_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema21)
     
-    # 1w TRIX (12-period EMA triple)
-    close_1w = df_1w['close'].values
-    ema1 = pd.Series(close_1w).ewm(span=12, adjust=False).mean()
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False).mean()
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False).mean()
-    trix = ((ema3 - pd.Series(ema3).shift(1)) / pd.Series(ema3).shift(1)) * 100
-    trix_values = trix.values
-    trix_12h = align_htf_to_ltf(prices, df_1w, trix_values)
-    
-    # Volume confirmation (12h)
+    # Volume confirmation: volume > 1.2 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma)
+    vol_confirm = volume > (1.2 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200
+    start_idx = 50  # ensure sufficient data
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if np.isnan(donch_high_12h[i]) or np.isnan(donch_low_12h[i]) or np.isnan(trix_12h[i]):
+        # Skip if data not ready
+        if np.isnan(wilson_upper[i]) or np.isnan(wilson_lower[i]) or np.isnan(weekly_ema21_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,24 +56,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian high + TRIX > 0 + volume confirmation
-            if (close[i] > donch_high_12h[i]) and (trix_12h[i] > 0) and vol_confirm[i]:
+            # Long: Price above upper band + weekly trend up + volume
+            if (close[i] > wilson_upper[i]) and (close[i] > weekly_ema21_aligned[i]) and vol_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + TRIX < 0 + volume confirmation
-            elif (close[i] < donch_low_12h[i]) and (trix_12h[i] < 0) and vol_confirm[i]:
+            # Short: Price below lower band + weekly trend down + volume
+            elif (close[i] < wilson_lower[i]) and (close[i] < weekly_ema21_aligned[i]) and vol_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price closes below Donchian low
-            if close[i] < donch_low_12h[i]:
+            # Exit long: Price below middle band or weekly trend down
+            if (close[i] < wilson_mid[i]) or (close[i] < weekly_ema21_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price closes above Donchian high
-            if close[i] > donch_high_12h[i]:
+            # Exit short: Price above middle band or weekly trend up
+            if (close[i] > wilson_mid[i]) or (close[i] > weekly_ema21_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
