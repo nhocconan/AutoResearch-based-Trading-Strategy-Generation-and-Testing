@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
+# 6h_12h_Donchian20_Breakout_1dTrend_Volume
+# Hypothesis: Use 12h Donchian(20) breakouts as primary signal, filtered by 1d EMA50 trend and volume confirmation.
+# The 12h timeframe reduces noise while capturing multi-day trends. Donchian breakouts capture momentum.
+# 1d EMA50 ensures alignment with daily trend, preventing counter-trend trades. Volume confirmation filters false breakouts.
+# Designed for low frequency (15-30 trades/year) to minimize fee drag in 6h timeframe.
 
-# 1d_1W_Camarilla_R1S1_Breakout_Trend_Volume
-# Hypothesis: Buy near Camarilla R1 in uptrend, sell near S1 in downtrend on daily timeframe with weekly trend filter and volume confirmation.
-# Camarilla levels provide precise support/resistance. Weekly trend ensures alignment with higher timeframe momentum.
-# Volume confirmation filters breakouts. Designed for low frequency (10-25 trades/year) to minimize fee drag.
-
-name = "1d_1W_Camarilla_R1S1_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_12h_Donchian20_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,41 +23,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for Donchian channels (primary signal)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
 
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 12h Donchian channels (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
 
-    # Calculate daily Camarilla levels (based on previous day)
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We use previous day's high, low, close to calculate today's levels
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    rang = prev_high - prev_low
-    R1 = prev_close + rang * 1.1 / 12
-    S1 = prev_close - rang * 1.1 / 12
+    # Get 1d data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
 
-    # Volume confirmation: current volume > 1.3x average of last 20 days
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+
+    # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.3 * vol_ma)
+    volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or
-            np.isnan(volume_ok[i])):
+        if (np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,31 +64,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Weekly trend filter
-        bullish_trend = close[i] > ema_1w_aligned[i]
-        bearish_trend = close[i] < ema_1w_aligned[i]
+        # Trend filter: price relative to 1d EMA50
+        bullish_trend = close[i] > ema_50_1d_aligned[i]
+        bearish_trend = close[i] < ema_50_1d_aligned[i]
 
         if position == 0:
-            # LONG: Price crosses above R1 with bullish weekly trend and volume confirmation
-            if close[i] > R1[i] and close[i-1] <= R1[i-1] and bullish_trend and volume_ok[i]:
+            # LONG: Price breaks above 12h upper Donchian with bullish 1d trend and volume
+            if close[i] > upper_12h_aligned[i] and close[i-1] <= upper_12h_aligned[i-1] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below S1 with bearish weekly trend and volume confirmation
-            elif close[i] < S1[i] and close[i-1] >= S1[i-1] and bearish_trend and volume_ok[i]:
+            # SHORT: Price breaks below 12h lower Donchian with bearish 1d trend and volume
+            elif close[i] < lower_12h_aligned[i] and close[i-1] >= lower_12h_aligned[i-1] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 or weekly trend turns bearish
-            if close[i] < S1[i] and close[i-1] >= S1[i-1] or not bullish_trend:
+            # EXIT LONG: Price breaks below 12h lower Donchian or trend turns bearish
+            if close[i] < lower_12h_aligned[i] and close[i-1] >= lower_12h_aligned[i-1] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 or weekly trend turns bullish
-            if close[i] > R1[i] and close[i-1] <= R1[i-1] or not bearish_trend:
+            # EXIT SHORT: Price breaks above 12h upper Donchian or trend turns bullish
+            if close[i] > upper_12h_aligned[i] and close[i-1] <= upper_12h_aligned[i-1] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
