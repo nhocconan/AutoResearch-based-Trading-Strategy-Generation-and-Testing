@@ -1,14 +1,16 @@
-# 6h Monthly Pivot + Volume Spike + Trend Filter
-# Hypothesis: Monthly pivot levels (from monthly chart) act as strong structural support/resistance.
-# In trending markets, price pulls back to these levels for continuation entries.
-# In ranging markets, reversals occur at these levels.
-# Volume spikes confirm institutional interest at key levels.
-# Trend filter (1w EMA) ensures alignment with higher timeframe momentum.
-# Timeframe: 6h balances trade frequency (~15-35/year) with signal quality.
-# Works in bull/bear: uses price action at key levels rather than trend direction.
+#!/usr/bin/env python3
+"""
+12h Weekly Pivot + Volume Confirmation Trend Strategy
+Hypothesis: Weekly pivot levels act as strong support/resistance on 12h timeframe.
+In trending markets, price respects these levels as pullback entries.
+In ranging markets, reversals occur at these levels.
+Volume confirmation filters false breakouts.
+Timeframe: 12h targets 12-37 trades/year (50-150 total over 4 years).
+Works in bull/bear: uses price action at key levels rather than trend direction.
+"""
 
-name = "6h_MonthlyPivot_Volume_Trend"
-timeframe = "6h"
+name = "12h_WeeklyPivot_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,35 +27,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === MONTHLY DATA FOR PIVOT LEVELS ===
-    df_1M = get_htf_data(prices, '1M')
-    high_1M = df_1M['high'].values
-    low_1M = df_1M['low'].values
-    close_1M = df_1M['close'].values
-    
-    # Monthly pivot points (standard calculation)
-    pivot_1M = (high_1M + low_1M + close_1M) / 3.0
-    r1_1M = 2 * pivot_1M - low_1M
-    s1_1M = 2 * pivot_1M - high_1M
-    r2_1M = pivot_1M + (high_1M - low_1M)
-    s2_1M = pivot_1M - (high_1M - low_1M)
-    
-    # Align monthly levels to 6h timeframe
-    pivot_1M_aligned = align_htf_to_ltf(prices, df_1M, pivot_1M)
-    r1_1M_aligned = align_htf_to_ltf(prices, df_1M, r1_1M)
-    s1_1M_aligned = align_htf_to_ltf(prices, df_1M, s1_1M)
-    r2_1M_aligned = align_htf_to_ltf(prices, df_1M, r2_1M)
-    s2_1M_aligned = align_htf_to_ltf(prices, df_1M, s2_1M)
-    
-    # === WEEKLY TREND FILTER (EMA 21) ===
+    # === WEEKLY DATA FOR PIVOT LEVELS ===
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Weekly pivot points (standard calculation)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    
+    # Align weekly levels to 12h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
     # === VOLUME CONFIRMATION (20-period) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)  # Strong volume filter
+    volume_spike = volume > (vol_ma * 1.5)  # Moderate volume filter
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,10 +58,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pivot_1M_aligned[i]) or np.isnan(r1_1M_aligned[i]) or 
-            np.isnan(s1_1M_aligned[i]) or np.isnan(r2_1M_aligned[i]) or 
-            np.isnan(s2_1M_aligned[i]) or np.isnan(ema_21_1w_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or 
+            np.isnan(s2_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,28 +69,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price bounces off S1 or S2 with volume and above weekly EMA
-            if ((close[i] > s1_1M_aligned[i] and low[i] <= s1_1M_aligned[i] * 1.005) or
-                (close[i] > s2_1M_aligned[i] and low[i] <= s2_1M_aligned[i] * 1.005)) and \
-               volume_spike[i] and close[i] > ema_21_1w_aligned[i]:
+            # LONG: Price bounces off S1 or S2 with volume
+            if ((close[i] > s1_1w_aligned[i] and low[i] <= s1_1w_aligned[i] * 1.005) or
+                (close[i] > s2_1w_aligned[i] and low[i] <= s2_1w_aligned[i] * 1.005)) and \
+               volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price rejects at R1 or R2 with volume and below weekly EMA
-            elif ((close[i] < r1_1M_aligned[i] and high[i] >= r1_1M_aligned[i] * 0.995) or
-                  (close[i] < r2_1M_aligned[i] and high[i] >= r2_1M_aligned[i] * 0.995)) and \
-                 volume_spike[i] and close[i] < ema_21_1w_aligned[i]:
+            # SHORT: Price rejects at R1 or R2 with volume
+            elif ((close[i] < r1_1w_aligned[i] and high[i] >= r1_1w_aligned[i] * 0.995) or
+                  (close[i] < r2_1w_aligned[i] and high[i] >= r2_1w_aligned[i] * 0.995)) and \
+                 volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # EXIT LONG: Price breaks below S2 or reaches R2
-            if close[i] < s2_1M_aligned[i] or close[i] > r2_1M_aligned[i]:
+            if close[i] < s2_1w_aligned[i] or close[i] > r2_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Price breaks above R2 or reaches S2
-            if close[i] > r2_1M_aligned[i] or close[i] < s2_1M_aligned[i]:
+            if close[i] > r2_1w_aligned[i] or close[i] < s2_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
