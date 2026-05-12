@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_DonchianBreakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,36 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter: EMA34
-    df_1w = get_htf_data(prices, '1w')
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 1d trend filter: EMA34
+    df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Donchian channel (20-period) on 12h
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    # 1d volume average (20-period)
+    vol20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol20_1d)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma[i] = np.mean(volume[i - 19:i + 1])
-    volume_ratio = np.full(n, np.nan)
-    for i in range(n):
-        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
-            volume_ratio[i] = volume[i] / vol_ma[i]
+    # Previous day's OHLC for Camarilla levels
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    
+    # Camarilla levels for today (based on previous day)
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, lookback - 1, 19)  # need enough data for all indicators
+    start_idx = 34  # need enough data for 1d EMA34 and volume
     
     for i in range(start_idx, n):
-        # Skip if weekly trend data not ready
-        if np.isnan(ema34_1w_aligned[i]):
+        # Skip if 1d trend or volume data not ready
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,29 +54,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        vol_ratio = volume[i] / vol20_1d_aligned[i] if vol20_1d_aligned[i] > 0 else 0
+        
         if position == 0:
-            # Long: price breaks above Donchian upper + weekly uptrend + volume spike
-            if (close[i] > highest_high[i] and 
-                close[i] > ema34_1w_aligned[i] and 
-                volume_ratio[i] > 1.5):
+            # Long: Close > R1 + volume spike + 1d uptrend
+            if (close[i] > R1_aligned[i] and 
+                vol_ratio > 1.5 and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + weekly downtrend + volume spike
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema34_1w_aligned[i] and 
-                  volume_ratio[i] > 1.5):
+            # Short: Close < S1 + volume spike + 1d downtrend
+            elif (close[i] < S1_aligned[i] and 
+                  vol_ratio > 1.5 and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price breaks below Donchian lower
-            if close[i] < lowest_low[i]:
+            # Exit long when close < S1 or trend turns down
+            if (close[i] < S1_aligned[i] or 
+                close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price breaks above Donchian upper
-            if close[i] > highest_high[i]:
+            # Exit short when close > R1 or trend turns up
+            if (close[i] > R1_aligned[i] or 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
