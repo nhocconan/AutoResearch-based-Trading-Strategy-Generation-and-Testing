@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_Pivot_Breakout_4hTrend_Volume
-# Hypothesis: Trade 1h breakouts of daily Camarilla pivot levels (R1/S1) aligned with 4h EMA50 trend and volume confirmation.
-# Daily Camarilla provides intraday support/resistance levels; 4h EMA filters higher timeframe trend; volume confirms breakout momentum.
-# Designed for low frequency (15-37 trades/year) to survive both bull and bear markets by following higher timeframe structure.
+# 6h_ElderRay_BullBearPower_1dTrend
+# Hypothesis: Use Elder Ray Index (Bull Power = High - EMA13, Bear Power = Low - EMA13) on 6h timeframe
+# with 1d EMA34 trend filter and volume confirmation. Long when Bull Power > 0 and rising, Bear Power < 0,
+# and price above 1d EMA34. Short when Bear Power < 0 and falling, Bull Power > 0, and price below 1d EMA34.
+# Designed for low frequency (15-30 trades/year) to capture momentum in both bull and bear markets
+# by aligning with higher timeframe trend while using Elder Ray for precise entry/exit.
 
-name = "1h_Camarilla_Pivot_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_BullBearPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,42 +24,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 4h EMA50 for trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # === Daily Camarilla pivot levels (R1, S1) ===
-    # Calculate from daily OHLC (previous completed day)
+    # === 1d EMA34 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Shift by 1 to use previous day's data
-    d_high_prev = np.roll(d_high, 1)
-    d_low_prev = np.roll(d_low, 1)
-    d_close_prev = np.roll(d_close, 1)
-    d_high_prev[0] = np.nan
-    d_low_prev[0] = np.nan
-    d_close_prev[0] = np.nan
-    
-    # Camarilla pivot calculation
-    pivot = (d_high_prev + d_low_prev + d_close_prev) / 3.0
-    range_ = d_high_prev - d_low_prev
-    r1 = pivot + (range_ * 1.1 / 12)
-    s1 = pivot - (range_ * 1.1 / 12)
-    
-    # Align daily levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # === Elder Ray Index on 6h: Bull Power = High - EMA13, Bear Power = Low - EMA13 ===
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     # === Volume confirmation (20-period average) ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,11 +44,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are stable
+    start_idx = 40  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
             np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -78,39 +57,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 4h EMA50
-        trend_up = close[i] > ema_50_4h_aligned[i]
-        trend_down = close[i] < ema_50_4h_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_up = close[i] > r1_aligned[i]
-        breakout_down = close[i] < s1_aligned[i]
+        # Elder Ray conditions
+        bull_rising = bull_power[i] > bull_power[i-1]
+        bear_falling = bear_power[i] < bear_power[i-1]
+        bull_positive = bull_power[i] > 0
+        bear_negative = bear_power[i] < 0
         
-        # Volume filter: above average
+        # Volume filter
         vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # LONG: breakout above R1, uptrend, volume confirmation
-            if breakout_up and trend_up and vol_ok:
-                signals[i] = 0.20
+            # LONG: Bull Power positive and rising, Bear Power negative, uptrend, volume
+            if bull_positive and bull_rising and bear_negative and trend_up and vol_ok:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: breakout below S1, downtrend, volume confirmation
-            elif breakout_down and trend_down and vol_ok:
-                signals[i] = -0.20
+            # SHORT: Bear Power negative and falling, Bull Power positive, downtrend, volume
+            elif bear_negative and bear_falling and bull_positive and trend_down and vol_ok:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: breakdown below S1 or trend reversal
-            if breakout_down or not trend_up:
+            # EXIT LONG: Bear Power becomes positive or trend reversal
+            if bear_power[i] > 0 or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: breakout above R1 or trend reversal
-            if breakout_up or not trend_down:
+            # EXIT SHORT: Bull Power becomes negative or trend reversal
+            if bull_power[i] < 0 or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
