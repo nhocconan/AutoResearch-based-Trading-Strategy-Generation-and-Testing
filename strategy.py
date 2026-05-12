@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_RSI_Streak_With_Volume_Confirmation
-Hypothesis: RSI streak (consecutive closes above/below previous close) identifies overextended moves. 
-Combined with volume confirmation (1.5x average) and 1d trend filter (EMA50), it captures mean-reversion 
-opportunities in both bull and bear markets. RSI streak >2 indicates exhaustion, while volume spike 
-confirms participation. Works in ranging markets where streaks frequently occur.
+12h_Camarilla_R1_S1_Breakout_1wEMA20_Trend_VolumeS
+Hypothesis: Price breaking above/below Camarilla R1/S1 levels on 12h with 1w EMA20 trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. Camarilla levels provide precise intraday support/resistance, 1w EMA20 ensures alignment with weekly trend, and volume filter adds confirmation. Target: 20-40 trades/year per symbol. Works in bull/bear by following weekly trend direction.
 """
 
-name = "6h_RSI_Streak_With_Volume_Confirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wEMA20_Trend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,45 +17,39 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI Streak: count consecutive closes > previous close (bullish streak) 
-    # or < previous close (bearish streak)
-    price_changes = np.diff(close, prepend=close[0])
-    bullish_streak = np.where(price_changes > 0, 1, 0)
-    bearish_streak = np.where(price_changes < 0, 1, 0)
+    # Camarilla levels for 12h (based on previous day's range)
+    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # But for intraday, we use previous bar's range
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Calculate consecutive streaks
-    bull_streak_count = np.zeros(n)
-    bear_streak_count = np.zeros(n)
-    
-    for i in range(1, n):
-        if price_changes[i] > 0:
-            bull_streak_count[i] = bull_streak_count[i-1] + 1
-            bear_streak_count[i] = 0
-        elif price_changes[i] < 0:
-            bear_streak_count[i] = bear_streak_count[i-1] + 1
-            bull_streak_count[i] = 0
-        else:
-            bull_streak_count[i] = 0
-            bear_streak_count[i] = 0
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
     # Volume spike: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # 1d EMA50 trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # HTF: 1w EMA20 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+    for i in range(20, n):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,32 +58,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Bearish streak exhaustion (>2) + volume spike + above 1d EMA50
-            if (bear_streak_count[i] >= 2 and 
-                volume_spike[i] and 
-                close[i] > ema_50_1d_aligned[i]):
+            # LONG: Price breaks above R1 + 1w EMA20 uptrend + volume spike
+            if (close[i] > r1[i] and 
+                close[i] > ema_20_1w_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bullish streak exhaustion (>2) + volume spike + below 1d EMA50
-            elif (bull_streak_count[i] >= 2 and 
-                  volume_spike[i] and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # SHORT: Price breaks below S1 + 1w EMA20 downtrend + volume spike
+            elif (close[i] < s1[i] and 
+                  close[i] < ema_20_1w_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bullish streak resumes or price drops below 1d EMA50
-            if (bull_streak_count[i] >= 1 or 
-                close[i] < ema_50_1d_aligned[i]):
+            # EXIT LONG: Price closes below S1 (support)
+            if close[i] < s1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bearish streak resumes or price rises above 1d EMA50
-            if (bear_streak_count[i] >= 1 or 
-                close[i] > ema_50_1d_aligned[i]):
+            # EXIT SHORT: Price closes above R1 (resistance)
+            if close[i] > r1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
