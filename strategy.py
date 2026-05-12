@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_RSI_Trend_With_200EMA_Filter
-# Hypothesis: RSI(14) crossing above 50 with price above 200EMA signals momentum in trending markets.
-# The 200EMA filter ensures we only trade in the direction of the long-term trend,
-# reducing false signals during ranging periods. Works in both bull and bear markets
-# by adapting to the prevailing trend direction. Target: 50-150 trades over 4 years.
+# 12h 1W Bollinger Band Width Breakout + Volume Spike + RSI Filter
+# Hypothesis: Bollinger Band Width (BBW) identifies low volatility regimes. Breakouts from
+# low BBW with volume confirmation and RSI filter capture explosive moves in both bull and bear markets.
+# Uses 1W BBW for regime filter, 12h price breakout, volume spike for confirmation, and RSI to avoid overextended moves.
+# Designed for low trade frequency (~15-30/year) with clear entry/exit rules.
 
-name = "6h_RSI_Trend_With_200EMA_Filter"
-timeframe = "6h"
+name = "12h_BBW_Breakout_Volume_RSI"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,43 +23,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Data for 200EMA Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === 1W Bollinger Band Width for Regime Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    daily_close_1d = df_1d['close'].values
+    weekly_close = df_1w['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # Daily EMA200 for trend filter
-    ema_200_1d = pd.Series(daily_close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_6h = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate Bollinger Bands (20, 2.0) on weekly data
+    bb_middle = pd.Series(weekly_close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(weekly_close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2.0 * bb_std
+    bb_lower = bb_middle - 2.0 * bb_std
     
-    # === RSI (14-period) on 6h chart ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Bollinger Band Width: (Upper - Lower) / Middle
+    bb_width = (bb_upper - bb_lower) / bb_middle
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # BBW percentile rank (lookback 50 weeks) to identify low volatility regimes
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Low volatility regime: BBW below 20th percentile
+    low_vol_regime = bb_width_percentile < 0.2
+    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1w, low_vol_regime)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    # === 12h Price Breakout (Donchian 20) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === Volume Spike (20-period) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
+    
+    # === RSI (14-period) for momentum filter ===
+    delta = pd.Series(close).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Ensure EMA200 and RSI ready
+    start_idx = 100  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema_200_6h[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(rsi[i]) or 
+            np.isnan(low_vol_regime_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,24 +85,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: RSI > 50 (bullish momentum) + price above daily EMA200 (uptrend)
-            if rsi[i] > 50 and close[i] > ema_200_6h[i]:
+            # LONG: Price breaks above Donchian high + low vol regime + volume spike + RSI not overbought
+            if (close[i] > donchian_high[i-1] and  # Breakout confirmed on close
+                low_vol_regime_aligned[i] and
+                vol_spike[i] and
+                rsi[i] < 70):  # Not overbought
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI < 50 (bearish momentum) + price below daily EMA200 (downtrend)
-            elif rsi[i] < 50 and close[i] < ema_200_6h[i]:
+            # SHORT: Price breaks below Donchian low + low vol regime + volume spike + RSI not oversold
+            elif (close[i] < donchian_low[i-1] and  # Breakdown confirmed on close
+                  low_vol_regime_aligned[i] and
+                  vol_spike[i] and
+                  rsi[i] > 30):  # Not oversold
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: RSI falls below 50 (momentum shifts)
-            if rsi[i] < 50:
+            # EXIT LONG: Price breaks below Donchian low OR RSI overbought
+            if (close[i] < donchian_low[i-1] or rsi[i] > 75):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI rises above 50 (momentum shifts)
-            if rsi[i] > 50:
+            # EXIT SHORT: Price breaks above Donchian high OR RSI oversold
+            if (close[i] > donchian_high[i-1] or rsi[i] < 25):
                 signals[i] = 0.0
                 position = 0
             else:
