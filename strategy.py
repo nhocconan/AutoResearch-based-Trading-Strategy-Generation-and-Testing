@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_1dTrend_VolumeFilter
-# Hypothesis: On 4h timeframe, enter long when price breaks above Keltner upper band with price > daily EMA200 and volume spike (>1.5x 20-period MA).
-# Enter short when price breaks below Keltner lower band with price < daily EMA200 and volume spike.
-# Exit when price crosses back inside Keltner bands.
-# Uses daily timeframe for trend filter to capture longer-term trend and avoid counter-trend trades.
-# Designed to work in both bull and bear markets by following the daily trend while using volatility-based bands for entry timing.
-# Targets 25-40 trades/year for low fee drag.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 with price > daily EMA34 and volume spike (>2x 20-period MA).
+# Enter short when price breaks below Camarilla S1 with price < daily EMA34 and volume spike.
+# Exit when price crosses back below R1 (for longs) or above S1 (for shorts).
+# Uses daily timeframe for trend filter and weekly for volatility regime filter to avoid false breakouts in low volatility.
+# Targets 15-30 trades/year for low fee drag and works in both bull and bear markets by fading extreme daily levels with institutional levels.
 
-name = "4h_Keltner_Breakout_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,50 +24,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Keltner Channel (20, 10) on 4h data
-    keltner_period = 20
-    keltner_mult = 10.0  # Using ATR multiplier of 10 for wider bands
+    # Calculate Camarilla levels from previous day (using daily data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # EMA of typical price for middle band
-    typical_price = (high + low + close) / 3.0
-    ema_tp = pd.Series(typical_price).ewm(span=keltner_period, adjust=False, min_periods=keltner_period).mean().values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Average True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(daily_high, 1)
+    prev_low = np.roll(daily_low, 1)
+    prev_close = np.roll(daily_close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla R1 and S1 levels
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 6
+    s1 = prev_close - camarilla_range * 1.1 / 6
+    
+    # Daily EMA34 for trend filter
+    daily_ema34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Weekly ATR for volatility regime filter (avoid low volatility breakouts)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    # True Range calculation for weekly ATR
+    tr1 = weekly_high - weekly_low
+    tr2 = np.abs(weekly_high - np.roll(weekly_close, 1))
+    tr3 = np.abs(weekly_low - np.roll(weekly_close, 1))
     tr1[0] = np.nan
     tr2[0] = np.nan
     tr3[0] = np.nan
+    
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=keltner_period, adjust=False, min_periods=keltner_period).mean().values
+    weekly_atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    upper_keltner = ema_tp + (keltner_mult * atr)
-    lower_keltner = ema_tp - (keltner_mult * atr)
-    
-    # Daily EMA200 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    daily_close = df_1d['close'].values
-    daily_ema200 = pd.Series(daily_close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Volume confirmation: 20-period moving average on 4h data
+    # Volume confirmation: 20-period moving average on 12h data
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily EMA200 to 4h timeframe
-    daily_ema200_aligned = align_htf_to_ltf(prices, df_1d, daily_ema200)
+    # Align all to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
+    weekly_atr_aligned = align_htf_to_ltf(prices, df_1w, weekly_atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
-            np.isnan(daily_ema200_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(daily_ema34_aligned[i]) or np.isnan(weekly_atr_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,32 +95,42 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        upper_keltner_val = upper_keltner[i]
-        lower_keltner_val = lower_keltner[i]
-        daily_trend = daily_ema200_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        daily_trend = daily_ema34_aligned[i]
         vol_ma_val = vol_ma[i]
+        atr_val = weekly_atr_aligned[i]
+        
+        # Avoid trading in extremely low volatility (choppy) markets
+        if atr_val < 0.5 * np.nanmedian(weekly_atr_aligned[max(0, i-50):i+1]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 0:
-            # LONG: Price breaks above upper Keltner band with price > daily EMA200 and volume > 1.5x MA
-            if close[i] > upper_keltner_val and close[i] > daily_trend and volume[i] > vol_ma_val * 1.5:
+            # LONG: Price breaks above R1 with price > daily EMA34 and volume > 2x MA
+            if close[i] > r1_val and close[i] > daily_trend and volume[i] > vol_ma_val * 2.0:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Keltner band with price < daily EMA200 and volume > 1.5x MA
-            elif close[i] < lower_keltner_val and close[i] < daily_trend and volume[i] > vol_ma_val * 1.5:
+            # SHORT: Price breaks below S1 with price < daily EMA34 and volume > 2x MA
+            elif close[i] < s1_val and close[i] < daily_trend and volume[i] > vol_ma_val * 2.0:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back inside Keltner bands (below upper band)
-            if close[i] < upper_keltner_val:
+            # EXIT LONG: Price crosses back below R1 (failed breakout)
+            if close[i] < r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back inside Keltner bands (above lower band)
-            if close[i] > lower_keltner_val:
+            # EXIT SHORT: Price crosses back above S1 (failed breakout)
+            if close[i] > s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
