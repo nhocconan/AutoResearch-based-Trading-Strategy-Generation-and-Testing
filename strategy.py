@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_1D_AdaptiveKeltner_DoubleEMA_Trend
-Hypothesis: Price must break beyond Keltner Channel (ATR-based) with confirmation from dual EMA trend filter.
-Long: Close > Upper Keltner + EMA20 > EMA50 + daily EMA50 uptrend.
-Short: Close < Lower Keltner + EMA20 < EMA50 + daily EMA50 downtrend.
-Exit: Price re-enters Keltner Channel or EMA20/EMA50 crossover reverses.
-Uses tight entry conditions to limit trades (target 25-40/year) and works in both bull/bear markets.
-ATR-based bands adapt to volatility, reducing false signals in low-vol periods.
+4h_1D_Camarilla_R1_S1_Breakout_TrendVol
+Hypothesis: 4-hour breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
+Only takes long when price breaks above R1 with volume spike and daily uptrend, short when breaks below S1 with volume spike and daily downtrend.
+Uses tight entry conditions (trend + volume + level break) to target 25-50 trades per year on 4h timeframe, avoiding overtrading.
+Works in bull markets via trend-following breaks and in bear markets via counter-trend reversals at extreme daily levels.
 """
 
-name = "4h_1D_AdaptiveKeltner_DoubleEMA_Trend"
+name = "4h_1D_Camarilla_R1_S1_Breakout_TrendVol"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,42 +25,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for Keltner Channel (20-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # EMA20 and EMA50 for trend filter
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Keltner Channel: EMA20 ± 2.0 * ATR
-    keltner_upper = ema20 + 2.0 * atr
-    keltner_lower = ema20 - 2.0 * atr
-    
-    # Daily data for higher timeframe trend filter
+    # Daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Daily Camarilla R1 and S1 from previous day
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    rang_1d = prev_high_1d - prev_low_1d
+    R1_1d = prev_close_1d + 1.1 * rang_1d * 1.0 / 4
+    S1_1d = prev_close_1d - 1.1 * rang_1d * 1.0 / 4
+    
+    # Align daily levels to 4h timeframe
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or 
-            np.isnan(ema20[i]) or 
-            np.isnan(ema50[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(R1_1d_aligned[i]) or 
+            np.isnan(S1_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,30 +65,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Close > Upper Keltner + EMA20 > EMA50 + daily EMA50 uptrend
-            if (close[i] > keltner_upper[i] and 
-                ema20[i] > ema50[i] and 
-                close[i] > ema50_1d_aligned[i]):
+            # LONG: Price breaks above R1 + volume spike + price above daily EMA50 (daily uptrend)
+            if (close[i] > R1_1d_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < Lower Keltner + EMA20 < EMA50 + daily EMA50 downtrend
-            elif (close[i] < keltner_lower[i] and 
-                  ema20[i] < ema50[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+            # SHORT: Price breaks below S1 + volume spike + price below daily EMA50 (daily downtrend)
+            elif (close[i] < S1_1d_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close < Lower Keltner OR EMA20 < EMA50
-            if close[i] < keltner_lower[i] or ema20[i] < ema50[i]:
+            # EXIT LONG: Price re-enters previous day's H-L range OR closes below daily EMA50
+            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
+               close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close > Upper Keltner OR EMA20 > EMA50
-            if close[i] > keltner_upper[i] or ema20[i] > ema50[i]:
+            # EXIT SHORT: Price re-enters previous day's H-L range OR closes above daily EMA50
+            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
+               close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
