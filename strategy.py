@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_RollingReturn_Skew_WeeklyTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,26 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== 6h Rolling Return and Skew (LTF) =====
-    ret_12 = np.zeros(n)
-    ret_12[12:] = (close[12:] - close[:-12]) / close[:-12]
-    skew_12 = np.zeros(n)
-    for i in range(12, n):
-        window = ret_12[i-12:i]
-        skew_12[i] = pd.Series(window).skew()
-    
-    # ===== Weekly Trend (HTF) =====
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-    
-    # ===== Daily Volume Spike Filter =====
+    # ===== 1d Trend (HTF) =====
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # ===== 1d Volume Spike Filter =====
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    
+    # ===== 4h Camarilla Pivot Levels (LTF) =====
+    # Calculate from previous 4h bar (to avoid look-ahead)
+    high_prev = np.roll(high, 1)
+    low_prev = np.roll(low, 1)
+    close_prev = np.roll(close, 1)
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    close_prev[0] = np.nan
+    
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    range_prev = high_prev - low_prev
+    
+    # Camarilla levels
+    R1 = pivot + (range_prev * 1.0 / 12.0)
+    S1 = pivot - (range_prev * 1.0 / 12.0)
     
     # ===== Session Filter: 08-20 UTC =====
     hours = pd.DatetimeIndex(prices["open_time"]).hour
@@ -44,12 +51,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 200  # Need enough data for 1d EMA34 and Camarilla calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(skew_12[i]) or 
-            np.isnan(ema21_1w_aligned[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(R1[i]) or
+            np.isnan(S1[i]) or
             np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,28 +78,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Negative skew (left-tail risk) + above weekly EMA21 + daily volume spike
-            if (skew_12[i] < -0.5 and
-                close[i] > ema21_1w_aligned[i] and
+            # Long: Close above R1 + above 1d EMA34 + daily volume spike
+            if (close[i] > R1[i] and
+                close[i] > ema34_1d_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Positive skew (right-tail exuberance) + below weekly EMA21 + daily volume spike
-            elif (skew_12[i] > 0.5 and
-                  close[i] < ema21_1w_aligned[i] and
+            # Short: Close below S1 + below 1d EMA34 + daily volume spike
+            elif (close[i] < S1[i] and
+                  close[i] < ema34_1d_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Skew turns positive or closes below weekly EMA21
-            if skew_12[i] > 0 or close[i] < ema21_1w_aligned[i]:
+            # Exit long: Close below S1 or below 1d EMA34
+            if close[i] < S1[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Skew turns negative or closes above weekly EMA21
-            if skew_12[i] < 0 or close[i] > ema21_1w_aligned[i]:
+            # Exit short: Close above R1 or above 1d EMA34
+            if close[i] > R1[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
