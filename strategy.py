@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dEMA50_Trend_Volume"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA100_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,10 +20,10 @@ def generate_signals(prices):
     # Load 1d data once for trend filter and pivots
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA(50) for trend filter
+    # 1d EMA(100) for trend filter (slower, more robust)
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
     # Daily OHLC for Camarilla pivots (previous day)
     high_1d = df_1d['high'].values
@@ -51,7 +51,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+            np.isnan(ema100_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,15 +62,15 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R1 + 1d trend up + volume spike
             if (close[i] > r1_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and 
+                close[i] > ema100_1d_aligned[i] and 
                 vol_spike[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below S1 + 1d trend down + volume spike
             elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
+                  close[i] < ema100_1d_aligned[i] and 
                   vol_spike[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price closes below S1
@@ -78,13 +78,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit short: price closes above R1
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
