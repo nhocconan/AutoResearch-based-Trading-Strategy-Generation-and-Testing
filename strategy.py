@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-# 1H_CAMARILLA_R1_S1_BREAKOUT_4H_TREND_FILTER
-# Hypothesis: Hourly price breaks above R1 or below S1 with 4-hour EMA20 trend filter capture momentum.
-# Uses 4-hour trend for direction (reduces whipsaw), 1h for entry timing.
-# Works in bull markets (breakouts continuation) and bear markets (reversals at extremes).
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
-# Session filter: 08-20 UTC to reduce noise.
+# 12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_VOLUME
+# Hypothesis: 12h breakouts at daily Camarilla R3/S3 levels with daily trend filter (EMA34) and volume confirmation (1.5x 20-period average) capture momentum in both bull and bear markets. Volume filter reduces false breakouts, improving win rate and reducing whipsaw.
+# Target: 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
 
-name = "1H_CAMARILLA_R1_S1_BREAKOUT_4H_TREND_FILTER"
-timeframe = "1h"
+name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_VOLUME"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,55 +19,42 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 4-hour data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    
-    # EMA20 for 4h trend filter
-    ema20 = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_aligned = align_htf_to_ltf(prices, df_4h, ema20)
-    
-    # 1-day data for Camarilla calculation (more stable levels)
+    # Daily data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day: R1 = C + (H-L)*1.125/6, S1 = C - (H-L)*1.125/6
+    # Calculate Camarilla levels from previous day
+    # R3 = C + (H-L)*1.25/2, S3 = C - (H-L)*1.25/2
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    r1 = close_1d + (high_1d - low_1d) * 1.125 / 6
-    s1 = close_1d - (high_1d - low_1d) * 1.125 / 6
+    r3 = close_1d + (high_1d - low_1d) * 1.25 / 2
+    s3 = close_1d - (high_1d - low_1d) * 1.25 / 2
     
-    # Align to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # EMA34 for trend filter
+    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Align to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    
+    # Volume confirmation: 1.5x 20-period average volume
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = vol_ma20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Need at least one day of data
+    start_idx = max(1, 20)  # Need at least one day of data and 20 periods for volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema20_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,33 +63,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 in uptrend (price > EMA20)
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema20_aligned[i]):
-                signals[i] = 0.20
+            # LONG: Price breaks above R3 in uptrend with volume confirmation
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema34_aligned[i] and
+                volume[i] > vol_threshold[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 in downtrend (price < EMA20)
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema20_aligned[i]):
-                signals[i] = -0.20
+            # SHORT: Price breaks below S3 in downtrend with volume confirmation
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema34_aligned[i] and
+                  volume[i] > vol_threshold[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below S1 or trend reversal (price <= EMA20)
-            if (close[i] < s1_aligned[i] or 
-                close[i] <= ema20_aligned[i]):
+            # EXIT LONG: Price falls below S3 or trend reversal
+            if (close[i] < s3_aligned[i] or 
+                close[i] <= ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above R1 or trend reversal (price >= EMA20)
-            if (close[i] > r1_aligned[i] or 
-                close[i] >= ema20_aligned[i]):
+            # EXIT SHORT: Price rises above R3 or trend reversal
+            if (close[i] > r3_aligned[i] or 
+                close[i] >= ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
