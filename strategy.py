@@ -1,45 +1,42 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla pivot levels from daily timeframe with trend filter and volume spike confirmation.
-Enters long when price breaks above R1 level with daily uptrend and volume above average.
-Enters short when price breaks below S1 level with daily downtrend and volume above average.
-Uses daily pivot levels for structure and filters to reduce false breakouts in ranging markets.
-Designed for low trade frequency (20-50/year) to minimize fee drag in 4h timeframe.
+4h_WilliamsAlligator_TopBottom_Filter
+Hypothesis: Williams Alligator identifies market direction via jaw/teeth/lips alignment. 
+Enters long when lips cross above teeth AND price > 8-period EMA (bullish alignment).
+Enters short when lips cross below teeth AND price < 8-period EMA (bearish alignment).
+Uses 1-day Williams Fractals to filter counter-trend trades: only long above recent bullish fractal,
+short below recent bearish fractal. Designed for low trade frequency (20-40/year) to minimize fee drag.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_WilliamsAlligator_TopBottom_Filter"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
-def calculate_camarilla_pivots(high, low, close):
-    """Calculate Camarilla pivot levels: R4, R3, R2, R1, PP, S1, S2, S3, S4"""
-    # Pivot Point (PP)
-    pp = (high + low + close) / 3
-    # Range
-    range_hl = high - low
+def calculate_alligator(close):
+    """Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMMA"""
+    # Smoothed Moving Average (SMMA) approximation using EMA with alpha=1/period
+    def smma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        alpha = 1.0 / period
+        res = np.zeros_like(arr)
+        res[0] = arr[0]
+        for i in range(1, len(arr)):
+            res[i] = alpha * arr[i] + (1 - alpha) * res[i-1]
+        return res
     
-    # Resistance levels
-    r1 = pp + (range_hl * 1.0833 / 2)
-    r2 = pp + (range_hl * 1.0833 / 2 * 2)
-    r3 = pp + (range_hl * 1.0833 / 2 * 3)
-    r4 = pp + (range_hl * 1.0833 / 2 * 4)
-    
-    # Support levels
-    s1 = pp - (range_hl * 1.0833 / 2)
-    s2 = pp - (range_hl * 1.0833 / 2 * 2)
-    s3 = pp - (range_hl * 1.0833 / 2 * 3)
-    s4 = pp - (range_hl * 1.0833 / 2 * 4)
-    
-    return r1, r2, r3, r4, pp, s1, s2, s3, s4
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
+    return jaw, teeth, lips
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -47,44 +44,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivots and trend filter
+    # Get daily data for Williams Fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
 
-    # Calculate daily Camarilla pivots
-    r1_1d, r2_1d, r3_1d, r4_1d, pp_1d, s1_1d, s2_1d, s3_1d, s4_1d = calculate_camarilla_pivots(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
-        df_1d['close'].values
+    # Calculate Williams Fractals on daily data
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
     )
-    
-    # Calculate daily EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 20-period volume average for volume spike confirmation
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Align daily data to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20)
+    # Need 2-bar confirmation for fractals (Williams requires 2 bars after close)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
+
+    # Calculate Alligator on 4h data
+    jaw, teeth, lips = calculate_alligator(close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after warmup
+    for i in range(34, n):  # Start after Alligator warmup (max period 13+8+5+8 for safety)
         # Get aligned values for current 4h bar
-        r1_val = r1_1d_aligned[i]
-        s1_val = s1_1d_aligned[i]
-        ema50_val = ema50_1d_aligned[i]
-        vol_ma_val = vol_ma20_aligned[i]
-        vol_val = volume[i]
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
+        close_val = close[i]
+        bearish_fractal_val = bearish_fractal_aligned[i]
+        bullish_fractal_val = bullish_fractal_aligned[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(r1_val) or np.isnan(s1_val) or 
-            np.isnan(ema50_val) or np.isnan(vol_ma_val)):
+        if (np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val) or
+            np.isnan(bearish_fractal_val) or np.isnan(bullish_fractal_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,30 +88,28 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 with daily uptrend and volume spike
-            if (close[i] > r1_val and 
-                close[i] > ema50_val and 
-                vol_val > vol_ma_val * 1.5):  # 50% above average volume
+            # LONG: Lips above Teeth (bullish alignment) AND price above recent bullish fractal
+            if (lips_val > teeth_val and 
+                close_val > bullish_fractal_val):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with daily downtrend and volume spike
-            elif (close[i] < s1_val and 
-                  close[i] < ema50_val and 
-                  vol_val > vol_ma_val * 1.5):  # 50% above average volume
+            # SHORT: Lips below Teeth (bearish alignment) AND price below recent bearish fractal
+            elif (lips_val < teeth_val and 
+                  close_val < bearish_fractal_val):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R1 or trend turns down
-            if (close[i] < r1_val or close[i] < ema50_val):
+            # EXIT LONG: Lips cross below Teeth OR price drops below bullish fractal
+            if (lips_val < teeth_val or close_val < bullish_fractal_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S1 or trend turns up
-            if (close[i] > s1_val or close[i] > ema50_val):
+            # EXIT SHORT: Lips cross above Teeth OR price rises above bearish fractal
+            if (lips_val > teeth_val or close_val > bearish_fractal_val):
                 signals[i] = 0.0
                 position = 0
             else:
