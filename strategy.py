@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Camarilla R1/S1 breakout with 1d EMA trend filter and volume spike.
-Works in bull/bear markets because: 1) Camarilla levels act as support/resistance in ranges, 2) EMA filter ensures trend alignment, 
-3) Volume spike confirms breakout strength, reducing false signals. Target 15-25 trades/year.
+Hypothesis: 4h KAMA trend + RSI + Choppiness filter. Uses KAMA for adaptive trend, RSI for momentum exhaustion, and Choppiness to identify ranging markets where mean-reversion works. Designed to work in both bull and bear regimes by adapting to market conditions.
 """
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_RSI_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,39 +20,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d DATA FOR TREND FILTER ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === KAMA CALCULATION (10-period) ===
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.where(volatility > 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === RSI (14-period) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # === DAILY CAMARILLA PIVOT LEVELS (R1, S1) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === CHOPPINESS INDEX (14-period) ===
+    atr = np.zeros_like(close)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(np.abs(np.diff(close, prepend=close[0])))
+    tr3 = np.abs(np.abs(np.diff(close, prepend=close[0])) - np.abs(high - low))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    chop = np.where((highest_high - lowest_low) > 0,
+                    100 * np.log10(np.sum(atr, axis=0) / (highest_high - lowest_low)) / np.log10(14),
+                    50)
     
-    # === VOLUME CONFIRMATION (20-period) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Handle NaN in chop calculation
+    chop = np.where(np.isnan(chop), 50, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 1)  # 34 for daily EMA
+    start_idx = max(30, 14)  # KAMA needs ~30, RSI/CHOP need 14
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +72,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1, price above daily EMA34, volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume_spike[i]):
+            # LONG: Price above KAMA (uptrend), RSI not overbought, choppy market (mean reversion)
+            if (close[i] > kama[i] and 
+                rsi[i] < 70 and 
+                chop[i] > 50):  # Choppy/ranging market
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1, price below daily EMA34, volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: Price below KAMA (downtrend), RSI not oversold, choppy market
+            elif (close[i] < kama[i] and 
+                  rsi[i] > 30 and 
+                  chop[i] > 50):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 or below EMA34
-            if (close[i] < s1_aligned[i]) or (close[i] < ema34_1d_aligned[i]):
+            # EXIT LONG: Price below KAMA or RSI overbought
+            if (close[i] < kama[i]) or (rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 or above EMA34
-            if (close[i] > r1_aligned[i]) or (close[i] > ema34_1d_aligned[i]):
+            # EXIT SHORT: Price above KAMA or RSI oversold
+            if (close[i] > kama[i]) or (rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
