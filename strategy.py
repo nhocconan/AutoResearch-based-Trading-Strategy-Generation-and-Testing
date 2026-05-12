@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Vortex_Trend_Scalper
-Hypothesis: Use Vortex Indicator (VI) crossovers on 4h with daily trend filter and volume confirmation to capture intermediate-term trends. Works in both bull and bear markets by filtering trades with higher timeframe trend and requiring volume confirmation, reducing false signals during choppy periods. Target: 20-40 trades/year.
+6h_Liquidity_Imbalance_Reversion
+Hypothesis: Exploit mean reversion from intraday liquidity imbalances using 6-hour price action filtered by 12-hour trend and volume exhaustion. Works in both bull and bear markets by fading extreme deviations from the 12-hour VWAP when volume dries up, capturing reversals after stop hunts or false breakouts. Target: 25-40 trades/year.
 """
 
-name = "4h_Vortex_Trend_Scalper"
-timeframe = "4h"
+name = "6h_Liquidity_Imbalance_Reversion"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -22,44 +22,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter (call once before loop)
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 34:
+    # Get 12h data for trend and VWAP (call once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
-    close_daily = df_daily['close'].values
-    ema34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
 
-    # Vortex Indicator on 4h (period=14)
-    tr = np.maximum(np.abs(high[1:] - low[:-1]), 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
+    # 12h VWAP (volume-weighted average price)
+    typical_price_12h = (high_12h + low_12h + close_12h) / 3.0
+    vwap_num = np.cumsum(typical_price_12h * volume_12h)
+    vwap_den = np.cumsum(volume_12h)
+    vwap_12h = vwap_num / vwap_den
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
+
+    # 12h trend: EMA20 of close
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
+
+    # 6h volatility: ATR(14) for dynamic thresholds
+    tr = np.maximum(np.abs(high[1:] - low[:-1]),
+                    np.maximum(np.abs(high[1:] - close[:-1]),
                                np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])  # align length
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = np.nan
-    vm_minus[0] = np.nan
+    tr = np.concatenate([[np.nan], tr])
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
 
-    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    sum_vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    sum_vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-
-    vi_plus = sum_vm_plus14 / sum_tr14
-    vi_minus = sum_vm_minus14 / sum_tr14
-
-    # Volume confirmation: volume > 1.3x 20-period average
+    # 6h volume exhaustion: volume < 0.6x 20-period average (low liquidity)
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
-        vi_p = vi_plus[i]
-        vi_m = vi_minus[i]
-        ema34_val = ema34_daily_aligned[i]
-        vol_avg_val = vol_avg_20[i]
+    for i in range(50, n):
+        vwap = vwap_12h_aligned[i]
+        ema20 = ema20_12h_aligned[i]
+        vol_exhaust = vol_avg_20[i]
+        atr = atr14[i]
 
-        if np.isnan(vi_p) or np.isnan(vi_m) or np.isnan(ema34_val) or np.isnan(vol_avg_val):
+        if np.isnan(vwap) or np.isnan(ema20) or np.isnan(vol_exhaust) or np.isnan(atr):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,27 +69,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Dynamic deviation threshold: 1.2 * ATR
+        dev_threshold = 1.2 * atr
+        deviation = close[i] - vwap
+
         if position == 0:
-            # LONG: VI+ crosses above VI- + daily uptrend + volume confirmation
-            if vi_p > vi_m and vi_plus[i-1] <= vi_minus[i-1] and close[i] > ema34_val and volume[i] > vol_avg_val * 1.3:
+            # LONG: price significantly below VWAP + volume exhaustion + price above 12h EMA (bullish bias)
+            if deviation < -dev_threshold and volume[i] < vol_exhaust * 0.6 and close[i] > ema20:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: VI- crosses above VI+ + daily downtrend + volume confirmation
-            elif vi_m > vi_p and vi_minus[i-1] <= vi_plus[i-1] and close[i] < ema34_val and volume[i] > vol_avg_val * 1.3:
+            # SHORT: price significantly above VWAP + volume exhaustion + price below 12h EMA (bearish bias)
+            elif deviation > dev_threshold and volume[i] < vol_exhaust * 0.6 and close[i] < ema20:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: VI- crosses above VI+ or close below daily EMA34
-            if vi_m > vi_p or close[i] < ema34_val:
+            # EXIT LONG: price returns to VWAP or volume returns (liquidity returns)
+            if deviation > -0.3 * dev_threshold or volume[i] > vol_exhaust * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: VI+ crosses above VI- or close above daily EMA34
-            if vi_p > vi_m or close[i] > ema34_val:
+            # EXIT SHORT: price returns to VWAP or volume returns
+            if deviation < 0.3 * dev_threshold or volume[i] > vol_exhaust * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
