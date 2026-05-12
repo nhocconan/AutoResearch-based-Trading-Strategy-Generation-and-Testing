@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 12H_WILLIAMS_ALLIGATOR_1W_TREND_FILTER
-# Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength.
-# In 1week uptrend (price > 50-period SMA), go long when Lips > Teeth > Jaw (bullish alignment).
-# In 1week downtrend (price < 50-period SMA), go short when Lips < Teeth < Jaw (bearish alignment).
-# Uses 12h timeframe for entries, 1week for trend filter and Alligator alignment.
-# Target: 15-25 trades/year on 12h timeframe.
+# 4H_CAMARILLA_R1_S1_BREAKOUT_1W_TREND_FILTER
+# Hypothesis: Camarilla R1/S1 levels from 1d provide strong support/resistance. 1w trend filter (EMA34) ensures we trade only in the direction of the weekly trend, avoiding counter-trend trades. Breakouts above R1 in uptrend or below S1 in downtrend capture momentum. Works in both bull and bear markets: trend filter avoids counter-trend trades, Camarilla breakouts capture momentum within trend. Volume confirmation reduces false breakouts. Target: 20-40 trades/year on 4h timeframe.
 
-name = "12H_WILLIAMS_ALLIGATOR_1W_TREND_FILTER"
-timeframe = "12h"
+name = "4H_CAMARILLA_R1_S1_BREAKOUT_1W_TREND_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,67 +18,50 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Weekly data for Alligator and trend filter
+    # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # Williams Alligator: Jaw (13-period SMMA, 8-bar shift), Teeth (8-period SMMA, 5-bar shift), Lips (5-period SMMA, 3-bar shift)
-    # SMMA = Smoothed Moving Average (similar to Wilder's smoothing)
-    close_1w = df_1w['close'].values
-    jaw_period, teeth_period, lips_period = 13, 8, 5
-    jaw_shift, teeth_shift, lips_shift = 8, 5, 3
+    # EMA34 for weekly trend
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate SMMA using Wilder's smoothing (alpha = 1/period)
-    def smma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan, dtype=float)
-        result = np.full_like(arr, np.nan, dtype=float)
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    jaw = smma(close_1w, jaw_period)
-    teeth = smma(close_1w, teeth_period)
-    lips = smma(close_1w, lips_period)
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Apply shifts (Jaw: 8 bars, Teeth: 5 bars, Lips: 3 bars)
-    jaw_shifted = np.roll(jaw, jaw_shift)
-    teeth_shifted = np.roll(teeth, teeth_shift)
-    lips_shifted = np.roll(lips, lips_shift)
+    # Camarilla R1, S1 (using previous day's OHLC)
+    # R1 = Close + 1.1*(High-Low)/12
+    # S1 = Close - 1.1*(High-Low)/12
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Set NaN for shifted positions that would look ahead
-    jaw_shifted[:jaw_shift] = np.nan
-    teeth_shifted[:teeth_shift] = np.nan
-    lips_shifted[:lips_shift] = np.nan
+    # Align Camarilla levels to 4h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # 50-period SMA for trend filter
-    sma50 = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    
-    # Align to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw_shifted)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth_shifted)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips_shifted)
-    sma50_aligned = align_htf_to_ltf(prices, df_1w, sma50)
-    
-    # Bullish alignment: Lips > Teeth > Jaw
-    bullish_alignment = (lips_aligned > teeth_aligned) & (teeth_aligned > jaw_aligned)
-    # Bearish alignment: Lips < Teeth < Jaw
-    bearish_alignment = (lips_aligned < teeth_aligned) & (teeth_aligned < jaw_aligned)
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are stable (50+ shifts)
+    start_idx = 40  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(sma50_aligned[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,30 +70,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: 1week uptrend (price > SMA50) + Bullish Alligator alignment
-            if (close[i] > sma50_aligned[i] and 
-                bullish_alignment[i]):
+            # LONG: 1w uptrend + price breaks above R1 + volume confirmation
+            if (close[i] > ema34_1w_aligned[i] and 
+                close[i] > camarilla_r1_aligned[i] and 
+                volume_confirmed[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1week downtrend (price < SMA50) + Bearish Alligator alignment
-            elif (close[i] < sma50_aligned[i] and 
-                  bearish_alignment[i]):
+            # SHORT: 1w downtrend + price breaks below S1 + volume confirmation
+            elif (close[i] < ema34_1w_aligned[i] and 
+                  close[i] < camarilla_s1_aligned[i] and 
+                  volume_confirmed[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal or alignment breakdown
-            if (close[i] <= sma50_aligned[i] or 
-                not bullish_alignment[i]):
+            # EXIT LONG: Trend reversal or price breaks below S1 (reversal signal)
+            if (close[i] <= ema34_1w_aligned[i] or 
+                close[i] < camarilla_s1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal or alignment breakdown
-            if (close[i] >= sma50_aligned[i] or 
-                not bearish_alignment[i]):
+            # EXIT SHORT: Trend reversal or price breaks above R1 (reversal signal)
+            if (close[i] >= ema34_1w_aligned[i] or 
+                close[i] > camarilla_r1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
