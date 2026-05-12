@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 4H_DONCHIAN_BREAKOUT_VOLUME_CONFIRMATION_12HTREND
-# Hypothesis: Donchian channel breakouts capture trend continuation. In 12h uptrend (EMA50), go long on upper band breakout with volume spike; in downtrend, go short on lower band breakout. Volume confirmation filters false breakouts. Trend filter ensures alignment with higher timeframe momentum. Works in both bull and bear markets by avoiding counter-trend trades. Target: 20-40 trades/year on 4h timeframe.
+# 1D_WEEKLY_RANGE_BREAKOUT_VOLUME_CONFIRMATION
+# Hypothesis: Weekly price range defines key support/resistance. Breakouts above weekly high or below weekly low with volume confirmation indicate institutional interest.
+# In 1d uptrend (price > weekly VWAP), go long on weekly high breakout with volume spike; in downtrend, go short on weekly low breakout with volume spike.
+# Weekly trend filter avoids counter-trend trades. Works in both bull and bear markets by following the weekly trend.
+# Target: 10-20 trades/year on 1d timeframe.
 
-name = "4H_DONCHIAN_BREAKOUT_VOLUME_CONFIRMATION_12HTREND"
-timeframe = "4h"
+name = "1D_WEEKLY_RANGE_BREAKOUT_VOLUME_CONFIRMATION"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,39 +23,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Weekly data for range and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # EMA50 for 12h trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Weekly high and low
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # Donchian channel (20-period) on 4h
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Weekly VWAP for trend filter
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    vwap = (typical_price * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
+    weekly_vwap = vwap.values
     
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    # Align to 1d timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    weekly_vwap_aligned = align_htf_to_ltf(prices, df_1w, weekly_vwap)
     
-    # Volume confirmation: current volume > 1.5x 20-period average volume
-    vol_avg = np.full(n, np.nan)
-    for i in range(lookback - 1, n):
-        vol_avg[i] = np.mean(volume[i - lookback + 1:i + 1])
-    volume_spike = volume > (vol_avg * 1.5)
+    # Volume spike detection (20-period volume average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = lookback  # Ensure indicators are stable
+    start_idx = 20  # Ensure volume MA is stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(weekly_vwap_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,30 +63,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: 12h uptrend + price breaks above Donchian upper band + volume spike
-            if (close[i] > ema50_12h_aligned[i] and 
-                close[i] > highest_high[i] and 
+            # LONG: Uptrend (price > weekly VWAP) + weekly high breakout + volume spike
+            if (close[i] > weekly_vwap_aligned[i] and 
+                high[i] > weekly_high_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 12h downtrend + price breaks below Donchian lower band + volume spike
-            elif (close[i] < ema50_12h_aligned[i] and 
-                  close[i] < lowest_low[i] and 
+            # SHORT: Downtrend (price < weekly VWAP) + weekly low breakout + volume spike
+            elif (close[i] < weekly_vwap_aligned[i] and 
+                  low[i] < weekly_low_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian lower band (stop/reverse)
-            if close[i] < lowest_low[i]:
+            # EXIT LONG: Trend reversal or price back below weekly high
+            if (close[i] <= weekly_vwap_aligned[i] or 
+                close[i] < weekly_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian upper band (stop/reverse)
-            if close[i] > highest_high[i]:
+            # EXIT SHORT: Trend reversal or price back above weekly low
+            if (close[i] >= weekly_vwap_aligned[i] or 
+                close[i] > weekly_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
