@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-# 12h_1w_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Trade 12h breakouts of weekly Camarilla R3/S3 levels with daily trend and volume confirmation.
-# Weekly Camarilla levels provide strong support/resistance; daily EMA50 filters trend direction.
-# Volume confirms breakout momentum. Designed for low frequency (15-30 trades/year) to survive
-# both bull and bear markets by following higher timeframe structure.
+# 4h_Camarilla_R3_S3_Breakout_12hTrend_Volume
+# Hypothesis: Breakouts of Camarilla R3/S3 levels (from daily OHLC) with 12h EMA50 trend filter and volume confirmation.
+# Designed for low frequency (20-50 trades/year) to work in both bull and bear markets by following higher timeframe structure.
 
-name = "12h_1w_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,44 +21,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d EMA50 for trend filter ===
+    # === 12h EMA50 for trend filter ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # === Daily Camarilla levels (R3, S3) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Use previous day's OHLC for current day's Camarilla
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    # === Weekly Camarilla levels (R3, S3) ===
-    # Calculate from weekly OHLC (previous completed week)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
+    # Shift by 1 to use previous day's data
+    d_high_prev = np.roll(d_high, 1)
+    d_low_prev = np.roll(d_low, 1)
+    d_close_prev = np.roll(d_close, 1)
+    d_high_prev[0] = np.nan
+    d_low_prev[0] = np.nan
+    d_close_prev[0] = np.nan
     
-    # Use previous week's OHLC for current week's Camarilla
-    wk_high = df_1w['high'].values
-    wk_low = df_1w['low'].values
-    wk_close = df_1w['close'].values
+    # Calculate Camarilla levels
+    r3 = d_close_prev + 1.1 * (d_high_prev - d_low_prev) / 2
+    s3 = d_close_prev - 1.1 * (d_high_prev - d_low_prev) / 2
     
-    # Shift by 1 to use previous week's data
-    wk_high_prev = np.roll(wk_high, 1)
-    wk_low_prev = np.roll(wk_low, 1)
-    wk_close_prev = np.roll(wk_close, 1)
-    wk_high_prev[0] = np.nan
-    wk_low_prev[0] = np.nan
-    wk_close_prev[0] = np.nan
+    # Align daily levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    pivot = (wk_high_prev + wk_low_prev + wk_close_prev) / 3.0
-    r3 = wk_high_prev + 1.1 * (wk_high_prev - wk_low_prev)
-    s3 = wk_low_prev - 1.1 * (wk_high_prev - wk_low_prev)
-    
-    # Align weekly levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    
-    # === Volume confirmation (24-period average) ===
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === Volume confirmation (20-period average) ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,8 +66,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_ma_24[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,16 +75,16 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA50
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
         # Breakout conditions
         breakout_up = close[i] > r3_aligned[i]
         breakout_down = close[i] < s3_aligned[i]
         
         # Volume filter: above average
-        vol_ok = volume[i] > vol_ma_24[i]
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
             # LONG: breakout above R3, uptrend, volume confirmation
