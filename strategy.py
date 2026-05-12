@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Zone_Reversal
-Hypothesis: In 6-hour timeframe, price reverses from weekly pivot support/resistance zones (S1/R1, S2/R2) with volume confirmation.
-Works in bull/bear by fading extreme weekly levels, avoiding whipsaws via volume filter.
-Targets 15-30 trades/year by requiring confluence of price at pivot zone + volume spike.
+1d_WeeklyKAMA_Trend_Volume
+Hypothesis: Trade weekly KAMA direction on daily timeframe with volume confirmation. 
+Weekly KAMA adapts to market efficiency - trending in strong moves, mean-reverting in chop.
+Works in bull/bear by following weekly trend, avoids whipsaws via adaptive smoothing.
+Volume spike confirms institutional participation. Targets 15-25 trades/year.
 """
 
-name = "6h_WeeklyPivot_Zone_Reversal"
-timeframe = "6h"
+name = "1d_WeeklyKAMA_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_weekly_pivots(high, low, close):
-    """Calculate standard pivot points: P = (H+L+C)/3, S1 = 2P-H, R1 = 2P-L, etc."""
-    P = (high + low + close) / 3.0
-    S1 = 2 * P - high
-    R1 = 2 * P - low
-    S2 = P - (high - low)
-    R2 = P + (high - low)
-    return P, S1, R1, S2, R2
+def calculate_kama(close, er_len=10, fast=2, slow=30):
+    """Kaufman's Adaptive Moving Average"""
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,35 +37,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot points ONCE before loop
+    # Get weekly data for KAMA trend ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 30:
         return np.zeros(n)
 
-    # Calculate weekly pivot points
-    wk_high = df_1w['high'].values
-    wk_low = df_1w['low'].values
+    # Calculate weekly KAMA
     wk_close = df_1w['close'].values
+    wk_kama = calculate_kama(wk_close, er_len=10, fast=2, slow=30)
+    wk_kama_prev = np.roll(wk_kama, 1)
+    wk_kama_prev[0] = wk_kama[0]
+    
+    # Align to daily
+    wk_kama_aligned = align_htf_to_ltf(prices, df_1w, wk_kama)
+    wk_kama_prev_aligned = align_htf_to_ltf(prices, df_1w, wk_kama_prev)
 
-    P, S1, R1, S2, R2 = calculate_weekly_pivots(wk_high, wk_low, wk_close)
-
-    # Align pivot levels to 6h timeframe
-    P_aligned = align_htf_to_ltf(prices, df_1w, P)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
-    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
-
-    # Volume spike: current > 2.0x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Daily volume spike: current > 1.5x average of last 10 days
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after volume MA warmup
-        if (np.isnan(P_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(R1_aligned[i]) or
-            np.isnan(S2_aligned[i]) or np.isnan(R2_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(30, n):  # Start after weekly KAMA warmup
+        if (np.isnan(wk_kama_aligned[i]) or np.isnan(wk_kama_prev_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,32 +69,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        price = close[i]
-
         if position == 0:
-            # LONG: price near S1 or S2 (within 0.5%) + volume spike
-            near_S1 = abs(price - S1_aligned[i]) / S1_aligned[i] < 0.005
-            near_S2 = abs(price - S2_aligned[i]) / S2_aligned[i] < 0.005
-            if (near_S1 or near_S2) and volume_spike[i]:
+            # LONG: weekly price > KAMA + volume spike
+            if (wk_kama_aligned[i] > wk_kama_prev_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price near R1 or R2 (within 0.5%) + volume spike
-            elif (abs(price - R1_aligned[i]) / R1_aligned[i] < 0.005 or
-                  abs(price - R2_aligned[i]) / R2_aligned[i] < 0.005) and volume_spike[i]:
+            # SHORT: weekly price < KAMA + volume spike
+            elif (wk_kama_aligned[i] < wk_kama_prev_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses above pivot point (P)
-            if price > P_aligned[i]:
+            # EXIT LONG: weekly price < KAMA (trend change)
+            if wk_kama_aligned[i] < wk_kama_prev_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses below pivot point (P)
-            if price < P_aligned[i]:
+            # EXIT SHORT: weekly price > KAMA (trend change)
+            if wk_kama_aligned[i] > wk_kama_prev_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
