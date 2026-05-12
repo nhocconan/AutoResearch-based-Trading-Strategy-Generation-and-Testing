@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "4h_TRIX_Volume_Spike_Trend"
-timeframe = "4h"
+name = "6h_Williams_Fractal_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,31 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for TRIX and volume average
+    # Load daily data for trend filter and fractal calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # TRIX: Triple EMA (15-period) of % change in EMA(15)
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - then % change
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # Calculate % change of triple EMA
-    trix_raw = np.zeros_like(ema3)
-    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    # Signal line: EMA of TRIX (9-period)
-    trix_signal = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
-    # TRIX histogram: TRIX - signal line
-    trix_hist = trix_raw - trix_signal
-    trix_hist_aligned = align_htf_to_ltf(prices, df_1d, trix_hist)
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily volume average (20-period) for volume spike filter
-    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Williams Fractals on daily data (need 2-bar confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # Bearish fractal: potential resistance (look for breakdowns)
+    # Bullish fractal: potential support (look for breakouts)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # 4h EMA34 for trend filter
-    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Volume filter: current volume > 1.8x 30-period average (5 days of 6h data)
+    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_filter = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -50,8 +45,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix_hist_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
-            np.isnan(ema_34[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,26 +55,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TRIX histogram crosses above zero + volume spike + above EMA34
-            if (trix_hist_aligned[i] > 0 and trix_hist_aligned[i-1] <= 0 and 
-                volume[i] > 1.5 * vol_ma_20_aligned[i] and close[i] > ema_34[i]):
+            # Long: breakout above bullish fractal (support) + above daily EMA34 + volume filter
+            if high[i] > bullish_fractal_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX histogram crosses below zero + volume spike + below EMA34
-            elif (trix_hist_aligned[i] < 0 and trix_hist_aligned[i-1] >= 0 and 
-                  volume[i] > 1.5 * vol_ma_20_aligned[i] and close[i] < ema_34[i]):
+            # Short: breakdown below bearish fractal (resistance) + below daily EMA34 + volume filter
+            elif low[i] < bearish_fractal_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TRIX histogram crosses below zero or price below EMA34
-            if trix_hist_aligned[i] < 0 or close[i] < ema_34[i]:
+            # Exit long: breakdown below bullish fractal or below daily EMA34
+            if low[i] < bullish_fractal_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX histogram crosses above zero or price above EMA34
-            if trix_hist_aligned[i] > 0 or close[i] > ema_34[i]:
+            # Exit short: breakout above bearish fractal or above daily EMA34
+            if high[i] > bearish_fractal_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
