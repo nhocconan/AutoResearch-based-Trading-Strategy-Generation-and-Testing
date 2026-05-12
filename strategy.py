@@ -1,12 +1,12 @@
-# 4H_DONCHIAN_BREAKOUT_1D_TREND_VOLUME_CONFIRMATION
-# Hypothesis: 4h Donchian breakout (20-period) with 1d EMA trend filter and volume spike confirmation.
-# In uptrend (price > 1d EMA), go long on upper band breakout with volume > 1.5x average.
-# In downtrend (price < 1d EMA), go short on lower band breakout with volume > 1.5x average.
-# Exit on opposite band touch. Works in bull/bear via trend filter; volume reduces false breakouts.
-# Target: 20-50 trades/year on 4h timeframe.
+# 6H_EAGLE_CLAW_EMA12_CROSS_4H_WAVE_TREND
+# Hypothesis: Uses EMA12 crossover on 6h timeframe for momentum, filtered by 4H WaveTrend oscillator (overbought/oversold).
+# WaveTrend identifies exhaustion points in trends, allowing entries in direction of higher timeframe trend.
+# Works in bull markets: buy dips in uptrend when WT oversold. Works in bear markets: sell rallies in downtrend when WT overbought.
+# Combines fast entry (EMA cross) with WT exhaustion filter to avoid chasing extended moves.
+# Target: 60-120 total trades over 4 years (15-30/year).
 
-name = "4H_DONCHIAN_BREAKOUT_1D_TREND_VOLUME_CONFIRMATION"
-timeframe = "4h"
+name = "6H_EAGLE_CLAW_EMA12_CROSS_4H_WAVE_TREND"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,34 +18,41 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d EMA for trend filter (34-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    # 4H data for WaveTrend indicator
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # WaveTrend Oscillator calculation
+    # Typical price and EMA smoothing
+    ap = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
+    esa = pd.Series(ap).ewm(span=10, adjust=False, min_periods=10).mean()
+    d = pd.Series(abs(ap - esa)).ewm(span=10, adjust=False, min_periods=10).mean()
+    ci = (ap - esa) / (0.015 * d)
+    tci = pd.Series(ci).ewm(span=21, adjust=False, min_periods=21).mean()
+    wt1 = tci.values
+    wt2 = pd.Series(wt1).ewm(span=4, adjust=False, min_periods=4).mean()
     
-    # Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # WaveTrend levels: overbought > 60, oversold < -60
+    wt1_aligned = align_htf_to_ltf(prices, df_4h, wt1)
+    wt2_aligned = align_htf_to_ltf(prices, df_4h, wt2)
     
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 6H EMA12 for entry signal
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for Donchian channels
+    start_idx = max(30, 12)  # Ensure EMA and WT are stable
     
     for i in range(start_idx, n):
-        # Skip if trend data not ready
-        if np.isnan(ema34_1d_aligned[i]):
+        # Skip if any critical data is not ready
+        if (np.isnan(wt1_aligned[i]) or np.isnan(wt2_aligned[i]) or np.isnan(ema12[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,30 +61,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Uptrend + upper band breakout + volume spike
-            if (close[i] > ema34_1d_aligned[i] and 
-                high[i] > high_max[i-1] and 
-                volume[i] > 1.5 * vol_ma[i-1]):
+            # LONG: EMA12 crosses above previous value AND WaveTrend oversold (< -60)
+            if (ema12[i] > ema12[i-1] and wt1_aligned[i] < -60):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend + lower band breakout + volume spike
-            elif (close[i] < ema34_1d_aligned[i] and 
-                  low[i] < low_min[i-1] and 
-                  volume[i] > 1.5 * vol_ma[i-1]):
+            # SHORT: EMA12 crosses below previous value AND WaveTrend overbought (> 60)
+            elif (ema12[i] < ema12[i-1] and wt1_aligned[i] > 60):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Touch or cross lower band
-            if low[i] <= low_min[i]:
+            # EXIT LONG: EMA12 turns down OR WaveTrend overbought (> 60)
+            if (ema12[i] < ema12[i-1]) or (wt1_aligned[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Touch or cross upper band
-            if high[i] >= high_max[i]:
+            # EXIT SHORT: EMA12 turns up OR WaveTrend oversold (< -60)
+            if (ema12[i] > ema12[i-1]) or (wt1_aligned[i] < -60):
                 signals[i] = 0.0
                 position = 0
             else:
