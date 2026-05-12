@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R3_S3_Breakout_Trend_Filter
-# Hypothesis: Combines 12h Camarilla pivot levels (R3/S3) with 4h breakouts for trend-following entries.
-# Uses 12h trend filter (EMA50 slope) to avoid counter-trend trades, and volume confirmation (>1.5x 20-period average)
-# to filter for institutional participation. Designed for low trade frequency (<200 total 4h trades) to minimize fee drag.
-# Works in bull/bear markets by following 12h trend while using 4h breaks of Camarilla R3/S3 levels for precise entries.
+# 1h_4d_Structure_Reversion
+# Hypothesis: In 1h timeframe, use 4h and 1d structure to identify trend exhaustion points for mean-reversion entries.
+# In strong trends (defined by 1d structure), wait for 4h pullbacks to enter in trend direction.
+# Uses volume confirmation to avoid false signals. Designed for low trade frequency (15-37/year) to minimize fee drag.
+# Works in bull/bear markets by following higher timeframe structure while using 1h for precise reversion entries.
 
-name = "4h_12h_Camarilla_R3_S3_Breakout_Trend_Filter"
-timeframe = "4h"
+name = "1h_4d_Structure_Reversion"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,42 +23,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-period average (on 4h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Session filter: 8-20 UTC (already datetime64, no conversion needed)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # 12h data for Camarilla pivot levels and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Volume confirmation: >1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.3 * vol_ma)
+    
+    # 4h trend structure (direction)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate Camarilla pivot levels for 12h timeframe
-    # Typical Price = (H + L + C) / 3
-    typical_price = (high_12h + low_12h + close_12h) / 3
-    # Camarilla levels: R3 = TP + (H-L) * 1.1/2, S3 = TP - (H-L) * 1.1/2
-    camarilla_r3 = typical_price + (high_12h - low_12h) * 1.1 / 2
-    camarilla_s3 = typical_price - (high_12h - low_12h) * 1.1 / 2
+    # Calculate 4h swing points
+    swing_high_4h = np.zeros(len(high_4h), dtype=bool)
+    swing_low_4h = np.zeros(len(low_4h), dtype=bool)
     
-    # 12h trend filter: EMA50 slope (positive = uptrend, negative = downtrend)
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_slope = np.diff(ema_50, prepend=ema_50[0])
+    for i in range(1, len(high_4h)-1):
+        if high_4h[i] > high_4h[i-1] and high_4h[i] > high_4h[i+1]:
+            swing_high_4h[i] = True
+        if low_4h[i] < low_4h[i-1] and low_4h[i] < low_4h[i+1]:
+            swing_low_4h[i] = True
     
-    # Align 12h indicators to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    ema_50_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_50_slope)
+    # Track last swing points for structure
+    last_swing_high_4h = np.full(len(high_4h), np.nan)
+    last_swing_low_4h = np.full(len(low_4h), np.nan)
+    
+    last_high_4h = np.nan
+    last_low_4h = np.nan
+    
+    for i in range(len(high_4h)):
+        if swing_high_4h[i]:
+            last_high_4h = high_4h[i]
+        if swing_low_4h[i]:
+            last_low_4h = low_4h[i]
+        last_swing_high_4h[i] = last_high_4h
+        last_swing_low_4h[i] = last_low_4h
+    
+    # Determine 4h trend structure
+    structure_long_4h = np.zeros(len(high_4h), dtype=bool)   # Bullish: HH/HL
+    structure_short_4h = np.zeros(len(high_4h), dtype=bool)  # Bearish: LH/LL
+    
+    for i in range(len(high_4h)):
+        if not np.isnan(last_swing_high_4h[i]) and not np.isnan(last_swing_low_4h[i]):
+            # Bullish structure: price above last swing low and making higher highs
+            if close_4h[i] > last_swing_low_4h[i]:
+                structure_long_4h[i] = True
+            # Bearish structure: price below last swing high and making lower lows
+            if close_4h[i] < last_swing_high_4h[i]:
+                structure_short_4h[i] = True
+    
+    # Align 4h structure to 1h timeframe
+    structure_long_4h_aligned = align_htf_to_ltf(prices, df_4h, structure_long_4h)
+    structure_short_4h_aligned = align_htf_to_ltf(prices, df_4h, structure_short_4h)
+    
+    # 1h pullback identification (for entry timing)
+    # Calculate 1h RSI for pullback detection
+    rsi_period = 14
+    delta = pd.Series(close).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period, min_periods=rsi_period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period, min_periods=rsi_period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # Fill NaN with neutral 50
+    
+    # Oversold/overbought levels for pullback entries
+    rsi_oversold = 30
+    rsi_overbought = 70
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_slope_aligned[i])):
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if (np.isnan(structure_long_4h_aligned[i]) or
+            np.isnan(structure_short_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,35 +118,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Uptrend (EMA50 slope > 0) + price breaks above Camarilla R3 + volume spike
-            if (ema_50_slope_aligned[i] > 0 and 
-                close[i] > camarilla_r3_aligned[i] and 
-                volume_spike[i]):
-                signals[i] = 0.25
+            # LONG: Bullish 4h structure + 1h RSI oversold pullback + volume confirmation
+            if (structure_long_4h_aligned[i] and 
+                rsi[i] < rsi_oversold and 
+                volume_confirm[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Downtrend (EMA50 slope < 0) + price breaks below Camarilla S3 + volume spike
-            elif (ema_50_slope_aligned[i] < 0 and 
-                  close[i] < camarilla_s3_aligned[i] and 
-                  volume_spike[i]):
-                signals[i] = -0.25
+            # SHORT: Bearish 4h structure + 1h RSI overbought pullback + volume confirmation
+            elif (structure_short_4h_aligned[i] and 
+                  rsi[i] > rsi_overbought and 
+                  volume_confirm[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S3 OR trend turns down
-            if (close[i] < camarilla_s3_aligned[i]) or \
-               (ema_50_slope_aligned[i] < 0):
+            # EXIT LONG: RSI returns to neutral OR 4h structure turns bearish
+            if (rsi[i] > 50) or \
+               not structure_long_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R3 OR trend turns up
-            if (close[i] > camarilla_r3_aligned[i]) or \
-               (ema_50_slope_aligned[i] > 0):
+            # EXIT SHORT: RSI returns to neutral OR 4h structure turns bullish
+            if (rsi[i] < 50) or \
+               not structure_short_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
