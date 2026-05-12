@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1D_Weekly_Momentum_Pullback
-# Hypothesis: On daily timeframe, enter long when weekly close > weekly EMA50 and price pulls back to daily EMA20 with RSI < 40.
-# Enter short when weekly close < weekly EMA50 and price pulls back to daily EMA20 with RSI > 60.
-# Exit on opposite signal or when price crosses daily EMA50.
-# Uses weekly trend filter to avoid counter-trend trades and daily EMA20/RSI for precise entries.
-# Targets 10-20 trades/year for low fee decay.
+# 6h_RSI_Divergence_1dTrendFilter
+# Hypothesis: On 6h timeframe, enter long when RSI(14) makes a bullish divergence (higher low in RSI vs lower low in price) and price is above 1d EMA50.
+# Enter short when RSI makes a bearish divergence (lower high in RSI vs higher high in price) and price is below 1d EMA50.
+# Exit when price crosses 1d EMA50 (trend reversal).
+# Uses divergence to catch reversals in both bull and bear markets, with EMA filter to avoid counter-trend trades.
+# Targets 15-25 trades/year for low fee drag.
 
-name = "1D_Weekly_Momentum_Pullback"
-timeframe = "1d"
+name = "6h_RSI_Divergence_1dTrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,38 +16,57 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load daily data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
+    daily_close = df_1d['close'].values
     
-    # Calculate weekly EMA50
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1d EMA50
+    ema50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align weekly EMA50 to daily timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate RSI(14) on 6h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    # Calculate daily indicators
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = (100 - (100 / (1 + rs))).values
+    # Find local minima and maxima for divergence detection
+    # We'll look for divergences over the last 5 bars
+    rsi_min = np.full(n, np.nan)
+    rsi_max = np.full(n, np.nan)
+    price_min = np.full(n, np.nan)
+    price_max = np.full(n, np.nan)
+    
+    lookback = 5
+    
+    for i in range(lookback, n):
+        # Find RSI and price minima in lookback window
+        rsi_window = rsi[i-lookback:i+1]
+        price_window_low = low[i-lookback:i+1]
+        price_window_high = high[i-lookback:i+1]
+        
+        min_idx = np.argmin(rsi_window)
+        max_idx = np.argmax(rsi_window)
+        
+        rsi_min[i] = rsi_window[min_idx]
+        rsi_max[i] = rsi_window[max_idx]
+        price_min[i] = price_window_low[min_idx]
+        price_max[i] = price_window_high[max_idx]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,8 +75,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(ema20[i]) or 
-            np.isnan(ema50[i]) or np.isnan(rsi[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(rsi_min[i]) or np.isnan(rsi_max[i]) or
+            np.isnan(price_min[i]) or np.isnan(price_max[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,32 +85,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        weekly_trend = ema50_1w_aligned[i]
-        daily_ema20 = ema20[i]
-        daily_ema50 = ema50[i]
+        ema1d_trend = ema50_1d_aligned[i]
         rsi_val = rsi[i]
+        rsi_min_val = rsi_min[i]
+        rsi_max_val = rsi_max[i]
+        price_min_val = price_min[i]
+        price_max_val = price_max[i]
         
         if position == 0:
-            # LONG: Weekly uptrend + price pulls back to daily EMA20 + RSI oversold
-            if weekly_close[-1] > weekly_trend and close[i] <= daily_ema20 * 1.01 and rsi_val < 40:
+            # Bullish divergence: RSI makes higher low while price makes lower low
+            bull_div = (rsi_min_val > rsi[i-lookback]) and (price_min_val < low[i-lookback])
+            # Bearish divergence: RSI makes lower high while price makes higher high
+            bear_div = (rsi_max_val < rsi[i-lookback]) and (price_max_val > high[i-lookback])
+            
+            if bull_div and close[i] > ema1d_trend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Weekly downtrend + price pulls back to daily EMA20 + RSI overbought
-            elif weekly_close[-1] < weekly_trend and close[i] >= daily_ema20 * 0.99 and rsi_val > 60:
+            elif bear_div and close[i] < ema1d_trend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Weekly trend turns down OR price crosses below daily EMA50
-            if weekly_close[-1] < weekly_trend or close[i] < daily_ema50:
+            # EXIT LONG: Price closes below 1d EMA50 (trend reversal)
+            if close[i] < ema1d_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Weekly trend turns up OR price crosses above daily EMA50
-            if weekly_close[-1] > weekly_trend or close[i] > daily_ema50:
+            # EXIT SHORT: Price closes above 1d EMA50 (trend reversal)
+            if close[i] > ema1d_trend:
                 signals[i] = 0.0
                 position = 0
             else:
