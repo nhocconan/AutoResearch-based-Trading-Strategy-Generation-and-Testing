@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4H_DONCHIAN_BREAKOUT_20_VOLUME_CONFIRMATION_12H_TREND_FILTER
-# Hypothesis: Donchian channel breakouts with volume confirmation and 12h trend filter
-# captures momentum moves while avoiding chop. Works in both bull and bear markets.
-# Entry: Price breaks above Donchian(20) high with volume > 1.5x avg volume and 12h EMA50 uptrend
-# Exit: Price breaks below Donchian(20) low or trend reversal
-# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years).
+# 1H_KC_BREAKOUT_4H_TREND_1D_VOLUME_FILTER
+# Hypothesis: On 1h timeframe, trade Keltner Channel breakouts only when
+# 4h EMA50 trend is aligned and 1d volume is above average.
+# Uses volatility-adjusted breakouts to capture trends while avoiding false breakouts in low volatility.
+# In bull markets: long when price breaks above KC upper + 4h uptrend + high volume.
+# In bear markets: short when price breaks below KC lower + 4h downtrend + high volume.
+# Target: 15-37 trades/year on 1h timeframe (60-150 total over 4 years).
 
-name = "4H_DONCHIAN_BREAKOUT_20_VOLUME_CONFIRMATION_12H_TREND_FILTER"
-timeframe = "4h"
+name = "1H_KC_BREAKOUT_4H_TREND_1D_VOLUME_FILTER"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,33 +25,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
     
-    # EMA50 for 12h trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # EMA50 for 4h trend filter
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Volume average (20-period)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_1d = df_1d['volume'].values
+    
+    # 20-period average volume on 1d
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    
+    # Keltner Channel on 1h (20-period EMA, 2*ATR)
+    # EMA20 for mid-line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # True Range and ATR(20)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # KC Upper and Lower
+    kc_upper = ema20 + 2 * atr
+    kc_lower = ema20 - 2 * atr
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for Donchian and volume average
+    start_idx = 20  # Need EMA20 and ATR to be ready
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(vol_avg_20[i]) or np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or
+            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,35 +82,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high with volume confirmation and uptrend
-            if (close[i] > high_20[i] and 
-                volume[i] > 1.5 * vol_avg_20[i] and
-                close[i] > ema50_12h_aligned[i]):
-                signals[i] = 0.25
+            # LONG: Price breaks above KC upper, 4h uptrend, and high volume
+            if (close[i] > kc_upper[i] and 
+                close[i] > ema50_4h_aligned[i] and 
+                volume[i] > vol_avg_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below Donchian low with volume confirmation and downtrend
-            elif (close[i] < low_20[i] and 
-                  volume[i] > 1.5 * vol_avg_20[i] and
-                  close[i] < ema50_12h_aligned[i]):
-                signals[i] = -0.25
+            # SHORT: Price breaks below KC lower, 4h downtrend, and high volume
+            elif (close[i] < kc_lower[i] and 
+                  close[i] < ema50_4h_aligned[i] and 
+                  volume[i] > vol_avg_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low or trend reversal
-            if (close[i] < low_20[i] or 
-                close[i] <= ema50_12h_aligned[i]):
+            # EXIT LONG: Price closes below EMA20 (middle of KC) or 4h trend turns down
+            if (close[i] < ema20[i] or 
+                close[i] < ema50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high or trend reversal
-            if (close[i] > high_20[i] or 
-                close[i] >= ema50_12h_aligned[i]):
+            # EXIT SHORT: Price closes above EMA20 or 4h trend turns up
+            if (close[i] > ema20[i] or 
+                close[i] > ema50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
