@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtd_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
