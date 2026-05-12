@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_ThreeBarBreakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,51 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla levels (pivot-based) ===
+    # === 1d Trend (EMA50) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Previous day's values for today's Camarilla
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Pivot and ranges
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    
-    # Camarilla levels
-    r1 = pivot + (range_hl * 1.0 / 12)
-    s1 = pivot - (range_hl * 1.0 / 12)
-    
-    # Align to 12h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === 1d Trend (EMA34) ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # === Volume spike (12h) ===
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma20
+    # === 1d Volume Spike (Volume > 2x MA20) ===
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (2.0 * vol_ma20_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34)  # Ensure enough data
+    start_idx = max(100, 50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,28 +46,36 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R1 with volume spike and uptrend
-            if (close[i] > r1_aligned[i] and 
-                vol_ratio[i] > 2.0 and
-                close[i] > ema34_1d_aligned[i]):
+            # Check for 3-bar breakout pattern
+            high_3bar = max(high[i-2], high[i-1], high[i])
+            low_3bar = min(low[i-2], low[i-1], low[i])
+            
+            # Long: 3-bar breakout above resistance in uptrend + volume spike
+            if (close[i] > high_3bar and 
+                close[i] > ema50_1d_aligned[i] and
+                vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with volume spike and downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  vol_ratio[i] > 2.0 and
-                  close[i] < ema34_1d_aligned[i]):
+            # Short: 3-bar breakout below support in downtrend + volume spike
+            elif (close[i] < low_3bar and 
+                  close[i] < ema50_1d_aligned[i] and
+                  vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below S1 (reversal) or trend breaks
-            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: close below 3-bar low or trend breaks
+            low_3bar = min(low[i-2], low[i-1], low[i])
+            if (close[i] < low_3bar or 
+                close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above R1 (reversal) or trend breaks
-            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: close above 3-bar high or trend breaks
+            high_3bar = max(high[i-2], high[i-1], high[i])
+            if (close[i] > high_3bar or 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
