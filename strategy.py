@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_KAMA_With_Trend_Filter"
-timeframe = "12h"
+name = "1D_Keltner_MR_With_WaveTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,48 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== 1d Trend Filter (HTF) =====
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === 1D INDICATORS ===
+    # EMA for Keltner
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # ATR for Keltner width
+    tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
+    tr2 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    upper = ema20 + 1.5 * atr
+    lower = ema20 - 1.5 * atr
     
-    # ===== KAMA on 12h =====
-    change = np.abs(np.diff(close, 1))
-    change = np.insert(change, 0, 0)
-    volatility = np.sum(np.abs(np.diff(close, 1)), axis=0)
-    volatility = np.concatenate([[0], volatility])
-    er = np.zeros_like(close)
-    er[1:] = change[1:] / np.where(volatility[1:] == 0, 1, volatility[1:])
-    sc = (er * (2 / (2 + 1) - 2 / (30 + 1)) + 2 / (30 + 1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # WaveTrend (WT) on 1d
+    hlc3 = (high + low + close) / 3.0
+    esa = pd.Series(hlc3).ewm(span=10, adjust=False, min_periods=10).mean().values
+    d = np.abs(hlc3 - esa)
+    de = pd.Series(d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    de = np.where(de == 0, 0.001, de)
+    ci = (hlc3 - esa) / (0.015 * de)
+    wt1 = pd.Series(ci).ewm(span=21, adjust=False, min_periods=21).mean().values
+    wt2 = pd.Series(wt1).ewm(span=4, adjust=False, min_periods=4).mean().values
+    wt_signal = wt1 - wt2
     
-    # ===== RSI on 12h =====
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # === 1W TREND FILTER (HTF) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # ===== Volume Spike Filter =====
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === VOLUME SPIKE FILTER ===
+    vol_avg = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(ema20[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(wt_signal[i]) or np.isnan(ema34_1w_aligned[i]) or
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,30 +68,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above KAMA + RSI > 50 + above 1d EMA34 + volume spike
-            if (close[i] > kama[i] and
-                rsi[i] > 50 and
-                close[i] > ema34_1d_aligned[i] and
+            # Mean reversion long: price below lower Keltner + WT oversold + weekly uptrend + volume spike
+            if (close[i] < lower[i] and
+                wt_signal[i] < -50 and
+                close[i] > ema34_1w_aligned[i] and
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA + RSI < 50 + below 1d EMA34 + volume spike
-            elif (close[i] < kama[i] and
-                  rsi[i] < 50 and
-                  close[i] < ema34_1d_aligned[i] and
+            # Mean reversion short: price above upper Keltner + WT overbought + weekly downtrend + volume spike
+            elif (close[i] > upper[i] and
+                  wt_signal[i] > 50 and
+                  close[i] < ema34_1w_aligned[i] and
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below KAMA or below 1d EMA34
-            if close[i] < kama[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: price crosses above EMA20 or WT crosses above zero
+            if close[i] > ema20[i] or wt_signal[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above KAMA or above 1d EMA34
-            if close[i] > kama[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: price crosses below EMA20 or WT crosses below zero
+            if close[i] < ema20[i] or wt_signal[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
