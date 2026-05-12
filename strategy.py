@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Reversal
-Hypothesis: In range-bound or weak-trend markets (common in 2025+), price often reverses at weekly pivot levels (R1/S1, R2/S2). This strategy fades extreme weekly pivot touches (R3/S3) with 12h trend filter and volume exhaustion signals. Works in both bull/bear by fading overextended moves regardless of direction.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeS
+Hypothesis: Price breaking above/below Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation captures strong trending moves while avoiding false breakouts. Works in bull/bear by following the higher timeframe trend direction. Uses 4h timeframe with 1d EMA34 trend filter for higher timeframe context.
 """
 
-name = "6h_WeeklyPivot_Reversal"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,47 +22,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data ONCE before loop
-    df_w = get_htf_data(prices, '1w')
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
 
-    # Calculate weekly high, low, close for pivot levels
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Calculate 1-day high, low, close for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Weekly pivot point and support/resistance levels
-    # Pivot = (H + L + C) / 3
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1_w = 2 * pivot_w - low_w
-    s1_w = 2 * pivot_w - high_w
-    # R2 = P + (H - L), S2 = P - (H - L)
-    r2_w = pivot_w + (high_w - low_w)
-    s2_w = pivot_w - (high_w - low_w)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    r3_w = high_w + 2 * (pivot_w - low_w)
-    s3_w = low_w - 2 * (high_w - pivot_w)
+    # Calculate Camarilla levels: R3, S3
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
+    camarilla_range = high_1d - low_1d
+    r3_level = close_1d + 1.1 * camarilla_range / 2
+    s3_level = close_1d - 1.1 * camarilla_range / 2
 
-    # Align weekly levels to 6h timeframe
-    r3_w_aligned = align_htf_to_ltf(prices, df_w, r3_w)
-    s3_w_aligned = align_htf_to_ltf(prices, df_w, s3_w)
+    # Align Camarilla levels to 4h timeframe
+    r3_level_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
+    s3_level_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
 
-    # 12h trend filter (EMA34) - only trade against the trend
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Volume exhaustion: current volume < 50% of 20-period average (sign of selling/buying climax exhaustion)
+    # Volume confirmation: >1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_exhaustion = volume < (0.5 * vol_ma)
+    volume_confirm = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(35, n):  # Start after EMA warmup
-        if (np.isnan(r3_w_aligned[i]) or np.isnan(s3_w_aligned[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(volume_exhaustion[i])):
+    for i in range(35, n):  # Start after EMA34 warmup
+        if (np.isnan(r3_level_aligned[i]) or np.isnan(s3_level_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,33 +63,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price touches or goes below S3 (extreme oversold) + 12h trend is down (fade the move) + volume exhaustion
-            if (low[i] <= s3_w_aligned[i] and 
-                close[i] < ema_34_12h_aligned[i] and 
-                volume_exhaustion[i]):
-                signals[i] = 0.25
+            # LONG: Price breaks above R3 + EMA34 uptrend + volume confirmation
+            if (close[i] > r3_level_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_confirm[i]):
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Price touches or goes above R3 (extreme overbought) + 12h trend is up (fade the move) + volume exhaustion
-            elif (high[i] >= r3_w_aligned[i] and 
-                  close[i] > ema_34_12h_aligned[i] and 
-                  volume_exhaustion[i]):
-                signals[i] = -0.25
+            # SHORT: Price breaks below S3 + EMA34 downtrend + volume confirmation
+            elif (close[i] < s3_level_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_confirm[i]):
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to weekly pivot (mean reversion complete) or stop if trend resumes
-            if close[i] >= pivot_w_aligned[i] or close[i] > ema_34_12h_aligned[i]:
+            # EXIT LONG: Price closes below EMA34 (trend reversal)
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Price returns to weekly pivot or stop if trend resumes
-            if close[i] <= pivot_w_aligned[i] or close[i] < ema_34_12h_aligned[i]:
+            # EXIT SHORT: Price closes above EMA34 (trend reversal)
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
 
     return signals
