@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Channel_Squeeze_Breakout
-# Hypothesis: Identifies low volatility squeeze (BB width < KC width) followed by breakout in direction of 1d EMA50 trend.
-# Works in bull/bear markets by using trend filter; squeeze reduces false breakouts.
-# Entry: BB inside KC + price breaks KC upper/lower + volume > 1.5x average + 1d EMA50 trend alignment.
-# Exit: Opposite KC breach or trend reversal. Targets 20-40 trades/year to minimize fee drag.
+# 1d_Pivot_Bounce_With_WeeklyTrend
+# Hypothesis: Use weekly trend filter + daily Camarilla pivot levels for mean reversion.
+# In uptrend (price > weekly EMA50), buy at S3/S4 support with volume confirmation.
+# In downtrend (price < weekly EMA50), sell at R3/R4 resistance with volume confirmation.
+# Exit at opposite pivot level or when trend reversals. Designed for low trade frequency
+# (<20/year) to minimize fee drag, works in both bull and bear via trend-following mean reversion.
 
-name = "4h_Keltner_Channel_Squeeze_Breakout"
-timeframe = "4h"
+name = "1d_Pivot_Bounce_With_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_pivot_levels(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    pivot = (high + low + close) / 3
+    range_val = high - low
+    r4 = close + range_val * 1.1 / 2
+    r3 = close + range_val * 1.1 / 4
+    s3 = close - range_val * 1.1 / 4
+    s4 = close - range_val * 1.1 / 2
+    return r3, r4, s3, s4
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -23,44 +34,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
 
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
 
-    # Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
-    bb_width = bb_upper - bb_lower
+    # Calculate daily Camarilla pivot levels
+    r3, r4, s3, s4 = calculate_pivot_levels(high, low, close)
 
-    # Keltner Channel (20, 2)
-    ema_20_kc = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr = pd.Series(np.abs(high - low)).rolling(window=20, min_periods=20).mean().values
-    kc_upper = ema_20_kc + 2 * atr
-    kc_lower = ema_20_kc - 2 * atr
-    kc_width = kc_upper - kc_lower
-
-    # Squeeze condition: BB inside KC
-    squeeze = (bb_width < kc_width)
-
-    # Volume confirmation: current volume > 1.5x average of last 6 periods
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    # Volume confirmation: current volume > 1.3x average of last 10 days
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_ok = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(60, n):
+    for i in range(50, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(squeeze[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
-            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r3[i]) or np.isnan(r4[i]) or np.isnan(s3[i]) or np.isnan(s4[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,31 +64,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from 1d EMA50
-        price_above_ema = close[i] > ema_50_aligned[i]
-        price_below_ema = close[i] < ema_50_aligned[i]
+        # Trend filter from weekly EMA50
+        price_above_weekly_ema = close[i] > ema_50_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_50_1w_aligned[i]
 
         if position == 0:
-            # LONG: Squeeze release + price breaks above KC upper + volume + uptrend
-            if squeeze[i-1] and close[i] > kc_upper[i] and volume_ok[i] and price_above_ema:
+            # LONG: In uptrend, price touches S3/S4 support with volume
+            if price_above_weekly_ema and (close[i] <= s3[i] or close[i] <= s4[i]) and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Squeeze release + price breaks below KC lower + volume + downtrend
-            elif squeeze[i-1] and close[i] < kc_lower[i] and volume_ok[i] and price_below_ema:
+            # SHORT: In downtrend, price touches R3/R4 resistance with volume
+            elif price_below_weekly_ema and (close[i] >= r3[i] or close[i] >= r4[i]) and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below KC lower OR trend reverses
-            if close[i] < kc_lower[i] or close[i] < ema_50_aligned[i]:
+            # EXIT LONG: Price reaches R3/R4 resistance OR trend turns down
+            if (close[i] >= r3[i] or close[i] >= r4[i]) or (close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above KC upper OR trend reverses
-            if close[i] > kc_upper[i] or close[i] > ema_50_aligned[i]:
+            # EXIT SHORT: Price reaches S3/S4 support OR trend turns up
+            if (close[i] <= s3[i] or close[i] <= s4[i]) or (close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
