@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_VWAP_Reversion_1wTrend_Filter
-# Hypothesis: Mean reversion to VWAP with 1-week trend filter to avoid counter-trend trades.
-# Uses VWAP deviation on 12h timeframe with 1-week EMA trend filter and volume confirmation.
-# Designed to work in both bull (mean reversion in uptrend) and bear (mean reversion in downtrend) markets.
-# Target: 12-30 trades/year on 12h timeframe to stay under fee drag threshold.
+# 4h_Donchian_20_breakout_Volume_Trend
+# Hypothesis: Donchian breakout with volume confirmation and trend filter on 4h timeframe.
+# Uses 20-period Donchian channels for breakout detection, volume spike confirmation (>2x 20-period average),
+# and 4h EMA50 trend filter. Designed to work in both bull and bear markets by requiring
+# trend alignment and volume confirmation to filter false breakouts.
+# Target: 20-50 trades per year on 4h timeframe to stay under fee drag threshold.
 
-name = "12h_VWAP_Reversion_1wTrend_Filter"
-timeframe = "12h"
+name = "4h_Donchian_20_breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,38 +24,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate Donchian channels (20-period high/low)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
 
-    close_1w = df_1w['close'].values
+    # Calculate 4h EMA50 for trend filter
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
 
-    # Calculate 1w EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-
-    # Calculate VWAP on 12h timeframe (typical price * volume cumulative)
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    vwap = vwap_numerator / vwap_denominator
-
-    # Calculate VWAP deviation as percentage
-    vwap_dev = (close - vwap) / vwap * 100.0
-
-    # Calculate volume filter (1.5x 20-period SMA)
+    # Calculate volume spike threshold (2x 20-period SMA)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume_sma20 * 1.5
+    volume_spike_threshold = volume_sma20 * 2.0
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(vwap_dev[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,32 +54,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price below VWAP (oversold) in uptrend with volume confirmation
-            if (vwap_dev[i] < -0.5 and  # Price below VWAP by more than 0.5%
-                close[i] > ema50_1w_aligned[i] and  # Uptrend filter
-                volume[i] > volume_filter[i]):  # Volume confirmation
+            # LONG: price breaks above Donchian high with uptrend and volume spike
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema50[i] and 
+                volume[i] > volume_spike_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price above VWAP (overbought) in downtrend with volume confirmation
-            elif (vwap_dev[i] > 0.5 and  # Price above VWAP by more than 0.5%
-                  close[i] < ema50_1w_aligned[i] and  # Downtrend filter
-                  volume[i] > volume_filter[i]):  # Volume confirmation
+            # SHORT: price breaks below Donchian low with downtrend and volume spike
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema50[i] and 
+                  volume[i] > volume_spike_threshold[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to VWAP or trend weakens
-            if (vwap_dev[i] > 0.0 or  # Price back to or above VWAP
-                close[i] < ema50_1w_aligned[i]):  # Trend broken
+            # EXIT LONG: price breaks below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to VWAP or trend weakens
-            if (vwap_dev[i] < 0.0 or  # Price back to or below VWAP
-                close[i] > ema50_1w_aligned[i]):  # Trend broken
+            # EXIT SHORT: price breaks above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
