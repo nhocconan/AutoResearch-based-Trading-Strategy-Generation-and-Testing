@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Slope"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,13 +35,17 @@ def generate_signals(prices):
     r1 = close_1d_vals + (high_1d - low_1d) * 1.1 / 2
     s1 = close_1d_vals - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to 12h (wait for daily close)
+    # Align Camarilla levels to 4h (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_avg)
+    
+    # EMA slope: positive when current EMA > previous EMA
+    ema_slope = ema34_1d_aligned > np.roll(ema34_1d_aligned, 1)
+    ema_slope[0] = False  # first value invalid
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,17 +64,19 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + daily trend up + volume spike
+            # Long: price breaks above R1 + daily trend up + volume spike + EMA slope up
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
-                vol_spike[i]):
-                signals[i] = 0.25
+                vol_spike[i] and 
+                ema_slope[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below S1 + daily trend down + volume spike
+            # Short: price breaks below S1 + daily trend down + volume spike + EMA slope down
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
-                  vol_spike[i]):
-                signals[i] = -0.25
+                  vol_spike[i] and 
+                  not ema_slope[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit long: price closes below S1
@@ -78,13 +84,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short: price closes above R1
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
