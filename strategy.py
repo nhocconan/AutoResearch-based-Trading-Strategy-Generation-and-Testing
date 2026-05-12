@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Chaikin_Money_Flow_Breakout_1dTrend
-Hypothesis: Use Chaikin Money Flow (CMF) to detect institutional accumulation/distribution on 6h timeframe.
-Enter long when CMF crosses above +0.15 with price above 1d EMA50, short when CMF crosses below -0.15 with price below 1d EMA50.
-Exit when CMF returns to neutral zone (-0.1 to +0.1). This captures smart money moves while avoiding whipsaws.
-Works in both bull and bear markets by following institutional flow rather than price alone.
-Timeframe: 6h
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 12h timeframe when aligned with 1d EMA50 trend and confirmed by volume spike. Targets 12-37 trades/year by requiring confluence of price level breakout, trend alignment, and volume confirmation. Works in both bull and bear markets by using trend-following entries and mean-reversion exits at the daily pivot point.
+Timeframe: 12h
 """
 
-name = "6h_Chaikin_Money_Flow_Breakout_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -26,38 +23,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for EMA50 trend filter ONCE before loop
+    # Get daily data for Camarilla levels ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
 
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
+    ph = df_1d['high'].shift(1).values  # prior day high
+    pl = df_1d['low'].shift(1).values   # prior day low
+    pc = df_1d['close'].shift(1).values # prior day close
+    r1 = pc + (ph - pl) * 1.1 / 12
+    s1 = pc - (ph - pl) * 1.1 / 12
+    # Align to 12h: daily Camarilla values are constant through the day
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+
+    # Get daily data for EMA50 trend filter ONCE before loop
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Calculate Chaikin Money Flow (CMF) on 6h data
-    # CMF = ADV(20) / Volume(20) where ADV = ((Close - Low) - (High - Close)) / (High - Low) * Volume
-    # Avoid division by zero
-    hl_range = high - low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)  # Prevent division by zero
-    
-    money_flow_multiplier = ((close - low) - (high - close)) / hl_range
-    money_flow_volume = money_flow_multiplier * volume
-    
-    # 20-period sums for CMF
-    mfv_sum = pd.Series(money_flow_volume).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    vol_sum = np.where(vol_sum == 0, 1e-10, vol_sum)  # Prevent division by zero
-    
-    cmf = mfv_sum / vol_sum
+    # Volume spike: current > 2.0x average of last 2 bars (1 day on 12h)
+    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after CMF warmup
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(cmf[i]) or 
-            np.isnan(money_flow_multiplier[i]) or np.isnan(volume[i])):
+    for i in range(60, n):  # Start after EMA50 warmup
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,28 +61,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: CMF crosses above +0.15 AND price above 1d EMA50
-            if (cmf[i] > 0.15 and cmf[i-1] <= 0.15 and 
-                close[i] > ema_50_1d_aligned[i]):
+            # LONG: close > daily R1 + price > 1d EMA50 + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: CMF crosses below -0.15 AND price below 1d EMA50
-            elif (cmf[i] < -0.15 and cmf[i-1] >= -0.15 and 
-                  close[i] < ema_50_1d_aligned[i]):
+            # SHORT: close < daily S1 + price < 1d EMA50 + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: CMF returns to neutral zone (above -0.1)
-            if cmf[i] > -0.1:
+            # EXIT LONG: close < daily pivot P
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: CMF returns to neutral zone (below +0.1)
-            if cmf[i] < 0.1:
+            # EXIT SHORT: close > daily pivot P
+            pp = (ph + pl + pc) / 3.0
+            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
