@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_KAMA_Trend_RSI_ChopFilter"
-timeframe = "4h"
+name = "6h_Pivot_Reversal_Volume_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,67 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === KAMA parameters (4h) ===
-    er_length = 10
-    fast_ema = 2
-    slow_ema = 30
-    
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(close - np.roll(close, er_length))
-    change[0:er_length] = 0
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    volatility_sum = pd.Series(volatility).rolling(window=er_length, min_periods=er_length).sum().values
-    er = np.where(volatility_sum > 0, change / volatility_sum, 0)
-    
-    # Calculate Smoothing Constant (SC)
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # === 1d data for higher timeframe context ===
+    # === 1d Data for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1d RSI(14) for trend filter
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # === 1d EMA34 for trend ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Choppiness Index (1d) for regime filter ===
-    period = 14
-    atr_1d = np.zeros_like(close_1d)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]
+    # === 1d Pivot Points (standard calculation) ===
+    # Previous day's high, low, close
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # First value: use current day's values as placeholder (will be ignored due to warmup)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    atr_sum = pd.Series(tr_1d).rolling(window=period, min_periods=period).sum().values
-    highest_high = pd.Series(high_1d).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=period, min_periods=period).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
-    chop = np.where((highest_high - lowest_low) > 0, chop, 50)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Pivot point and support/resistance levels
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pp - prev_low
+    s1 = 2 * pp - prev_high
+    r2 = pp + (prev_high - prev_low)
+    s2 = pp - (prev_high - prev_low)
+    r3 = prev_high + 2 * (pp - prev_low)
+    s3 = prev_low - 2 * (prev_high - pp)
+    
+    # Align pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === Volume spike detection (20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34, 14)  # Ensure enough data for all indicators
+    start_idx = max(200, 34)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,32 +82,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above KAMA (trend up) + RSI > 50 (bullish momentum) + chop < 61.8 (trending market)
-            if (close[i] > kama[i] and 
-                rsi_1d_aligned[i] > 50 and
-                chop_aligned[i] < 61.8):
+            # Long: price crosses above S1 with volume spike and 1d trend up
+            if (close[i] > s1_aligned[i] and 
+                close[i-1] <= s1_aligned[i-1] and
+                volume_spike[i] and
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA (trend down) + RSI < 50 (bearish momentum) + chop < 61.8 (trending market)
-            elif (close[i] < kama[i] and 
-                  rsi_1d_aligned[i] < 50 and
-                  chop_aligned[i] < 61.8):
+            # Short: price crosses below R1 with volume spike and 1d trend down
+            elif (close[i] < r1_aligned[i] and 
+                  close[i-1] >= r1_aligned[i-1] and
+                  volume_spike[i] and
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below KAMA or RSI turns bearish or chop indicates ranging
-            if (close[i] < kama[i] or 
-                rsi_1d_aligned[i] < 50 or
-                chop_aligned[i] > 61.8):
+            # Exit long: price crosses below PP or trend breaks
+            if close[i] < pp_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above KAMA or RSI turns bullish or chop indicates ranging
-            if (close[i] > kama[i] or 
-                rsi_1d_aligned[i] > 50 or
-                chop_aligned[i] > 61.8):
+            # Exit short: price crosses above PP or trend breaks
+            if close[i] > pp_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
