@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Chaikin_Money_Flow_Range_Extreme_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,35 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for trend filter
+    # Load 1d data for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Chaikin Money Flow (CMF) on 6h data
-    # CMF = sum(volume * ((close - low) - (high - close)) / (high - low)) / sum(volume) over period
-    # Range: ((close - low) - (high - close)) = 2*close - high - low
-    mf_multiplier = ((2 * close - high - low) / (high - low))
-    # Handle division by zero when high == low
-    mf_multiplier = np.where((high - low) == 0, 0, mf_multiplier)
-    mf_volume = mf_multiplier * volume
+    # Calculate Camarilla R3 and S3 for previous day
+    p = (high_1d + low_1d + close_1d) / 3
+    r3 = p + (high_1d - low_1d) * 1.1 / 4
+    s3 = p - (high_1d - low_1d) * 1.1 / 4
     
-    # 20-period CMF
-    mf_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = np.where(vol_sum != 0, mf_sum / vol_sum, 0)
+    # Align Camarilla levels to 12h (wait for daily close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume spike: current volume > 2.0x 10-period average
+    vol_avg = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(cmf[i]):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,27 +57,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: CMF < -0.25 (extreme selling) + price above 1d EMA50 (bullish trend bias)
-            if cmf[i] < -0.25 and close[i] > ema_50_1d_aligned[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R3 + above 1d EMA34 + volume spike
+            if close[i] > r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_spike[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: CMF > 0.25 (extreme buying) + price below 1d EMA50 (bearish trend bias)
-            elif cmf[i] > 0.25 and close[i] < ema_50_1d_aligned[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S3 + below 1d EMA34 + volume spike
+            elif close[i] < s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_spike[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: CMF > -0.05 (selling pressure exhausted)
-            if cmf[i] > -0.05:
+            # Exit long: price closes below S3
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: CMF < 0.05 (buying pressure exhausted)
-            if cmf[i] < 0.05:
+            # Exit short: price closes above R3
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
