@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 12h_TRIX_ZeroCross_1dTrend_Volume
-# Hypothesis: TRIX zero-cross on 12h with 1d trend filter and volume confirmation.
-# TRIX (12-period) captures momentum shifts; zero-cross indicates trend changes.
-# Combined with 1d EMA34 trend filter to ensure alignment with higher timeframe trend.
-# Volume spike confirms institutional participation. Works in bull via long entries in uptrends,
-# and in bear via short entries in downtrends. Target: 12-37 trades/year.
+# 4h_ParabolicSAR_Trend_Filter_Volume
+# Hypothesis: Parabolic SAR captures trend direction and potential reversals. 
+# Long when price > SAR and SAR is rising, short when price < SAR and SAR is falling.
+# Filtered by 1d EMA50 trend direction for multi-timeframe alignment.
+# Volume confirmation ensures institutional participation. 
+# Works in bull markets via longs in uptrends, bear markets via shorts in downtrends.
+# Target: 20-30 trades/year.
 
-name = "12h_TRIX_ZeroCross_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_ParabolicSAR_Trend_Filter_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,27 +28,58 @@ def generate_signals(prices):
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
 
-    # Calculate 1d EMA34 trend filter
+    # Calculate 1d EMA50 trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # TRIX (12,12,12) on 12h
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # first value has no previous
+    # Parabolic SAR calculation (0.02 step, 0.2 max)
+    sar = np.zeros(n)
+    trend = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    af = 0.02  # acceleration factor
+    max_af = 0.2
+    ep = 0  # extreme point
+    sar[0] = low[0]
 
-    # Volume spike: current > 2.0x average of last 12 bars (6 days)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    for i in range(1, n):
+        if trend[i-1] == 1:  # uptrend
+            sar[i] = sar[i-1] + af * (ep - sar[i-1])
+            if sar[i] > low[i]:
+                trend[i] = -1
+                sar[i] = ep
+                ep = high[i]
+                af = 0.02
+            else:
+                trend[i] = 1
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + 0.02, max_af)
+                if sar[i] > low[i]:
+                    sar[i] = low[i]
+        else:  # downtrend
+            sar[i] = sar[i-1] + af * (ep - sar[i-1])
+            if sar[i] < high[i]:
+                trend[i] = 1
+                sar[i] = ep
+                ep = low[i]
+                af = 0.02
+            else:
+                trend[i] = -1
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + 0.02, max_af)
+                if sar[i] < high[i]:
+                    sar[i] = high[i]
+
+    # Volume spike: current > 2.0x average of last 6 bars (1 day)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(12, n):  # Start after TRIX warmup
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(trix[i]) or 
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(sar[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -57,30 +89,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX crosses above zero + 1d EMA34 uptrend + volume spike
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # LONG: price > SAR (uptrend) + 1d EMA50 uptrend + volume spike
+            if (close[i] > sar[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero + 1d EMA34 downtrend + volume spike
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # SHORT: price < SAR (downtrend) + 1d EMA50 downtrend + volume spike
+            elif (close[i] < sar[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero or trend breaks
-            if (trix[i] < 0 and trix[i-1] >= 0) or close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: price < SAR (trend reversal)
+            if close[i] < sar[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero or trend breaks
-            if (trix[i] > 0 and trix[i-1] <= 0) or close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: price > SAR (trend reversal)
+            if close[i] > sar[i]:
                 signals[i] = 0.0
                 position = 0
             else:
