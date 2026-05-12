@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1d_Weekly_Camarilla_R1S1_Breakout_Trend_Filter
-# Hypothesis: Breakouts from weekly Camarilla R1/S1 levels on daily chart with weekly trend filter
-# and volume confirmation capture institutional moves while avoiding whipsaw in ranging markets.
-# Weekly trend filter reduces false breakouts; volume confirms institutional participation.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+# 4h_MACD_Histogram_Trend_Filter
+# Hypothesis: MACD histogram crossing zero with 12h trend filter and volume confirmation captures momentum with low trade frequency.
+# Works in bull markets via bullish crosses and in bear via bearish crosses, filtered by higher timeframe trend.
+# Target: 15-30 trades/year per symbol.
 
-name = "1d_Weekly_Camarilla_R1S1_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "4h_MACD_Histogram_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,53 +17,33 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Camarilla levels and trend filter (call once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter (call once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    
-    # Calculate weekly Camarilla levels from previous week
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C = (H+L+CLOSE)/3 of previous week
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # Previous week's values for current week's levels
-    prev_weekly_high = np.roll(weekly_high, 1)
-    prev_weekly_low = np.roll(weekly_low, 1)
-    prev_weekly_close = np.roll(weekly_close, 1)
-    
-    # Pivot point (average of H, L, C from previous week)
-    pp = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
-    # Range
-    weekly_range = prev_weekly_high - prev_weekly_low
-    
-    # Camarilla R1 and S1 levels
-    r1 = pp + (weekly_range * 1.1 / 12)
-    s1 = pp - (weekly_range * 1.1 / 12)
-    
-    # Align weekly levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Weekly trend filter: EMA20 on weekly close
-    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_ema20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema20)
-    
-    # Volume confirmation: volume > 1.5x 20-day average
+    close_12h = df_12h['close'].values
+    # 12h EMA50 for trend
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+
+    # Calculate MACD (12,26,9)
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
+
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(weekly_ema20_aligned[i]) or np.isnan(vol_avg_20[i]):
+    for i in range(30, n):
+        if np.isnan(macd_hist[i]) or np.isnan(signal_line[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,26 +52,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above weekly R1 + weekly uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > weekly_ema20_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # LONG: MACD histogram crosses above zero + 12h uptrend + volume spike
+            if macd_hist[i] > 0 and macd_hist[i-1] <= 0 and close[i] > ema50_12h_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below weekly S1 + weekly downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < weekly_ema20_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # SHORT: MACD histogram crosses below zero + 12h downtrend + volume spike
+            elif macd_hist[i] < 0 and macd_hist[i-1] >= 0 and close[i] < ema50_12h_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below weekly S1 or weekly trend turns down
-            if close[i] < s1_aligned[i] or close[i] < weekly_ema20_aligned[i]:
+            # EXIT LONG: MACD histogram crosses below zero or 12h trend turns down
+            if macd_hist[i] < 0 and macd_hist[i-1] >= 0 or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses above weekly R1 or weekly trend turns up
-            if close[i] > r1_aligned[i] or close[i] > weekly_ema20_aligned[i]:
+            # EXIT SHORT: MACD histogram crosses above zero or 12h trend turns up
+            if macd_hist[i] > 0 and macd_hist[i-1] <= 0 or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
