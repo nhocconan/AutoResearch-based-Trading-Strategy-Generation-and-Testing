@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Keltner_RSI_MeanReversion_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,41 +17,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter
+    # Load daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Previous day's close for Camarilla calculation
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_close_1d[0] = np.nan
     
-    # Keltner Channel parameters
-    atr_length = 10
-    keltner_mult = 1.5
-    ema_length = 20
+    # Calculate Camarilla levels: R1, S1
+    # R1 = (high - low) * 1.1 / 12 + close
+    # S1 = close - (high - low) * 1.1 / 12
+    rang = high_1d - low_1d
+    r1 = prev_close_1d + rang * 1.1 / 12
+    s1 = prev_close_1d - rang * 1.1 / 12
     
-    # True Range and ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=atr_length, adjust=False, min_periods=atr_length).mean().values
+    # Align daily levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # EMA for Keltner middle line
-    ema_keltner = pd.Series(close).ewm(span=ema_length, adjust=False, min_periods=ema_length).mean().values
-    
-    # Keltner Bands
-    upper_keltner = ema_keltner + (keltner_mult * atr)
-    lower_keltner = ema_keltner - (keltner_mult * atr)
-    
-    # RSI for overbought/oversold
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,12 +49,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_keltner[i]) or 
-            np.isnan(lower_keltner[i]) or np.isnan(rsi[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,24 +63,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price touches lower Keltner + RSI oversold (<30) + above daily EMA50 + volume filter
-            if low[i] <= lower_keltner[i] and rsi[i] < 30 and close[i] > ema_50_1d_aligned[i] and vol_filter[i]:
+            # Long: breakout above S1 + above daily EMA34 + volume filter
+            if high[i] > s1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches upper Keltner + RSI overbought (>70) + below daily EMA50 + volume filter
-            elif high[i] >= upper_keltner[i] and rsi[i] > 70 and close[i] < ema_50_1d_aligned[i] and vol_filter[i]:
+            # Short: breakdown below R1 + below daily EMA34 + volume filter
+            elif low[i] < r1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price touches upper Keltner or RSI overbought
-            if high[i] >= upper_keltner[i] or rsi[i] > 70:
+            # Exit long: breakdown below S1 or below daily EMA34
+            if low[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price touches lower Keltner or RSI oversold
-            if low[i] <= lower_keltner[i] or rsi[i] < 30:
+            # Exit short: breakout above R1 or above daily EMA34
+            if high[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
