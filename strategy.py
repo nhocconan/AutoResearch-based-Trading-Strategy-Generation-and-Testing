@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 6h_Fibonacci_Retracement_1dTrend_VolumeFilter
-# Hypothesis: Price retracing to 61.8% Fibonacci level of prior 1d swing (high/low) with trend alignment and volume confirmation captures high-probability reversals.
-# Uses 1d swing points to define retracement levels, enters at 61.8% level in direction of 1d trend, filtered by volume spike.
-# Works in bull/bear by following 1d trend. Target: 15-25 trades/year.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirm
+# Hypothesis: Price breaking above/below Camarilla R1/S1 levels with 1-day EMA34 trend filter and volume confirmation captures strong trend moves. Camarilla levels derived from prior day's range provide institutional support/resistance. Trend filter ensures alignment with higher timeframe direction. Volume confirmation reduces false breakouts. Works in bull/bear by following 1d trend. Target: 20-40 trades/year.
 
-name = "6h_Fibonacci_Retracement_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,40 +22,32 @@ def generate_signals(prices):
 
     # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+
+    # Calculate 1d EMA34 trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+
+    # Camarilla levels from prior 1d bar (H1, L1, C1)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_shift = df_1d['close'].shift(1).values  # prior day close
+    # Calculate R1 and S1 levels
+    r1 = close_1d_shift + 1.1 * (high_1d - low_1d) / 12
+    s1 = close_1d_shift - 1.1 * (high_1d - low_1d) / 12
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Calculate 1d EMA50 trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-
-    # Calculate 1d swing high/low for Fibonacci retracement
-    # Swing high: highest high over last 20 1d bars
-    # Swing low: lowest low over last 20 1d bars
-    swing_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    swing_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    swing_range = swing_high - swing_low
-
-    # Fibonacci 61.8% retracement level from swing low in uptrend, from swing high in downtrend
-    fib_618_long = swing_low + 0.618 * swing_range  # 61.8% retracement from swing low
-    fib_618_short = swing_high - 0.618 * swing_range  # 61.8% retracement from swing high
-
-    # Align Fibonacci levels to 6h timeframe
-    fib_618_long_aligned = align_htf_to_ltf(prices, df_1d, fib_618_long)
-    fib_618_short_aligned = align_htf_to_ltf(prices, df_1d, fib_618_short)
-
-    # Volume momentum: current > 1.8x average of last 20 bars
+    # Volume confirmation: current > 1.5x average of last 20 bars
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_momentum = volume > (1.8 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after EMA50 and swing lookback warmup
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(fib_618_long_aligned[i]) or 
-            np.isnan(fib_618_short_aligned[i]) or np.isnan(volume_momentum[i]) or
-            np.isnan(swing_range[i])):
+    for i in range(34, n):  # Start after EMA34 warmup
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,32 +56,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price near 61.8% fib retracement (support) + 1d EMA50 uptrend + volume momentum
-            if (close[i] <= fib_618_long_aligned[i] * 1.005 and  # Within 0.5% above fib level
-                close[i] >= fib_618_long_aligned[i] * 0.995 and  # Within 0.5% below fib level
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_momentum[i]):
+            # LONG: Price breaks above R1 + 1d EMA34 uptrend + volume confirmation
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price near 61.8% fib retracement (resistance) + 1d EMA50 downtrend + volume momentum
-            elif (close[i] <= fib_618_short_aligned[i] * 1.005 and  # Within 0.5% above fib level
-                  close[i] >= fib_618_short_aligned[i] * 0.995 and  # Within 0.5% below fib level
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_momentum[i]):
+            # SHORT: Price breaks below S1 + 1d EMA34 downtrend + volume confirmation
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above 1d EMA50 (trend exhaustion) or reaches swing high
-            if close[i] > ema_50_1d_aligned[i] * 1.02 or close[i] >= swing_high[i] * 0.998:  # Near swing high
+            # EXIT LONG: Price closes below S1 (reversion to mean)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below 1d EMA50 (trend exhaustion) or reaches swing low
-            if close[i] < ema_50_1d_aligned[i] * 0.98 or close[i] <= swing_low[i] * 1.002:  # Near swing low
+            # EXIT SHORT: Price closes above R1 (reversion to mean)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
