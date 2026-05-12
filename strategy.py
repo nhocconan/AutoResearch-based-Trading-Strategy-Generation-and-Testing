@@ -1,6 +1,17 @@
+# US Patent US10753988B1 - Novel Adaptive Volatility Breakout with Volatility Regime Filter
+# Strategy: Uses a novel volatility breakout system (patent-inspired) combined with a volatility regime filter
+# Timeframe: 4h
+# Volatility breakout triggers on expansion beyond adaptive Bollinger Bands (using ATR-based deviation)
+# Volatility regime filter uses ATR ratio to distinguish between trending and ranging markets
+# Designed to work in both bull and bear markets by filtering trades based on volatility regime
+# Entry conditions: Volatility breakout + volatility regime alignment (trending market)
+# Exit conditions: Volatility contraction or opposite breakout signal
+# Position sizing: Discrete levels (0.25) to minimize churn
+# Uses 1d trend filter for higher timeframe bias
+
 #!/usr/bin/env python3
-name = "12h_Vortex_Trend_v1"
-timeframe = "12h"
+name = "US10753988B1_AdaptiveVolBreakout_1dTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +20,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,29 +33,38 @@ def generate_signals(prices):
     ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Vortex Indicator on 12h
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    vm_plus = np.abs(high - low[:-1])
-    vm_minus = np.abs(low - high[:-1])
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
+    # Adaptive Bollinger Bands using ATR for dynamic deviation
+    # Calculate ATR(21)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    # Calculate adaptive deviation: ATR * volatility multiplier
+    vol_mult = 2.0  # Base multiplier
+    dev = atr * vol_mult
     
-    vi_plus = vm_plus14 / tr14
-    vi_minus = vm_minus14 / tr14
+    # Calculate middle band: SMA(21)
+    close_pd = pd.Series(close)
+    sma21 = close_pd.rolling(window=21, min_periods=21).mean().values
+    
+    # Upper and lower bands
+    upper_band = sma21 + dev
+    lower_band = sma21 - dev
+    
+    # Volatility regime filter: ATR ratio (current ATR vs longer ATR)
+    atr_long = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    atr_ratio = atr / atr_long  # >1 indicates expanding volatility (trending), <1 indicates contracting (ranging)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough data for EMA50 and Vortex
+    start_idx = 50  # need enough data for longest indicator
     
     for i in range(start_idx, n):
         # Skip if 1d trend data not ready
-        if np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,24 +73,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: VI+ > VI- and price above 1d EMA50
-            if vi_plus[i] > vi_minus[i] and close[i] > ema50_1d_aligned[i]:
+            # Long: Price breaks above upper band AND volatility expanding (atr_ratio > 1.1) AND 1d uptrend
+            if (close[i] > upper_band[i] and 
+                atr_ratio[i] > 1.1 and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: VI- > VI+ and price below 1d EMA50
-            elif vi_minus[i] > vi_plus[i] and close[i] < ema50_1d_aligned[i]:
+            # Short: Price breaks below lower band AND volatility expanding (atr_ratio > 1.1) AND 1d downtrend
+            elif (close[i] < lower_band[i] and 
+                  atr_ratio[i] > 1.1 and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when VI- > VI+ or price crosses below 1d EMA50
-            if vi_minus[i] > vi_plus[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit long: Price breaks below lower band OR volatility contracting (atr_ratio < 0.9)
+            if (close[i] < lower_band[i] or atr_ratio[i] < 0.9):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when VI+ > VI- or price crosses above 1d EMA50
-            if vi_plus[i] > vi_minus[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit short: Price breaks above upper band OR volatility contracting (atr_ratio < 0.9)
+            if (close[i] > upper_band[i] or atr_ratio[i] < 0.9):
                 signals[i] = 0.0
                 position = 0
             else:
