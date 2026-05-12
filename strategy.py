@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_BullBearPower_1dTrend_Volume
-# Hypothesis: Elder Ray's Bull Power (High - EMA13) and Bear Power (EMA13 - Low) capture institutional buying/selling pressure.
-# Combined with 1-day EMA34 trend filter and volume spikes, it identifies strong directional moves with institutional backing.
-# Works in bull markets via Bull Power > 0 + uptrend, and in bear markets via Bear Power > 0 + downtrend.
-# Volume spike confirms institutional participation. Target: 15-25 trades/year.
+# 4h_Keltner_Breakout_1dTrend_Volume
+# Hypothesis: Price breaking above/below Keltner Channels (ATR-based bands) signals strong momentum.
+# Combined with 1-day EMA34 trend filter and volume spikes, it captures institutional moves.
+# Works in bull markets via upper band breakout + uptrend, and in bear markets via lower band breakout + downtrend.
+# Volume spike confirms participation. Target: 25-40 trades/year.
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Keltner_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -31,12 +31,18 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Elder Ray components on 6h
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = ema_13 - low   # Bear Power: EMA13 - Low
+    # Keltner Channels on 4h
+    atr_period = 14
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = ema_20 + (2.0 * atr)
+    kc_lower = ema_20 - (2.0 * atr)
 
-    # Volume spike: current > 2.0x average of last 24 bars (4 days)
+    # Volume spike: current > 2.0x average of last 24 bars (6 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
@@ -44,8 +50,8 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(34, n):  # Start after EMA34 warmup
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(kc_upper[i]) or 
+            np.isnan(kc_lower[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,14 +60,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Bull Power > 0 (buying pressure) + 1d EMA34 uptrend + volume spike
-            if (bull_power[i] > 0 and 
+            # LONG: Close above upper Keltner band + 1d EMA34 uptrend + volume spike
+            if (close[i] > kc_upper[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power > 0 (selling pressure) + 1d EMA34 downtrend + volume spike
-            elif (bear_power[i] > 0 and 
+            # SHORT: Close below lower Keltner band + 1d EMA34 downtrend + volume spike
+            elif (close[i] < kc_lower[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -69,15 +75,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power turns negative (loss of buying pressure) OR close below EMA13
-            if (bull_power[i] <= 0 or close[i] < ema_13[i]):
+            # EXIT LONG: Close below EMA20 (trend mean)
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power turns negative (loss of selling pressure) OR close above EMA13
-            if (bear_power[i] <= 0 or close[i] > ema_13[i]):
+            # EXIT SHORT: Close above EMA20 (trend mean)
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
