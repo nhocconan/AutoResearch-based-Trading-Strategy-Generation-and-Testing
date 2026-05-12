@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER
-# Hypothesis: Camarilla pivot levels (R3/S3) from daily data act as strong support/resistance.
-# In 1-day uptrend (EMA50), go long when price breaks above R3 with volume confirmation.
-# In 1-day downtrend (EMA50), go short when price breaks below S3 with volume confirmation.
-# Works in both bull and bear markets: trend filter avoids counter-trend trades, Camarilla breakouts capture momentum.
-# Target: 15-30 trades/year on 12h timeframe.
+# 4H_CAMARILLA_R1_S1_BREAKOUT_12H_EMA50_TREND_VOLUME_SPIKE
+# Hypothesis: Camarilla R1/S1 levels act as strong intraday support/resistance.
+# In 12h uptrend (EMA50), go long when price breaks above R1 with volume spike;
+# in 12h downtrend, go short when price breaks below S1 with volume spike.
+# Volume spike confirms institutional interest. Works in both bull/bear markets:
+# trend filter avoids counter-trend trades, Camarilla breakout captures momentum.
+# Target: 20-40 trades/year on 4h timeframe.
 
-name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER"
-timeframe = "12h"
+name = "4H_CAMARILLA_R1_S1_BREAKOUT_12H_EMA50_TREND_VOLUME_SPIKE"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,9 +25,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla calculation and trend filter
+    # Daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Previous day's OHLC for Camarilla calculation
@@ -34,21 +35,26 @@ def generate_signals(prices):
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # Camarilla R1 and S1 levels
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # 12h data for trend filter and volume average
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
     # EMA50 for trend filter
-    ema50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50 = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume average (20-period) for confirmation
-    vol_avg = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period) for spike detection
+    vol_avg = pd.Series(df_12h['volume']).rolling(window=20, min_periods=20).mean().values
     
-    # Align to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
+    # Align all to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,7 +63,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
             np.isnan(ema50_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,32 +73,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: 1-day uptrend + price breaks above R3 + volume confirmation
+            # LONG: 12h uptrend + price breaks above R1 + volume spike
             if (close[i] > ema50_aligned[i] and 
-                high[i] > r3_aligned[i] and 
-                volume[i] > vol_avg_aligned[i]):
+                close[i] > R1_aligned[i] and 
+                volume[i] > 2.0 * vol_avg_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1-day downtrend + price breaks below S3 + volume confirmation
+            # SHORT: 12h downtrend + price breaks below S1 + volume spike
             elif (close[i] < ema50_aligned[i] and 
-                  low[i] < s3_aligned[i] and 
-                  volume[i] > vol_avg_aligned[i]):
+                  close[i] < S1_aligned[i] and 
+                  volume[i] > 2.0 * vol_avg_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal or price breaks below S3 (invalidates bullish breakout)
+            # EXIT LONG: Trend reversal or price breaks below S1 (invalidates bullish breakout)
             if (close[i] <= ema50_aligned[i] or 
-                low[i] < s3_aligned[i]):
+                close[i] < S1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal or price breaks above R3 (invalidates bearish breakout)
+            # EXIT SHORT: Trend reversal or price breaks above R1 (invalidates bearish breakout)
             if (close[i] >= ema50_aligned[i] or 
-                high[i] > r3_aligned[i]):
+                close[i] > R1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
