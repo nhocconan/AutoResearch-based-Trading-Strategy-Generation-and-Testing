@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "4h_RSI_Trend_Squeeze_Momentum"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_RangeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mta_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,44 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d Trend Filter (HTF) ---
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # ===== 1w Trend Filter (HTF) =====
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # 1d EMA(50) for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1w EMA(34) for trend
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # --- RSI(14) on 4h ---
+    # ===== KAMA Trend Indicator (LTF) =====
+    # Kaufman Adaptive Moving Average
     close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    change = abs(close_s.diff(10))
+    volatility = abs(close_s.diff(1)).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
+    kama = [close[0]]
+    for i in range(1, len(close)):
+        kama.append(kama[-1] + sc[i] * (close[i] - kama[-1]))
+    kama = np.array(kama)
+    
+    # ===== RSI(14) for Range Filter =====
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    rsi = rsi.fillna(50).values
     
-    # --- Bollinger Band Squeeze (volatility filter) ---
-    bb_mid = close_s.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_s.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_mid
-    bb_width_mean = pd.Series(bb_width).rolling(window=50, min_periods=50).mean().values
-    squeeze = bb_width < 0.8 * bb_width_mean  # low volatility
+    # ===== Volume Spike Filter =====
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(squeeze[i]) or
-            np.isnan(bb_mid[i])):
+        # Skip if data not ready
+        if (np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(kama[i]) or np.isnan(rsi[i]) or
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +70,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI > 50 (momentum) + price > 1d EMA50 (trend) + Bollinger squeeze (low vol breakout setup)
-            if (rsi[i] > 50 and 
-                close[i] > ema50_1d_aligned[i] and 
-                squeeze[i]):
+            # Long: Price above KAMA (uptrend) + RSI in neutral range (40-60) + 1w EMA34 uptrend + volume spike
+            if (close[i] > kama[i] and 
+                40 <= rsi[i] <= 60 and 
+                close[i] > ema34_1w_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 50 (momentum) + price < 1d EMA50 (trend) + Bollinger squeeze (low vol breakdown setup)
-            elif (rsi[i] < 50 and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  squeeze[i]):
+            # Short: Price below KAMA (downtrend) + RSI in neutral range (40-60) + 1w EMA34 downtrend + volume spike
+            elif (close[i] < kama[i] and 
+                  40 <= rsi[i] <= 60 and 
+                  close[i] < ema34_1w_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI < 40 (loss of momentum) OR price < 1d EMA50 (trend break)
-            if rsi[i] < 40 or close[i] < ema50_1d_aligned[i]:
+            # Exit long: Price crosses below KAMA OR RSI overbought (>70)
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI > 60 (loss of momentum) OR price > 1d EMA50 (trend break)
-            if rsi[i] > 60 or close[i] > ema50_1d_aligned[i]:
+            # Exit short: Price crosses above KAMA OR RSI oversold (<30)
+            if close[i] > kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
