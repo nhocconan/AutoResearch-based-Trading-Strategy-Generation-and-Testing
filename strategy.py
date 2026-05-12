@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Ichimoku_Cloud_Trend_Follow"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,45 +17,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Ichimoku
+    # Load 1d data for Camarilla and trend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Ichimoku components (10,26,52 periods)
-    def ichimoku_cloud(high, low, close):
-        # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-        period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-        period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-        tenkan = (period9_high + period9_low) / 2
-        
-        # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-        period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-        period26_low = pd.Series(high).rolling(window=26, min_periods=26).min().values
-        kijun = (period26_high + period26_low) / 2
-        
-        # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-        senkou_a = ((tenkan + kijun) / 2)
-        
-        # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-        period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-        period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-        senkou_b = ((period52_high + period52_low) / 2)
-        
-        return tenkan, kijun, senkou_a, senkou_b
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = ichimoku_cloud(high_1d, low_1d, close_1d)
+    # Calculate Camarilla R3 and S3 from previous 1d candle
+    # Formula: R3 = close + 1.1 * (high - low), S3 = close - 1.1 * (high - low)
+    camarilla_range = high_1d - low_1d
+    camarilla_r3 = close_1d + 1.1 * camarilla_range
+    camarilla_s3 = close_1d - 1.1 * camarilla_range
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    # Align to 12h timeframe (values from previous 1d close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume filter: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_avg)
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,8 +49,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or 
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,29 +60,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = np.maximum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        cloud_bottom = np.minimum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        
         if position == 0:
-            # Long: Tenkan > Kijun (bullish cross) + price above cloud + volume filter
-            if tenkan_1d_aligned[i] > kijun_1d_aligned[i] and close[i] > cloud_top and vol_filter[i]:
+            # Long: Close above R3 + above 1d EMA34 + volume filter
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Tenkan < Kijun (bearish cross) + price below cloud + volume filter
-            elif tenkan_1d_aligned[i] < kijun_1d_aligned[i] and close[i] < cloud_bottom and vol_filter[i]:
+            # Short: Close below S3 + below 1d EMA34 + volume filter
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Tenkan < Kijun (bearish cross) or price drops below cloud
-            if tenkan_1d_aligned[i] < kijun_1d_aligned[i] or close[i] < cloud_top:
+            # Exit long: Close below S3
+            if close[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Tenkan > Kijun (bullish cross) or price rises above cloud
-            if tenkan_1d_aligned[i] > kijun_1d_aligned[i] or close[i] > cloud_bottom:
+            # Exit short: Close above R3
+            if close[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
