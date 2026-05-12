@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_Breakout_Volume_Trend
-Hypothesis: On daily timeframe, Donchian(20) breakouts with volume confirmation and 
-weekly EMA200 trend filter capture strong trends while avoiding false breakouts in ranges.
-Works in bull via upward breakouts and bear via downward breakouts with trend filter.
-Targets 7-25 trades/year (30-100 total over 4 years) with low turnover.
+12h_MACD_RSI_Confluence_1dTrend
+Hypothesis: On 12h timeframe, MACD bullish/bearish cross combined with RSI extremes 
+(oversold/overbought) generates high-probability signals when aligned with 1d EMA50 trend 
+and volume > 1.3x 20-period average. Uses 1d Bollinger Band width < 60th percentile 
+to avoid choppy regimes. Targets 15-30 trades/year (60-120 total over 4 years) 
+with low turnover. Works in bull via MACD momentum and bear via RSI mean-reversion 
+with trend filter.
 """
 
-name = "1d_Donchian20_Breakout_Volume_Trend"
-timeframe = "1d"
+name = "12h_MACD_RSI_Confluence_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,39 +27,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data (call once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
 
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate weekly EMA200 for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate 1d EMA50 for trend
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Calculate daily Donchian channels (20-period)
-    # Upper band: highest high of last 20 days
-    # Lower band: lowest low of last 20 days
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d Bollinger Band width (20, 2) for squeeze filter
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma20_1d + 2 * std20_1d
+    lower_bb_1d = sma20_1d - 2 * std20_1d
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma20_1d
+    # Percentile rank of bb_width over lookback
+    bb_width_rank = pd.Series(bb_width_1d).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    bb_width_rank_aligned = align_htf_to_ltf(prices, df_1d, bb_width_rank)
 
-    # Volume confirmation: 1.5x 20-day average volume
+    # MACD (12,26,9)
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
+
+    # RSI (14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+
+    # Volume confirmation: 1.3x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        # Get current values
-        ema200 = ema200_1w_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        vol_avg_val = vol_avg_20[i]
+    for i in range(60, n):
+        # Get aligned values for current 12h bar
+        ema50 = ema50_1d_aligned[i]
+        bb_rank = bb_width_rank_aligned[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(ema200) or np.isnan(upper) or 
-            np.isnan(lower) or np.isnan(vol_avg_val)):
+        if (np.isnan(ema50) or np.isnan(bb_rank) or 
+            np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,31 +90,48 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Squeeze filter: only trade when BB width is in lower 60% (avoid chop)
+        if bb_rank > 0.6:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        vol_avg_val = vol_avg_20[i]
+
         if position == 0:
-            # LONG: Price breaks above Donchian high + above weekly EMA200 + volume surge
-            if (close[i] > upper and 
-                close[i] > ema200 and 
-                volume[i] > vol_avg_val * 1.5):
+            # LONG: MACD bullish cross + RSI oversold + price above EMA50 + volume surge
+            if (macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1] and
+                rsi[i] < 35 and
+                close[i] > ema50 and
+                volume[i] > vol_avg_val * 1.3):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low + below weekly EMA200 + volume surge
-            elif (close[i] < lower and 
-                  close[i] < ema200 and 
-                  volume[i] > vol_avg_val * 1.5):
+            # SHORT: MACD bearish cross + RSI overbought + price below EMA50 + volume surge
+            elif (macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1] and
+                  rsi[i] > 65 and
+                  close[i] < ema50 and
+                  volume[i] > vol_avg_val * 1.3):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low or below weekly EMA200
-            if (close[i] < lower or close[i] < ema200):
+            # EXIT LONG: MACD bearish cross or RSI overbought or price below EMA50
+            if (macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1]) or \
+               (rsi[i] > 70) or \
+               (close[i] < ema50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high or above weekly EMA200
-            if (close[i] > upper or close[i] > ema200):
+            # EXIT SHORT: MACD bullish cross or RSI oversold or price above EMA50
+            if (macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1]) or \
+               (rsi[i] < 30) or \
+               (close[i] > ema50):
                 signals[i] = 0.0
                 position = 0
             else:
