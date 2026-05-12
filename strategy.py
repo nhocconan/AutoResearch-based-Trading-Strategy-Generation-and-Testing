@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Camarilla pivot breakouts with daily trend filter and volume confirmation work across market regimes.
-# Long when price breaks above R1 with daily uptrend and volume spike.
-# Short when price breaks below S1 with daily downtrend and volume spike.
-# Uses daily EMA34 for trend filter and volume > 1.5x 20-period average for confirmation.
-# Designed for 4h timeframe to target 20-50 trades/year with low frequency and high edge.
+# 1d_Price_Action_With_Weekly_Trend_and_Volume
+# Hypothesis: Combines daily price action (close > open for bullish, close < open for bearish) with weekly trend filter (price above/below weekly EMA20) and volume confirmation (>1.5x 20-day average volume). Works in bull markets via buying dips in uptrend and in bear markets via selling rallies in downtrend. Uses only 3 conditions to minimize overtrading and maximize edge.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_Price_Action_With_Weekly_Trend_and_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,32 +16,19 @@ def generate_signals(prices):
         return np.zeros(n)
 
     close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
 
-    # Daily EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-
-    # Calculate Camarilla levels from previous day
-    ph = df_1d['high'].shift(1).values  # previous day high
-    pl = df_1d['low'].shift(1).values   # previous day low
-    pc = df_1d['close'].shift(1).values # previous day close
-    
-    # Camarilla R1 = C + (H-L)*1.1/12
-    r1 = pc + (ph - pl) * 1.1 / 12
-    # Camarilla S1 = C - (H-L)*1.1/12
-    s1 = pc - (ph - pl) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Weekly EMA20 trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,8 +39,7 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,31 +47,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from daily EMA34
-        price_above_daily_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_daily_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from weekly EMA20
+        price_above_weekly_ema = close[i] > ema_20_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_20_1w_aligned[i]
+
+        # Bullish/bearish candle
+        bullish_candle = close[i] > open_price[i]
+        bearish_candle = close[i] < open_price[i]
 
         if position == 0:
-            # LONG: Price breaks above R1 with daily uptrend and volume confirmation
-            if close[i] > r1_aligned[i] and price_above_daily_ema and volume_ok[i]:
+            # LONG: Bullish candle, price above weekly EMA, volume confirmation
+            if bullish_candle and price_above_weekly_ema and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with daily downtrend and volume confirmation
-            elif close[i] < s1_aligned[i] and price_below_daily_ema and volume_ok[i]:
+            # SHORT: Bearish candle, price below weekly EMA, volume confirmation
+            elif bearish_candle and price_below_weekly_ema and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or daily trend turns down
-            if close[i] < s1_aligned[i] or not price_above_daily_ema:
+            # EXIT LONG: Bearish candle or price breaks below weekly EMA
+            if bearish_candle or not price_above_weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or daily trend turns up
-            if close[i] > r1_aligned[i] or not price_below_daily_ema:
+            # EXIT SHORT: Bullish candle or price breaks above weekly EMA
+            if bullish_candle or not price_below_weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
