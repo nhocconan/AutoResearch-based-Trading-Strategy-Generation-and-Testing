@@ -1,5 +1,5 @@
-#/usr/bin/env python3
-name = "12h_Camarilla_R3_S4_Breakout_1dEMA34_VolumeSpike"
+#!/usr/bin/env python3
+name = "12h_Camarilla_R3_S4_Breakout_1dEMA34_VolumeSpike_v2"
 timeframe = "12h"
 leverage = 1.0
 
