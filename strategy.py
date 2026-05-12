@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_WilliamsAlligator_Trend_Confirmation
-Hypothesis: Williams Alligator (3 SMAs) confirms daily trend direction. Price above/below Alligator teeth with volume confirmation. Works in bull/bear via trend filter + volume filter to avoid whipsaws.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Simplified
+Hypothesis: Breakouts at daily Camarilla R1/S1 levels with volume confirmation and 1d trend filter.
+Uses only the most recent daily values (no look-ahead) and discrete position sizing to limit trades.
+Targets ~25-35 trades/year per symbol to stay within fee limits. Works in bull/bear via trend filter.
 """
 
-name = "1d_WilliamsAlligator_Trend_Confirmation"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Simplified"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,30 +16,33 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Williams Alligator
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
 
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs
-    jaw = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().values
+    # Calculate Camarilla levels from previous daily close
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d + camarilla_range * 1.1 / 12
+    s1 = close_1d - camarilla_range * 1.1 / 12
 
-    # Align to daily timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
+    # Get 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume confirmation: 1.5x 20-day SMA
+    # Volume confirmation: 1.5x 20-period SMA
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_threshold = volume_sma20 * 1.5
@@ -46,9 +51,15 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
+        # Get aligned values for current 4h bar (only uses completed daily bars)
+        r1_aligned = align_htf_to_ltf(prices, df_1d, r1)[i]
+        s1_aligned = align_htf_to_ltf(prices, df_1d, s1)[i]
+        ema50_aligned = ema50_1d_aligned[i]
+        vol_threshold_val = volume_threshold[i]
+
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(volume_threshold[i])):
+        if (np.isnan(r1_aligned) or np.isnan(s1_aligned) or 
+            np.isnan(ema50_aligned) or np.isnan(vol_threshold_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,30 +68,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above teeth and lips > jaw (bullish alignment) + volume spike
-            if (close[i] > teeth_aligned[i] and 
-                lips_aligned[i] > jaw_aligned[i] and
-                volume[i] > volume_threshold[i]):
+            # LONG: Price closes above daily R1 + volume spike (1.5x) + 1d uptrend
+            if (close[i] > r1_aligned and
+                volume[i] > vol_threshold_val and
+                close[i] > ema50_aligned):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below teeth and lips < jaw (bearish alignment) + volume spike
-            elif (close[i] < teeth_aligned[i] and 
-                  lips_aligned[i] < jaw_aligned[i] and
-                  volume[i] > volume_threshold[i]):
+            # SHORT: Price closes below daily S1 + volume spike (1.5x) + 1d downtrend
+            elif (close[i] < s1_aligned and
+                  volume[i] > vol_threshold_val and
+                  close[i] < ema50_aligned):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below teeth
-            if close[i] < teeth_aligned[i]:
+            # EXIT LONG: Price closes below daily S1
+            if close[i] < s1_aligned:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above teeth
-            if close[i] > teeth_aligned[i]:
+            # EXIT SHORT: Price closes above daily R1
+            if close[i] > r1_aligned:
                 signals[i] = 0.0
                 position = 0
             else:
