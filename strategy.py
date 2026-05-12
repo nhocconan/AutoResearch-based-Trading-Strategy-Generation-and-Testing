@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirmation_v2
-# Hypothesis: 4h breakout of daily Camarilla R1/S1 levels with daily trend filter (EMA34) and volume spike (1.5x average).
-# Uses daily EMA34 for trend direction to avoid counter-trend trades. Volume spike confirms breakout strength.
-# Designed for 15-30 trades/year (60-120 total over 4 years) to minimize fee drag. Works in bull/bear by following daily trend.
-# Focus on BTC/ETH performance by requiring alignment with daily trend and volume confirmation.
+# 1d_1w_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume
+# Hypothesis: Daily timeframe strategy using weekly Camarilla R1/S1 breakouts filtered by weekly trend (EMA20) and volume confirmation (1.5x average volume).
+# Weekly trend filter ensures we only trade in the direction of the higher timeframe trend, reducing whipsaws in ranging markets.
+# Volume confirmation adds conviction to breakouts. Designed for low trade frequency (15-30 trades/year) to minimize fee drag.
+# Works in bull markets by catching breakouts in uptrends and in bear markets by catching breakdowns in downtrends.
 
-name = "4h_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirmation_v2"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,40 +23,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot levels and EMA34 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for Camarilla pivot levels (R1, S1) and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
 
-    # Calculate Camarilla pivot levels for each 1d bar
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate weekly Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12
+    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12
 
-    # Calculate daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly EMA20 for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
 
-    # Align all 1d data to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly volume SMA10 for volume confirmation
+    volume_series_1w = pd.Series(volume_1w)
+    volume_sma10_1w = volume_series_1w.rolling(window=10, min_periods=10).mean().values
+    volume_spike_threshold_1w = volume_sma10_1w * 1.5  # Require 1.5x average weekly volume
 
-    # Calculate 4h volume SMA20 for volume confirmation
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
+    # Align weekly indicators to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    volume_sma10_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_sma10_1w)
+    volume_spike_threshold_aligned = align_htf_to_ltf(prices, df_1w, volume_spike_threshold_1w)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_spike_threshold_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,25 +71,25 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Breakout above R1 in daily uptrend with volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume[i] > volume_sma20[i]:
+            # LONG: Breakout above weekly R1 in weekly uptrend with volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema20_1w_aligned[i] and volume[i] > volume_spike_threshold_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 in daily downtrend with volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: Breakdown below weekly S1 in weekly downtrend with volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema20_1w_aligned[i] and volume[i] > volume_spike_threshold_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S1 (reversal signal)
+            # EXIT LONG: Price closes below weekly S1 (reversal signal)
             if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R1 (reversal signal)
+            # EXIT SHORT: Price closes above weekly R1 (reversal signal)
             if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
