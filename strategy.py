@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Trix_Volume_Spike_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Load 1d data for Camarilla pivot levels
+    # Load 1d data for TRIX calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0
-    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0
+    # Calculate TRIX on 1d: TRIX = EMA(EMA(EMA(close, period), period), period)
+    period = 12
+    ema1 = pd.Series(close_1d).ewm(span=period, adjust=False, min_periods=period).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, adjust=False, min_periods=period).mean().values
+    ema3 = pd.Series(ema2).ewm(span=period, adjust=False, min_periods=period).mean().values
+    trix = np.diff(ema3, prepend=ema3[0]) / ema3
+    trix[0] = 0  # avoid division by zero in first element
     
-    # Align Camarilla levels to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align TRIX to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Volume filter: current volume > 2.0x 30-period average
-    vol_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: current volume > 2.0x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (2.0 * vol_avg)
-    
-    # Price range filter: avoid choppy markets (ATR-based)
-    tr1 = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]))
-    tr2 = np.maximum(np.absolute(low[1:] - close[:-1]), tr1)
-    tr = np.concatenate([[tr1[0]], tr2]) if len(tr1) > 0 else np.array([0.0])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_pct = atr / close
-    vol_regime = (atr_pct > 0.01) & (atr_pct < 0.05)  # 1% to 5% ATR
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,9 +47,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(vol_filter[i]) or np.isnan(vol_regime[i])):
+        if (np.isnan(trix_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,24 +58,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R3 + above 1w EMA50 + volume filter + vol regime
-            if high[i] > r3_1d_aligned[i] and close[i] > ema_50_1w_aligned[i] and vol_filter[i] and vol_regime[i]:
+            # Long: TRIX crosses above zero + above 1d EMA34 + volume spike
+            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below S3 + below 1w EMA50 + volume filter + vol regime
-            elif low[i] < s3_1d_aligned[i] and close[i] < ema_50_1w_aligned[i] and vol_filter[i] and vol_regime[i]:
+            # Short: TRIX crosses below zero + below 1d EMA34 + volume spike
+            elif trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: breakdown below S3 or below 1w EMA50
-            if low[i] < s3_1d_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: TRIX crosses below zero or below 1d EMA34
+            if trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: breakout above R3 or above 1w EMA50
-            if high[i] > r3_1d_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: TRIX crosses above zero or above 1d EMA34
+            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
