@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume_Confirmation"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,29 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Load 1d data for Camarilla pivots
+    # Load 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot point
-    p = (high_1d + low_1d + close_1d) / 3
-    # Calculate Camarilla R1 and S1
-    r1 = p + (high_1d - low_1d) * 1.1 / 12
-    s1 = p - (high_1d - low_1d) * 1.1 / 12
+    # Load 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Align Camarilla levels to 4h (wait for daily close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate 1w EMA40 for trend filter
+    ema_40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
+    
+    # Calculate Camarilla R3 and S3 for previous day
+    p = (high_1d + low_1d + close_1d) / 3
+    r3 = p + (high_1d - low_1d) * 1.1 / 4
+    s3 = p - (high_1d - low_1d) * 1.1 / 4
+    
+    # Align Camarilla levels to daily (wait for daily close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Volume spike: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,8 +51,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_40_1w_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,27 +61,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 12h EMA50 + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_50_12h_aligned[i] and vol_spike[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R3 + above 1w EMA40 + volume spike
+            if close[i] > r3_aligned[i] and close[i] > ema_40_1w_aligned[i] and vol_spike[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below S1 + below 12h EMA50 + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_50_12h_aligned[i] and vol_spike[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S3 + below 1w EMA40 + volume spike
+            elif close[i] < s3_aligned[i] and close[i] < ema_40_1w_aligned[i] and vol_spike[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S1
-            if close[i] < s1_aligned[i]:
+            # Exit long: price closes below S3
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price closes above R1
-            if close[i] > r1_aligned[i]:
+            # Exit short: price closes above R3
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
