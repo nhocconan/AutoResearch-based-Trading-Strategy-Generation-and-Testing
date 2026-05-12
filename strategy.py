@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_1dTrend_Volume
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both trending and ranging markets.
-In trending markets (ADX > 25), follow KAMA direction with volume confirmation.
-In ranging markets (ADX <= 25), fade KAMA extremes at Bollinger Bands with volume confirmation.
-Uses 1d EMA50 as higher timeframe trend filter to avoid counter-trend trades.
-Designed for low trade frequency (<50/year) to minimize fee drag.
+4h_RSI_Pullback_to_EMA_with_Volume_Spike
+Hypothesis: In strong trends (ADX > 25), price pulls back to the 21-period EMA offering high-probability entries. 
+RSI < 30 (oversold) for longs, RSI > 70 (overbought) for shorts, combined with volume spikes (>1.5x 20-bar average) 
+to confirm momentum resumption. Trend filter uses 1d EMA50 to ensure alignment with higher timeframe direction. 
+Works in both bull and bear markets by trading pullbacks within the dominant trend.
 """
 
-name = "4h_KAMA_Direction_1dTrend_Volume"
+name = "4h_RSI_Pullback_to_EMA_with_Volume_Spike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,51 +31,42 @@ def generate_signals(prices):
         return np.zeros(n)
     close_1d = df_1d['close'].values
 
-    # Calculate KAMA (adaptive moving average)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period net change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period sum of absolute changes
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i-1] * (close[i] - kama[i-1])
-    # Pad ER and SC arrays
-    er = np.concatenate([np.full(9, np.nan), er])
-    sc = np.concatenate([np.full(9, np.nan), sc])
+    # EMA21 for pullback target
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+
+    # ADX(14) for trend strength
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum()
+    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum()
+    plus_di = 100 * plus_dm_sum / tr_sum
+    minus_di = 100 * minus_dm_sum / tr_sum
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
 
     # 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # ADX for regime detection (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.absolute(high[1:] - close[:-1]), np.absolute(low[1:] - close[:-1]))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr_14 * 14)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr_14 * 14)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    # Pad ADX arrays
-    plus_dm = np.concatenate([np.zeros(1), plus_dm])
-    minus_dm = np.concatenate([np.zeros(1), minus_dm])
-    tr = np.concatenate([np.zeros(1), tr])
-    atr_14 = np.concatenate([np.full(13, np.nan), atr_14])
-    plus_di = np.concatenate([np.full(13, np.nan), plus_di])
-    minus_di = np.concatenate([np.full(13, np.nan), minus_di])
-    dx = np.concatenate([np.full(27, np.nan), dx])
-    adx = np.concatenate([np.full(27, np.nan), adx])
-
-    # Bollinger Bands (20, 2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
 
     # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -84,8 +74,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or np.isnan(kama[i]) or np.isnan(adx[i]) or np.isnan(sma20[i]):
+    for i in range(21, n):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or np.isnan(rsi[i]) or np.isnan(ema21[i]) or np.isnan(adx[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -94,51 +84,37 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # TRENDING MARKET (ADX > 25): follow KAMA direction
-            if adx[i] > 25:
-                if close[i] > kama[i] and close[i-1] <= kama[i-1] and volume[i] > vol_avg_20[i] * 1.5:
-                    if close[i] > ema50_1d_aligned[i]:  # 1d uptrend filter
-                        signals[i] = 0.25
-                        position = 1
-                elif close[i] < kama[i] and close[i-1] >= kama[i-1] and volume[i] > vol_avg_20[i] * 1.5:
-                    if close[i] < ema50_1d_aligned[i]:  # 1d downtrend filter
-                        signals[i] = -0.25
-                        position = -1
-            # RANGING MARKET (ADX <= 25): fade KAMA extremes at Bollinger Bands
+            # LONG: RSI < 30 (oversold), price near EMA21, volume spike, ADX > 25, 1d uptrend
+            if (rsi[i] < 30 and 
+                abs(close[i] - ema21[i]) / ema21[i] < 0.02 and  # within 2% of EMA21
+                volume[i] > vol_avg_20[i] * 1.5 and
+                adx[i] > 25 and
+                close[i] > ema50_1d_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: RSI > 70 (overbought), price near EMA21, volume spike, ADX > 25, 1d downtrend
+            elif (rsi[i] > 70 and 
+                  abs(close[i] - ema21[i]) / ema21[i] < 0.02 and  # within 2% of EMA21
+                  volume[i] > vol_avg_20[i] * 1.5 and
+                  adx[i] > 25 and
+                  close[i] < ema50_1d_aligned[i]):
+                signals[i] = -0.25
+                position = -1
             else:
-                if close[i] <= lower_bb[i] and close[i-1] > lower_bb[i-1] and volume[i] > vol_avg_20[i] * 1.5:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] >= upper_bb[i] and close[i-1] < upper_bb[i-1] and volume[i] > vol_avg_20[i] * 1.5:
-                    signals[i] = -0.25
-                    position = -1
+                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA cross down OR 1d trend fails OR Bollinger Band touch (in range)
-            if adx[i] > 25:
-                if close[i] < kama[i] or close[i] < ema50_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # EXIT LONG: RSI > 50 (momentum fading) or price breaks below EMA21
+            if rsi[i] > 50 or close[i] < ema21[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                if close[i] >= sma20[i] or volume[i] <= vol_avg_20[i] * 1.5:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA cross up OR 1d trend fails OR Bollinger Band touch (in range)
-            if adx[i] > 25:
-                if close[i] > kama[i] or close[i] > ema50_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # EXIT SHORT: RSI < 50 (momentum fading) or price breaks above EMA21
+            if rsi[i] < 50 or close[i] > ema21[i]:
+                signals[i] = 0.0
+                position = 0
             else:
-                if close[i] <= sma20[i] or volume[i] <= vol_avg_20[i] * 1.5:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
 
     return signals
