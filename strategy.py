@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_R3_S3_Breakout_TrendVol_v4
-Hypothesis: Daily breakouts from Camarilla R3/S3 levels with 1-week trend filter and volume spike confirmation.
-Targets 1d timeframe to minimize trade frequency (7-25/year) while using proven 1d Camarilla levels and 1w trend filter.
-Only takes long when price breaks above R3 with volume spike and 1w uptrend, short when breaks below S3 with volume spike and 1w downtrend.
-Designed to work in both bull and bear markets via trend filter and volume confirmation to avoid false breakouts.
-Focuses on stronger breakout levels (R3/S3) for higher quality signals.
+6h_12h_1d_WeeklyPivot_Breakout_VolumeTrend
+Hypothesis: 6-hour breakouts from weekly pivot levels (calculated from 1d data) with 12h trend filter and volume confirmation.
+Targets 6h timeframe to reduce trade frequency (target: 15-35 trades/year) while using proven weekly pivot structure.
+Only takes long when price breaks above weekly R1 with volume spike and 12h uptrend, short when breaks below weekly S1 with volume spike and 12h downtrend.
+Uses weekly pivots for stronger support/resistance that works in both bull and bear markets via trend filter and volume confirmation.
 """
 
-name = "1d_1w_Camarilla_R3_S3_Breakout_TrendVol_v4"
-timeframe = "1d"
+name = "6h_12h_1d_WeeklyPivot_Breakout_VolumeTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,24 +25,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >2.0x 20-period average (on 1d timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: >2.0x 30-period average (on 6h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d data for weekly pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate weekly pivot points from previous week's data
+    # Weekly high/low/close from previous 5 trading days
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(1).values
+    
+    # Weekly pivot point and support/resistance levels
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    
+    # Align weekly pivot levels to 6h timeframe (wait for weekly bar to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        if np.isnan(ema_34_1w_aligned[i]):
+    for i in range(50, n):
+        if (np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -51,49 +76,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Calculate Camarilla levels from previous day (available at open)
-        if i >= 1:
-            prev_close = close[i-1]
-            prev_high = high[i-1]
-            prev_low = low[i-1]
-            range_ = prev_high - prev_low
-            if range_ > 0:
-                R3 = prev_close + 1.1 * range_ / 4
-                S3 = prev_close - 1.1 * range_ / 4
-            else:
-                R3 = prev_close
-                S3 = prev_close
-        else:
-            R3 = 0
-            S3 = 0
-        
         if position == 0:
-            # LONG: Price breaks above R3 + volume spike + price above 1w EMA34
-            if (close[i] > R3 and 
+            # LONG: Price breaks above R1 + volume spike + price above 12h EMA50
+            if (close[i] > r1_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > ema_34_1w_aligned[i]):
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + volume spike + price below 1w EMA34
-            elif (close[i] < S3 and 
+            # SHORT: Price breaks below S1 + volume spike + price below 12h EMA50
+            elif (close[i] < s1_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < ema_34_1w_aligned[i]):
+                  close[i] < ema_50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters between S3 and R3 OR closes below 1w EMA34
-            if (close[i] > S3 and close[i] < R3) or \
-               close[i] < ema_34_1w_aligned[i]:
+            # EXIT LONG: Price re-enters between S1 and R1 OR closes below 12h EMA50
+            if (close[i] > s1_aligned[i] and close[i] < r1_aligned[i]) or \
+               close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters between S3 and R3 OR closes above 1w EMA34
-            if (close[i] > S3 and close[i] < R3) or \
-               close[i] > ema_34_1w_aligned[i]:
+            # EXIT SHORT: Price re-enters between S1 and R1 OR closes above 12h EMA50
+            if (close[i] > s1_aligned[i] and close[i] < r1_aligned[i]) or \
+               close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
