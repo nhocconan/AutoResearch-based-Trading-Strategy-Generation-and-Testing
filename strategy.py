@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_Volume_Spike_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for trend filter and pivot calculation
+    # Load daily data for TRIX and volume average
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # TRIX: Triple EMA (15-period) of % change in EMA(15)
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - then % change
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # Calculate % change of triple EMA
+    trix_raw = np.zeros_like(ema3)
+    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    # Signal line: EMA of TRIX (9-period)
+    trix_signal = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # TRIX histogram: TRIX - signal line
+    trix_hist = trix_raw - trix_signal
+    trix_hist_aligned = align_htf_to_ltf(prices, df_1d, trix_hist)
     
-    # Daily pivot points (using previous day's data)
-    shift_high_1d = np.roll(high_1d, 1)
-    shift_low_1d = np.roll(low_1d, 1)
-    shift_close_1d = np.roll(close_1d, 1)
-    shift_high_1d[0] = high_1d[0]
-    shift_low_1d[0] = low_1d[0]
-    shift_close_1d[0] = close_1d[0]
+    # Daily volume average (20-period) for volume spike filter
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    daily_pivot = (shift_high_1d + shift_low_1d + shift_close_1d) / 3
-    daily_range = shift_high_1d - shift_low_1d
-    daily_r1 = daily_pivot + daily_range * 1.1 / 12
-    daily_s1 = daily_pivot - daily_range * 1.1 / 12
-    daily_r2 = daily_pivot + daily_range * 1.1 / 6
-    daily_s2 = daily_pivot - daily_range * 1.1 / 6
-    
-    # Align daily pivot levels to 12h timeframe
-    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
-    daily_r2_aligned = align_htf_to_ltf(prices, df_1d, daily_r2)
-    daily_s2_aligned = align_htf_to_ltf(prices, df_1d, daily_s2)
-    
-    # Volume filter: current volume > 1.5x 24-period average (2 days of 12h data)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_filter = volume > (1.5 * vol_avg)
+    # 4h EMA34 for trend filter
+    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,9 +50,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(daily_r1_aligned[i]) or np.isnan(daily_s1_aligned[i]) or 
-            np.isnan(daily_r2_aligned[i]) or np.isnan(daily_s2_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(trix_hist_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or 
+            np.isnan(ema_34[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,29 +60,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price rejects daily S1 (bounces off) + above daily EMA34 + volume filter
-            # Rejection condition: low touches or goes below S1 but close recovers above S1
-            if low[i] <= daily_s1_aligned[i] and close[i] > daily_s1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
-                signals[i] = 0.30
+            # Long: TRIX histogram crosses above zero + volume spike + above EMA34
+            if (trix_hist_aligned[i] > 0 and trix_hist_aligned[i-1] <= 0 and 
+                volume[i] > 1.5 * vol_ma_20_aligned[i] and close[i] > ema_34[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price rejects daily R1 (gets rejected) + below daily EMA34 + volume filter
-            # Rejection condition: high touches or goes above R1 but close falls back below R1
-            elif high[i] >= daily_r1_aligned[i] and close[i] < daily_r1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
-                signals[i] = -0.30
+            # Short: TRIX histogram crosses below zero + volume spike + below EMA34
+            elif (trix_hist_aligned[i] < 0 and trix_hist_aligned[i-1] >= 0 and 
+                  volume[i] > 1.5 * vol_ma_20_aligned[i] and close[i] < ema_34[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below daily S2 or below daily EMA34
-            if low[i] < daily_s2_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: TRIX histogram crosses below zero or price below EMA34
+            if trix_hist_aligned[i] < 0 or close[i] < ema_34[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above daily R2 or above daily EMA34
-            if high[i] > daily_r2_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: TRIX histogram crosses above zero or price above EMA34
+            if trix_hist_aligned[i] > 0 or close[i] > ema_34[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
