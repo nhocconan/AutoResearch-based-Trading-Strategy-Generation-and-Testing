@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_Alligator_Trend_Signal_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,36 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Elder Ray components (13-period EMA)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Calculate Camarilla pivot levels from previous day's data (avoid look-ahead)
-    shift_high_1d = np.roll(high_1d, 1)
-    shift_low_1d = np.roll(low_1d, 1)
-    shift_close_1d = np.roll(close_1d, 1)
-    shift_high_1d[0] = high_1d[0]
-    shift_low_1d[0] = low_1d[0]
-    shift_close_1d[0] = close_1d[0]
+    # Calculate Alligator lines (13, 8, 5 SMMA)
+    def smma(series, period):
+        sma = np.full_like(series, np.nan, dtype=float)
+        sma[period-1] = np.mean(series[:period])
+        for i in range(period, len(series)):
+            sma[i] = (sma[i-1] * (period-1) + series[i]) / period
+        return sma
     
-    pivot = (shift_high_1d + shift_low_1d + shift_close_1d) / 3
-    range_ = shift_high_1d - shift_low_1d
-    r1 = pivot + range_ * 1.1 / 12
-    s1 = pivot - range_ * 1.1 / 12
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Daily trend filter: EMA50
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: current volume > 1.8x 12-period average (2 days of 4h data)
-    vol_avg = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    vol_filter = volume > (1.8 * vol_avg)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,8 +45,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,24 +56,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above daily EMA50 + volume filter
-            if close[i] > r1_aligned[i] and close[i] > ema_50_1d_aligned[i] and vol_filter[i]:
+            # Long: Bull Power > 0, Lips > Teeth > Jaw (bullish alignment), volume filter
+            if bull_power[i] > 0 and lips[i] > teeth[i] > jaw[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below daily EMA50 + volume filter
-            elif close[i] < s1_aligned[i] and close[i] < ema_50_1d_aligned[i] and vol_filter[i]:
+            # Short: Bear Power < 0, Jaws > Teeth > Lips (bearish alignment), volume filter
+            elif bear_power[i] < 0 and jaw[i] > teeth[i] > lips[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S1 or below daily EMA50
-            if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: Bull Power <= 0 or bearish alignment (Jaw > Teeth)
+            if bull_power[i] <= 0 or jaw[i] > teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R1 or above daily EMA50
-            if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: Bear Power >= 0 or bullish alignment (Lips > Teeth)
+            if bear_power[i] >= 0 or lips[i] > teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
