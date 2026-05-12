@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_ParabolicSAR_TF_Signal_System
-Hypothesis: Parabolic SAR on 12h captures trend direction and provides trailing stop levels.
-Combined with 1d EMA50 trend filter and volume confirmation, it avoids whipsaws in both bull and bear markets.
-Long when PSAR flips below price (uptrend) with 1d uptrend and volume spike.
-Short when PSAR flips above price (downtrend) with 1d downtrend and volume spike.
-Exit when PSAR reverses or 1d trend fails.
+6h_FisherTransform_1dTrend
+Hypothesis: Ehlers Fisher Transform identifies turning points with leading signals. 
+Applied on 6h price, filtered by 1d EMA trend (EMA34) to trade in direction of higher timeframe trend.
+In bull market: long when Fisher crosses above -1.5 with 1d uptrend. 
+In bear market: short when Fisher crosses below +1.5 with 1d downtrend.
+Uses volume confirmation to filter weak signals. Targets 15-35 trades/year.
 """
 
-name = "12h_ParabolicSAR_TF_Signal_System"
-timeframe = "12h"
+name = "6h_FisherTransform_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -32,60 +32,38 @@ def generate_signals(prices):
         return np.zeros(n)
     close_1d = df_1d['close'].values
 
-    # Parabolic SAR (12h timeframe)
-    # Initialize
-    psar = np.full(n, np.nan)
-    bull = True  # True for uptrend
-    af = 0.02    # acceleration factor
-    max_af = 0.2
-    ep = high[0] if bull else low[0]  # extreme point
-
-    psar[0] = low[0] if bull else high[0]
-
+    # Ehlers Fisher Transform (9 period)
+    price = (high + low) / 2
+    max_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    min_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    range_val = max_high - min_low
+    # Avoid division by zero
+    value1 = np.where(range_val != 0, 2 * ((price - min_low) / range_val - 0.5), 0)
+    # Smooth value1
+    value2 = np.zeros_like(value1)
     for i in range(1, n):
-        prev_psar = psar[i-1]
-        psar[i] = prev_psar + af * (ep - prev_psar)
+        value2[i] = 0.33 * value1[i] + 0.67 * value2[i-1]
+    # Clamp to [-0.99, 0.99] to avoid domain errors in log
+    value2 = np.clip(value2, -0.99, 0.99)
+    fish = 0.5 * np.log((1 + value2) / (1 - value2)) + 0.5 * np.roll(fish if 'fish' in locals() else np.zeros(n), 1)
+    # Initialize first value
+    if n > 0:
+        fish[0] = 0
+    for i in range(1, n):
+        fish[i] = 0.5 * np.log((1 + value2[i]) / (1 - value2[i])) + 0.5 * fish[i-1]
 
-        # Ensure PSAR stays within the prior period's range
-        if bull:
-            psar[i] = min(psar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
-        else:
-            psar[i] = max(psar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-        # Trend reversal check
-        if bull:
-            if low[i] < psar[i]:
-                bull = False
-                psar[i] = ep
-                ep = low[i]
-                af = 0.02
-            else:
-                if high[i] > ep:
-                    ep = high[i]
-                    af = min(af + 0.02, max_af)
-        else:
-            if high[i] > psar[i]:
-                bull = True
-                psar[i] = ep
-                ep = high[i]
-                af = 0.02
-            else:
-                if low[i] < ep:
-                    ep = low[i]
-                    af = min(af + 0.02, max_af)
-
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # Volume confirmation: volume > 1.5x 30-period average
-    vol_avg_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(1, n):
-        if np.isnan(psar[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_30[i]):
+    for i in range(10, n):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or np.isnan(fish[i]) or np.isnan(fish[i-1]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -94,26 +72,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: PSAR flipped below price (uptrend) + 1d uptrend + volume spike
-            if bull and close[i] > psar[i] and close[i] > ema50_1d_aligned[i] and volume[i] > vol_avg_30[i] * 1.5:
+            # LONG: Fisher crosses above -1.5 + 1d uptrend + volume spike
+            if fish[i-1] <= -1.5 and fish[i] > -1.5 and close[i] > ema34_1d_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: PSAR flipped above price (downtrend) + 1d downtrend + volume spike
-            elif not bull and close[i] < psar[i] and close[i] < ema50_1d_aligned[i] and volume[i] > vol_avg_30[i] * 1.5:
+            # SHORT: Fisher crosses below +1.5 + 1d downtrend + volume spike
+            elif fish[i-1] >= 1.5 and fish[i] < 1.5 and close[i] < ema34_1d_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: PSAR flips above price or 1d trend turns down
-            if not bull or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Fisher crosses below +1.5 or 1d trend turns down
+            if fish[i-1] >= 1.5 and fish[i] < 1.5 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: PSAR flips below price or 1d trend turns up
-            if bull or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Fisher crosses above -1.5 or 1d trend turns up
+            if fish[i-1] <= -1.5 and fish[i] > -1.5 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
