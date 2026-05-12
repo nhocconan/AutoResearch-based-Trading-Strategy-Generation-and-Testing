@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVol"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,11 +17,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== 12h Trend Filter (HTF) =====
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # ===== 4h Trend Filter (HTF) =====
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
     # ===== Daily Pivot Points (1d) =====
     df_1d = get_htf_data(prices, '1d')
@@ -55,7 +55,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or 
+        if (np.isnan(ema20_4h_aligned[i]) or 
             np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
@@ -77,31 +77,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price touches S1 + above 12h EMA50 + daily volume spike
+            # Long: Price touches S1 + above 4h EMA20 + daily volume spike
             if (low[i] <= s1_aligned[i] and
-                close[i] > ema50_12h_aligned[i] and
+                close[i] > ema20_4h_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: Price touches R1 + below 12h EMA50 + daily volume spike
+            # Short: Price touches R1 + below 4h EMA20 + daily volume spike
             elif (high[i] >= r1_aligned[i] and
-                  close[i] < ema50_12h_aligned[i] and
+                  close[i] < ema20_4h_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: Price reaches pivot or closes below 12h EMA50
-            if high[i] >= pivot_aligned[i] or close[i] < ema50_12h_aligned[i]:
+            # Exit long: Price reaches pivot or closes below 4h EMA20
+            if high[i] >= pivot_aligned[i] or close[i] < ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: Price reaches pivot or closes above 12h EMA50
-            if low[i] <= pivot_aligned[i] or close[i] > ema50_12h_aligned[i]:
+            # Exit short: Price reaches pivot or closes above 4h EMA20
+            if low[i] <= pivot_aligned[i] or close[i] > ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
