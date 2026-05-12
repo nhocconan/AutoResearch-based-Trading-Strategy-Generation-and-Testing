@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1DTrend_VolumeS_v2
-# Hypothesis: Breakouts at daily Camarilla R1/S1 levels with volume confirmation and 1d trend filter.
-# Uses 12h timeframe for moderate trade frequency (target 12-37/year) to minimize fee drag.
-# Long: Close > daily R1 + volume > 1.5x SMA20 + price > daily EMA50
-# Short: Close < daily S1 + volume > 1.5x SMA20 + price < daily EMA50
-# Exit: Close crosses opposite daily Camarilla level (S1 for long, R1 for short)
-# Added volatility filter: only trade when 12h ATR < 1.5x 1d ATR to avoid choppy periods.
+# 4h_Donchian_Breakout_VolumeTrend_Filter_v1
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.5x SMA20) and trend filter (price > EMA50).
+# Works in bull markets via breakout momentum and in bear via short breakdowns.
+# Volume filter reduces false breakouts; EMA50 ensures trend alignment.
+# Target: 20-50 trades/year to avoid fee drag.
 
-name = "12h_Camarilla_R1_S1_Breakout_1DTrend_VolumeS_v2"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_VolumeTrend_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,59 +23,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Donchian channel (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
 
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # EMA50 for trend filter
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
 
-    # Calculate Camarilla levels from previous daily close
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + camarilla_range * 1.1 / 12
-    s1 = close_1d - camarilla_range * 1.1 / 12
-
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # Volume confirmation: 1.5x 20-period SMA
+    # Volume confirmation: 1.5x SMA20
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_threshold = volume_sma20 * 1.5
-
-    # Volatility filter: 12h ATR < 1.5x 1d ATR
-    tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
-    tr2 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = 0
-    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    tr1d = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
-    tr2d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_d = np.maximum(tr1d, tr2d)
-    tr_d[0] = 0
-    atr_1d = pd.Series(tr_d).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
-        # Get aligned values for current 12h bar
-        r1_aligned = align_htf_to_ltf(prices, df_1d, r1)[i]
-        s1_aligned = align_htf_to_ltf(prices, df_1d, s1)[i]
-        ema50_aligned = ema50_1d_aligned[i]
-        vol_threshold_val = volume_threshold[i]
-        atr_12h_val = atr_12h[i]
-        atr_1d_aligned_val = atr_1d_aligned[i]
-
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned) or np.isnan(s1_aligned) or 
-            np.isnan(ema50_aligned) or np.isnan(vol_threshold_val) or
-            np.isnan(atr_12h_val) or np.isnan(atr_1d_aligned_val)):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or
+            np.isnan(ema50[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,36 +49,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Volatility filter: only trade when 12h ATR < 1.5x 1d ATR (avoid choppy periods)
-        volatility_filter = atr_12h_val < 1.5 * atr_1d_aligned_val
-
         if position == 0:
-            # LONG: Price closes above daily R1 + volume spike (1.5x) + daily uptrend + volatility filter
-            if (close[i] > r1_aligned and
-                volume[i] > vol_threshold_val and
-                close[i] > ema50_aligned and
-                volatility_filter):
+            # LONG: Breakout above Donchian high + volume spike + uptrend
+            if (close[i] > high_roll[i] and
+                volume[i] > volume_threshold[i] and
+                close[i] > ema50[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below daily S1 + volume spike (1.5x) + daily downtrend + volatility filter
-            elif (close[i] < s1_aligned and
-                  volume[i] > vol_threshold_val and
-                  close[i] < ema50_aligned and
-                  volatility_filter):
+            # SHORT: Breakdown below Donchian low + volume spike + downtrend
+            elif (close[i] < low_roll[i] and
+                  volume[i] > volume_threshold[i] and
+                  close[i] < ema50[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below daily S1
-            if close[i] < s1_aligned:
+            # EXIT LONG: Close below Donchian low
+            if close[i] < low_roll[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above daily R1
-            if close[i] > r1_aligned:
+            # EXIT SHORT: Close above Donchian high
+            if close[i] > high_roll[i]:
                 signals[i] = 0.0
                 position = 0
             else:
