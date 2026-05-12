@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_InsideBar_Breakout_1dTrend_VolumeFilter
-# Hypothesis: On 4h timeframe, enter long when price breaks above the high of an inside bar (narrow range) with price > daily EMA50 and volume > 1.5x 20-period MA.
-# Enter short when price breaks below the low of an inside bar with price < daily EMA50 and volume > 1.5x MA.
-# Exit when price crosses back to the opposite side of the inside bar's range.
-# Uses daily trend filter and volume confirmation to avoid false breakouts. Targets 20-40 trades/year for low fee drag.
-# Works in bull markets via breakouts and in bear markets via faded breaks of low-volatility consolidations.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 with price > daily EMA34 and volume spike (>2x 20-period MA).
+# Enter short when price breaks below Camarilla S1 with price < daily EMA34 and volume spike.
+# Exit when price crosses back below R1 (for longs) or above S1 (for shorts).
+# Uses daily timeframe for trend filter. Targets 15-30 trades/year for low fee drag.
+# Works in both bull and bear markets by fading extreme daily levels with institutional levels.
 
-name = "4h_InsideBar_Breakout_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,28 +24,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Inside bar detection: current bar range within previous bar
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    inside_bar = (high <= prev_high) & (low >= prev_low)
-    # Mark the inside bar's high and low
-    inside_high = np.where(inside_bar, high, np.nan)
-    inside_low = np.where(inside_bar, low, np.nan)
-    # Forward fill to get the most recent inside bar's levels
-    inside_high_series = pd.Series(inside_high).ffill().values
-    inside_low_series = pd.Series(inside_low).ffill().values
-    
-    # Daily EMA50 for trend filter
+    # Calculate Camarilla levels from previous day (using daily data)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
     
-    # Volume confirmation: 20-period MA on 4h data
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(daily_high, 1)
+    prev_low = np.roll(daily_low, 1)
+    prev_close = np.roll(daily_close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla R1 and S1 levels (inner bands)
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 6
+    s1 = prev_close - camarilla_range * 1.1 / 6
+    
+    # Daily EMA34 for trend filter
+    daily_ema34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume confirmation: 20-period moving average on 12h data
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align all to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,8 +64,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(inside_high_series[i]) or np.isnan(inside_low_series[i]) or 
-            np.isnan(daily_ema50_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(daily_ema34_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,32 +73,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        ib_high = inside_high_series[i]
-        ib_low = inside_low_series[i]
-        daily_trend = daily_ema50_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        daily_trend = daily_ema34_aligned[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: Price breaks above inside bar high with trend and volume filter
-            if close[i] > ib_high and close[i] > daily_trend and volume[i] > vol_ma_val * 1.5:
+            # LONG: Price breaks above R1 with price > daily EMA34 and volume > 2x MA
+            if close[i] > r1_val and close[i] > daily_trend and volume[i] > vol_ma_val * 2.0:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below inside bar low with trend and volume filter
-            elif close[i] < ib_low and close[i] < daily_trend and volume[i] > vol_ma_val * 1.5:
+            # SHORT: Price breaks below S1 with price < daily EMA34 and volume > 2x MA
+            elif close[i] < s1_val and close[i] < daily_trend and volume[i] > vol_ma_val * 2.0:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below inside bar low (failed breakout)
-            if close[i] < ib_low:
+            # EXIT LONG: Price crosses back below R1 (failed breakout)
+            if close[i] < r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above inside bar high (failed breakout)
-            if close[i] > ib_high:
+            # EXIT SHORT: Price crosses back above S1 (failed breakout)
+            if close[i] > s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
