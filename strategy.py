@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""
-1d_Weekly_RSI_MeanReversion_1wTrend
-Hypothesis: Weekly RSI extremes (RSI<25 for long, RSI>75 for short) combined with weekly trend filter (price above/below 20-week EMA) provides high-probability mean-reversion entries that work in both bull and bear markets. Uses daily timeframe with weekly RSI and EMA filters to avoid counter-trend trades. Low-frequency signals (target 10-30 trades/year) minimize fee drag.
-"""
-name = "1d_Weekly_RSI_MeanReversion_1wTrend"
-timeframe = "1d"
+# 160101: 4h_Price_Action_Pullback_1dTrend_Volume
+# Hypothesis: Buy pullbacks to value area in trending markets using 1d EMA50 trend filter, 4h support/resistance from prior day's range, and volume confirmation. Works in bull/bear by following higher timeframe trend. Designed for low trade frequency (target: 20-40/year) to minimize fee drag.
+
+name = "4h_Price_Action_Pullback_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,44 +12,37 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
 
-    # Calculate weekly RSI(14)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Calculate weekly EMA(20) for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Prior day's high/low for value area (support/resistance)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
 
-    # Align weekly indicators to daily timeframe
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1w, rsi_14)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-
-    # Volume confirmation: >1.5x 20-day average
+    # Volume confirmation: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after EMA20 warmup
-        if (np.isnan(rsi_14_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(volume_confirm[i])):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_1d_aligned[i]) or 
+            np.isnan(low_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,32 +51,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI oversold (<25) + price above weekly EMA20 (uptrend) + volume confirmation
-            if (rsi_14_aligned[i] < 25 and 
-                close[i] > ema_20_1w_aligned[i] and 
+            # LONG: Pullback to support in uptrend with volume
+            if (close[i] <= low_1d_aligned[i] * 1.005 and  # Near prior day low
+                close[i] > ema_50_1d_aligned[i] and       # Above 1d EMA50 (uptrend)
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought (>75) + price below weekly EMA20 (downtrend) + volume confirmation
-            elif (rsi_14_aligned[i] > 75 and 
-                  close[i] < ema_20_1w_aligned[i] and 
+            # SHORT: Pullback to resistance in downtrend with volume
+            elif (close[i] >= high_1d_aligned[i] * 0.995 and  # Near prior day high
+                  close[i] < ema_50_1d_aligned[i] and        # Below 1d EMA50 (downtrend)
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (>45) or trend breaks (price below weekly EMA20)
-            if (rsi_14_aligned[i] > 45 or 
-                close[i] < ema_20_1w_aligned[i]):
+            # EXIT LONG: Close below 1d EMA50 (trend change) or strong rejection
+            if close[i] < ema_50_1d_aligned[i] * 0.995:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (<55) or trend breaks (price above weekly EMA20)
-            if (rsi_14_aligned[i] < 55 or 
-                close[i] > ema_20_1w_aligned[i]):
+            # EXIT SHORT: Close above 1d EMA50 (trend change) or strong rejection
+            if close[i] > ema_50_1d_aligned[i] * 1.005:
                 signals[i] = 0.0
                 position = 0
             else:
