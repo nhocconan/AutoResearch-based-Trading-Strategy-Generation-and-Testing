@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Aggressive_Force_Index_Breakout_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 300:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,52 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Data for trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # === 1w data for trend ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # 4h EMA20 for trend direction
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # === 1w EMA34 for trend ===
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # === Daily data for Camarilla levels ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # === Aggressive Force Index (AFI) on 6m: EMA(13) of (Close - Prev Close) * Volume ===
+    # Calculate raw Force Index: (Close - Previous Close) * Volume
+    price_change = close - np.roll(close, 1)
+    price_change[0] = 0  # First value has no previous close
+    fi_raw = price_change * volume
     
-    # Previous day's values for Camarilla calculation
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    range_1d = prev_high_1d - prev_low_1d
+    # EMA(13) of Force Index
+    afi = pd.Series(fi_raw).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Camarilla R1 and S1 levels
-    r1 = prev_close_1d + (range_1d * 1.1 / 12)
-    s1 = prev_close_1d - (range_1d * 1.1 / 12)
-    
-    # Align Camarilla levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # === Volume spike detection (1h) ===
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # ~1 day of 1h bars
-    volume_spike = volume > (vol_ma * 1.5)
-    
-    # === Session filter: 08-20 UTC ===
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # === Volume spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 20)  # Ensure enough data for volume MA and EMA
+    start_idx = max(300, 34, 20, 13)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
+        if (np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(afi[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -71,41 +55,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Only trade during active session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
         if position == 0:
-            # Long: price breaks above R1 + volume spike + 4h trend up
-            if (close[i] > r1_aligned[i] and 
+            # Long: AFI crosses above zero + volume spike + 1w trend up
+            if (afi[i] > 0 and afi[i-1] <= 0 and 
                 volume_spike[i] and
-                close[i] > ema20_4h_aligned[i]):
-                signals[i] = 0.20
+                close[i] > ema34_1w_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + volume spike + 4h trend down
-            elif (close[i] < s1_aligned[i] and 
+            # Short: AFI crosses below zero + volume spike + 1w trend down
+            elif (afi[i] < 0 and afi[i-1] >= 0 and 
                   volume_spike[i] and
-                  close[i] < ema20_4h_aligned[i]):
-                signals[i] = -0.20
+                  close[i] < ema34_1w_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below S1 or trend breaks
-            if close[i] < s1_aligned[i] or close[i] < ema20_4h_aligned[i]:
+            # Exit long: AFI crosses below zero or trend breaks
+            if afi[i] < 0 or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above R1 or trend breaks
-            if close[i] > r1_aligned[i] or close[i] > ema20_4h_aligned[i]:
+            # Exit short: AFI crosses above zero or trend breaks
+            if afi[i] > 0 or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
