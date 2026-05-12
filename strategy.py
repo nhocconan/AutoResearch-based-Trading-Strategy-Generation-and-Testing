@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Stochastic_Bollinger_Trend_Reversal
-# Hypothesis: In ranging markets, price reverses at Bollinger Bands with Stochastic oversold/overbought conditions. In trending markets, follow 12h EMA50 trend. Volume confirms momentum. Works in both bull/bear by adapting to volatility and trend. Target: 25-40 trades/year.
+# 1h_4H1D_Camarilla_R1S1_Breakout_Volume
+# Hypothesis: Use 4h/1d Camarilla pivot levels as structural support/resistance with 1h breakout entries.
+# Only trade in direction of 1d trend (EMA50) and require volume spike. This captures institutional
+# interest at key levels while filtering noise. Designed for 1h timeframe to balance trade frequency
+# and signal quality, targeting 15-35 trades/year. Works in bull/bear by following 1d trend.
 
-name = "4h_Stochastic_Bollinger_Trend_Reversal"
-timeframe = "4h"
+name = "1h_4H1D_Camarilla_R1S1_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,37 +23,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
 
-    # Calculate 12h EMA50 trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 4h Camarilla levels (based on previous day's range)
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    camarilla_range = (high_4h - low_4h) * 1.1 / 12
+    r1_4h = close_4h + camarilla_range
+    s1_4h = close_4h - camarilla_range
 
-    # Bollinger Bands (20, 2.0) on 4h
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2.0 * std_20
-    bb_lower = sma_20 - 2.0 * std_20
+    # Align 4h Camarilla levels to 1h
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
 
-    # Stochastic Oscillator (14,3,3)
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    stoch_k = 100 * (close - lowest_low) / (highest_high - lowest_low)
-    stoch_d = pd.Series(stoch_k).rolling(window=3, min_periods=3).mean().values
+    # 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Volume filter: current > 1.3x average of last 20 bars
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
+    # Volume spike: current > 2.0x average of last 24 bars
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after warmup
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(bb_upper[i]) or 
-            np.isnan(bb_lower[i]) or np.isnan(stoch_k[i]) or 
-            np.isnan(stoch_d[i]) or np.isnan(volume_filter[i])):
+    for i in range(50, n):  # Start after EMA50 warmup
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,37 +63,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price at/below BB Lower + Stochastic oversold + 12h EMA50 uptrend + volume
-            if (close[i] <= bb_lower[i] and 
-                stoch_k[i] < 20 and 
-                stoch_d[i] < 20 and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume_filter[i]):
-                signals[i] = 0.25
+            # LONG: Price breaks above R1 + 1d EMA50 uptrend + volume spike
+            if (close[i] > r1_4h_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price at/above BB Upper + Stochastic overbought + 12h EMA50 downtrend + volume
-            elif (close[i] >= bb_upper[i] and 
-                  stoch_k[i] > 80 and 
-                  stoch_d[i] > 80 and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume_filter[i]):
-                signals[i] = -0.25
+            # SHORT: Price breaks below S1 + 1d EMA50 downtrend + volume spike
+            elif (close[i] < s1_4h_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_spike[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above SMA20 (mean reversion) OR Stochastic overbought
-            if close[i] > sma_20[i] or stoch_k[i] > 80:
+            # EXIT LONG: Price closes below S1 (reversion to mean) or trend fails
+            if close[i] < s1_4h_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price crosses below SMA20 OR Stochastic oversold
-            if close[i] < sma_20[i] or stoch_k[i] < 20:
+            # EXIT SHORT: Price closes above R1 (reversion to mean) or trend fails
+            if close[i] > r1_4h_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
