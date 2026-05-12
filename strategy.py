@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 6h_VolumeSpike_Camarilla_Reversal
-# Hypothesis: Fade extreme price moves at daily Camarilla S3/R3 levels on 6b timeframe.
-# Enter long when price touches S3 with volume spike and RSI < 30 (oversold).
-# Enter short when price touches R3 with volume spike and RSI > 70 (overbought).
-# Exit when price reverts to the daily pivot point.
-# Uses volume confirmation to avoid false breaks and RSI for momentum exhaustion.
-# Works in ranging markets (mean reversion) and avoids strong trends via RSI extremes.
-# Target: 20-40 trades/year per symbol for low friction and high win rate.
+# 4h_Williams_Alligator_ElderRay_Trend
+# Hypothesis: On 4h timeframe, use Williams Alligator (3 SMAs) to determine trend direction and avoid chop.
+# Combine with Elder Ray (bull/bear power from EMA13) to confirm trend strength.
+# Enter long when price > Alligator Jaw, Bull Power > 0, and Bear Power < 0 with volume confirmation.
+# Enter short when price < Alligator Jaw, Bear Power > 0, and Bull Power < 0 with volume confirmation.
+# Exit when Elder Ray signals reverse or price crosses the Alligator Teeth.
+# Uses 1-day trend filter to avoid counter-trend trades, targeting 20-40 trades/year for low friction.
+# Works in bull via strong bull power and in bear via strong bear power with trend alignment.
 
-name = "6h_VolumeSpike_Camarilla_Reversal"
-timeframe = "6h"
+name = "4h_Williams_Alligator_ElderRay_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,42 +26,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot calculation and RSI
+    # Williams Alligator: 3 SMAs (Jaw=13, Teeth=8, Lips=5)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Volume confirmation: current volume > 1.3 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.3 * vol_ma)
+    
+    # 1-day trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
-    
-    # Typical price (Pivot point)
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_range = daily_high - daily_low
-    
-    # Camarilla levels: S3 and R3
-    r3 = daily_pivot + daily_range * 1.25
-    s3 = daily_pivot - daily_range * 1.25
-    
-    # Align daily levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
-    
-    # Calculate daily RSI(14) for momentum exhaustion signal
-    delta = pd.Series(daily_close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average (to avoid noise)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
+    daily_ema50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,9 +56,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(rsi_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(daily_ema50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,33 +66,39 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        pivot_val = pivot_aligned[i]
-        rsi_val = rsi_aligned[i]
+        # Alligator condition: price > Jaw for uptrend, price < Jaw for downtrend
+        price_above_jaw = close[i] > jaw[i]
+        price_below_jaw = close[i] < jaw[i]
+        
+        # Elder Ray condition: Bull Power > 0 and Bear Power < 0 for long,
+        # Bear Power > 0 and Bull Power < 0 for short
+        bull_strong = bull_power[i] > 0 and bear_power[i] < 0
+        bear_strong = bear_power[i] > 0 and bull_power[i] < 0
+        
         vol_confirm = volume_confirm[i]
+        daily_trend = daily_ema50_aligned[i]
         
         if position == 0:
-            # LONG: Price at S3, oversold RSI, volume spike
-            if low[i] <= s3_val and rsi_val < 30 and vol_confirm:
+            # LONG: Price above Jaw, Bull Power positive, Bear Power negative, volume confirmation, daily uptrend
+            if price_above_jaw and bull_strong and vol_confirm and close[i] > daily_trend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at R3, overbought RSI, volume spike
-            elif high[i] >= r3_val and rsi_val > 70 and vol_confirm:
+            # SHORT: Price below Jaw, Bear Power positive, Bull Power negative, volume confirmation, daily downtrend
+            elif price_below_jaw and bear_strong and vol_confirm and close[i] < daily_trend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to pivot (mean reversion complete)
-            if close[i] >= pivot_val:
+            # EXIT LONG: Price crosses below Teeth or Elder Ray weakens
+            if close[i] < teeth[i] or bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot (mean reversion complete)
-            if close[i] <= pivot_val:
+            # EXIT SHORT: Price crosses above Teeth or Elder Ray weakens
+            if close[i] > teeth[i] or bear_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
