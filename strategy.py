@@ -1,40 +1,39 @@
 #!/usr/bin/env python3
-# 12h_TRIX_1dTrend_Volume
-# Hypothesis: Use TRIX (12-period) on 12h for momentum, filtered by 1d EMA34 trend and volume spike.
-# TRIX > 0 indicates bullish momentum, TRIX < 0 bearish. Enter long when TRIX crosses above 0
-# with price above 1d EMA34 and volume above average; enter short on cross below 0 with price
-# below 1d EMA34 and volume confirmation. Exit on TRIX cross back through zero or trend failure.
-# Designed for low frequency (15-35 trades/year) to avoid fee drag. Works in bull (catch momentum)
-# and bear (catch reversals) with trend filter and volume confirmation.
+# 4h_RSI_4hTrend_Volume
+# Hypothesis: Use 4h RSI(14) with overbought/oversold levels and 4h EMA50 trend filter.
+# Long when RSI < 30 and price > EMA50; short when RSI > 70 and price < EMA50.
+# Volume confirmation requires current volume > 20-period average.
+# Exits on RSI crossing back to neutral zone (40-60) or trend failure.
+# Designed for low frequency (20-40 trades/year) to avoid fee drag. Works in bull (catch oversold bounces)
+# and bear (catch overbought reversals) with trend filter and volume confirmation.
 
-name = "12h_TRIX_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_4hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
-def ema(series, period):
-    """Calculate Exponential Moving Average."""
-    return pd.Series(series).ewm(span=period, adjust=False).mean().values
-
-def trix(close, period=12):
-    """
-    Calculate TRIX indicator.
-    TRIX = EMA(EMA(EMA(close, period), period), period)
-    Returns percentage change: (EMA3 - EMA3_prev) / EMA3_prev * 100
-    """
-    ema1 = ema(close, period)
-    ema2 = ema(ema1, period)
-    ema3 = ema(ema2, period)
+def rsi(close, period=14):
+    """Calculate Relative Strength Index."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate percentage change
-    trix_raw = np.zeros_like(ema3)
-    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    trix_raw[0] = 0
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
     
-    return trix_raw
+    # Wilder's smoothing
+    avg_gain[period] = np.mean(gain[1:period+1])
+    avg_loss[period] = np.mean(loss[1:period+1])
+    
+    for i in range(period+1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_vals = 100 - (100 / (1 + rs))
+    return rsi_vals
 
 def generate_signals(prices):
     n = len(prices)
@@ -46,33 +45,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
-        return np.zeros(n)
+    # Calculate RSI on 4h data
+    rsi_vals = rsi(close, 14)
     
-    close_1d = df_1d['close'].values
-    
-    # Calculate TRIX on 12h data
-    trix_val = trix(close, 12)
-    
-    # Daily EMA34 for trend filter
-    ema_34_1d = ema(close_1d, 34)
+    # 4h EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align daily data to 12h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure indicators are stable (34 EMA + buffer)
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(trix_val[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_vals[i]) or np.isnan(ema_50[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,40 +69,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below daily EMA34
-        trend_up = close[i] > ema_34_1d_aligned[i]
-        trend_down = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below EMA50
+        trend_up = close[i] > ema_50[i]
+        trend_down = close[i] < ema_50[i]
         
         # Volume filter
         vol_ok = volume[i] > vol_ma_20[i]
         
-        # TRIX signals: momentum direction
-        trix_pos = trix_val[i] > 0
-        trix_neg = trix_val[i] < 0
-        
-        # TRIX cross zero (momentum shift)
-        trix_cross_up = trix_val[i] > 0 and trix_val[i-1] <= 0
-        trix_cross_down = trix_val[i] < 0 and trix_val[i-1] >= 0
+        # RSI conditions
+        rsi_oversold = rsi_vals[i] < 30
+        rsi_overbought = rsi_vals[i] > 70
+        rsi_neutral = (rsi_vals[i] >= 40) & (rsi_vals[i] <= 60)
         
         if position == 0:
-            # LONG: TRIX crosses above zero, price above daily EMA34, volume confirmation
-            if trix_cross_up and trend_up and vol_ok:
+            # LONG: RSI oversold, price above EMA50, volume confirmation
+            if rsi_oversold and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero, price below daily EMA34, volume confirmation
-            elif trix_cross_down and trend_down and vol_ok:
+            # SHORT: RSI overbought, price below EMA50, volume confirmation
+            elif rsi_overbought and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero (momentum fails) or trend fails
-            if trix_cross_down or not trend_up:
+            # EXIT LONG: RSI returns to neutral or trend fails
+            if rsi_neutral or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero (momentum fails) or trend fails
-            if trix_cross_up or not trend_down:
+            # EXIT SHORT: RSI returns to neutral or trend fails
+            if rsi_neutral or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
