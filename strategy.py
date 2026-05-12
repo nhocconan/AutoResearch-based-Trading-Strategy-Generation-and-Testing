@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_StructureBreak_MR_Zscore_Volume"
-timeframe = "4h"
+name = "1d_1w_KAMA_Direction_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,54 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily close for structure and mean-reversion
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # Weekly trend filter: EMA34
+    df_1w = get_htf_data(prices, '1w')
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # 20-period Z-score of daily returns (mean reversion signal)
-    returns_1d = np.diff(np.log(close_1d), prepend=np.log(close_1d[0]))
-    mean_20 = pd.Series(returns_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(returns_1d).rolling(window=20, min_periods=20).std().values
-    zscore_20 = (returns_1d - mean_20) / (std_20 + 1e-9)
-    zscore_20_aligned = align_htf_to_ltf(prices, df_1d, zscore_20)
+    # Daily KAMA for trend direction
+    delta = pd.Series(close).diff().abs()
+    direction = pd.Series(close).diff().abs()
+    change = abs(pd.Series(close).diff(10))
+    volatility = delta.rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = [np.nan] * len(close)
+    for i in range(1, len(close)):
+        if np.isnan(kama[i-1]):
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama = np.array(kama)
+    
+    # Daily RSI for overbought/oversold
+    delta_rsi = pd.Series(close).diff()
+    gain = delta_rsi.where(delta_rsi > 0, 0)
+    loss = -delta_rsi.where(delta_rsi < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
     # Daily volume filter: volume > 1.5x 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Daily structure: 20-period high/low for breakout
-    high_20_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    high_20_1d_aligned = align_htf_to_ltf(prices, df_1d, high_20_1d)
-    low_20_1d_aligned = align_htf_to_ltf(prices, df_1d, low_20_1d)
-    
-    # Session filter: active during London/NY overlap (08-16 UTC) and Asia (00-08 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # need enough data for indicators
+    start_idx = 50  # need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if daily data not ready
-        if np.isnan(zscore_20_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or \
-           np.isnan(high_20_1d_aligned[i]) or np.isnan(low_20_1d_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Session filter: active during London/NY overlap (08-16 UTC) and Asia (00-08 UTC)
-        hour = hours[i]
-        in_session = ((0 <= hour <= 8) or (8 <= hour <= 16))
-        
-        if not in_session:
+        # Skip if weekly trend or volume data not ready
+        if np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,32 +67,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above daily 20-period high AND Z-score < -1.5 (oversold) with volume confirmation
-            if (high[i] > high_20_1d_aligned[i] and 
-                close[i] > high_20_1d_aligned[i] and
-                zscore_20_aligned[i] < -1.5 and
-                volume[i] > vol_ma_20_1d_aligned[i]):
+            # Long conditions: KAMA up, RSI < 30 (oversold), volume confirmation
+            if (close[i] > kama[i] and 
+                rsi[i] < 30 and 
+                volume[i] > vol_ma_20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below daily 20-period low AND Z-score > 1.5 (overbought) with volume confirmation
-            elif (low[i] < low_20_1d_aligned[i] and 
-                  close[i] < low_20_1d_aligned[i] and
-                  zscore_20_aligned[i] > 1.5 and
-                  volume[i] > vol_ma_20_1d_aligned[i]):
+            # Short conditions: KAMA down, RSI > 70 (overbought), volume confirmation
+            elif (close[i] < kama[i] and 
+                  rsi[i] > 70 and 
+                  volume[i] > vol_ma_20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when price breaks below daily 20-period low or Z-score reverts
-            if (low[i] < low_20_1d_aligned[i] or 
-                zscore_20_aligned[i] > -0.5):
+            # Exit long when KAMA turns down or RSI > 70
+            if (close[i] < kama[i] or rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price breaks above daily 20-period high or Z-score reverts
-            if (high[i] > high_20_1d_aligned[i] or 
-                zscore_20_aligned[i] < 0.5):
+            # Exit short when KAMA turns up or RSI < 30
+            if (close[i] > kama[i] or rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
