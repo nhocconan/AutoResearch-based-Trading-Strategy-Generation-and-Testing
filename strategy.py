@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1D_Keltner_MR_With_WaveTrend"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D INDICATORS ===
-    # EMA for Keltner
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # ATR for Keltner width
-    tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
-    tr2 = np.abs(low - np.roll(close, 1))
+    # ===== 1d Trend Filter =====
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # ===== Camarilla Pivot Points from Previous Day =====
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]
+    
+    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
+    r1 = pivot + (high_1d - low_1d) * 1.1 / 12
+    s1 = pivot - (high_1d - low_1d) * 1.1 / 12
+    
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # ===== Volume Spike Filter =====
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)
+    
+    # ===== ATR for Entry Quality =====
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
     tr = np.maximum(tr1, tr2)
     tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    upper = ema20 + 1.5 * atr
-    lower = ema20 - 1.5 * atr
-    
-    # WaveTrend (WT) on 1d
-    hlc3 = (high + low + close) / 3.0
-    esa = pd.Series(hlc3).ewm(span=10, adjust=False, min_periods=10).mean().values
-    d = np.abs(hlc3 - esa)
-    de = pd.Series(d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    de = np.where(de == 0, 0.001, de)
-    ci = (hlc3 - esa) / (0.015 * de)
-    wt1 = pd.Series(ci).ewm(span=21, adjust=False, min_periods=21).mean().values
-    wt2 = pd.Series(wt1).ewm(span=4, adjust=False, min_periods=4).mean().values
-    wt_signal = wt1 - wt2
-    
-    # === 1W TREND FILTER (HTF) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # === VOLUME SPIKE FILTER ===
-    vol_avg = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(wt_signal[i]) or np.isnan(ema34_1w_aligned[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_spike[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,33 +66,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Mean reversion long: price below lower Keltner + WT oversold + weekly uptrend + volume spike
-            if (close[i] < lower[i] and
-                wt_signal[i] < -50 and
-                close[i] > ema34_1w_aligned[i] and
-                vol_spike[i]):
-                signals[i] = 0.25
+            # Long: Price touches S1 + above 1d EMA34 + volume spike + strong close
+            if (low[i] <= s1_aligned[i] and
+                close[i] > ema34_1d_aligned[i] and
+                vol_spike[i] and
+                (close[i] - low[i]) > 0.3 * atr[i]):
+                signals[i] = 0.30
                 position = 1
-            # Mean reversion short: price above upper Keltner + WT overbought + weekly downtrend + volume spike
-            elif (close[i] > upper[i] and
-                  wt_signal[i] > 50 and
-                  close[i] < ema34_1w_aligned[i] and
-                  vol_spike[i]):
-                signals[i] = -0.25
+            # Short: Price touches R1 + below 1d EMA34 + volume spike + strong close
+            elif (high[i] >= r1_aligned[i] and
+                  close[i] < ema34_1d_aligned[i] and
+                  vol_spike[i] and
+                  (high[i] - close[i]) > 0.3 * atr[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price crosses above EMA20 or WT crosses above zero
-            if close[i] > ema20[i] or wt_signal[i] > 0:
+            # Exit long: Price reaches pivot or closes below EMA34
+            if high[i] >= pivot_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price crosses below EMA20 or WT crosses below zero
-            if close[i] < ema20[i] or wt_signal[i] < 0:
+            # Exit short: Price reaches pivot or closes above EMA34
+            if low[i] <= pivot_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
