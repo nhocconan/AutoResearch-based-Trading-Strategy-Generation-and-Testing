@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Donchian_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4h_Price_Action_Reversal_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,27 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend: weekly EMA50
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # === 1d Data for trend and price action ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Daily Donchian channels (20-period)
-    high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 1d EMA34 for trend ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: volume > 1.5x 20-day average
+    # === 1d Price Action: Higher High/Lower Low pattern ===
+    # Higher High: current high > previous high
+    # Lower Low: current low < previous low
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    higher_high = high_1d > prev_high_1d
+    lower_low = low_1d < prev_low_1d
+    
+    # Align to 4h timeframe
+    higher_high_aligned = align_htf_to_ltf(prices, df_1d, higher_high.astype(float))
+    lower_low_aligned = align_htf_to_ltf(prices, df_1d, lower_low.astype(float))
+    
+    # === Volume spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(200, 34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(high_ma[i]) or np.isnan(low_ma[i]) or np.isnan(vol_ma[i]):
+        # Skip if data not ready
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(higher_high_aligned[i]) or
+            np.isnan(lower_low_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -46,24 +62,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above upper Donchian + weekly uptrend + volume
-            if high[i] > high_ma[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
+            # Long: HH on 1d + volume spike + price above 1d EMA
+            if (higher_high_aligned[i] == 1.0 and 
+                volume_spike[i] and
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian + weekly downtrend + volume
-            elif low[i] < low_ma[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
+            # Short: LL on 1d + volume spike + price below 1d EMA
+            elif (lower_low_aligned[i] == 1.0 and 
+                  volume_spike[i] and
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below weekly EMA or opposite break
-            if close[i] < ema50_1w_aligned[i] or low[i] < low_ma[i]:
+            # Exit long: LL on 1d or price below EMA
+            if lower_low_aligned[i] == 1.0 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above weekly EMA or opposite break
-            if close[i] > ema50_1w_aligned[i] or high[i] > high_ma[i]:
+            # Exit short: HH on 1d or price above EMA
+            if higher_high_aligned[i] == 1.0 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
