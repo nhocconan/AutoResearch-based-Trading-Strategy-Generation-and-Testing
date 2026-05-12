@@ -1,121 +1,108 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_PriceChannelBreakout_VolumeSpike_HT
-Hypothesis: Breakout above/below 6h price channel (20-period Donchian) with weekly pivot (Monday open) direction filter and volume confirmation (2x average) captures momentum in trending markets while avoiding chop. Weekly pivot provides directional bias: above = long bias, below = short bias. Works in bull/bear by following weekly pivot position relative to price.
+4h_Wilson_Shock_Absorber
+Hypothesis: In bear markets, price often rejects after sharp moves due to liquidity exhaustion. 
+This strategy uses Wilson's Shock Absorber (price deviation from EMA normalized by ATR) 
+combined with 1-week RSI extremes and volume divergence to catch mean-reversion bounces 
+in overextended moves. Works in both bull (buy dips) and bear (sell rallies) by fading 
+extreme deviations when higher-timeframe momentum is exhausted.
 """
 
-name = "6h_WeeklyPivot_PriceChannelBreakout_VolumeSpike_HT"
-timeframe = "6h"
+name = "4h_Wilson_Shock_Absorber"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def wilson_shock_absorber(close, ema, atr, c=2.0):
+    """Wilson's Shock Absorber: (price - EMA) / (c * ATR)"""
+    return (close - ema) / (c * atr)
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
 
-    # Get weekly data (resample to weekly using Monday as start)
-    # We'll compute weekly pivot from prior week's open (Monday)
-    # For simplicity, use 1d data and aggregate to weekly manually
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+
+    # Calculate 1w RSI(14) for momentum exhaustion
+    delta = np.diff(df_1w['close'], prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w[0:14] = np.nan  # Not enough data
+
+    # Align 1w RSI to 4h
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+
+    # Calculate 4h EMA(34) and ATR(14)
+    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+
+    # Wilson Shock Absorber
+    wsa = wilson_shock_absorber(close, ema_34, atr_14, c=2.5)
     
-    # Convert to DataFrame for resampling
-    df_1d_df = pd.DataFrame({
-        'open': df_1d['open'],
-        'high': df_1d['high'],
-        'low': df_1d['low'],
-        'close': df_1d['close'],
-        'volume': df_1d['volume']
-    }, index=pd.to_datetime(df_1d['open_time']))
-    
-    # Resample to weekly, starting Monday
-    df_weekly = df_1d_df.resample('W-MON').agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
-    }).dropna()
-    
-    if len(df_weekly) < 2:
-        return np.zeros(n)
-    
-    # Weekly pivot: use prior week's open (Monday open) as bias
-    weekly_open = df_weekly['open'].values
-    weekly_close = df_weekly['close'].values
-    
-    # Shift by 1 to use prior week's data
-    prev_weekly_open = np.roll(weekly_open, 1)
-    prev_weekly_close = np.roll(weekly_close, 1)
-    prev_weekly_open[0] = np.nan
-    prev_weekly_close[0] = np.nan
-    
-    # Bias: 1 if current week's open > prior week's close (bullish), -1 if bearish
-    weekly_bias = np.where(prev_weekly_open > prev_weekly_close, 1, -1)
-    weekly_bias = np.roll(weekly_bias, 1)  # Align to current week
-    weekly_bias[0] = np.nan
-    
-    # Align weekly bias to 6h timeframe
-    weekly_bias_aligned = align_htf_to_ltf(prices, df_weekly, weekly_bias)
-    
-    # 6h Donchian channel (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike: >2x 20-period average
+    # Volume divergence: decreasing volume on price extremes
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
+    volume_decreasing = volume < vol_ma
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(20, n):
-        if (np.isnan(weekly_bias_aligned[i]) or np.isnan(high_roll[i]) or 
-            np.isnan(low_roll[i]) or np.isnan(volume_spike[i])):
+
+    for i in range(34, n):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(wsa[i]) or 
+            np.isnan(volume_decreasing[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.0
             continue
-        
+
         if position == 0:
-            # LONG: Price breaks above Donchian high + weekly bullish bias + volume spike
-            if (close[i] > high_roll[i] and 
-                weekly_bias_aligned[i] == 1 and 
-                volume_spike[i]):
+            # LONG: Extreme negative WSA (oversold) + 1w RSI < 30 (bearish exhaustion) + volume decreasing
+            if (wsa[i] < -1.2 and 
+                rsi_1w_aligned[i] < 30 and 
+                volume_decreasing[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low + weekly bearish bias + volume spike
-            elif (close[i] < low_roll[i] and 
-                  weekly_bias_aligned[i] == -1 and 
-                  volume_spike[i]):
+            # SHORT: Extreme positive WSA (overbought) + 1w RSI > 70 (bullish exhaustion) + volume decreasing
+            elif (wsa[i] > 1.2 and 
+                  rsi_1w_aligned[i] > 70 and 
+                  volume_decreasing[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Donchian low
-            if close[i] < low_roll[i]:
+            # EXIT LONG: WSA returns to neutral or RSI shows recovery
+            if wsa[i] > -0.3 or rsi_1w_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Donchian high
-            if close[i] > high_roll[i]:
+            # EXIT SHORT: WSA returns to neutral or RSI shows weakness
+            if wsa[i] < 0.3 or rsi_1w_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
-    
+
     return signals
