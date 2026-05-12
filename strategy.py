@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Pivot_Bounce_Trend_Volume
-# Hypothesis: Price bouncing off weekly pivot S1/R1 with 1d EMA50 trend filter and volume spike confirmation on 4h timeframe.
-# Uses weekly pivot levels from prior week to identify key support/resistance zones.
-# In bull markets, long at S1 bounce; in bear markets, short at R1 rejection.
-# Volume spike confirms institutional interest at these levels.
-# EMA50 filter ensures trading with higher timeframe trend to avoid counter-trend whipsaws.
-# Designed for low trade frequency (target: 20-40 trades/year) with high win rate.
+# 1D_KAMA_20_RSI_14_CHOPPINESS_14_FILTER
+# Hypothesis: KAMA(20) trend direction + RSI(14) extreme + Choppiness Index(14) regime filter on 1d timeframe.
+# KAMA adapts to market noise, reducing false signals in ranging markets.
+# RSI identifies overbought/oversold conditions for mean reversion entries.
+# Choppiness Index filters for trending markets (CHOP < 38.2) to avoid whipsaws.
+# Works in bull/bear markets by following KAMA direction only when RSI is extreme and market is trending.
+# Targets BTC/ETH with tight entry to avoid whipsaw and reduce trade frequency.
 
-name = "4h_Pivot_Bounce_Trend_Volume"
-timeframe = "4h"
+name = "1D_KAMA_20_RSI_14_CHOPPINESS_14_FILTER"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,49 +23,85 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
 
-    # Get weekly data for pivot calculation (use 1w as HTF)
+    # Get 1w data for Choppiness Index calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    if len(df_1w) < 14:
         return np.zeros(n)
 
-    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P - H, R1 = 2P - L
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    s1 = 2 * pivot - weekly_high
-    r1 = 2 * pivot - weekly_low
-    
-    # Align weekly pivot levels to 4h timeframe (hold until next week's pivot)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # Get 1d data for EMA50 trend filter
+    # Calculate True Range (TR)
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+
+    # Calculate max/high and min/low over 14 periods
+    max_hh = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
+    min_ll = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+
+    # Calculate Choppiness Index: CHOP = 100 * log10(sum(TR,14) / (maxHH - minLL)) / log10(14)
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    range_hl = max_hh - min_ll
+    chop = 100 * np.log10(sum_tr / range_hl) / np.log10(14)
+    chop[range_hl == 0] = 50  # Avoid division by zero
+
+    # Align Choppiness Index to lower timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+
+    # Get 1d data for KAMA and RSI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
 
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Calculate volume spike threshold (1.5x 20-period SMA)
-    volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    # Efficiency Ratio (ER) = |close - close[10]| / sum(|close - close[-1]|, 10)
+    change = np.abs(np.concatenate([[np.nan], close_1d[1:] - close_1d[:-1]]))
+    er_num = np.abs(np.concatenate([[np.nan]*10, close_1d[10:] - close_1d[:-10]]))
+    er_den = pd.Series(change).rolling(window=10, min_periods=10).sum().values
+    er = np.where(er_den != 0, er_num / er_den, 0)
+    # Smoothing Constants: SC = [ER * (fastest - slowest) + slowest]^2
+    fastest = 2 / (2 + 1)   # EMA(2)
+    slowest = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fastest - slowest) + slowest) ** 2
+    # KAMA: kama[i] = kama[i-1] + SC * (close[i] - kama[i-1])
+    kama = np.full_like(close_1d, np.nan)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+
+    # Align KAMA to lower timeframe (same timeframe, so identity)
+    kama_aligned = kama  # Already 1d
+
+    # Calculate RSI(14)
+    delta = np.concatenate([[np.nan], close_1d[1:] - close_1d[:-1]])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[0] = 50  # First value neutral
+
+    # Align RSI to lower timeframe (same timeframe, so identity)
+    rsi_aligned = rsi  # Already 1d
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(volume_sma20[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,32 +110,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price near S1 with bullish trend and volume spike
-            if (low[i] <= s1_aligned[i] * 1.005 and  # Allow 0.5% tolerance for touch
-                close[i] > s1_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume[i] > volume_sma20[i]):
+            # LONG: KAMA up (uptrend), RSI oversold (<30), trending market (CHOP < 38.2)
+            if (close[i] > kama_aligned[i] and 
+                rsi_aligned[i] < 30 and 
+                chop_aligned[i] < 38.2):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price near R1 with bearish trend and volume spike
-            elif (high[i] >= r1_aligned[i] * 0.995 and  # Allow 0.5% tolerance for touch
-                  close[i] < r1_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume[i] > volume_sma20[i]):
+            # SHORT: KAMA down (downtrend), RSI overbought (>70), trending market (CHOP < 38.2)
+            elif (close[i] < kama_aligned[i] and 
+                  rsi_aligned[i] > 70 and 
+                  chop_aligned[i] < 38.2):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 or trend turns bearish
-            if close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: KAMA down (trend change) OR RSI overbought (>70)
+            if (close[i] < kama_aligned[i] or rsi_aligned[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 or trend turns bullish
-            if close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: KAMA up (trend change) OR RSI oversold (<30)
+            if (close[i] > kama_aligned[i] or rsi_aligned[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
