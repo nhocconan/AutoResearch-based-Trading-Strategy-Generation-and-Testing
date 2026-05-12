@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Williams_R_Reversal_1dTrend_Volume
-# Hypothesis: Williams %R identifies overbought/oversold extremes; long when %R crosses above -50 from oversold with volume spike and daily uptrend, short when %R crosses below -50 from overbought with volume spike and daily downtrend. Uses Williams %R(14) for mean reversion signals, daily EMA50 for trend filter, and volume > 1.5x 20-period average for confirmation. Designed for 4h timeframe to avoid overtrading. Works in bull markets via pullbacks in uptrends and in bear markets via bounces in downtrends.
+# 1d_Camarilla_Pivot_R1_S1_Breakout_WeeklyTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily candles act as support/resistance.
+# Long when price breaks above R1 with volume spike and weekly uptrend.
+# Short when price breaks below S1 with volume spike and weekly downtrend.
+# Uses weekly EMA20 for trend filter and volume > 1.5x 20-period average for confirmation.
+# Designed for 1d timeframe to avoid overtrading. Works in bull markets via breakouts in uptrends
+# and in bear markets via breakdowns in downtrends. Low trade frequency (~10-25/year) minimizes fee drag.
 
-name = "4h_Williams_R_Reversal_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_R1_S1_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,21 +25,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
 
-    # Daily EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly EMA20 trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
 
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Daily Camarilla pivot levels (R1, S1)
+    # Calculated from previous day's OHLC
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    close_shift = np.roll(close, 1)
+    high_shift[0] = high[0]
+    low_shift[0] = low[0]
+    close_shift[0] = close[0]
+
+    # Pivot point
+    pivot = (high_shift + low_shift + close_shift) / 3.0
+    # R1 and S1 levels
+    r1 = pivot + (high_shift - low_shift) * 1.1 / 12
+    s1 = pivot - (high_shift - low_shift) * 1.1 / 12
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,9 +56,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ok[i]) or 
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(pivot[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,31 +67,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from daily EMA50
-        price_above_daily_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_daily_ema = close[i] < ema_50_1d_aligned[i]
+        # Trend filter from weekly EMA20
+        price_above_weekly_ema = close[i] > ema_20_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_20_1w_aligned[i]
 
         if position == 0:
-            # LONG: Williams %R crosses above -50 from oversold with volume spike and daily uptrend
-            if i > 0 and not np.isnan(williams_r[i-1]) and williams_r[i-1] <= -80 and williams_r[i] > -50 and volume_ok[i] and price_above_daily_ema:
+            # LONG: Price breaks above R1 with volume spike and weekly uptrend
+            if close[i] > r1[i] and volume_ok[i] and price_above_weekly_ema:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R crosses below -50 from overbought with volume spike and daily downtrend
-            elif i > 0 and not np.isnan(williams_r[i-1]) and williams_r[i-1] >= -20 and williams_r[i] < -50 and volume_ok[i] and price_below_daily_ema:
+            # SHORT: Price breaks below S1 with volume spike and weekly downtrend
+            elif close[i] < s1[i] and volume_ok[i] and price_below_weekly_ema:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R crosses below -50 or trend turns down
-            if i > 0 and not np.isnan(williams_r[i-1]) and williams_r[i-1] >= -20 and williams_r[i] < -50 or not price_above_daily_ema:
+            # EXIT LONG: Price closes below pivot or trend turns down
+            if close[i] < pivot[i] or not price_above_weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R crosses above -50 or trend turns up
-            if i > 0 and not np.isnan(williams_r[i-1]) and williams_r[i-1] <= -80 and williams_r[i] > -50 or not price_below_daily_ema:
+            # EXIT SHORT: Price closes above pivot or trend turns up
+            if close[i] > pivot[i] or not price_below_weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
