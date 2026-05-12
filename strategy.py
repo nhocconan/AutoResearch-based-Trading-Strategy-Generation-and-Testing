@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
 # Hypothesis: Camarilla pivot levels from daily timeframe identify key support/resistance levels.
-# Breakouts above R1 level with volume confirmation and daily trend alignment go long.
-# Breakdowns below S1 level with volume confirmation and daily trend alignment go short.
-# Uses tight entry conditions to maintain 20-50 trades/year, avoiding fee drag.
+# Breakouts above R1 (resistance) with volume confirmation and daily trend alignment go long.
+# Breakdowns below S1 (support) with volume confirmation and daily trend alignment go short.
 # Works in both bull and bear markets by trading breakouts of significant daily levels with trend filter.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years).
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -29,26 +29,25 @@ def generate_signals(prices):
     if len(df_1d) < 10:
         return np.zeros(n)
 
-    # Calculate Camarilla pivot levels from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla pivot levels on daily data
+    # Standard Camarilla formula: 
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), R2 = close + 0.55*(high-low), R1 = close + 0.275*(high-low)
+    # S1 = close - 0.275*(high-low), S2 = close - 0.55*(high-low), S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    daily_range = daily_high - daily_low
     
-    # Camarilla formulas: Pivot = (H+L+C)/3
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate Camarilla levels
+    r1 = daily_close + 0.275 * daily_range
+    s1 = daily_close - 0.275 * daily_range
     
-    # R1 = Pivot + (Range * 1.1/12)
-    # S1 = Pivot - (Range * 1.1/12)
-    r1 = pivot + (range_1d * 1.1 / 12.0)
-    s1 = pivot - (range_1d * 1.1 / 12.0)
-    
-    # Camarilla levels need only the completed daily candle
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Camarilla levels need confirmation from next daily candle (like pivot points)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1, additional_delay_bars=1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1, additional_delay_bars=1)
 
     # Daily EMA34 trend filter (only needs completed daily candle)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
@@ -74,13 +73,13 @@ def generate_signals(prices):
         price_below_daily_ema = close[i] < ema_34_1d_aligned[i]
 
         if position == 0:
-            # LONG: Price breaks above R1 level with volume and uptrend
+            # LONG: Price breaks above R1 (resistance) with volume and uptrend
             if (not np.isnan(r1_aligned[i]) and 
                 close[i] > r1_aligned[i] and
                 price_above_daily_ema and volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 level with volume and downtrend
+            # SHORT: Price breaks below S1 (support) with volume and downtrend
             elif (not np.isnan(s1_aligned[i]) and 
                   close[i] < s1_aligned[i] and
                   price_below_daily_ema and volume_ok[i]):
@@ -89,7 +88,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 level or trend turns down
+            # EXIT LONG: Price breaks below S1 (support) or trend turns down
             if (not np.isnan(s1_aligned[i]) and 
                 close[i] < s1_aligned[i]) or not price_above_daily_ema:
                 signals[i] = 0.0
@@ -97,7 +96,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 level or trend turns up
+            # EXIT SHORT: Price breaks above R1 (resistance) or trend turns up
             if (not np.isnan(r1_aligned[i]) and 
                 close[i] > r1_aligned[i]) or not price_below_daily_ema:
                 signals[i] = 0.0
