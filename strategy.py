@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Breakouts at daily Camarilla R1/S1 levels with volume confirmation and 4h trend filter on 4h timeframe.
-Targets 20-40 trades/year to stay within fee limits. Uses daily for structure and 4h for trend filter.
-Long: Close > daily R1 + volume > 1.5x SMA20 + close > 4h EMA50
-Short: Close < daily S1 + volume > 1.5x SMA20 + close < 4h EMA50
-Exit: Close crosses opposite daily Camarilla level (S1 for long, R1 for short)
+12h_Keltner_Breakout_Trend_Confirm
+Hypothesis: Breakouts above/below Keltner Channel (20,2) with 1-day trend filter and volume confirmation on 12h timeframe.
+Long: Close > upper Keltner + volume > 1.5x SMA20 + close > 1-day EMA50
+Short: Close < lower Keltner + volume > 1.5x SMA20 + close < 1-day EMA50
+Exit: Close crosses opposite Keltner band (lower for long, upper for short)
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Keltner_Breakout_Trend_Confirm"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,28 +25,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels
+    # Get 1-day data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
 
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Calculate Camarilla levels from previous daily close
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + camarilla_range * 1.1 / 12
-    s1 = close_1d - camarilla_range * 1.1 / 12
-
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Keltner Channel (20,2)
+    atr_period = 20
+    atr_multiplier = 2.0
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema20 + atr_multiplier * atr
+    lower_keltner = ema20 - atr_multiplier * atr
 
     # Volume confirmation: 1.5x 20-period SMA
     volume_series = pd.Series(volume)
@@ -58,15 +56,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
-        # Get aligned values for current 4h bar
-        r1_aligned = align_htf_to_ltf(prices, df_1d, r1)[i]
-        s1_aligned = align_htf_to_ltf(prices, df_1d, s1)[i]
-        ema50_aligned = ema50_4h_aligned[i]
+        # Get aligned values for current 12h bar
+        ema50_aligned = ema50_1d_aligned[i]
         vol_threshold_val = volume_threshold[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned) or np.isnan(s1_aligned) or 
-            np.isnan(ema50_aligned) or np.isnan(vol_threshold_val)):
+        if (np.isnan(ema50_aligned) or np.isnan(vol_threshold_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,14 +70,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price closes above daily R1 + volume spike (1.5x) + 4h uptrend
-            if (close[i] > r1_aligned and
+            # LONG: Close > upper Keltner + volume spike + 1-day uptrend
+            if (close[i] > upper_keltner[i] and
                 volume[i] > vol_threshold_val and
                 close[i] > ema50_aligned):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below daily S1 + volume spike (1.5x) + 4h downtrend
-            elif (close[i] < s1_aligned and
+            # SHORT: Close < lower Keltner + volume spike + 1-day downtrend
+            elif (close[i] < lower_keltner[i] and
                   volume[i] > vol_threshold_val and
                   close[i] < ema50_aligned):
                 signals[i] = -0.25
@@ -90,15 +85,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below daily S1
-            if close[i] < s1_aligned:
+            # EXIT LONG: Close < lower Keltner
+            if close[i] < lower_keltner[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above daily R1
-            if close[i] > r1_aligned:
+            # EXIT SHORT: Close > upper Keltner
+            if close[i] > upper_keltner[i]:
                 signals[i] = 0.0
                 position = 0
             else:
