@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Triple_Confirmation_Breakout
-Hypothesis: Combines Donchian breakout (20-period) with ADX trend strength and volume confirmation to capture strong trending moves. Uses ADX > 25 to filter choppy markets, volume > 1.5x 20-period average for confirmation, and Donchian breakouts for entry. Designed for 4h timeframe to balance trade frequency and signal quality, targeting 20-40 trades per year. Works in both bull and bear markets by requiring strong trend confirmation (ADX) before entering breakout trades.
+1h_Pullback_Trend_Follower
+Hypothesis: Use 4h EMA trend filter and 1d RSI filter to identify primary trend, then enter on 1h pullbacks with volume confirmation. Works in bull markets by buying dips in uptrends and in bear markets by selling rallies in downtrends. Uses volume spike to confirm institutional interest during pullbacks, reducing false signals in chop. Target: 20-40 trades/year.
 """
 
-name = "4h_Triple_Confirmation_Breakout"
-timeframe = "4h"
+name = "1h_Pullback_Trend_Follower"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -22,54 +22,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Donchian Channel (20-period) - using pandas rolling with min_periods
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 4h data for EMA trend (primary timeframe direction)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
 
-    # ADX calculation (14-period) - measures trend strength
-    # True Range
-    tr1 = np.abs(high[1:] - low[:-1])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
-
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-
-    # Smooth TR, DM+, DM- using Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    def wilder_smoothing(arr, period):
-        """Wilder's smoothing (same as EMA with alpha=1/period)"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(arr[1:period])  # skip first NaN
-        # Subsequent values: smoothed = prev * (1-1/period) + current * (1/period)
-        for i in range(period, len(arr)):
-            if not np.isnan(arr[i]):
-                if np.isnan(result[i-1]):
-                    result[i] = arr[i]
-                else:
-                    result[i] = result[i-1] * (1 - 1/period) + arr[i] * (1/period)
-        return result
-
-    tr14 = wilder_smoothing(tr, 14)
-    dm_plus_14 = wilder_smoothing(dm_plus, 14)
-    dm_minus_14 = wilder_smoothing(dm_minus, 14)
-
-    # DI+ and DI-
-    di_plus = np.where(tr14 != 0, 100 * dm_plus_14 / tr14, 0)
-    di_minus = np.where(tr14 != 0, 100 * dm_minus_14 / tr14, 0)
-
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smoothing(dx, 14)
+    # Get 1d data for RSI filter (avoid overextended conditions)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    # Calculate RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
 
     # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -77,10 +51,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # start from 20 to ensure Donchian is valid
-        # Skip if any required values are NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx[i]) or np.isnan(vol_avg_20[i])):
+    for i in range(100, n):
+        ema50_val = ema50_4h_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
+        vol_avg_val = vol_avg_20[i]
+
+        if np.isnan(ema50_val) or np.isnan(rsi_val) or np.isnan(vol_avg_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -89,33 +65,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above Donchian high + ADX > 25 (strong trend) + volume confirmation
-            if (close[i] > donchian_high[i] and 
-                adx[i] > 25 and 
-                volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = 0.25
+            # LONG: 4h uptrend + 1d RSI not overbought + pullback to EMA + volume confirmation
+            if ema50_val > close[i] and close[i] > ema50_val * 0.98 and rsi_val < 70 and volume[i] > vol_avg_val * 1.5:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: price breaks below Donchian low + ADX > 25 (strong trend) + volume confirmation
-            elif (close[i] < donchian_low[i] and 
-                  adx[i] > 25 and 
-                  volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = -0.25
+            # SHORT: 4h downtrend + 1d RSI not oversold + pullback to EMA + volume confirmation
+            elif ema50_val < close[i] and close[i] < ema50_val * 1.02 and rsi_val > 30 and volume[i] > vol_avg_val * 1.5:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below Donchian low or ADX falls below 20 (trend weakening)
-            if close[i] < donchian_low[i] or adx[i] < 20:
+            # EXIT LONG: 4h downtrend or RSI overbought
+            if ema50_val < close[i] or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: price breaks above Donchian high or ADX falls below 20 (trend weakening)
-            if close[i] > donchian_high[i] or adx[i] < 20:
+            # EXIT SHORT: 4h uptrend or RSI oversold
+            if ema50_val > close[i] or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
