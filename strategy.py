@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 6H_ELDER_RAY_POWER_1D_TREND_FILTER
-# Hypothesis: Elder Ray (Bull/Bear power) measures bull/bear strength relative to EMA13.
-# In 1d uptrend (EMA34), go long when Bull Power > 0 and rising; in downtrend, go short when Bear Power < 0 and falling.
-# Works in both bull and bear markets: trend filter avoids counter-trend trades, Elder Ray captures momentum within trend.
-# Target: 15-25 trades/year on 6h timeframe.
+# 12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER
+# Hypothesis: Camarilla pivot levels (R3/S3) from daily data act as strong support/resistance.
+# In 1-day uptrend (EMA50), go long when price breaks above R3 with volume confirmation.
+# In 1-day downtrend (EMA50), go short when price breaks below S3 with volume confirmation.
+# Works in both bull and bear markets: trend filter avoids counter-trend trades, Camarilla breakouts capture momentum.
+# Target: 15-30 trades/year on 12h timeframe.
 
-name = "6H_ELDER_RAY_POWER_1D_TREND_FILTER"
-timeframe = "6h"
+name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,43 +22,43 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Daily data for Elder Ray and trend filter
+    # Daily data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # EMA13 for Elder Ray calculation
-    ema13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = df_1d['high'].values - ema13
-    bear_power = df_1d['low'].values - ema13
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # EMA34 for trend filter
-    ema34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align to 6h timeframe
-    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    # EMA50 for trend filter
+    ema50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Rising/falling power detection (1-bar change)
-    bull_power_rising = bull_power_aligned > np.roll(bull_power_aligned, 1)
-    bear_power_falling = bear_power_aligned < np.roll(bear_power_aligned, 1)
-    # Handle first bar
-    bull_power_rising[0] = False
-    bear_power_falling[0] = False
+    # Volume average (20-period) for confirmation
+    vol_avg = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    
+    # Align to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema13_aligned[i]) or np.isnan(ema34_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema50_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,32 +67,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: 1d uptrend + Bull Power > 0 and rising
-            if (close[i] > ema34_aligned[i] and 
-                bull_power_aligned[i] > 0 and 
-                bull_power_rising[i]):
+            # LONG: 1-day uptrend + price breaks above R3 + volume confirmation
+            if (close[i] > ema50_aligned[i] and 
+                high[i] > r3_aligned[i] and 
+                volume[i] > vol_avg_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1d downtrend + Bear Power < 0 and falling
-            elif (close[i] < ema34_aligned[i] and 
-                  bear_power_aligned[i] < 0 and 
-                  bear_power_falling[i]):
+            # SHORT: 1-day downtrend + price breaks below S3 + volume confirmation
+            elif (close[i] < ema50_aligned[i] and 
+                  low[i] < s3_aligned[i] and 
+                  volume[i] > vol_avg_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal or power weakening
-            if (close[i] <= ema34_aligned[i] or 
-                bull_power_aligned[i] <= 0):
+            # EXIT LONG: Trend reversal or price breaks below S3 (invalidates bullish breakout)
+            if (close[i] <= ema50_aligned[i] or 
+                low[i] < s3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal or power weakening
-            if (close[i] >= ema34_aligned[i] or 
-                bear_power_aligned[i] >= 0):
+            # EXIT SHORT: Trend reversal or price breaks above R3 (invalidates bearish breakout)
+            if (close[i] >= ema50_aligned[i] or 
+                high[i] > r3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
