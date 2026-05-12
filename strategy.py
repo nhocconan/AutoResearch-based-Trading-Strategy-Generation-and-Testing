@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 6h_Stochastic_RSI_WeeklyTrend
-# Hypothesis: Use Stochastic RSI on 6h for mean-reversion entries in oversold/overbought conditions,
-# filtered by weekly trend (EMA200) and volume confirmation. Enter long when StochRSI < 0.2,
-# price above weekly EMA200, and volume spike; short when StochRSI > 0.8, price below weekly EMA200,
-# and volume spike. Exit on StochRSI crossing back to neutral (0.5). Targets 20-40 trades/year
-# to minimize fee drag and profit from mean reversion in ranging markets while respecting weekly trend.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Use Camarilla pivot levels (R1/S1) from daily data for breakout entries, confirmed by 1d EMA50 trend and volume spikes (>2x 20-period average). Go long when price breaks above R1 with trend and volume, short when breaks below S1 with trend and volume. Exit when price returns to the Camarilla pivot (CP) level. Targets 12-37 trades/year to minimize fee drag and work in both bull/bear markets via trend filter.
 
-name = "6h_Stochastic_RSI_WeeklyTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,42 +20,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get 1d data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate Stochastic RSI (14,14,3,3) on 6h
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla pivot levels for each 1d bar
+    # CP = (H + L + C) / 3
+    # R1 = CP + (H - L) * 1.1 / 12
+    # S1 = CP - (H - L) * 1.1 / 12
+    cp = (high_1d + low_1d + close_1d) / 3.0
+    r1 = cp + (high_1d - low_1d) * 1.1 / 12.0
+    s1 = cp - (high_1d - low_1d) * 1.1 / 12.0
 
-    # Stochastic RSI: (RSI - min(RSI)) / (max(RSI) - min(RSI)) over 14 periods
-    rsi_series = pd.Series(rsi)
-    min_rsi = rsi_series.rolling(window=14, min_periods=14).min().values
-    max_rsi = rsi_series.rolling(window=14, min_periods=14).max().values
-    stoch_rsi = (rsi - min_rsi) / (max_rsi - min_rsi + 1e-10)
+    # Align Camarilla levels to 12h timeframe (wait for daily bar to close)
+    cp_aligned = align_htf_to_ltf(prices, df_1d, cp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # 200 EMA on weekly for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(stoch_rsi[i]) or np.isnan(ema200_1w_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(cp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +63,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: StochRSI oversold (<0.2) + price > weekly EMA200 + volume spike
-            if (stoch_rsi[i] < 0.2 and 
-                close[i] > ema200_1w_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: price breaks above R1 + price > 1d EMA50 + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: StochRSI overbought (>0.8) + price < weekly EMA200 + volume spike
-            elif (stoch_rsi[i] > 0.8 and 
-                  close[i] < ema200_1w_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: price breaks below S1 + price < 1d EMA50 + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: StochRSI crosses back above 0.5 (mean reversion complete)
-            if stoch_rsi[i] > 0.5:
+            # EXIT LONG: price returns to or below CP level
+            if close[i] <= cp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: StochRSI crosses back below 0.5
-            if stoch_rsi[i] < 0.5:
+            # EXIT SHORT: price returns to or above CP level
+            if close[i] >= cp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
