@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER
-# Hypothesis: Camarilla R3/S3 levels from daily timeframe act as strong support/resistance.
-# In 1d uptrend (price > EMA34), go long when price breaks above R3 with volume confirmation.
-# In 1d downtrend (price < EMA34), go short when price breaks below S3 with volume confirmation.
-# Works in both bull and bear markets: trend filter avoids counter-trend trades, Camarilla breakouts capture momentum.
-# Target: 15-25 trades/year on 12h timeframe.
+# 4H_VOLATILITY_BREAKOUT_VOLUME_CONFIRMATION_1D_TREND_FILTER
+# Hypothesis: Volatility breakouts capture sharp directional moves, which occur in both bull and bear markets.
+# Uses 10-period ATR-based breakout from close, confirmed by volume spike and 1d trend filter.
+# In 1d uptrend, go long on upward volatility breakout; in downtrend, go short on downward breakout.
+# Volatility breakouts tend to be fewer but higher quality trades, reducing fee drag.
+# Target: 20-40 trades/year on 4h timeframe.
 
-name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER"
-timeframe = "12h"
+name = "4H_VOLATILITY_BREAKOUT_VOLUME_CONFIRMATION_1D_TREND_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,43 +24,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla calculation and trend filter
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:
         return np.zeros(n)
-    
-    # Previous day's OHLC for Camarilla levels
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Camarilla R3 and S3 levels
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
     # EMA34 for trend filter
     ema34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    # ATR for volatility breakout (10-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.zeros_like(close)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * 9 + tr[i]) / 10  # Wilder's smoothing
+    
+    # Volume spike: current volume > 1.5 * 20-period average volume
+    vol_ma = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+        else:
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure indicators are stable
+    start_idx = max(34, 20)  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema34_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,32 +68,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: 1d uptrend + price breaks above R3 + volume spike
+            # LONG: 1d uptrend + upward volatility breakout + volume spike
             if (close[i] > ema34_aligned[i] and 
-                high[i] > r3_aligned[i] and 
+                close[i] > close[i-1] + 0.5 * atr[i] and  # Upward breakout
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1d downtrend + price breaks below S3 + volume spike
+            # SHORT: 1d downtrend + downward volatility breakout + volume spike
             elif (close[i] < ema34_aligned[i] and 
-                  low[i] < s3_aligned[i] and 
+                  close[i] < close[i-1] - 0.5 * atr[i] and  # Downward breakout
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal or price breaks below S3 (contrarian signal)
+            # EXIT LONG: Trend reversal or volatility contraction
             if (close[i] <= ema34_aligned[i] or 
-                low[i] < s3_aligned[i]):
+                close[i] < close[i-1] + 0.25 * atr[i]):  # Loss of upward momentum
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal or price breaks above R3 (contrarian signal)
+            # EXIT SHORT: Trend reversal or volatility contraction
             if (close[i] >= ema34_aligned[i] or 
-                high[i] > r3_aligned[i]):
+                close[i] > close[i-1] - 0.25 * atr[i]):  # Loss of downward momentum
                 signals[i] = 0.0
                 position = 0
             else:
