@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyTrend_DailyPullback_Entry_v2"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_HT"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,24 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== Weekly Trend Filter (HTF) =====
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # ===== 1d Trend Filter (HTF) =====
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # ===== Daily ATR for Volatility Filter =====
-    tr = np.maximum(high - low, np.absolute(high - np.roll(close, 1)), np.absolute(low - np.roll(close, 1)))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ===== Daily Camarilla Pivot Points (R3, S3) =====
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]
     
-    # ===== Daily Pullback Signals =====
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
+    r3 = pivot + (high_1d - low_1d) * 1.1000
+    s3 = pivot - (high_1d - low_1d) * 1.1000
     
-    # ===== Daily Volume Spike =====
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # ===== Daily Volume Spike Filter =====
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    
+    # ===== Session Filter: 08-20 UTC =====
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -43,9 +53,20 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(ema8[i]) or np.isnan(ema21[i]) or
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,30 +75,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Weekly uptrend + price pulls back to EMA8 with volume spike
-            if (close[i] > ema20_1w_aligned[i] and
-                low[i] <= ema8[i] and
-                vol_spike[i]):
+            # Long: Price touches S3 + above 1d EMA34 + daily volume spike
+            if (low[i] <= s3_aligned[i] and
+                close[i] > ema34_1d_aligned[i] and
+                vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Weekly downtrend + price bounces to EMA8 with volume spike
-            elif (close[i] < ema20_1w_aligned[i] and
-                  high[i] >= ema8[i] and
-                  vol_spike[i]):
+            # Short: Price touches R3 + below 1d EMA34 + daily volume spike
+            elif (high[i] >= r3_aligned[i] and
+                  close[i] < ema34_1d_aligned[i] and
+                  vol_spike_1d_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Weekly trend breaks or price closes below EMA21
-            if (close[i] < ema20_1w_aligned[i] or
-                close[i] < ema21[i]):
+            # Exit long: Price reaches pivot or closes below 1d EMA34
+            if high[i] >= pivot_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Weekly trend breaks or price closes above EMA21
-            if (close[i] > ema20_1w_aligned[i] or
-                close[i] > ema21[i]):
+            # Exit short: Price reaches pivot or closes above 1d EMA34
+            if low[i] <= pivot_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
