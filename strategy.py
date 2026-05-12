@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_With_Volume_Spike"
-timeframe = "1d"
+name = "6h_Volume_Weighted_RSI_With_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,33 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== KAMA Trend (1d) =====
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
-    # Pad for convolution-like sum
-    volatility_padded = np.concatenate([np.full(9, np.nan), volatility])
-    er = np.where(volatility_padded != 0, change / volatility_padded, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # start after 10 bars
-    for i in range(10, n):
-        if np.isnan(kama[i-1]):
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # ===== 1d Trend Filter (HTF) =====
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # ===== Weekly Trend Filter (HTF) =====
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # ===== Volume-Weighted RSI (14) =====
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Weight gains/losses by volume
+    vol_ratio = volume / (np.mean(volume) + 1e-9)
+    weighted_gain = gain * vol_ratio
+    weighted_loss = loss * vol_ratio
+    
+    avg_gain = pd.Series(weighted_gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(weighted_loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-9)
+    rsi = 100 - (100 / (1 + rs))
     
     # ===== Volume Spike Filter =====
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_avg)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,9 +50,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +60,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above KAMA + above weekly EMA50 + volume spike
-            if (close[i] > kama[i] and
-                close[i] > ema50_1w_aligned[i] and
+            # Long: RSI < 30 (oversold) + above 1d EMA50 + volume spike
+            if (rsi[i] < 30 and
+                close[i] > ema50_1d_aligned[i] and
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA + below weekly EMA50 + volume spike
-            elif (close[i] < kama[i] and
-                  close[i] < ema50_1w_aligned[i] and
+            # Short: RSI > 70 (overbought) + below 1d EMA50 + volume spike
+            elif (rsi[i] > 70 and
+                  close[i] < ema50_1d_aligned[i] and
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses below KAMA
-            if close[i] < kama[i]:
+            # Exit long: RSI > 50 or closes below 1d EMA50
+            if rsi[i] > 50 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses above KAMA
-            if close[i] > kama[i]:
+            # Exit short: RSI < 50 or closes above 1d EMA50
+            if rsi[i] < 50 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
