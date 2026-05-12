@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_DailyVolumeSpike
-Hypothesis: Price breaking above/below Camarilla R1/S1 levels (from previous day) 
-with 4h EMA trend filter and daily volume confirmation (2x average) captures 
-strong trending moves while avoiding false breakouts. Works in bull/bear by 
-following 4h trend direction. Uses 1h timeframe for entry timing only.
+6h_Supertrend_Volume_Regime
+Hypothesis: Supertrend captures trend direction, volume confirms strength, and choppy market filter (CM) avoids whipsaws. Works in bull/bear by following Supertrend direction only in trending regimes (CM < 38.2) and avoiding range-bound markets. Uses 6h Supertrend with 1d CM regime filter for robustness.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_DailyVolumeSpike"
-timeframe = "1h"
+name = "6h_Supertrend_Volume_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,49 +22,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
+    # Get 1d data ONCE before loop for chop filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from 1d data (R1, S1)
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    close_1d = df_1d['close'].values
+    # Calculate Supertrend on 6h data
+    atr_period = 10
+    atr_multiplier = 3.0
+    
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # ATR
+    atr = np.full(n, np.nan)
+    for i in range(atr_period, n):
+        atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
+    
+    # Supertrend calculation
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (atr_multiplier * atr)
+    lower_band = hl2 - (atr_multiplier * atr)
+    
+    supertrend = np.full(n, np.nan)
+    trend = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
+    
+    supertrend[0] = hl2[0]
+    for i in range(1, n):
+        if np.isnan(atr[i]):
+            supertrend[i] = hl2[i]
+            trend[i] = trend[i-1]
+            continue
+            
+        if close[i] > upper_band[i-1]:
+            trend[i] = 1
+        elif close[i] < lower_band[i-1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i-1]
+            
+        if trend[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+    
+    # Calculate Choppiness Index on 1d data (CM)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Shift by 1 to use previous day's data
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = np.nan
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    # True Range for 1d
+    tr1_1d = high_1d[1:] - low_1d[1:]
+    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
     
-    camarilla_upper = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
-    camarilla_lower = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
+    # ATR for 1d (period 14)
+    atr_1d = np.full(len(close_1d), np.nan)
+    atr_period_1d = 14
+    for i in range(atr_period_1d, len(close_1d)):
+        atr_1d[i] = np.nanmean(tr_1d[i-atr_period_1d+1:i+1])
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_upper_aligned = align_htf_to_ltf(prices, df_1d, camarilla_upper)
-    camarilla_lower_aligned = align_htf_to_ltf(prices, df_1d, camarilla_lower)
+    # Sum of ATR over 14 periods
+    sum_atr_1d = np.full(len(close_1d), np.nan)
+    for i in range(atr_period_1d, len(close_1d)):
+        sum_atr_1d[i] = np.nansum(atr_1d[i-atr_period_1d+1:i+1])
     
-    # Get 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Max - Min over 14 periods
+    max_high_1d = np.full(len(close_1d), np.nan)
+    min_low_1d = np.full(len(close_1d), np.nan)
+    for i in range(atr_period_1d, len(close_1d)):
+        max_high_1d[i] = np.nanmax(high_1d[i-atr_period_1d+1:i+1])
+        min_low_1d[i] = np.nanmin(low_1d[i-atr_period_1d+1:i+1])
     
-    # 4h EMA34 trend filter
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Choppiness Index
+    cm_1d = np.full(len(close_1d), np.nan)
+    for i in range(atr_period_1d, len(close_1d)):
+        if sum_atr_1d[i] > 0 and (max_high_1d[i] - min_low_1d[i]) > 0:
+            cm_1d[i] = 100 * np.log10(sum_atr_1d[i] / (max_high_1d[i] - min_low_1d[i])) / np.log10(atr_period_1d)
+        else:
+            cm_1d[i] = np.nan
     
-    # Daily volume spike: >2x 20-period average
-    vol_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = df_1d['volume'].values > (2.0 * vol_20_1d)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Align CM to 6h timeframe
+    cm_1d_aligned = align_htf_to_ltf(prices, df_1d, cm_1d)
+    
+    # Volume spike: >1.5x 20-period average (6h)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.nanmean(volume[i-20:i])
+    
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after EMA34 warmup
-        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(volume_spike_1d_aligned[i])):
+    for i in range(34, n):  # Start after warmup
+        if (np.isnan(supertrend[i]) or np.isnan(trend[i]) or 
+            np.isnan(cm_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,34 +127,39 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if position == 0:
-            # LONG: Price breaks above Camarilla R1 + 4h EMA34 uptrend + daily volume spike
-            if (close[i] > camarilla_upper_aligned[i] and 
-                close[i] > ema_34_4h_aligned[i] and 
-                volume_spike_1d_aligned[i]):
-                signals[i] = 0.20
-                position = 1
-            # SHORT: Price breaks below Camarilla S1 + 4h EMA34 downtrend + daily volume spike
-            elif (close[i] < camarilla_lower_aligned[i] and 
-                  close[i] < ema_34_4h_aligned[i] and 
-                  volume_spike_1d_aligned[i]):
-                signals[i] = -0.20
-                position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # EXIT LONG: Price closes below Camarilla S1 (reversal level)
-            if close[i] < camarilla_lower_aligned[i]:
+        # Only trade in trending regime (CM < 38.2)
+        if cm_1d_aligned[i] < 38.2:
+            if position == 0:
+                # LONG: Supertrend uptrend + volume spike
+                if trend[i] == 1 and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # SHORT: Supertrend downtrend + volume spike
+                elif trend[i] == -1 and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            elif position == 1:
+                # EXIT LONG: Supertrend turns down
+                if trend[i] == -1:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # EXIT SHORT: Supertrend turns up
+                if trend[i] == 1:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:
+            # In ranging market, stay flat
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
-        elif position == -1:
-            # EXIT SHORT: Price closes above Camarilla R1 (reversal level)
-            if close[i] > camarilla_upper_aligned[i]:
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
     
     return signals
