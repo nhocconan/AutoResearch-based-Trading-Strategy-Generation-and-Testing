@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
-# Hypothesis: Camarilla pivot levels (R1/S1) from daily combined with 34-period EMA trend filter and volume spike confirmation on 4h timeframe.
-# Camarilla levels provide precise support/resistance in ranging markets. Breakout above R1 or below S1 with volume confirms momentum.
-# EMA34 trend filter ensures we only trade in the direction of the higher timeframe trend.
-# Volume spike (2x 20-period average) filters out false breakouts. Designed for low trade frequency with clear entry/exit rules.
-# Works in bull/bear markets by following EMA34 trend direction. Exit when price re-enters Camarilla H-L range (mean reversion).
+# 12h_Donchian20_Breakout_1dTrend_VolumeSpike
+# Hypothesis: On 12h timeframe, enter long when price breaks above Donchian(20) high with 1d EMA50 uptrend and volume spike; enter short when price breaks below Donchian(20) low with 1d EMA50 downtrend and volume spike. Exit on opposite Donchian breakout or trend reversal. Uses 1d EMA50 for trend filter and volume spike for confirmation to reduce false signals. Designed for low trade frequency (target: 12-37 trades/year) and robustness in both bull and bear markets by following higher timeframe trend.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,33 +20,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot calculation and EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+
+    # Calculate Donchian channels: 20-period high/low
+    high_series = pd.Series(high_12h)
+    low_series = pd.Series(low_12h)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+
+    # Align Donchian channels to lower timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+
     close_1d = df_1d['close'].values
-
-    # Calculate Camarilla pivot levels for the previous day
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    # H-L = high - low of previous day
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
-
-    # Align Camarilla levels to 4h timeframe (using previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    h_l = high_1d - low_1d
-    h_l_aligned = align_htf_to_ltf(prices, df_1d, h_l)
-
-    # Calculate 34-period EMA on daily close for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
     # Calculate volume spike threshold (2.0x 20-period SMA)
     volume_series = pd.Series(volume)
@@ -60,11 +55,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i]) or
-            np.isnan(h_l_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,30 +67,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike in uptrend
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
+            # LONG: Price breaks above Donchian high with uptrend and volume spike
+            if (close[i] > donchian_high_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and 
                 volume[i] > volume_sma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with volume spike in downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
+            # SHORT: Price breaks below Donchian low with downtrend and volume spike
+            elif (close[i] < donchian_low_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
                   volume[i] > volume_sma20[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R1 (mean reversion) or breaks below S1
-            if close[i] < r1_aligned[i]:
+            # EXIT LONG: Price breaks below Donchian low or trend turns down
+            if (close[i] < donchian_low_aligned[i] or 
+                close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S1 (mean reversion) or breaks above R1
-            if close[i] > s1_aligned[i]:
+            # EXIT SHORT: Price breaks above Donchian high or trend turns up
+            if (close[i] > donchian_high_aligned[i] or 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
