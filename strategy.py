@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_RSI_Filter
-# Hypothesis: On 1d timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction.
-# Enter long when price crosses above KAMA with RSI < 50 and weekly EMA50 uptrend.
-# Enter short when price crosses below KAMA with RSI > 50 and weekly EMA50 downtrend.
-# Exit when price crosses back over KAMA.
-# Uses weekly trend filter to avoid counter-trend trades, targeting 10-25 trades/year for low friction.
-# Works in bull via KAMA uptrend entries and in bear via KAMA downtrend entries.
+# 6h_VolumeSpike_Camarilla_Reversal
+# Hypothesis: Fade extreme price moves at daily Camarilla S3/R3 levels on 6b timeframe.
+# Enter long when price touches S3 with volume spike and RSI < 30 (oversold).
+# Enter short when price touches R3 with volume spike and RSI > 70 (overbought).
+# Exit when price reverts to the daily pivot point.
+# Uses volume confirmation to avoid false breaks and RSI for momentum exhaustion.
+# Works in ranging markets (mean reversion) and avoids strong trends via RSI extremes.
+# Target: 20-40 trades/year per symbol for low friction and high win rate.
 
-name = "1d_KAMA_Trend_RSI_Filter"
-timeframe = "1d"
+name = "6h_VolumeSpike_Camarilla_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,51 +21,47 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    def calculate_kama(close, period=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, n=period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.full_like(close, np.nan, dtype=float)
-        kama[period] = close[period]
-        for i in range(period+1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
-    
-    # Calculate RSI
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full_like(close, np.nan, dtype=float)
-        avg_loss = np.full_like(close, np.nan, dtype=float)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    # Calculate KAMA and RSI
-    kama = calculate_kama(close, period=10, fast=2, slow=30)
-    rsi = calculate_rsi(close, period=14)
-    
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Load daily data for Camarilla pivot calculation and RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    # Typical price (Pivot point)
+    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+    daily_range = daily_high - daily_low
+    
+    # Camarilla levels: S3 and R3
+    r3 = daily_pivot + daily_range * 1.25
+    s3 = daily_pivot - daily_range * 1.25
+    
+    # Align daily levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    
+    # Calculate daily RSI(14) for momentum exhaustion signal
+    delta = pd.Series(daily_close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average (to avoid noise)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,7 +70,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(weekly_ema50_aligned[i]):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,31 +80,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        weekly_trend = weekly_ema50_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        pivot_val = pivot_aligned[i]
+        rsi_val = rsi_aligned[i]
+        vol_confirm = volume_confirm[i]
         
         if position == 0:
-            # LONG: Price crosses above KAMA with RSI < 50 and weekly uptrend
-            if close[i] > kama_val and close[i-1] <= kama[i-1] and rsi_val < 50 and close[i] > weekly_trend:
+            # LONG: Price at S3, oversold RSI, volume spike
+            if low[i] <= s3_val and rsi_val < 30 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below KAMA with RSI > 50 and weekly downtrend
-            elif close[i] < kama_val and close[i-1] >= kama[i-1] and rsi_val > 50 and close[i] < weekly_trend:
+            # SHORT: Price at R3, overbought RSI, volume spike
+            elif high[i] >= r3_val and rsi_val > 70 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below KAMA
-            if close[i] < kama_val and close[i-1] >= kama[i-1]:
+            # EXIT LONG: Price returns to pivot (mean reversion complete)
+            if close[i] >= pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above KAMA
-            if close[i] > kama_val and close[i-1] <= kama[i-1]:
+            # EXIT SHORT: Price returns to pivot (mean reversion complete)
+            if close[i] <= pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
