@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 160119: 6h_Keltner_Channel_Reversal_12hTrend_Volume
-# Hypothesis: Mean reversion at Keltner Channel bands with 12h trend filter and volume confirmation.
-# Works in bull markets by buying dips in uptrend, and in bear markets by selling rallies in downtrend.
-# Uses 6h timeframe with 12h EMA trend filter and 1.5x ATR Keltner bands for dynamic support/resistance.
-# Volume spike (>1.5x 20-period average) confirms momentum behind the reversal.
-# Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
+"""
+160122: 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: Price breaking above/below daily Camarilla R3/S3 levels with daily EMA trend and volume confirmation on 12h timeframe. Designed to capture strong trending moves while avoiding false breakouts. Works in bull/bear by following higher timeframe trend. Targets 50-150 total trades over 4 years.
+"""
 
-name = "6h_Keltner_Channel_Reversal_12hTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,38 +22,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Get daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
 
-    # Calculate 12-period ATR for Keltner Channel
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=12, min_periods=12).mean().values
+    # Calculate daily high, low, close for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate EMA(20) for middle band
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla levels: R3, S3
+    camarilla_range = high_1d - low_1d
+    r3_level = close_1d + 1.1 * camarilla_range / 2
+    s3_level = close_1d - 1.1 * camarilla_range / 2
 
-    # Keltner Channel bands: ±1.5 * ATR from EMA(20)
-    kc_upper = ema_20 + 1.5 * atr
-    kc_lower = ema_20 - 1.5 * atr
+    # Align Camarilla levels to 12h timeframe
+    r3_level_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
+    s3_level_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
 
-    # 12h EMA34 trend filter
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Daily EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Volume confirmation: >1.5x 20-period average
+    # Volume confirmation: >1.3x 20-period average (on 12h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirm = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(40, n):  # Start after warmup period
-        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(volume_confirm[i])):
+    for i in range(35, n):  # Start after EMA34 warmup
+        if (np.isnan(r3_level_aligned[i]) or np.isnan(s3_level_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,33 +61,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price touches lower Keltner band + 12h uptrend + volume confirmation
-            if (low[i] <= kc_lower[i] and 
-                close[i] > ema_34_12h_aligned[i] and 
+            # LONG: Price breaks above R3 + daily EMA uptrend + volume confirmation
+            if (close[i] > r3_level_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_confirm[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Price touches upper Keltner band + 12h downtrend + volume confirmation
-            elif (high[i] >= kc_upper[i] and 
-                  close[i] < ema_34_12h_aligned[i] and 
+            # SHORT: Price breaks below S3 + daily EMA downtrend + volume confirmation
+            elif (close[i] < s3_level_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_confirm[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above EMA(20) (mean reversion complete)
-            if close[i] >= ema_20[i]:
+            # EXIT LONG: Price closes below daily EMA (trend reversal)
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Price crosses below EMA(20) (mean reversion complete)
-            if close[i] <= ema_20[i]:
+            # EXIT SHORT: Price closes above daily EMA (trend reversal)
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
 
     return signals
