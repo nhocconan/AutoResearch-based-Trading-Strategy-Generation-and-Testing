@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 12h_1d_1w_Camarilla_R4S4_Breakout_Trend_Filter
-# Hypothesis: Uses 1d and 1w Camarilla R4/S4 levels as key support/resistance on 12h timeframe.
-# Enters long when price breaks above R4 with bullish 1d/1w trend and volume confirmation.
-# Enters short when price breaks below S4 with bearish 1d/1w trend and volume confirmation.
-# Uses 1d EMA50 and 1w EMA200 as trend filters to avoid counter-trend trades.
-# Designed for low trade frequency (~50-150 total trades over 4 years) to minimize fee drag.
-# Works in bull/bear markets by following multi-timeframe trend while using daily/weekly
-# Camarilla breakouts for precise entries.
+# 4h_12h_1d_Trix_VolumeSpike_Regime
+# Hypothesis: Combines TRIX momentum (12h) with volume spike and Choppiness regime filter on 4h.
+# Goes long when TRIX turns positive (bullish momentum) with volume spike in low-chop (trending) market.
+# Goes short when TRIX turns negative (bearish momentum) with volume spike in low-chop market.
+# Uses 1d ADX to confirm trend strength (ADX > 25) to avoid whipsaws in ranging markets.
+# Designed for low trade frequency (<100/year) to minimize fee drag and improve generalization.
 
-name = "12h_1d_1w_Camarilla_R4S4_Breakout_Trend_Filter"
-timeframe = "12h"
+name = "4h_12h_1d_Trix_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,60 +24,95 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.5x 20-period average (on 12h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Volume spike: >1.8x 30-period average (to reduce trade frequency)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
-    # Daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # 1h data for Choppiness index (regime filter)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
     
-    # Calculate Camarilla pivot levels for each day (R4/S4)
-    camarilla_r4_1d = close_1d + ((high_1d - low_1d) * 1.1 / 2)
-    camarilla_s4_1d = close_1d - ((high_1d - low_1d) * 1.1 / 2)
+    # True Range
+    tr1 = high_1h[1:] - low_1h[1:]
+    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
+    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align index
     
-    # Weekly data for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # ATR(14)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # +DM and -DM
+    up_move = high_1h[1:] - high_1h[:-1]
+    down_move = low_1h[:-1] - low_1h[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smoothed +DM, -DM, TR
+    def smooth(val, period):
+        smoothed = np.zeros_like(val)
+        smoothed[:] = np.nan
+        if len(val) >= period:
+            # First value: simple average
+            smoothed[period-1] = np.nansum(val[:period])
+            # Wilder smoothing
+            for i in range(period, len(val)):
+                smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + val[i]
+        return smoothed
+    
+    smoothed_plus_dm = smooth(plus_dm, 14)
+    smoothed_minus_dm = smooth(minus_dm, 14)
+    smoothed_tr = smooth(tr, 14)
+    
+    # +DI and -DI
+    plus_di = 100 * smoothed_plus_dm / smoothed_tr
+    minus_di = 100 * smoothed_minus_dm / smoothed_tr
+    
+    # DX and ADX
+    dx = np.zeros_like(close_1h)
+    dx[:] = np.nan
+    di_sum = plus_di + minus_di
+    mask = di_sum > 0
+    dx[mask] = 100 * np.abs(plus_di[mask] - minus_di[mask]) / di_sum[mask]
+    
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_trending = adx > 25  # trending market filter
+    
+    # 12h data for TRIX
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla pivot levels for each week (R4/S4)
-    camarilla_r4_1w = close_1w + ((high_1w - low_1w) * 1.1 / 2)
-    camarilla_s4_1w = close_1w - ((high_1w - low_1w) * 1.1 / 2)
+    # TRIX: EMA of EMA of EMA of close, then ROC
+    ema1 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Rate of change of triple EMA
+    trix = np.zeros_like(ema3)
+    trix[:] = np.nan
+    trix[12:] = (ema3[12:] - ema3[:-12]) / ema3[:-12] * 100
     
-    # Weekly EMA200 for trend filter (longer-term trend)
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align all indicators to 12h timeframe
-    camarilla_r4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_1d)
-    camarilla_s4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_1d)
-    camarilla_r4_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4_1w)
-    camarilla_s4_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4_1w)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Align indicators to 4h timeframe
+    volume_spike_aligned = align_htf_to_ltf(prices, prices, volume_spike)  # already 4h
+    adx_trending_aligned = align_htf_to_ltf(prices, df_1h, adx_trending)
+    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        if (np.isnan(camarilla_r4_1d_aligned[i]) or
-            np.isnan(camarilla_s4_1d_aligned[i]) or
-            np.isnan(camarilla_r4_1w_aligned[i]) or
-            np.isnan(camarilla_s4_1w_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(ema_200_1w_aligned[i])):
+    for i in range(60, n):
+        if (np.isnan(trix_aligned[i]) or 
+            np.isnan(adx_trending_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,39 +120,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Multi-timeframe trend filter: bullish if price > both EMAs, bearish if price < both
-        trend_bullish = close[i] > ema_50_1d_aligned[i] and close[i] > ema_200_1w_aligned[i]
-        trend_bearish = close[i] < ema_50_1d_aligned[i] and close[i] < ema_200_1w_aligned[i]
-        
         if position == 0:
-            # LONG: Price breaks above R4 (1d OR 1w) + bullish trend + volume spike
-            if ((close[i] > camarilla_r4_1d_aligned[i] or close[i] > camarilla_r4_1w_aligned[i]) and
-                trend_bullish and
-                volume_spike[i]):
+            # LONG: TRIX turns positive (>0) + volume spike + trending market (ADX>25)
+            if (trix_aligned[i] > 0 and 
+                trix_aligned[i-1] <= 0 and  # crossed above zero
+                volume_spike_aligned[i] and
+                adx_trending_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S4 (1d OR 1w) + bearish trend + volume spike
-            elif ((close[i] < camarilla_s4_1d_aligned[i] or close[i] < camarilla_s4_1w_aligned[i]) and
-                  trend_bearish and
-                  volume_spike[i]):
+            # SHORT: TRIX turns negative (<0) + volume spike + trending market
+            elif (trix_aligned[i] < 0 and 
+                  trix_aligned[i-1] >= 0 and  # crossed below zero
+                  volume_spike_aligned[i] and
+                  adx_trending_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S4 (1d OR 1w) OR bearish trend
-            if (close[i] < camarilla_s4_1d_aligned[i]) or \
-               (close[i] < camarilla_s4_1w_aligned[i]) or \
-               (not trend_bullish):
+            # EXIT LONG: TRIX turns negative OR loss of trend
+            if (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0) or \
+               (not adx_trending_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R4 (1d OR 1w) OR bullish trend
-            if (close[i] > camarilla_r4_1d_aligned[i]) or \
-               (close[i] > camarilla_r4_1w_aligned[i]) or \
-               (not trend_bearish):
+            # EXIT SHORT: TRIX turns positive OR loss of trend
+            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0) or \
+               (not adx_trending_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
