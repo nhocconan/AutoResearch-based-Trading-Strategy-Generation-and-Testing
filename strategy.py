@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4H_CAMARILLA_R1_S1_BREAKOUT_1DVOLUME_CONFIRMATION
-# Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d volume confirmation to filter false breakouts.
-# Long when 4h close breaks above R1 and 1d volume > 1.5x 20-period average; short when breaks below S1 with same volume filter.
-# Uses 1d EMA50 trend filter to avoid counter-trend trades. Designed for low-frequency, high-probability setups in all market regimes.
-# Targets 25-40 trades/year to minimize fee drag while capturing institutional interest levels.
+# 4H_CAMARILLA_R3_S3_BREAKOUT_12HTREND_VOLUME
+# Hypothesis: Camarilla pivot levels (R3/S3) on 1d combined with 12h EMA trend and volume confirmation.
+# Long when price closes above R3 with volume > 1.5x average and price above 12h EMA.
+# Short when price closes below S3 with volume > 1.5x average and price below 12h EMA.
+# Exit when price returns to opposite pivot level (R1 for longs, S1 for shorts) or trend invalidates.
+# Designed to capture breakouts in trending markets with volume confirmation.
+# Targets 25-40 trades/year to minimize fee drain with high-probability setups.
 
-name = "4H_CAMARILLA_R1_S1_BREAKOUT_1DVOLUME_CONFIRMATION"
+name = "4H_CAMARILLA_R3_S3_BREAKOUT_12HTREND_VOLUME"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,44 +25,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for each 4h bar using prior bar's OHLC
-    # R1 = C + (H-L)*1.12/12, S1 = C - (H-L)*1.12/12
-    # We use the previous bar's OHLC to avoid look-ahead
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]  # Initialize first value
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    
-    rang = prev_high - prev_low
-    r1 = prev_close + rang * 1.12 / 12
-    s1 = prev_close - rang * 1.12 / 12
-    
-    # 1d volume confirmation: compare current 1d volume to its 20-period average
+    # Calculate Camarilla levels from previous 1d candle
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 25:  # Need enough for 20-period average
+    if len(df_1d) < 2:
         return np.zeros(n)
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_1d_avg = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
-    # 1d EMA50 trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate Camarilla levels for each 4h bar (based on previous day)
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # 12h EMA for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    pclose_12h = df_12h['close'].values
+    ema12h = pd.Series(pclose_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema12h_aligned = align_htf_to_ltf(prices, df_12h, ema12h)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators are stable
+    start_idx = 30  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(vol_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(R1[i]) or np.isnan(S1[i]) or 
+            np.isnan(ema12h_aligned[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +69,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume filter: current 1d volume > 1.5x 20-period average
-        vol_filter = vol_1d_aligned[i] > vol_ma_20_aligned[i] * 1.5
-        
         if position == 0:
-            # LONG: close breaks above R1 with volume confirmation and uptrend
-            if close[i] > r1[i] and vol_filter and close[i] > ema50_1d_aligned[i]:
+            # LONG: Close above R3 with volume confirmation and uptrend
+            if close[i] > R3[i] and vol_confirm[i] and close[i] > ema12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: close breaks below S1 with volume confirmation and downtrend
-            elif close[i] < s1[i] and vol_filter and close[i] < ema50_1d_aligned[i]:
+            # SHORT: Close below S3 with volume confirmation and downtrend
+            elif close[i] < S3[i] and vol_confirm[i] and close[i] < ema12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: close returns below R1 or trend breaks
-            if close[i] < r1[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price returns to R1 or trend breaks
+            if close[i] < R1[i] or close[i] < ema12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: close returns above S1 or trend breaks
-            if close[i] > s1[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price returns to S1 or trend breaks
+            if close[i] > S1[i] or close[i] > ema12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
