@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WilliamsAlligator_ElderRay_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "12h_VolumeWeighted_RSI_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,58 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY DATA FOR TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === 1D DATA FOR TREND FILTER AND RSI ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator on weekly (3 SMAs: 13, 8, 5)
-    # Jaw (13-period, 8-bar shift)
-    sma13_1w = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().values
-    jaw_1w = np.roll(sma13_1w, 8)  # shift forward 8 bars
-    jaw_1w[:8] = np.nan  # first 8 invalid
+    # Calculate 34-period EMA for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Teeth (8-period, 5-bar shift)
-    sma8_1w = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().values
-    teeth_1w = np.roll(sma8_1w, 5)  # shift forward 5 bars
-    teeth_1w[:5] = np.nan  # first 5 invalid
+    # Calculate 14-period RSI on 1d closes
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
+    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # Lips (5-period, 3-bar shift)
-    sma5_1w = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().values
-    lips_1w = np.roll(sma5_1w, 3)  # shift forward 3 bars
-    lips_1w[:3] = np.nan  # first 3 invalid
-    
-    # Align Alligator components to daily
-    jaw_1d = align_htf_to_ltf(prices, df_1w, jaw_1w)
-    teeth_1d = align_htf_to_ltf(prices, df_1w, teeth_1w)
-    lips_1d = align_htf_to_ltf(prices, df_1w, lips_1w)
-    
-    # Weekly trend: bullish when Lips > Teeth > Jaw
-    weekly_bullish = (lips_1d > teeth_1d) & (teeth_1d > jaw_1d)
-    weekly_bearish = (lips_1d < teeth_1d) & (teeth_1d < jaw_1d)
-    
-    # === DAILY DATA FOR ELDER RAY ===
-    # Calculate 13-period EMA for Elder Ray
-    ema13_1d = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power_1d = high - ema13_1d
-    bear_power_1d = low - ema13_1d
-    
-    # === VOLUME CONFIRMATION (20-period) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    # === VOLUME WEIGHTED PRICE MOMENTUM (12-period) ===
+    # Price change weighted by volume
+    price_change = np.diff(close, prepend=close[0])
+    vol_weighted_change = price_change * volume
+    vol_weighted_ma = pd.Series(vol_weighted_change).rolling(window=12, min_periods=12).mean().values
+    vol_weighted_mean = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    volume_weighted_momentum = np.divide(
+        vol_weighted_ma, 
+        vol_weighted_mean, 
+        out=np.zeros_like(vol_weighted_ma), 
+        where=vol_weighted_mean!=0
+    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(50, 12, 14)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_1d[i]) or np.isnan(teeth_1d[i]) or np.isnan(lips_1d[i]) or
-            np.isnan(bull_power_1d[i]) or np.isnan(bear_power_1d[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema34_12h[i]) or np.isnan(rsi_12h[i]) or 
+            np.isnan(volume_weighted_momentum[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,24 +66,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Bullish weekly trend + strong bull power + volume confirmation
-            if weekly_bullish[i] and (bull_power_1d[i] > 0) and volume_spike[i]:
+            # LONG: Price above trend + RSI not overbought + positive volume-weighted momentum
+            if (close[i] > ema34_12h[i] and 
+                rsi_12h[i] < 70 and
+                volume_weighted_momentum[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish weekly trend + strong bear power + volume confirmation
-            elif weekly_bearish[i] and (bear_power_1d[i] < 0) and volume_spike[i]:
+            # SHORT: Price below trend + RSI not oversold + negative volume-weighted momentum
+            elif (close[i] < ema34_12h[i] and 
+                  rsi_12h[i] > 30 and
+                  volume_weighted_momentum[i] < 0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Weekly trend turns bearish OR bull power turns negative
-            if weekly_bearish[i] or (bull_power_1d[i] <= 0):
+            # EXIT LONG: Price breaks below trend OR RSI overbought
+            if close[i] < ema34_12h[i] or rsi_12h[i] >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Weekly trend turns bullish OR bear power turns positive
-            if weekly_bullish[i] or (bear_power_1d[i] >= 0):
+            # EXIT SHORT: Price breaks above trend OR RSI oversold
+            if close[i] > ema34_12h[i] or rsi_12h[i] <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
