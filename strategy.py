@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla pivot breakout with 12h trend filter and volume confirmation
-# Targets 25-40 trades/year on BTC/ETH by combining price structure (Camarilla levels),
-# trend filter (12h EMA50), and volume spike (1d) to avoid whipsaws in both bull and bear markets.
-# Uses discrete position sizing (0.25) to minimize fee churn.
-
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_1dVol"
-timeframe = "4h"
+name = "1d_WeeklyTrend_DailyPullback_Entry_v5"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,35 +17,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h Trend Filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # ===== Weekly Trend Filter (HTF) =====
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Daily Camarilla Pivot Points
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    close_1d_prev = np.roll(close_1d, 1)
-    close_1d_prev[0] = close_1d[0]
+    # ===== Daily Pullback Entry =====
+    ema21_daily = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    atr_raw = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
     
-    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
-    r1 = pivot + 1.1 * (high_1d - low_1d)
-    s1 = pivot - 1.1 * (high_1d - low_1d)
+    # ===== Daily Volume Spike Filter =====
+    vol_avg_daily = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike_daily = volume > (1.5 * vol_avg_daily)
     
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Daily Volume Spike Filter
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
-    
-    # Session Filter: 08-20 UTC
+    # ===== Session Filter: 08-20 UTC =====
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
@@ -60,9 +41,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(ema21_daily[i]) or np.isnan(atr_raw[i]) or
+            np.isnan(vol_spike_daily[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,29 +62,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        atr = atr_raw[i]
+        
         if position == 0:
-            # Long: Price touches S1 + above 12h EMA50 + daily volume spike
-            if (low[i] <= s1_aligned[i] and
-                close[i] > ema50_12h_aligned[i] and
-                vol_spike_1d_aligned[i] > 0.5):
+            # Long: Uptrend + pullback to EMA21 + volume spike
+            if (close[i] > ema34_1w_aligned[i] and
+                low[i] <= ema21_daily[i] and
+                vol_spike_daily[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price touches R1 + below 12h EMA50 + daily volume spike
-            elif (high[i] >= r1_aligned[i] and
-                  close[i] < ema50_12h_aligned[i] and
-                  vol_spike_1d_aligned[i] > 0.5):
+            # Short: Downtrend + pullback to EMA21 + volume spike
+            elif (close[i] < ema34_1w_aligned[i] and
+                  high[i] >= ema21_daily[i] and
+                  vol_spike_daily[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price reaches pivot or closes below 12h EMA50
-            if high[i] >= pivot_aligned[i] or close[i] < ema50_12h_aligned[i]:
+            # Exit: Close below EMA21 or trend reversal
+            if close[i] < ema21_daily[i] or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price reaches pivot or closes above 12h EMA50
-            if low[i] <= pivot_aligned[i] or close[i] > ema50_12h_aligned[i]:
+            # Exit: Close above EMA21 or trend reversal
+            if close[i] > ema21_daily[i] or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
