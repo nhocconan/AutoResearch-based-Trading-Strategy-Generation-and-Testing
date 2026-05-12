@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Market_Regime_Donchian_Breakout"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     open_ = prices['open'].values
@@ -18,37 +18,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian breakout levels
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
-    
-    # 1d ATR for volatility filter (use completed 1d bar)
+    # Daily trend filter: EMA34 on 1d close
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate Camarilla pivot levels from 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
-    tr = np.concatenate([[np.nan], tr2])  # first tr is nan
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume filter: 6-period volume MA
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Camarilla levels: R3, S3, R4, S4
+    # R3 = Close + 1.1*(High-Low)*1.1/2
+    # S3 = Close - 1.1*(High-Low)*1.1/2
+    # R4 = Close + 1.1*(High-Low)*1.1
+    # S4 = Close - 1.1*(High-Low)*1.1
+    camarilla_range = high_1d - low_1d
+    r3 = close_1d + 1.1 * camarilla_range * 1.1 / 2
+    s3 = close_1d - 1.1 * camarilla_range * 1.1 / 2
+    r4 = close_1d + 1.1 * camarilla_range * 1.1
+    s4 = close_1d - 1.1 * camarilla_range * 1.1
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 34  # ensure EMA34 has enough data
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or np.isnan(atr_1d_aligned[i]):
+        # Skip if EMA data not ready
+        if np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,24 +66,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above upper Donchian with volume expansion and volatility filter
-            if (close[i] > donch_high_aligned[i]) and (volume[i] > 1.5 * vol_ma[i]) and (atr_1d_aligned[i] > 0):
+            # Long: price breaks above R3 with volume confirmation and above daily EMA34
+            if (close[i] > r3_aligned[i]) and volume_confirm[i] and (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Donchian with volume expansion and volatility filter
-            elif (close[i] < donch_low_aligned[i]) and (volume[i] > 1.5 * vol_ma[i]) and (atr_1d_aligned[i] > 0):
+            # Short: price breaks below S3 with volume confirmation and below daily EMA34
+            elif (close[i] < s3_aligned[i]) and volume_confirm[i] and (close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below lower Donchian (trailing stop)
-            if close[i] < donch_low_aligned[i]:
+            # Exit long: price crosses below S3
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above upper Donchian (trailing stop)
-            if close[i] > donch_high_aligned[i]:
+            # Exit short: price crosses above R3
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
