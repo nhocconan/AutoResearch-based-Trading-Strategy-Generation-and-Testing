@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter
-# Hypothesis: On 12h timeframe, enter long when price closes above daily R1 with close > 1d EMA34.
+# 4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter
+# Hypothesis: On 4h timeframe, enter long when price closes above daily R1 with close > 1d EMA34.
 # Enter short when price closes below daily S1 with close < 1d EMA34.
 # Exit when price crosses 1d EMA34 (trend reversal).
 # Uses 1d EMA for trend filter to reduce whipsaw and improve performance in both bull and bear markets.
-# Targets 12-37 trades/year for low fee drift.
+# Targets 20-30 trades/year for low fee drag.
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -44,7 +44,7 @@ def generate_signals(prices):
     # Calculate 1d EMA34
     ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align daily levels and 1d EMA34 to 12h timeframe
+    # Align daily levels and 1d EMA34 to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
