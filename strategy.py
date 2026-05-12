@@ -1,20 +1,64 @@
 #!/usr/bin/env python3
-# 1d_WeeklyDonchianBreakout
-# Hypothesis: Buy breakout above weekly Donchian high (20-week) in uptrend, sell breakout below weekly Donchian low in downtrend.
-# Uses weekly price structure for trend and key levels, with daily volume confirmation.
-# Designed for very low frequency (<15 trades/year) to avoid fee drag. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
+# 12h_Vortex_1dTrend
+# Hypothesis: Use Vortex indicator (VI+ and VI-) on 12h to detect trend direction,
+# filtered by 1d EMA34 trend and volume spike. Enter long when VI+ > VI- and price > 1d EMA34,
+# enter short when VI- > VI+ and price < 1d EMA34. Exit on Vortex crossover or trend failure.
+# Designed for low frequency (10-30 trades/year) to avoid fee drag. Works in bull (catch trends)
+# and bear (catch downtrends) with trend filter and volume confirmation.
 
-name = "1d_WeeklyDonchianBreakout"
-timeframe = "1d"
+name = "12h_Vortex_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def vortex_indicator(high, low, close):
+    """
+    Calculate Vortex Indicator (VI+ and VI-).
+    Returns VI+ and VI- arrays.
+    """
+    n = len(high)
+    tr = np.zeros(n)
+    vm_plus = np.zeros(n)
+    vm_minus = np.zeros(n)
+    
+    # True Range
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Vortex Movement
+    for i in range(1, n):
+        vm_plus[i] = abs(high[i] - low[i-1])
+        vm_minus[i] = abs(low[i] - high[i-1])
+    
+    # Sum over period (default 14)
+    period = 14
+    tr_sum = np.zeros(n)
+    vm_plus_sum = np.zeros(n)
+    vm_minus_sum = np.zeros(n)
+    
+    for i in range(n):
+        if i < period:
+            tr_sum[i] = np.sum(tr[max(0, i-period+1):i+1])
+            vm_plus_sum[i] = np.sum(vm_plus[max(0, i-period+1):i+1])
+            vm_minus_sum[i] = np.sum(vm_minus[max(0, i-period+1):i+1])
+        else:
+            tr_sum[i] = tr_sum[i-1] - tr[i-period] + tr[i]
+            vm_plus_sum[i] = vm_plus_sum[i-1] - vm_plus[i-period] + vm_plus[i]
+            vm_minus_sum[i] = vm_minus_sum[i-1] - vm_minus[i-period] + vm_minus[i]
+    
+    # Avoid division by zero
+    vi_plus = np.where(tr_sum > 0, vm_plus_sum / tr_sum, 0)
+    vi_minus = np.where(tr_sum > 0, vm_minus_sum / tr_sum, 0)
+    
+    return vi_plus, vi_minus
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,39 +66,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly Donchian channels (20-period)
-    donchian_high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate Vortex on 12h data
+    vi_plus, vi_minus = vortex_indicator(high, low, close)
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Daily volume confirmation: 20-period average
+    # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align weekly data to daily timeframe
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1w, donchian_low_20)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align daily data to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure indicators are stable
+    start_idx = 34  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,34 +102,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA50
-        trend_up = close[i] > ema_50_1w_aligned[i]
-        trend_down = close[i] < ema_50_1w_aligned[i]
+        # Trend filter: price above/below daily EMA34
+        trend_up = close[i] > ema_34_1d_aligned[i]
+        trend_down = close[i] < ema_34_1d_aligned[i]
         
         # Volume filter
         vol_ok = volume[i] > vol_ma_20[i]
         
+        # Vortex signals
+        vi_plus_cross = vi_plus[i] > vi_minus[i]
+        vi_minus_cross = vi_minus[i] > vi_plus[i]
+        
         if position == 0:
-            # LONG: Breakout above weekly Donchian high in uptrend with volume
-            if (close[i] > donchian_high_20_aligned[i] and 
-                trend_up and vol_ok):
+            # LONG: VI+ > VI-, price above daily EMA34, volume confirmation
+            if vi_plus_cross and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below weekly Donchian low in downtrend with volume
-            elif (close[i] < donchian_low_20_aligned[i] and 
-                  trend_down and vol_ok):
+            # SHORT: VI- > VI+, price below daily EMA34, volume confirmation
+            elif vi_minus_cross and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price closes below weekly Donchian low or trend reverses
-            if (close[i] < donchian_low_20_aligned[i] or not trend_up):
+            # EXIT LONG: VI- > VI+ (Vortex crossover down) or trend fails
+            if vi_minus_cross or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above weekly Donchian high or trend reverses
-            if (close[i] > donchian_high_20_aligned[i] or not trend_down):
+            # EXIT SHORT: VI+ > VI- (Vortex crossover up) or trend fails
+            if vi_plus_cross or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
