@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Daily Camarilla Pivot + Volume Spike + Chop Filter
-Hypothesis: Daily Camarilla pivot levels (from daily chart) act as strong support/resistance.
-In trending markets, price respects these levels as pullback entries.
+4h_12h_Camarilla_R1S1_Breakout_Volume_Trend
+Hypothesis: Camarilla R1/S1 levels from 12h act as strong support/resistance in trending markets.
+Price breaking above R1 or below S1 with volume confirms trend continuation.
 In ranging markets, reversals occur at these levels.
-Volume confirmation filters false breakouts.
-Choppiness filter ensures we only trade in trending or clear ranging conditions.
-Timeframe: 12h balances trade frequency (~12-37/year) with signal quality.
-Works in bull/bear: uses price action at key levels rather than trend direction.
+Uses 12h trend filter to avoid counter-trend trades.
+Works in bull/bear: trend filter adapts to market direction.
+Timeframe: 4h balances trade frequency with signal quality.
 """
-
-name = "12h_DailyCamarilla_Pivot_Volume_Chop"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R1S1_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -28,96 +26,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY DATA FOR CAMARILLA PIVOT LEVELS ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 12H DATA FOR CAMARILLA PIVOTS ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Camarilla pivot points calculation
-    # P = (H + L + C) / 3
-    # R4 = C + ((H-L) * 1.1/2)
-    # R3 = C + ((H-L) * 1.1/4)
-    # R2 = C + ((H-L) * 1.1/6)
-    # R1 = C + ((H-L) * 1.1/12)
-    # S1 = C - ((H-L) * 1.1/12)
-    # S2 = C - ((H-L) * 1.1/6)
-    # S3 = C - ((H-L) * 1.1/4)
-    # S4 = C - ((H-L) * 1.1/2)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate pivot and Camarilla levels for 12h
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
+    r1_12h = close_12h + (range_12h * 1.1 / 12)  # R1 = C + (H-L)*1.1/12
+    s1_12h = close_12h - (range_12h * 1.1 / 12)  # S1 = C - (H-L)*1.1/12
+    r2_12h = close_12h + (range_12h * 1.1 / 6)   # R2 = C + (H-L)*1.1/6
+    s2_12h = close_12h - (range_12h * 1.1 / 6)   # S2 = C - (H-L)*1.1/6
     
-    r4_1d = close_1d + (range_1d * 1.1 / 2)
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
-    r2_1d = close_1d + (range_1d * 1.1 / 6)
-    r1_1d = close_1d + (range_1d * 1.1 / 12)
-    s1_1d = close_1d - (range_1d * 1.1 / 12)
-    s2_1d = close_1d - (range_1d * 1.1 / 6)
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
-    s4_1d = close_1d - (range_1d * 1.1 / 2)
+    # Align 12h levels to 4h timeframe
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    r2_12h_aligned = align_htf_to_ltf(prices, df_12h, r2_12h)
+    s2_12h_aligned = align_htf_to_ltf(prices, df_12h, s2_12h)
     
-    # Align daily levels to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # === 12H TREND FILTER (EMA 50) ===
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # === VOLUME CONFIRMATION (24-period for 12h) ===
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (vol_ma * 2.0)  # Strong volume filter to reduce trades
-    
-    # === CHOPPINESS FILTER (14-period) ===
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First value has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR (14)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Chop = 100 * log10(sum(TR,14) / (max(high,14) - min(low,14))) / log10(14)
-    def rolling_max(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=1).max().values
-    
-    def rolling_min(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=1).min().values
-    
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    max_high = rolling_max(high, 14)
-    min_low = rolling_min(low, 14)
-    range_14 = max_high - min_low
-    
-    # Avoid division by zero
-    chop = np.full_like(close, 50.0, dtype=float)
-    mask = range_14 > 0
-    chop[mask] = 100 * np.log10(sum_tr[mask] / range_14[mask]) / np.log10(14)
-    
-    # Chop thresholds: >61.8 = ranging, <38.2 = trending
-    chop_ranging = chop > 61.8
-    chop_trending = chop < 38.2
+    # === VOLUME CONFIRMATION (20-period) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # For volume MA and chop
+    start_idx = 50  # For EMA 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(r2_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(r4_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(s2_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(s4_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(chop[i])):
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(r2_12h_aligned[i]) or np.isnan(s2_12h_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -126,34 +72,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price bounces off S1 or S2 with volume spike
-            long_condition = (((close[i] > s1_1d_aligned[i] and low[i] <= s1_1d_aligned[i] * 1.002) or
-                              (close[i] > s2_1d_aligned[i] and low[i] <= s2_1d_aligned[i] * 1.002)) and
-                             volume_spike[i] and
-                             (chop_ranging[i] or chop_trending[i]))  # Trade in both regimes
-            
-            # SHORT: Price rejects at R1 or R2 with volume spike
-            short_condition = (((close[i] < r1_1d_aligned[i] and high[i] >= r1_1d_aligned[i] * 0.998) or
-                               (close[i] < r2_1d_aligned[i] and high[i] >= r2_1d_aligned[i] * 0.998)) and
-                              volume_spike[i] and
-                              (chop_ranging[i] or chop_trending[i]))
-            
-            if long_condition:
+            # LONG: Price breaks above R1 with volume, only if above 12h EMA50 (uptrend)
+            if close[i] > r1_12h_aligned[i] and volume_spike[i] and close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            elif short_condition:
+            # SHORT: Price breaks below S1 with volume, only if below 12h EMA50 (downtrend)
+            elif close[i] < s1_12h_aligned[i] and volume_spike[i] and close[i] < ema_50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below S2 or reaches R2
-            if close[i] < s2_1d_aligned[i] or close[i] > r2_1d_aligned[i]:
+            # EXIT LONG: Price breaks below S1 or reaches R2
+            if close[i] < s1_12h_aligned[i] or close[i] > r2_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R2 or reaches S2
-            if close[i] > r2_1d_aligned[i] or close[i] < s2_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above R1 or reaches S2
+            if close[i] > r1_12h_aligned[i] or close[i] < s2_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
