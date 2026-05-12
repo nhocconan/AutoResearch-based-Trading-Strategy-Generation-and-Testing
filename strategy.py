@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filter"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filter_2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -40,6 +40,11 @@ def generate_signals(prices):
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (2.0 * vol_avg)
     
+    # Price momentum: 4-period rate of change > 0
+    roc4 = np.zeros_like(close)
+    roc4[4:] = (close[4:] - close[:-4]) / close[:-4]
+    momentum = roc4 > 0
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -48,7 +53,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(momentum[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,12 +62,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 1d EMA34 + volume spike
-            if (close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_spike[i]):
+            # Long: price breaks above R1 + above 1d EMA34 + volume spike + upward momentum
+            if (close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and 
+                vol_spike[i] and momentum[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 1d EMA34 + volume spike
-            elif (close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_spike[i]):
+            # Short: price breaks below S1 + below 1d EMA34 + volume spike + downward momentum
+            elif (close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and 
+                  vol_spike[i] and not momentum[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
