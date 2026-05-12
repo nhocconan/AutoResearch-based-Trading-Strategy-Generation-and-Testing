@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
-# 12h_1D_Camarilla_R3S3_Breakout_Trend
-# Hypothesis: Breakouts above/below Camarilla R3/S3 levels from daily pivot with 1d EMA34 trend filter and volume confirmation.
-# Uses key pivot levels (R3/S3) for significant breakout signals, aligned with daily trend to avoid counter-trend trades.
-# Volume confirmation ensures institutional participation. Targets 12-37 trades/year on 12h timeframe.
+# 4h_1D_Donchian20_Breakout_VolumeTrend
+# Hypothesis: Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+# In bull markets, buy breakouts above 20-period high with uptrend; in bear markets,
+# sell breakdowns below 20-period low with downtrend. Volume > 1.5x average confirms
+# breakout strength. Exit on opposite Donchian touch or trend reversal. Targets 20-40 trades/year.
 
-name = "12h_1D_Camarilla_R3S3_Breakout_Trend"
-timeframe = "12h"
+name = "4h_1D_Donchian20_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,9 +24,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
     # Calculate 1d EMA for trend filter
@@ -33,17 +34,10 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: R4 = close + range * 1.1/2, R3 = close + range * 1.1/4, etc.
-    # We use R3 and S3 (most significant inner levels)
-    range_1d = df_1d['high'] - df_1d['low']
-    close_1d = df_1d['close']
-    r3 = close_1d + range_1d * 1.1 / 4
-    s3 = close_1d - range_1d * 1.1 / 4
-
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
+    # Calculate 4h Donchian channels (20-period)
+    period = 20
+    donchian_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    donchian_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,10 +46,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,26 +62,26 @@ def generate_signals(prices):
         bearish_trend = close[i] < ema_1d_aligned[i]
 
         if position == 0:
-            # LONG: Price breaks above R3 with bullish trend and volume confirmation
-            if close[i] > r3_aligned[i] and bullish_trend and volume_ok[i]:
+            # LONG: Price breaks above Donchian high with bullish trend and volume confirmation
+            if close[i] > donchian_high[i] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with bearish trend and volume confirmation
-            elif close[i] < s3_aligned[i] and bearish_trend and volume_ok[i]:
+            # SHORT: Price breaks below Donchian low with bearish trend and volume confirmation
+            elif close[i] < donchian_low[i] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S3 (opposite level) or trend turns bearish
-            if close[i] < s3_aligned[i] or not bullish_trend:
+            # EXIT LONG: Price touches Donchian low or trend turns bearish
+            if close[i] < donchian_low[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R3 (opposite level) or trend turns bullish
-            if close[i] > r3_aligned[i] or not bearish_trend:
+            # EXIT SHORT: Price touches Donchian high or trend turns bullish
+            if close[i] > donchian_high[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
