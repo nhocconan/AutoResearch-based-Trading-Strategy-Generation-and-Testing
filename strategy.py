@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2
 # Hypothesis: Camarilla R3/S3 breakouts with daily trend and volume filter capture momentum with controlled risk.
 # Uses 1d EMA50 for trend filter and volume > 1.5x 20-period average for confirmation.
 # Designed for low trade frequency and high win rate in both bull and bear markets.
 # Uses discrete position sizing (0.25) to limit drawdown and minimize trade frequency.
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
