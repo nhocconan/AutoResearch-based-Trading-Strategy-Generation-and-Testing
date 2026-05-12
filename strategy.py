@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R1S1_Breakout_Volume_Trend
-# Hypothesis: Camarilla R1/S1 levels derived from daily price action provide strong intraday support/resistance.
-# Enter long when price breaks above R1 with volume spike and 12h EMA50 uptrend; short when breaks below S1 with volume spike and downtrend.
-# Exit on opposite Camarilla level touch or trend reversal. Designed to work in both bull and bear markets by using 12h trend filter.
-# Uses 4h for entry timing and 12h for trend direction, minimizing false signals while capturing meaningful moves.
+# 6h_1W_1D_Telegraph_Signal_With_Volume_Filter
+# Hypothesis: Combines weekly trend (price above/below weekly VWAP) with daily momentum (RSI(14) > 50 for long, < 50 for short) and volume confirmation on 6h.
+# Weekly VWAP acts as institutional trend filter; daily RSI provides momentum entry; volume spike confirms conviction.
+# Works in bull markets (price above weekly VWAP + RSI > 50 + volume) and bear markets (price below weekly VWAP + RSI < 50 + volume).
+# Targets 15-35 trades/year with discrete sizing to minimize fee drag.
 
-name = "4h_12h_Camarilla_R1S1_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "6h_1W_1D_Telegraph_Signal_With_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,39 +23,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter and Camarilla calculation (using daily for Camarilla)
-    df_12h = get_htf_data(prices, '12h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_12h) < 20 or len(df_1d) < 2:
+    # Get weekly data for VWAP calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
 
-    # Calculate EMA50 on 12h close for trend filter
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate VWAP on weekly data: typical price * volume, cumulative
+    typical_price_1w = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3.0
+    vwap_numerator = (typical_price_1w * df_1w['volume'].values).cumsum()
+    vwap_denominator = df_1w['volume'].values.cumsum()
+    vwap_1w = vwap_numerator / vwap_denominator
 
-    # Calculate Camarilla levels from daily data
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Align weekly VWAP to 6h timeframe
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+
+    # Get daily data for RSI calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+
+    # Calculate RSI(14) on daily close
     close_1d = df_1d['close'].values
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
 
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align daily RSI to 6h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
 
-    # Calculate 20-period SMA of volume for volume spike detection
-    vol_sma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-period volume average on 6h for volume spike detection
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma_20 * 1.5)  # 50% above average
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_sma20[i])):
+        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,32 +74,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1, volume spike, and 12h trend up
-            if (close[i] > camarilla_r1_aligned[i] and
-                volume[i] > 2.0 * vol_sma20[i] and
-                ema50_12h_aligned[i] > ema50_12h_aligned[i-1]):
+            # LONG: Price above weekly VWAP, RSI > 50, volume spike
+            if close[i] > vwap_1w_aligned[i] and rsi_1d_aligned[i] > 50 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1, volume spike, and 12h trend down
-            elif (close[i] < camarilla_s1_aligned[i] and
-                  volume[i] > 2.0 * vol_sma20[i] and
-                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1]):
+            # SHORT: Price below weekly VWAP, RSI < 50, volume spike
+            elif close[i] < vwap_1w_aligned[i] and rsi_1d_aligned[i] < 50 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price touches S1 or trend turns down
-            if (close[i] < camarilla_s1_aligned[i] or
-                ema50_12h_aligned[i] < ema50_12h_aligned[i-1]):
+            # EXIT LONG: Price crosses below weekly VWAP OR RSI < 40
+            if close[i] < vwap_1w_aligned[i] or rsi_1d_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price touches R1 or trend turns up
-            if (close[i] > camarilla_r1_aligned[i] or
-                ema50_12h_aligned[i] > ema50_12h_aligned[i-1]):
+            # EXIT SHORT: Price crosses above weekly VWAP OR RSI > 60
+            if close[i] > vwap_1w_aligned[i] or rsi_1d_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
