@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1D_KAMA_Trend_With_1W_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,31 +17,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for 1-week EMA trend filter
+    # Load weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate 1-week EMA200 for trend filter
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate KAMA (1d) - Kaufman Adaptive Moving Average
+    # Parameters: ER length = 10, Fast EMA = 2, Slow EMA = 30
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Volume filter: current volume > 1.8x 20-period average
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_length))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # sum of absolute changes over er_length window
+    # Handle first er_length elements
+    change_padded = np.concatenate([np.full(er_length, np.nan), change])
+    volatility_padded = np.concatenate([np.full(er_length, np.nan), volatility])
+    
+    # Calculate ER and smoothed ER
+    er = np.where(volatility_padded != 0, change_padded / volatility_padded, 0)
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # Initialize kama
+    kama = np.full_like(close, np.nan)
+    kama[er_length] = close[er_length]  # seed
+    
+    for i in range(er_length + 1, n):
+        if np.isnan(kama[i-1]):
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Volume filter: current volume > 1.3x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_avg)
+    vol_filter = volume > (1.3 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # ensure indicators have enough data
+    start_idx = max(50, er_length + 10)  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -50,24 +72,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + above weekly EMA200 + volume filter
-            if close[i] > donchian_high[i] and close[i] > ema_200_1w_aligned[i] and vol_filter[i]:
+            # Long: Price above KAMA + above weekly EMA34 + volume filter
+            if close[i] > kama[i] and close[i] > ema_34_1w_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + below weekly EMA200 + volume filter
-            elif close[i] < donchian_low[i] and close[i] < ema_200_1w_aligned[i] and vol_filter[i]:
+            # Short: Price below KAMA + below weekly EMA34 + volume filter
+            elif close[i] < kama[i] and close[i] < ema_34_1w_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit long: Price below KAMA
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit short: Price above KAMA
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
