@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
 
-# 4h_1D_TRIX_VolumeSpike_Regime
-# Hypothesis: TRIX momentum on 4h with 1d trend filter, volume spike, and Choppiness regime filter.
-# TRIX filters noise and identifies momentum shifts. Volume spike confirms conviction.
-# Choppiness regime filter avoids whipsaws in ranging markets. Works in bull/bear by requiring
-# alignment with 1d trend and volatility regime. Targets 20-40 trades/year.
+# 12h_1W_1D_Alligator_Filter_Volume
+# Hypothesis: Williams Alligator on 1week defines primary trend (JAW/TEETH/LIPS alignment).
+# Entry on 12h when price crosses LIPS (13-period SMMA) in trend direction with volume confirmation.
+# Uses 1day ADX > 20 to filter ranging markets. Works in bull/bear by requiring trend alignment.
+# Targets 15-25 trades/year on 12h timeframe.
 
-name = "4h_1D_TRIX_VolumeSpike_Regime"
-timeframe = "4h"
+name = "12h_1W_1D_Alligator_Filter_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(data, period):
+    """Smoothed Moving Average (SMMA) - used in Williams Alligator"""
+    if len(data) < period:
+        return np.full_like(data, np.nan, dtype=np.float64)
+    result = np.full_like(data, np.nan, dtype=np.float64)
+    # First value is SMA
+    result[period-1] = np.mean(data[:period])
+    # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+    for i in range(period, len(data)):
+        result[i] = (result[i-1] * (period-1) + data[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,51 +36,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
+    # Get 1w data for Alligator trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Get 1d data for ADX filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate 1d EMA for trend filter
+    # Calculate Williams Alligator on 1week
+    # Jaw: 13-period SMMA, shifted 8 bars forward
+    # Teeth: 8-period SMMA, shifted 5 bars forward  
+    # Lips: 5-period SMMA, shifted 3 bars forward
+    median_price_1w = (df_1w['high'].values + df_1w['low'].values) / 2.0
+    jaw = smma(median_price_1w, 13)
+    teeth = smma(median_price_1w, 8)
+    lips = smma(median_price_1w, 5)
+    
+    # Shift as per Alligator definition (future shift for visualization, but we use unshifted for crossover)
+    # For trading, we use the unshifted SMMA values for crossover signals
+    jaw_1w = jaw
+    teeth_1w = teeth
+    lips_1w = lips
+    
+    # Align to 12h timeframe
+    jaw_12h = align_htf_to_ltf(prices, df_1w, jaw_1w)
+    teeth_12h = align_htf_to_ltf(prices, df_1w, teeth_1w)
+    lips_12h = align_htf_to_ltf(prices, df_1w, lips_1w)
+
+    # Calculate ADX on 1day for trend strength filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-
-    # Calculate TRIX on 4h (15-period EMA of 15-period EMA of 15-period EMA)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # First value has no previous
-
-    # Volume confirmation: current volume > 2.0x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (2.0 * vol_ma)
-
-    # Choppiness regime filter (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    chop[np.isnan(chop) | np.isinf(chop)] = 50  # Default to neutral
-    chop[highest_high - lowest_low == 0] = 50   # Avoid division by zero
-    chop_trending = chop < 38.2  # Trending regime
-    chop_ranging = chop > 61.8   # Ranging regime
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr_1d
+    minus_di = 100 * minus_dm_smooth / atr_1d
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
+
+    # Volume confirmation: current volume > 1.3x average of last 20 periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > (1.3 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(15, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(trix[i]) or
-            np.isnan(volume_ok[i]) or np.isnan(chop_trending[i])):
+        if (np.isnan(jaw_12h[i]) or np.isnan(teeth_12h[i]) or np.isnan(lips_12h[i]) or
+            np.isnan(adx_12h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,31 +121,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter: price above/below 34-period EMA on 1d
-        bullish_trend = close[i] > ema_1d_aligned[i]
-        bearish_trend = close[i] < ema_1d_aligned[i]
+        # Alligator conditions: Lips above Teeth above Jaw = bullish alignment
+        # Lips below Teeth below Jaw = bearish alignment
+        bullish_alignment = (lips_12h[i] > teeth_12h[i]) and (teeth_12h[i] > jaw_12h[i])
+        bearish_alignment = (lips_12h[i] < teeth_12h[i]) and (teeth_12h[i] < jaw_12h[i])
+        
+        # Trend filter: ADX > 20 indicates trending market
+        strong_trend = adx_12h[i] > 20
 
         if position == 0:
-            # LONG: TRIX turning up in trending regime with bullish trend and volume spike
-            if trix[i] > trix[i-1] and trix[i] > 0 and chop_trending[i] and bullish_trend and volume_ok[i]:
+            # LONG: Price crosses above Lips with bullish alignment and volume confirmation
+            if (close[i] > lips_12h[i]) and bullish_alignment and strong_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX turning down in trending regime with bearish trend and volume spike
-            elif trix[i] < trix[i-1] and trix[i] < 0 and chop_trending[i] and bearish_trend and volume_ok[i]:
+            # SHORT: Price crosses below Lips with bearish alignment and volume confirmation
+            elif (close[i] < lips_12h[i]) and bearish_alignment and strong_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX turns down OR trend turns bearish OR enters ranging market
-            if trix[i] < trix[i-1] or not bullish_trend or chop_ranging[i]:
+            # EXIT LONG: Price crosses below Lips or trend alignment breaks
+            if (close[i] < lips_12h[i]) or not bullish_alignment:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX turns up OR trend turns bullish OR enters ranging market
-            if trix[i] > trix[i-1] or not bearish_trend or chop_ranging[i]:
+            # EXIT SHORT: Price crosses above Lips or trend alignment breaks
+            if (close[i] > lips_12h[i]) or not bearish_alignment:
                 signals[i] = 0.0
                 position = 0
             else:
