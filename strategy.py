@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Refined"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -64,13 +64,13 @@ def generate_signals(prices):
             if (close[i] > camarilla_r1_aligned[i] and
                 close[i] > ema34_1d_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: Close below S1 + below daily EMA34 + volume spike
             elif (close[i] < camarilla_s1_aligned[i] and
                   close[i] < ema34_1d_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
             # Exit long: Close below S1 or below EMA34
@@ -78,13 +78,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short: Close above R1 or above EMA34
             if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
