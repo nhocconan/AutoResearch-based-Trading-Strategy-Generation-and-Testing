@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-1h_Keltner_Squeeze_Breakout
-Hypothesis: On 1h timeframe, when price breaks above Keltner upper band during low volatility (BBW < 30th percentile) with volume > 1.5x 20-period average, go long. 
-Break below lower band with volume surge goes short. 
-Use 4h EMA50 as trend filter: only long when price > EMA50, short when price < EMA50. 
-Apply session filter (08-20 UTC) to avoid low-liquidity hours. 
-Target 15-37 trades/year (60-150 total over 4 years) with tight entries to minimize fee drag.
-Works in bull via momentum breaks and bear via mean-reversion at extremes with trend filter.
+1d_KAMA_1wTrend_RSI_Momentum
+Hypothesis: On daily timeframe, KAMA (Kaufman Adaptive Moving Average) tracks trend with low whipsaw.
+Long when price > KAMA, RSI > 50, and 1w trend up (price > 1w EMA34).
+Short when price < KAMA, RSI < 50, and 1w trend down (price < 1w EMA34).
+Uses volume confirmation (volume > 1.5x 20-day average) to filter false breakouts.
+Designed for low turnover: ~15-25 trades/year to minimize fee drag.
+Works in bull via momentum continuation and bear via mean-reversion at extremes with trend filter.
 """
 
-name = "1h_Keltner_Squeeze_Breakout"
-timeframe = "1h"
+name = "1d_KAMA_1wTrend_RSI_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,84 +19,63 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data (call once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 60:
+    # Get 1w data (call once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
 
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate 4h EMA50 for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate KAMA on daily close
+    # Efficiency Ratio (ER) = |net change| / sum(|changes|) over 10 periods
+    change = np.abs(np.diff(close, prepend=close[0]))
+    direction = np.abs(np.subtract(close, np.roll(close, 10)))
+    volatility = np.sum(np.lib.stride_tricks.sliding_window_view(change, 10), axis=1)
+    er = np.where(volatility != 0, direction / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama = kama  # already aligned to daily
 
-    # Calculate Bollinger Band width (20, 2) for squeeze filter on 1h
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
-    bb_width = (upper_bb - lower_bb) / sma20
-    # Percentile rank of bb_width over lookback
-    bb_width_rank = pd.Series(bb_width).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
+    # Calculate 1w EMA34 for trend
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
 
-    # Calculate Keltner Channel (20, 2) on 1h
-    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values
-    sma20_ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    upper_keltner = sma20_ma + 2 * atr
-    lower_keltner = sma20_ma - 2 * atr
+    # Calculate RSI(14) on daily
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(np.isnan(rsi), 50, rsi)  # fill NaN with neutral
 
-    # Volume confirmation: 1.5x 20-period average
+    # Volume confirmation: 1.5x 20-day average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-
-    # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        # Skip if outside session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Get aligned values for current 1h bar
-        ema50 = ema50_4h_aligned[i]
-        bb_rank = bb_width_rank[i]
-        upper_kelt = upper_keltner[i]
-        lower_kelt = lower_keltner[i]
+    for i in range(30, n):  # start after warmup for KAMA/RSI
+        # Get aligned values for current day
+        ema34_1w = ema34_1w_aligned[i]
         vol_avg_val = vol_avg_20[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(ema50) or np.isnan(bb_rank) or 
-            np.isnan(upper_kelt) or np.isnan(lower_kelt) or 
-            np.isnan(vol_avg_val)):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Squeeze filter: only trade when BB width is in lower 30% (contraction)
-        if bb_rank > 0.3:
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema34_1w) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -105,33 +84,35 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Keltner upper + price > EMA50 + volume surge
-            if (close[i] > upper_kelt and 
-                close[i] > ema50 and 
+            # LONG: Price > KAMA, RSI > 50, 1w trend up, volume surge
+            if (close[i] > kama[i] and 
+                rsi[i] > 50 and 
+                close[i] > ema34_1w and 
                 volume[i] > vol_avg_val * 1.5):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Keltner lower + price < EMA50 + volume surge
-            elif (close[i] < lower_kelt and 
-                  close[i] < ema50 and 
+            # SHORT: Price < KAMA, RSI < 50, 1w trend down, volume surge
+            elif (close[i] < kama[i] and 
+                  rsi[i] < 50 and 
+                  close[i] < ema34_1w and 
                   volume[i] > vol_avg_val * 1.5):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Keltner lower or price < EMA50
-            if (close[i] < lower_kelt or close[i] < ema50):
+            # EXIT LONG: Price < KAMA or RSI < 40
+            if (close[i] < kama[i] or rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Keltner upper or price > EMA50
-            if (close[i] > upper_kelt or close[i] > ema50):
+            # EXIT SHORT: Price > KAMA or RSI > 60
+            if (close[i] > kama[i] or rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
