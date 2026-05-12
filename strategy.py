@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
-# Hypothesis: Refined version with stricter volume confirmation (volume > 2.0x 20-period SMA) and stricter entry (price must close beyond the level, not just touch).
-# Uses Camarilla pivot levels (R1, S1) from prior day's OHLC. Long when price closes above R1 with uptrend (price > EMA34) and volume spike.
-# Short when price closes below S1 with downtrend (price < EMA34) and volume spike. Exits on opposite level touch.
-# Designed for low trade frequency (12-37/year) to avoid fee drag. Works in bull/bear markets by following daily EMA trend direction.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v4
+# Hypothesis: Camarilla R1/S1 breakout on 4h timeframe with daily EMA trend filter and volume confirmation.
+# Uses Camarilla pivot levels (R1, S1) calculated from prior day's OHLC.
+# Long when price breaks above R1 with uptrend (price > EMA34) and volume spike.
+# Short when price breaks below S1 with downtrend (price < EMA34) and volume spike.
+# Exit on opposite level touch (S1 for long exit, R1 for short exit).
+# Designed for low trade frequency (20-50/year) to avoid fee drag while maintaining edge in bull/bear markets.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -40,7 +42,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + 1.1 * rng_1d / 12
     camarilla_s1 = close_1d - 1.1 * rng_1d / 12
 
-    # Align Camarilla levels to 12h timeframe (use prior day's levels for current day)
+    # Align Camarilla levels to 4h timeframe (use prior day's levels for current day)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
@@ -48,7 +50,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate volume spike threshold (2.0x 20-period SMA on 12h)
+    # Calculate volume spike threshold (2.0x 20-period SMA on 4h)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 2.0
@@ -68,29 +70,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price closes above R1 with uptrend and volume spike
+            # LONG: price breaks above R1 with uptrend and volume spike
             if (close[i] > camarilla_r1_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
-                volume[i] > volume_spike_threshold[i]):
+                volume[i] > volume_sma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price closes below S1 with downtrend and volume spike
+            # SHORT: price breaks below S1 with downtrend and volume spike
             elif (close[i] < camarilla_s1_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > volume_spike_threshold[i]):
+                  volume[i] > volume_sma20[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price closes below S1 (opposite level)
+            # EXIT LONG: price touches or crosses below S1 (opposite level)
             if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price closes above R1 (opposite level)
+            # EXIT SHORT: price touches or crosses above R1 (opposite level)
             if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
