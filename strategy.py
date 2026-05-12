@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1D_Camarilla_R3S3_Breakout_Trend_Volume
-# Hypothesis: Breakout at daily Camarilla R3/S3 levels with volume confirmation and 1d trend filter.
-# Uses 12h timeframe for execution and 1d for HTF context. Designed to work in both bull and bear markets
-# by requiring volume confirmation and trend alignment. Targets 12-37 trades/year to avoid fee drag.
+# 4h_1D_Camarilla_R3S3_Breakout_Trend_Volume_Filtered
+# Hypothesis: Breakout at daily Camarilla R3/S3 levels with volume confirmation, 1d trend filter, and
+# additional Choppy Market Index filter to reduce whipsaws in ranging markets. Designed to work in both
+# bull and bear markets by requiring volume confirmation, trend alignment, and low-chop conditions.
+# Targets 25-40 trades/year on 4h timeframe to avoid excessive fee drag.
 
-name = "12h_1D_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R3S3_Breakout_Trend_Volume_Filtered"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -32,6 +33,21 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
+    # Calculate Choppy Market Index (CMI) on 1d timeframe
+    # CMI = 100 * (sum of true ranges over n periods) / (n * (highest high - lowest low over n periods))
+    # Values near 0 indicate strong trend, values near 100 indicate choppy/ranging market
+    lookback_period = 14
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    true_range = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    atr_sum = true_range.rolling(window=lookback_period, min_periods=lookback_period).sum()
+    highest_high = df_1d['high'].rolling(window=lookback_period, min_periods=lookback_period).max()
+    lowest_low = df_1d['low'].rolling(window=lookback_period, min_periods=lookback_period).min()
+    cmi = 100 * (atr_sum / (lookback_period * (highest_high - lowest_low)))
+    cmi_values = cmi.fillna(100).values  # Fill NaN with 100 (max chop) for safety
+    cmi_aligned = align_htf_to_ltf(prices, df_1d, cmi_values)
+
     # Calculate Camarilla R3 and S3 levels from previous 1d OHLC
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
@@ -53,7 +69,8 @@ def generate_signals(prices):
     for i in range(50, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ok[i])):
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ok[i]) or
+            np.isnan(cmi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,28 +81,31 @@ def generate_signals(prices):
         # Trend filter: price above/below 34-period EMA on 1d
         bullish_trend = close[i] > ema_1d_aligned[i]
         bearish_trend = close[i] < ema_1d_aligned[i]
+        
+        # Chop filter: only trade when market is not too choppy (CMI < 50)
+        low_chop = cmi_aligned[i] < 50
 
         if position == 0:
-            # LONG: Break above Camarilla R3 with bullish trend and volume confirmation
-            if (close[i] > camarilla_r3_aligned[i] and bullish_trend and volume_ok[i]):
+            # LONG: Break above Camarilla R3 with bullish trend, volume confirmation, and low chop
+            if (close[i] > camarilla_r3_aligned[i] and bullish_trend and volume_ok[i] and low_chop):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Camarilla S3 with bearish trend and volume confirmation
-            elif (close[i] < camarilla_s3_aligned[i] and bearish_trend and volume_ok[i]):
+            # SHORT: Break below Camarilla S3 with bearish trend, volume confirmation, and low chop
+            elif (close[i] < camarilla_s3_aligned[i] and bearish_trend and volume_ok[i] and low_chop):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R3 or trend turns bearish
-            if close[i] < camarilla_r3_aligned[i] or not bullish_trend:
+            # EXIT LONG: Price re-enters below R3 or trend turns bearish or chop increases
+            if close[i] < camarilla_r3_aligned[i] or not bullish_trend or not low_chop:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S3 or trend turns bullish
-            if close[i] > camarilla_s3_aligned[i] or not bearish_trend:
+            # EXIT SHORT: Price re-enters above S3 or trend turns bullish or chop increases
+            if close[i] > camarilla_s3_aligned[i] or not bearish_trend or not low_chop:
                 signals[i] = 0.0
                 position = 0
             else:
