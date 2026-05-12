@@ -1,17 +1,6 @@
-# US Patent US10753988B1 - Novel Adaptive Volatility Breakout with Volatility Regime Filter
-# Strategy: Uses a novel volatility breakout system (patent-inspired) combined with a volatility regime filter
-# Timeframe: 4h
-# Volatility breakout triggers on expansion beyond adaptive Bollinger Bands (using ATR-based deviation)
-# Volatility regime filter uses ATR ratio to distinguish between trending and ranging markets
-# Designed to work in both bull and bear markets by filtering trades based on volatility regime
-# Entry conditions: Volatility breakout + volatility regime alignment (trending market)
-# Exit conditions: Volatility contraction or opposite breakout signal
-# Position sizing: Discrete levels (0.25) to minimize churn
-# Uses 1d trend filter for higher timeframe bias
-
 #!/usr/bin/env python3
-name = "US10753988B1_AdaptiveVolBreakout_1dTrend_Filter"
-timeframe = "4h"
+name = "1h_Camillo_R1S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -28,43 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA50
+    # Session filter: 08-20 UTC (pre-compute)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # 4h trend filter: EMA34
+    df_4h = get_htf_data(prices, '4h')
+    ema34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    
+    # Daily volume average (for volume spike filter)
     df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Adaptive Bollinger Bands using ATR for dynamic deviation
-    # Calculate ATR(21)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Camarilla pivot levels (based on previous day)
+    # Calculate from daily OHLC
+    dm_high = df_1d['high'].values
+    dm_low = df_1d['low'].values
+    dm_close = df_1d['close'].values
     
-    # Calculate adaptive deviation: ATR * volatility multiplier
-    vol_mult = 2.0  # Base multiplier
-    dev = atr * vol_mult
+    # Previous day's Camarilla levels
+    range_d = dm_high - dm_low
+    camarilla_h5 = dm_close + range_d * 1.1 / 2
+    camarilla_h4 = dm_close + range_d * 1.1 / 4
+    camarilla_h3 = dm_close + range_d * 1.1 / 6
+    camarilla_l3 = dm_close - range_d * 1.1 / 6
+    camarilla_l4 = dm_close - range_d * 1.1 / 4
+    camarilla_l5 = dm_close - range_d * 1.1 / 2
     
-    # Calculate middle band: SMA(21)
-    close_pd = pd.Series(close)
-    sma21 = close_pd.rolling(window=21, min_periods=21).mean().values
-    
-    # Upper and lower bands
-    upper_band = sma21 + dev
-    lower_band = sma21 - dev
-    
-    # Volatility regime filter: ATR ratio (current ATR vs longer ATR)
-    atr_long = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    atr_ratio = atr / atr_long  # >1 indicates expanding volatility (trending), <1 indicates contracting (ranging)
+    # Align to 1h
+    h5 = align_htf_to_ltf(prices, df_1d, camarilla_h5)
+    h4 = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    h3 = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3 = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    l4 = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    l5 = align_htf_to_ltf(prices, df_1d, camarilla_l5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough data for longest indicator
+    start_idx = 40  # need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if 1d trend data not ready
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(atr_ratio[i]):
+        # Skip if outside session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,32 +69,44 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Skip if 4h trend or volume data not ready
+        if np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume spike: current volume > 1.5x daily average
+        vol_spike = volume[i] > (vol_avg_1d_aligned[i] * 1.5)
+        
         if position == 0:
-            # Long: Price breaks above upper band AND volatility expanding (atr_ratio > 1.1) AND 1d uptrend
-            if (close[i] > upper_band[i] and 
-                atr_ratio[i] > 1.1 and 
-                close[i] > ema50_1d_aligned[i]):
-                signals[i] = 0.25
+            # Long: Price > Camarilla H4 AND 4h uptrend AND volume spike
+            if (close[i] > h4[i] and 
+                close[i] > ema34_4h_aligned[i] and 
+                vol_spike):
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below lower band AND volatility expanding (atr_ratio > 1.1) AND 1d downtrend
-            elif (close[i] < lower_band[i] and 
-                  atr_ratio[i] > 1.1 and 
-                  close[i] < ema50_1d_aligned[i]):
-                signals[i] = -0.25
+            # Short: Price < Camarilla L4 AND 4h downtrend AND volume spike
+            elif (close[i] < l4[i] and 
+                  close[i] < ema34_4h_aligned[i] and 
+                  vol_spike):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below lower band OR volatility contracting (atr_ratio < 0.9)
-            if (close[i] < lower_band[i] or atr_ratio[i] < 0.9):
+            # Exit long: Price < Camarilla L3 OR 4h trend turns down
+            if (close[i] < l3[i] or close[i] < ema34_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: Price breaks above upper band OR volatility contracting (atr_ratio < 0.9)
-            if (close[i] > upper_band[i] or atr_ratio[i] < 0.9):
+            # Exit short: Price > Camarilla H3 OR 4h trend turns up
+            if (close[i] > h3[i] or close[i] > ema34_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
