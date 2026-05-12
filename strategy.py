@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_LiquidityVoid_1wTrend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,29 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w trend filter: EMA50 (to avoid counter-trend trades)
+    # 1w trend filter: EMA34 (weekly close)
     df_1w = get_htf_data(prices, '1w')
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Liquidity void detection: gap between candle low and prior candle high (or vice versa)
-    # Bullish void: current candle low > previous candle high
-    # Bearish void: current candle high < previous candle low
-    bullish_void = (low > np.roll(high, 1)) & ~np.isnan(np.roll(high, 1))
-    bearish_void = (high < np.roll(low, 1)) & ~np.isnan(np.roll(low, 1))
+    # 1d Camarilla levels (R3, S3, close)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    # Camarilla: R3 = close + 1.1*(high-low)/6, S3 = close - 1.1*(high-low)/6
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 6
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 6
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Volume filter: current volume > 1.5x average volume (to confirm institutional interest)
-    volume_avg = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_filter = volume > (1.5 * volume_avg)
+    # Volume spike: 12h volume > 1.5 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough data for 1w EMA50
+    start_idx = 60  # need enough data for weekly EMA34 and volume MA20
     
     for i in range(start_idx, n):
-        # Skip if 1w trend data not ready
-        if np.isnan(ema50_1w_aligned[i]):
+        # Skip if weekly trend data not ready
+        if np.isnan(ema34_1w_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Skip if Camarilla data not ready (should be ready after start_idx)
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -48,24 +63,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bullish liquidity void + volume filter + 1w uptrend
-            if bullish_void[i] and volume_filter[i] and (close[i] > ema50_1w_aligned[i]):
+            # Long: price breaks above R3 + weekly uptrend + volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema34_1w_aligned[i] and  # weekly uptrend filter
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish liquidity void + volume filter + 1w downtrend
-            elif bearish_void[i] and volume_filter[i] and (close[i] < ema50_1w_aligned[i]):
+            # Short: price breaks below S3 + weekly downtrend + volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema34_1w_aligned[i] and  # weekly downtrend filter
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when bearish void appears or price closes below entry area (simple: below prior candle low)
-            if bearish_void[i] or (close[i] < np.roll(low, 1)[i]):
+            # Exit long when price closes below S3 or weekly trend turns down
+            if (close[i] < s3_aligned[i] or 
+                close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when bullish void appears or price closes above entry area (simple: above prior candle high)
-            if bullish_void[i] or (close[i] > np.roll(high, 1)[i]):
+            # Exit short when price closes above R3 or weekly trend turns up
+            if (close[i] > r3_aligned[i] or 
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
