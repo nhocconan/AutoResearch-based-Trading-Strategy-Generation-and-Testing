@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 4h_ThreeTier_Trend_Confirmation_v1
-# Hypothesis: Three-tier confirmation system for 4H timeframe:
-# 1. Primary: 20-period Donchian breakout (price channel breakout)
-# 2. Secondary: 12H EMA50 trend filter (higher timeframe trend alignment)
-# 3. Tertiary: Volume surge (>1.5x 20-period SMA) for confirmation
-# This creates a high-probability setup that works in both bull and bear markets
-# by combining breakout momentum with trend alignment and volume validation.
-# Target: 25-35 trades/year to minimize fee drag while capturing strong moves.
+# 1h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Camarilla R1/S1 breakouts with 1d EMA50 trend filter and volume confirmation.
+# The Camarilla levels provide institutional-grade support/resistance, while the 1d EMA50
+# ensures we trade with the daily trend. Volume filter reduces false breakouts.
+# Designed for ~20-40 trades/year on 1h to minimize fee drag. Works in both bull and bear
+# markets by filtering breakouts with higher timeframe trend and volume confirmation.
 
-name = "4h_ThreeTier_Trend_Confirmation_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -26,33 +24,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get daily data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla levels from previous day
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Previous day's values (shifted by 1 to avoid look-ahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    
+    # Calculate Camarilla levels for each day
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # Align Camarilla levels to 1h timeframe (1 day = 24 hours)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Calculate Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Calculate 12H EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-
-    # Volume confirmation: 1.5x 20-period SMA
+    # Volume confirmation: 1.5x 24-period SMA (approx 1 day)
     volume_series = pd.Series(volume)
-    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_threshold = volume_sma20 * 1.5
+    volume_sma24 = volume_series.rolling(window=24, min_periods=24).mean().values
+    volume_threshold = volume_sma24 * 1.5
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after indicators need 20 bars
+    for i in range(24, n):  # Start after indicators need 24 bars
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_sma24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,35 +73,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Donchian Upper + volume + 12H uptrend
-            if (close[i] > highest_high[i] and
+            # LONG: Price breaks above R1 + volume + 1d uptrend
+            if (close[i] > r1_aligned[i] and
                 volume[i] > volume_threshold[i] and
-                close[i] > ema50_12h_aligned[i]):
-                signals[i] = 0.25
+                close[i] > ema50_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below Donchian Lower + volume + 12H downtrend
-            elif (close[i] < lowest_low[i] and
+            # SHORT: Price breaks below S1 + volume + 1d downtrend
+            elif (close[i] < s1_aligned[i] and
                   volume[i] > volume_threshold[i] and
-                  close[i] < ema50_12h_aligned[i]):
-                signals[i] = -0.25
+                  close[i] < ema50_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Donchian Middle OR 12H trend turns down
-            donchian_middle = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] < donchian_middle or close[i] < ema50_12h_aligned[i]:
+            # EXIT LONG: Price closes below S1 OR 1d trend turns down
+            if close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price closes above Donchian Middle OR 12H trend turns up
-            donchian_middle = (highest_high[i] + lowest_low[i]) / 2
-            if close[i] > donchian_middle or close[i] > ema50_12h_aligned[i]:
+            # EXIT SHORT: Price closes above R1 OR 1d trend turns up
+            if close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
