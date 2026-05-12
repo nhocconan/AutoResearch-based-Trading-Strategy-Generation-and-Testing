@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_PriceAction_1wTrend_Confirmation"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,36 +17,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-week trend filter: EMA50
-    df_1w = get_htf_data(prices, '1w')
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1d trend filter: EMA50
+    df_1d = get_htf_data(prices, '1d')
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1-day price action: higher high/low structure for trend
-    # We'll use a simple 3-bar higher high/low for uptrend, lower high/low for downtrend
-    higher_high = (high > np.roll(high, 1)) & (np.roll(high, 1) > np.roll(high, 2))
-    higher_low = (low > np.roll(low, 1)) & (np.roll(low, 1) > np.roll(low, 2))
-    lower_high = (high < np.roll(high, 1)) & (np.roll(high, 1) < np.roll(high, 2))
-    lower_low = (low < np.roll(low, 1)) & (np.roll(low, 1) < np.roll(low, 2))
-    
-    # Smooth the signals to avoid noise
-    uptrend_raw = higher_high & higher_low
-    downtrend_raw = lower_high & lower_low
-    
-    # Use rolling sum to require at least 2 out of 3 bars
-    uptrend = pd.Series(uptrend_raw).rolling(window=3, min_periods=1).sum() >= 2
-    downtrend = pd.Series(downtrend_raw).rolling(window=3, min_periods=1).sum() >= 2
-    uptrend = uptrend.values
-    downtrend = downtrend.values
+    # Elder Ray on 6h: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # need enough data for 1w EMA50
+    start_idx = 50  # need enough data for 1d EMA50
     
     for i in range(start_idx, n):
-        # Skip if 1w trend data not ready
-        if np.isnan(ema50_1w_aligned[i]):
+        # Skip if 1d trend data not ready
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,25 +41,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        bull_power = high[i] - ema13[i]
+        bear_power = low[i] - ema13[i]
+        
         if position == 0:
-            # Long: 1d uptrend structure + price above 1w EMA50
-            if uptrend[i] and close[i] > ema50_1w_aligned[i]:
+            # Long: Bull Power > 0 (strong buying pressure) + Bear Power < 0 (weak selling) + 1d uptrend
+            if bull_power > 0 and bear_power < 0 and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: 1d downtrend structure + price below 1w EMA50
-            elif downtrend[i] and close[i] < ema50_1w_aligned[i]:
+            # Short: Bear Power < 0 (strong selling pressure) + Bull Power < 0 (weak buying) + 1d downtrend
+            elif bear_power < 0 and bull_power < 0 and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long when 1d trend turns down or price crosses below 1w EMA50
-            if downtrend[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit long when Bull Power <= 0 (buying pressure fades) or Bear Power > 0 (selling pressure emerges)
+            if bull_power <= 0 or bear_power > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when 1d trend turns up or price crosses above 1w EMA50
-            if uptrend[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit short when Bear Power >= 0 (selling pressure fades) or Bull Power > 0 (buying pressure emerges)
+            if bear_power >= 0 or bull_power > 0:
                 signals[i] = 0.0
                 position = 0
             else:
