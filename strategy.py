@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Donchian_Breakout_Pullback_1dTrend_Volume
-# Hypothesis: Enter on pullbacks within Donchian(20) channels in the direction of 1d EMA50 trend,
-# confirmed by volume spikes. Uses tight entry conditions to limit trades (target: 20-40/year).
-# Works in bull via breakout pulls back up, in bear via breakdown pulls back down.
+# 1d_KAMA_Trend_with_RSI_and_Choppy_Filter
+# Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) to determine trend direction on daily timeframe.
+# Enter long when price crosses above KAMA and RSI < 70 (not overbought) and market is not choppy (Choppiness Index > 38.2).
+# Enter short when price crosses below KAMA and RSI > 30 (not oversold) and market is not choppy.
+# Exit when price crosses back across KAMA or RSI reaches extreme levels.
+# Designed for low-frequency signals (7-25 trades/year) to minimize fee drag, works in both bull and bear markets via trend following with momentum and regime filters.
 
-name = "4h_Donchian_Breakout_Pullback_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_Trend_with_RSI_and_Choppy_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -14,39 +16,64 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for chop filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
 
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # KAMA on daily close
+    def kama(close, length=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(slow+1) - 2/(fast+1)) + 2/(fast+1)) ** 2
+        kama = np.full_like(close, np.nan, dtype=float)
+        kama[length-1] = close[length-1]
+        for i in range(length, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
 
-    # Donchian channels (20-period) on 4h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    kama_vals = kama(close, 10, 2, 30)
 
-    # Volume confirmation: current volume > 2.0x average of last 12 periods (2 days)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    volume_ok = volume > (2.0 * vol_ma)
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([[np.nan], rsi])  # align with close
+
+    # Choppiness Index (14) on weekly
+    def choppiness_index(high, low, close, length=14):
+        atr = np.zeros_like(high)
+        tr1 = high - low
+        tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+        tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr = pd.Series(tr).rolling(window=length, min_periods=length).mean().values
+        highest_high = pd.Series(high).rolling(window=length, min_periods=length).max().values
+        lowest_low = pd.Series(low).rolling(window=length, min_periods=length).min().values
+        ci = 100 * np.log10(atr * length / (highest_high - lowest_low)) / np.log10(length)
+        return ci
+
+    chop_vals = choppiness_index(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, 14)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop_vals)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after warmup
-        # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_ok[i])):
+    for i in range(50, n):
+        if (np.isnan(kama_vals[i]) or np.isnan(rsi[i]) or np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,36 +81,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from 1d EMA50
-        price_above_ema = close[i] > ema_50_aligned[i]
-        price_below_ema = close[i] < ema_50_aligned[i]
+        # Trend and momentum conditions
+        price_above_kama = close[i] > kama_vals[i]
+        price_below_kama = close[i] < kama_vals[i]
+        rsi_not_overbought = rsi[i] < 70
+        rsi_not_oversold = rsi[i] > 30
+        not_choppy = chop_aligned[i] > 38.2  # trending market
 
         if position == 0:
-            # LONG: Pullback to support in uptrend with volume
-            # Condition: price near Donchian low (within 10% of range) AND uptrend AND volume spike
-            range_size = donchian_high[i] - donchian_low[i]
-            if range_size > 0:
-                proximity_to_low = (close[i] - donchian_low[i]) / range_size
-                if proximity_to_low < 0.1 and price_above_ema and volume_ok[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # SHORT: Pullback to resistance in downtrend with volume
-            # Condition: price near Donchian high (within 10% of range) AND downtrend AND volume spike
-                elif proximity_to_low > 0.9 and price_below_ema and volume_ok[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # LONG: price above KAMA, RSI not overbought, trending market
+            if price_above_kama and rsi_not_overbought and not_choppy:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: price below KAMA, RSI not oversold, trending market
+            elif price_below_kama and rsi_not_oversold and not_choppy:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Break below midpoint OR trend down OR volume dries up
-            if close[i] < donchian_mid[i] or not price_above_ema or not volume_ok[i]:
+            # EXIT LONG: price below KAMA or RSI overbought or choppy
+            if not price_above_kama or not rsi_not_overbought or not not_choppy:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Break above midpoint OR trend up OR volume dries up
-            if close[i] > donchian_mid[i] or not price_below_ema or not volume_ok[i]:
+            # EXIT SHORT: price above KAMA or RSI oversold or choppy
+            if not price_below_kama or not rsi_not_oversold or not not_choppy:
                 signals[i] = 0.0
                 position = 0
             else:
