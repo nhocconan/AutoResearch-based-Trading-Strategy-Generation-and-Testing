@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
 """
-6h_Wilson_Wave_Trader
-Hypothesis: Combines Wilson Wave (modified RSI divergence) with 1w pivot structure and volume confirmation to capture trend reversals in both bull and bear markets.
-Wilson Wave identifies exhaustion via RSI divergence, weekly pivots provide institutional support/resistance, and volume confirms institutional participation.
-Target: 15-25 trades/year per symbol with controlled risk in all market regimes.
+1d_Camarilla_Pivot_R3S3_Breakout_Trend_Volume
+Hypothesis: Camarilla Pivot R3/S3 breakouts with 1-week trend filter and volume confirmation capture institutional breakouts in both bull and bear markets.
+Breakouts above R3 + uptrend = long; breakdowns below S3 + downtrend = short.
+Camarilla levels are derived from prior day's range and act as strong support/resistance.
+Weekly trend filter avoids counter-trend trades. Volume confirmation ensures institutional participation.
+Target: 15-25 trades/year per symbol with disciplined risk management.
 """
 
-name = "6h_Wilson_Wave_Trader"
-timeframe = "6h"
+name = "1d_Camarilla_Pivot_R3S3_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def wilson_wave(rsi_series, period=14):
-    """Calculate Wilson Wave oscillator from RSI"""
-    # Wilson Wave = RSI - EMA(RSI)
-    rsi_ema = pd.Series(rsi_series).ewm(span=period, adjust=False).mean()
-    wilson = rsi_series - rsi_ema.values
-    return wilson
 
 def generate_signals(prices):
     n = len(prices)
@@ -31,49 +26,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot points (call once before loop)
+    # Get 1-week data for trend filter (call once before loop)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 10:
         return np.zeros(n)
-    
-    # Calculate weekly pivot points
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    pivot = typical_price.values
-    r1 = 2 * pivot - df_1w['low'].values
-    s1 = 2 * pivot - df_1w['high'].values
-    r2 = pivot + (df_1w['high'].values - df_1w['low'].values)
-    s2 = pivot - (df_1w['high'].values - df_1w['low'].values)
-    
-    # Align weekly pivots to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    close_1w = df_1w['close'].values
+    # 1-week EMA20 for trend
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
 
-    # Calculate RSI (14-period) for Wilson Wave
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Wilson Wave
-    wilson = wilson_wave(rsi, 14)
-    
-    # Volume confirmation: volume > 1.5x 24-period average (4 days)
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate Camarilla levels from previous day's range
+    # R3 = close + 1.1 * (high - low) * 1.1
+    # S3 = close - 1.1 * (high - low) * 1.1
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1
+
+    # Volume confirmation: volume > 1.5x 20-day average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(24, n):
-        # Skip if any required data is NaN
-        if (np.isnan(wilson[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_avg_24[i])):
+    for i in range(1, n):
+        if np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,30 +63,28 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Wilson Wave bullish divergence + price above S1 + volume confirmation
-            if (wilson[i] > wilson[i-1] and  # Wilson turning up
-                close[i] > s1_aligned[i] and  # Above weekly S1
-                volume[i] > vol_avg_24[i] * 1.5):  # Volume spike
+            # LONG: Close breaks above Camarilla R3 + weekly uptrend + volume spike
+            if close[i] > camarilla_r3[i] and close[i] > ema20_1w_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Wilson Wave bearish divergence + price below R1 + volume confirmation
-            elif (wilson[i] < wilson[i-1] and  # Wilson turning down
-                  close[i] < r1_aligned[i] and  # Below weekly R1
-                  volume[i] > vol_avg_24[i] * 1.5):  # Volume spike
+            # SHORT: Close breaks below Camarilla S3 + weekly downtrend + volume spike
+            elif close[i] < camarilla_s3[i] and close[i] < ema20_1w_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Wilson Wave turns down OR price breaks below pivot
-            if wilson[i] < wilson[i-1] or close[i] < pivot_aligned[i]:
+            # EXIT LONG: Close crosses below Camarilla Pivot Point (CP) or weekly trend turns down
+            cp = (prev_high[i] + prev_low[i] + prev_close[i]) / 3
+            if close[i] < cp or close[i] < ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Wilson Wave turns up OR price breaks above pivot
-            if wilson[i] > wilson[i-1] or close[i] > pivot_aligned[i]:
+            # EXIT SHORT: Close crosses above Camarilla Pivot Point (CP) or weekly trend turns up
+            cp = (prev_high[i] + prev_low[i] + prev_close[i]) / 3
+            if close[i] > cp or close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
