@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Keltner_Channel_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,35 +21,31 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # 12h EMA20 for trend filter (fast EMA for better trend detection)
-    ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Load 1d data for Keltner Channel components
+    # Load 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ATR(10) for Keltner Channel
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate Camarilla pivot levels from previous day
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Keltner Channel: EMA(20) ± 2 * ATR(10)
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_keltner = ema_20_1d + 2 * atr_10
-    lower_keltner = ema_20_1d - 2 * atr_10
+    # Align Camarilla levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Align Keltner levels to 6h timeframe
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
-    
-    # Volume filter: current volume > 1.8x 20-period average (stricter to reduce trades)
+    # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_avg)
+    vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,8 +54,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_12h_aligned[i]) or 
-            np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
             np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,24 +65,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above upper Keltner + above 12h EMA20 + volume filter
-            if high[i] > upper_keltner_aligned[i] and close[i] > ema_20_12h_aligned[i] and vol_filter[i]:
+            # Long: breakout above R1 + above 12h EMA50 + volume filter
+            if high[i] > r1_1d_aligned[i] and close[i] > ema_50_12h_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below lower Keltner + below 12h EMA20 + volume filter
-            elif low[i] < lower_keltner_aligned[i] and close[i] < ema_20_12h_aligned[i] and vol_filter[i]:
+            # Short: breakdown below S1 + below 12h EMA50 + volume filter
+            elif low[i] < s1_1d_aligned[i] and close[i] < ema_50_12h_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: breakdown below lower Keltner or below 12h EMA20
-            if low[i] < lower_keltner_aligned[i] or close[i] < ema_20_12h_aligned[i]:
+            # Exit long: breakdown below S1 or below 12h EMA50
+            if low[i] < s1_1d_aligned[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: breakout above upper Keltner or above 12h EMA20
-            if high[i] > upper_keltner_aligned[i] or close[i] > ema_20_12h_aligned[i]:
+            # Exit short: breakout above R1 or above 12h EMA50
+            if high[i] > r1_1d_aligned[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
