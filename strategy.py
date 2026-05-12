@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 6h_MACD_Trend_Filter
-# Hypothesis: MACD(12,26,9) on 6m timeframe captures medium-term momentum; confirmed by 1w trend filter (price > 200-period EMA) and volume spikes (>1.5x 50-period average). Enter long when MACD line crosses above signal line and price > 1w EMA200 with volume spike; short when MACD line crosses below signal line and price < 1w EMA200 with volume spike. Exit on MACD reverse crossover. Targets 15-35 trades/year to minimize fee drag and work in both bull/bear markets via trend filter.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA50 trend filter and volume spike (2x 20-period average) for confirmation.
+# Uses tight entry conditions to limit trades (target: 50-150 over 4 years). Works in bull/bear via trend filter.
+# Exit on opposite Camarilla level touch (S1 for longs, R1 for shorts) to avoid whipsaw.
 
-name = "6h_MACD_Trend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,36 +22,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate MACD on 6h
-    fast_period = 12
-    slow_period = 26
-    signal_period = 9
+    # Calculate Camarilla levels from previous 1d bar
+    # R1 = C + (H-L)*1.12/12, S1 = C - (H-L)*1.12/12
+    # We calculate for each 12h bar using the previous completed 1d bar
+    range_1d = high_1d - low_1d
+    camarilla_width = range_1d * 1.12 / 12
+    r1_1d = close_1d + camarilla_width
+    s1_1d = close_1d - camarilla_width
 
-    ema_fast = pd.Series(close).ewm(span=fast_period, adjust=False, min_periods=fast_period).mean().values
-    ema_slow = pd.Series(close).ewm(span=slow_period, adjust=False, min_periods=slow_period).mean().values
-    macd_line = ema_fast - ema_slow
-    signal_line = pd.Series(macd_line).ewm(span=signal_period, adjust=False, min_periods=signal_period).mean().values
+    # Align Camarilla levels to 12h timeframe (using previous 1d bar's levels)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
 
-    # 1w EMA200 for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume confirmation: volume > 1.5x 50-period average
-    vol_avg_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation: volume > 2x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(max(fast_period, slow_period, signal_period), n):
+    for i in range(1, n):  # Start from 1 to have previous bar for Camarilla
         # Skip if any required value is NaN
-        if (np.isnan(macd_line[i]) or np.isnan(signal_line[i]) or 
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_avg_50[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,30 +64,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: MACD line crosses above signal line + price > 1w EMA200 + volume spike
-            if (macd_line[i] > signal_line[i] and macd_line[i-1] <= signal_line[i-1] and
-                close[i] > ema200_1w_aligned[i] and
-                volume[i] > vol_avg_50[i] * 1.5):
+            # LONG: Close breaks above R1 + price > 1d EMA50 + volume spike
+            if (close[i] > r1_1d_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: MACD line crosses below signal line + price < 1w EMA200 + volume spike
-            elif (macd_line[i] < signal_line[i] and macd_line[i-1] >= signal_line[i-1] and
-                  close[i] < ema200_1w_aligned[i] and
-                  volume[i] > vol_avg_50[i] * 1.5):
+            # SHORT: Close breaks below S1 + price < 1d EMA50 + volume spike
+            elif (close[i] < s1_1d_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: MACD line crosses below signal line
-            if macd_line[i] < signal_line[i]:
+            # EXIT LONG: Close touches or crosses below S1 (opposite level)
+            if close[i] <= s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: MACD line crosses above signal line
-            if macd_line[i] > signal_line[i]:
+            # EXIT SHORT: Close touches or crosses above R1 (opposite level)
+            if close[i] >= r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
