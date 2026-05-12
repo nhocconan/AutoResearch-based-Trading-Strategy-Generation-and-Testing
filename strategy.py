@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_WilliamsAlligator_12hTrend
-# Hypothesis: Williams Alligator (3 SMAs: Jaw 13, Teeth 8, Lips 5) identifies market phases.
-# Long when Lips > Teeth > Jaw (bullish alignment) and 12h close > 12h EMA50; short when Lips < Teeth < Jaw (bearish alignment) and 12h close < 12h EMA50.
-# Exit when Alligator lines cross (Lips crosses Teeth) or trend weakens. Uses 12h trend filter to avoid whipsaw.
-# Works in trending markets (bull/bear) and avoids range-bound conditions via trend filter.
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) from 12h data provide institutional support/resistance.
+# Long when price breaks above R1 with volume confirmation and 12h uptrend.
+# Short when price breaks below S1 with volume confirmation and 12h downtrend.
+# Exit when price returns to the 12h VWAP (mean reversion to fair value).
+# Works in trending markets via 12h trend filter and avoids false breakouts with volume confirmation.
+# Timeframe: 4h, HTF: 12h for trend and pivot calculation.
 
-name = "4h_WilliamsAlligator_12hTrend"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,32 +23,42 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Load 12h data for trend filter
+    # Load 12h data for pivot calculation and trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    if len(df_12h) < 2:
         return np.zeros(n)
     
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # 12h EMA50 for trend filter
+    # Calculate Camarilla pivot levels from previous 12h bar
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    # PP = (high + low + close)/3  # Not used directly but needed for context
+    range_12h = high_12h - low_12h
+    r1_level = close_12h + 1.1 * range_12h / 12
+    s1_level = close_12h - 1.1 * range_12h / 12
+    
+    # Align pivot levels to 4h timeframe (they are constant until next 12h bar)
+    r1_4h = align_htf_to_ltf(prices, df_12h, r1_level)
+    s1_4h = align_htf_to_ltf(prices, df_12h, s1_level)
+    
+    # 12h trend filter: EMA50
     ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Williams Alligator components on 4h data
-    # Jaw: 13-period SMMA (smoothed median)
-    # Teeth: 8-period SMMA
-    # Lips: 5-period SMMA
-    # SMMA is similar to smoothed moving average, approximated by EMA for simplicity
-    jaw = pd.Series(high).ewm(alpha=1/13, adjust=False).mean().values  # Approximation
-    teeth = pd.Series(high).ewm(alpha=1/8, adjust=False).mean().values
-    lips = pd.Series(high).ewm(alpha=1/5, adjust=False).mean().values
+    # 12h VWAP for exit (mean reversion target)
+    # VWAP = sum(price * volume) / sum(volume) over session
+    typical_price_12h = (high_12h + low_12h + close_12h) / 3
+    vwap_12h = (typical_price_12h * volume_12h).cumsum() / volume_12h.cumsum()
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
     
-    # Alternative: use median of high-low-close for more robustness
-    typical_price = (high + low + close) / 3
-    jaw = pd.Series(typical_price).ewm(alpha=1/13, adjust=False).mean().values
-    teeth = pd.Series(typical_price).ewm(alpha=1/8, adjust=False).mean().values
-    lips = pd.Series(typical_price).ewm(alpha=1/5, adjust=False).mean().values
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,7 +67,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vwap_12h_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,41 +77,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Get aligned 12h close for trend filter
-        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-        close_12h_current = close_12h_aligned[i]
+        # Get current values
+        r1 = r1_4h[i]
+        s1 = s1_4h[i]
+        ema50 = ema50_12h_aligned[i]
+        vwap = vwap_12h_aligned[i]
+        vol_conf = volume_confirm[i]
         
-        trend_up = close_12h_current > ema50_12h_aligned[i]
-        trend_down = close_12h_current < ema50_12h_aligned[i]
-        
-        # Alligator alignment checks
-        lips_above_teeth = lips[i] > teeth[i]
-        teeth_above_jaw = teeth[i] > jaw[i]
-        bullish_alignment = lips_above_teeth and teeth_above_jaw
-        
-        lips_below_teeth = lips[i] < teeth[i]
-        teeth_below_jaw = teeth[i] < jaw[i]
-        bearish_alignment = lips_below_teeth and teeth_below_jaw
+        trend_up = close[i] > ema50
+        trend_down = close[i] < ema50
         
         if position == 0:
-            # LONG: bullish Alligator alignment AND 12h uptrend
-            if bullish_alignment and trend_up:
+            # LONG: price breaks above R1 with volume confirmation and 12h uptrend
+            if close[i] > r1 and vol_conf and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: bearish Alligator alignment AND 12h downtrend
-            elif bearish_alignment and trend_down:
+            # SHORT: price breaks below S1 with volume confirmation and 12h downtrend
+            elif close[i] < s1 and vol_conf and trend_down:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Alligator alignment breaks (Lips crosses below Teeth) OR trend weakens
-            if not bullish_alignment or not trend_up:
+            # EXIT LONG: price returns to VWAP (mean reversion) or trend fails
+            if close[i] <= vwap or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator alignment breaks (Lips crosses above Teeth) OR trend weakens
-            if not bearish_alignment or not trend_down:
+            # EXIT SHORT: price returns to VWAP (mean reversion) or trend fails
+            if close[i] >= vwap or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
