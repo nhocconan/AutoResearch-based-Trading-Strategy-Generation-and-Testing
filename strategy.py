@@ -1,8 +1,9 @@
-# 4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3
-# Hypothesis: Further refined version with even stricter entry conditions (2x volume spike) and stricter exit (requires price to cross below/above EMA50) to reduce trade frequency below 100 total trades over 4 years. Targets robust performance in both bull and bear markets by combining daily trend following with high-confidence breakout signals.
+#!/usr/bin/env python3
+# 12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v1
+# Hypothesis: Trading breakouts from daily Camarilla R1/S1 levels on 12h timeframe in the direction of the daily trend, with volume confirmation requiring 1.5x average volume. Targets 50-150 total trades over 4 years to avoid fee drag while maintaining edge in both bull and bear markets by following higher-timeframe trend. Designed to work on BTC and ETH.
 
-name = "4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v3"
-timeframe = "4h"
+name = "12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -33,18 +34,18 @@ def generate_signals(prices):
     r1 = close_1d + 1.1 * camarilla_range / 12
     s1 = close_1d - 1.1 * camarilla_range / 12
 
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Calculate 1d EMA50 for trend filter (more stable than EMA34)
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate 4h volume SMA20 for volume confirmation (with stricter spike filter)
+    # Calculate 12h volume SMA20 for volume confirmation (with spike filter)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0  # Require 2x average volume (stricter)
+    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,7 +53,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if any required data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_sma20[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,25 +63,25 @@ def generate_signals(prices):
 
         if position == 0:
             # LONG: Breakout above R1 in 1d uptrend with volume spike confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema50_1d_aligned[i] and volume[i] > volume_spike_threshold[i]:
+            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume[i] > volume_spike_threshold[i]:
                 signals[i] = 0.25
                 position = 1
             # SHORT: Breakdown below S1 in 1d downtrend with volume spike confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema50_1d_aligned[i] and volume[i] > volume_spike_threshold[i]:
+            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume[i] > volume_spike_threshold[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below 1d EMA50 (trend change)
-            if close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price closes below 1d EMA34 (trend change)
+            if close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above 1d EMA50 (trend change)
-            if close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price closes above 1d EMA34 (trend change)
+            if close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
