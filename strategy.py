@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_RSI_Reversal_4h1d
-# Hypothesis: Use KAMA on 4h for trend direction and RSI on 1d for mean-reversion entries.
-# In bull markets: go long when KAMA trends up and RSI pulls back from overbought.
-# In bear markets: go short when KAMA trends down and RSI bounces from oversold.
-# Uses 4h for entry timing and 1d RSI to avoid whipsaws. Designed for 15-35 trades/year.
+# 1d_1W_Keltner_Breakout_Volume_Trend
+# Hypothesis: Daily breakouts above weekly Keltner upper band or below lower band with volume confirmation and weekly trend filter.
+# Uses weekly timeframe for trend and Keltner bands to reduce noise and avoid overtrading. Designed for 10-30 trades/year.
+# Weekly trend filter avoids whipsaws in range markets; volume confirms institutional interest.
+# Works in bull markets (breakouts continue) and bear markets (breakdowns continue) by following the weekly trend.
 
-name = "4h_KAMA_Trend_RSI_Reversal_4h1d"
-timeframe = "4h"
+name = "1d_1W_Keltner_Breakout_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,54 +23,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter and Keltner bands
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
 
-    # Calculate 4h KAMA (trend filter)
-    close_4h = close
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_4h, prepend=close_4h[0]))
-    volatility = np.abs(np.diff(close_4h))
-    er = np.zeros_like(change)
-    for i in range(len(change)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close_4h)
-    kama[0] = close_4h[0]
-    for i in range(1, len(close_4h)):
-        kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
-    kama = kama  # already aligned to 4h
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
 
-    # Calculate daily RSI (mean reversion signal)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi  # daily RSI values
+    # Calculate weekly Keltner bands: EMA(34) ± 2*ATR(10)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w_arr = df_1w['close'].values
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w_arr, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w_arr, 1))
+    tr1[0] = high_1w[0] - low_1w[0]
+    tr2[0] = high_1w[0] - close_1w_arr[0]
+    tr3[0] = low_1w[0] - close_1w_arr[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    keltner_upper = ema_1w + 2 * atr_1w
+    keltner_lower = ema_1w - 2 * atr_1w
 
-    # Align daily RSI to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align weekly levels to daily timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1w, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1w, keltner_lower)
 
-    # Volume confirmation: current volume > 1.3x average of last 20 periods
+    # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.3 * vol_ma)
+    volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
+            np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,31 +71,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter from KAMA
-        bullish_trend = close[i] > kama[i]
-        bearish_trend = close[i] < kama[i]
+        # Weekly trend filter
+        bullish_trend = close[i] > ema_1w_aligned[i]
+        bearish_trend = close[i] < ema_1w_aligned[i]
 
         if position == 0:
-            # LONG: KAMA uptrend + RSI pulls back from overbought (>70 to <70)
-            if bullish_trend and rsi_aligned[i] < 70 and rsi_aligned[i-1] >= 70 and volume_ok[i]:
+            # LONG: Price closes above Keltner upper band with bullish weekly trend and volume confirmation
+            if close[i] > keltner_upper_aligned[i] and close[i-1] <= keltner_upper_aligned[i-1] and bullish_trend and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA downtrend + RSI bounces from oversold (<30 to >30)
-            elif bearish_trend and rsi_aligned[i] > 30 and rsi_aligned[i-1] <= 30 and volume_ok[i]:
+            # SHORT: Price closes below Keltner lower band with bearish weekly trend and volume confirmation
+            elif close[i] < keltner_lower_aligned[i] and close[i-1] >= keltner_lower_aligned[i-1] and bearish_trend and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI reaches overbought or trend turns bearish
-            if rsi_aligned[i] >= 70 or not bullish_trend:
+            # EXIT LONG: Price closes below EMA or weekly trend turns bearish
+            if close[i] < ema_1w_aligned[i] and close[i-1] >= ema_1w_aligned[i-1] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI reaches oversold or trend turns bullish
-            if rsi_aligned[i] <= 30 or not bearish_trend:
+            # EXIT SHORT: Price closes above EMA or weekly trend turns bullish
+            if close[i] > ema_1w_aligned[i] and close[i-1] <= ema_1w_aligned[i-1] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
