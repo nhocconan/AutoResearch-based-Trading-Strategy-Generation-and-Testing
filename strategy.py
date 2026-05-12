@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-# 4h Ichimoku Cloud Breakout + Volume Spike + Daily EMA Trend
-# Hypothesis: Ichimoku Cloud provides strong support/resistance; breakouts above/below cloud with volume confirmation and daily EMA trend filter capture sustained moves in both bull and bear markets. Designed for low trade frequency (~20-40/year) with clear entry/exit rules.
+# 1d Weekly Donchian Breakout with Volume Confirmation and Volatility Filter
+# Hypothesis: Weekly Donchian channels capture long-term trend structure.
+# Breakouts above weekly high or below weekly low with volume confirmation
+# and low volatility (ATR ratio) filter capture strong moves while avoiding
+# whipsaws in choppy markets. Works in bull markets via breakouts and
+# bear markets via breakdowns. Designed for very low trade frequency
+# (~10-25/year) to minimize fee drag on 1d timeframe.
 
-name = "4h_Ichimoku_Volume_DailyTrend"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Volume_VolatilityFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,74 +17,57 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Daily Data for EMA Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === Weekly Data for Donchian Channels ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:  # Need at least 21 periods for Donchian(20) + 1
         return np.zeros(n)
     
-    daily_close_1d = df_1d['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_volume = df_1w['volume'].values
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(daily_close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly Donchian Channels (20-period)
+    donchian_high = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
     
-    # === Ichimoku Cloud (9, 26, 52) ===
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Align to daily timeframe (available after weekly bar closes)
+    donchian_high_daily = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_daily = align_htf_to_ltf(prices, df_1w, donchian_low)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Weekly Volume Average (20-period) for confirmation
+    vol_ma_weekly = pd.Series(weekly_volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma_weekly_daily = align_htf_to_ltf(prices, df_1w, vol_ma_weekly)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    # === Daily Volatility Filter (ATR Ratio) ===
+    # True Range
+    tr1 = np.maximum(high, np.roll(close, 1)) - np.minimum(low, np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
+    # ATR(10) and ATR(30)
+    atr10 = pd.Series(tr1).rolling(window=10, min_periods=10).mean().values
+    atr30 = pd.Series(tr1).rolling(window=30, min_periods=30).mean().values
     
-    # Chikou Span (Lagging Span): close shifted 26 periods behind (not used for entry)
-    
-    # The "cloud" is between Senkou Span A and Senkou Span B
-    # For simplicity, we use the current cloud boundaries (already shifted in data)
-    # We need to align Senkou Span A and B to current periods (they are forward-shifted in calculation)
-    # So we shift them back by 26 to align with current price for cloud comparison
-    senkou_a_aligned = np.roll(senkou_a, 26)
-    senkou_b_aligned = np.roll(senkou_b, 26)
-    # First 26 values are invalid due to roll
-    senkou_a_aligned[:26] = np.nan
-    senkou_b_aligned[:26] = np.nan
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
-    
-    # === Volume Spike (20-period on 4h) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Avoid division by zero
+    atr_ratio = np.where(atr30 > 0, atr10 / atr30, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure all indicators ready (52 for Senkou B + buffer)
+    start_idx = 50  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high_daily[i]) or np.isnan(donchian_low_daily[i]) or
+            np.isnan(vol_ma_weekly_daily[i]) or np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,28 +76,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above cloud + volume spike + price above daily EMA50
-            if (close[i] > cloud_top[i] and 
-                vol_spike[i] and
-                close[i] > ema_50_4h[i]):
+            # LONG: Break above weekly Donchian high + volume surge + low volatility (trending market)
+            if (close[i] > donchian_high_daily[i] and
+                volume[i] > vol_ma_weekly_daily[i] * 1.5 and
+                atr_ratio[i] < 0.4):  # Low ATR ratio indicates trending market
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below cloud + volume spike + price below daily EMA50
-            elif (close[i] < cloud_bottom[i] and 
-                  vol_spike[i] and
-                  close[i] < ema_50_4h[i]):
+            # SHORT: Break below weekly Donchian low + volume surge + low volatility
+            elif (close[i] < donchian_low_daily[i] and
+                  volume[i] > vol_ma_weekly_daily[i] * 1.5 and
+                  atr_ratio[i] < 0.4):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price re-enters cloud (below cloud top)
-            if close[i] < cloud_top[i]:
+            # EXIT LONG: Price returns to weekly Donchian low (mean reversion within channel)
+            if close[i] <= donchian_low_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters cloud (above cloud bottom)
-            if close[i] > cloud_bottom[i]:
+            # EXIT SHORT: Price returns to weekly Donchian high
+            if close[i] >= donchian_high_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
