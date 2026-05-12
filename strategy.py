@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S4_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S4_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -31,10 +31,10 @@ def generate_signals(prices):
     R3 = close_1d + rng * 1.1 / 4
     S4 = close_1d - rng * 1.1 / 4
     
-    # ALIGN TO 12H TIMEFRAME (PREVIOUS DAY'S LEVELS AVAILABLE AT OPEN)
+    # ALIGN TO 4H TIMEFRAME (PREVIOUS DAY'S LEVELS AVAILABLE AT OPEN)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
-    S4_12h = align_htf_to_ltf(prices, df_1d, S4)
+    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
+    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
     
     # === VOLUME SPIKE DETECTION (20-PERIOD) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,8 +48,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(R3_12h[i]) or
-            np.isnan(S4_12h[i]) or
+            np.isnan(R3_4h[i]) or
+            np.isnan(S4_4h[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,27 +60,27 @@ def generate_signals(prices):
         
         if position == 0:
             # LONG: PRICE BREAKS ABOVE R3 + ABOVE 1D EMA34 + VOLUME SPIKE
-            if (close[i] > R3_12h[i] and 
+            if (close[i] > R3_4h[i] and 
                 close[i] > ema34_1d_aligned[i] and
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
             # SHORT: PRICE BREAKS BELOW S4 + BELOW 1D EMA34 + VOLUME SPIKE
-            elif (close[i] < S4_12h[i] and 
+            elif (close[i] < S4_4h[i] and 
                   close[i] < ema34_1d_aligned[i] and
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # EXIT LONG: PRICE BREAKS BELOW S4 (REVERSAL) OR BELOW 1D EMA34
-            if close[i] < S4_12h[i] or close[i] < ema34_1d_aligned[i]:
+            if close[i] < S4_4h[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: PRICE BREAKS ABOVE R3 (REVERSAL) OR ABOVE 1D EMA34
-            if close[i] > R3_12h[i] or close[i] > ema34_1d_aligned[i]:
+            if close[i] > R3_4h[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
