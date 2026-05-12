@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "6h_ElderRay_Alligator_Trend_Signal"
+name = "6h_Donchian_20_WeeklyPivot_Direction_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,38 +17,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data for Elder Ray and Alligator
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load weekly data for pivot direction (weekly trend)
+    df_w = get_htf_data(prices, '1w')
+    close_w = df_w['close'].values
+    # Weekly EMA34 for trend filter
+    ema_34_w = pd.Series(close_w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_w_aligned = align_htf_to_ltf(prices, df_w, ema_34_w)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
-    
-    # Alligator: Jaw (13-period SMMA shifted 8), Teeth (8-period SMMA shifted 5), Lips (5-period SMMA shifted 3)
-    # Using EMA as approximation for SMMA
-    jaw_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth_1d = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips_1d = pd.Series(close_1d).ewm(span=5, adjust=False, min_periods=5).mean().values
-    
-    # Shift to align with Alligator rules
-    jaw_1d_shifted = np.roll(jaw_1d, 8)
-    teeth_1d_shifted = np.roll(teeth_1d, 5)
-    lips_1d_shifted = np.roll(lips_1d, 3)
-    # Fill initial values
-    jaw_1d_shifted[:8] = jaw_1d[0]
-    teeth_1d_shifted[:5] = teeth_1d[0]
-    lips_1d_shifted[:3] = lips_1d[0]
-    
-    # Align all indicators to 6h timeframe
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d_shifted)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d_shifted)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d_shifted)
+    # Calculate Donchian(20) on 6h data
+    # Upper band = max(high, lookback 20)
+    # Lower band = min(low, lookback 20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,9 +43,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or 
-            np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
-            np.isnan(lips_1d_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34_w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,26 +53,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bull Power > 0, Bear Power < 0, Lips > Jaw > Teeth (bullish alignment), volume filter
-            if (bull_power_1d_aligned[i] > 0 and bear_power_1d_aligned[i] < 0 and 
-                lips_1d_aligned[i] > jaw_1d_aligned[i] > teeth_1d_aligned[i] and vol_filter[i]):
+            # Long: price breaks above Donchian upper + weekly trend up + volume filter
+            if close[i] > donchian_upper[i] and close[i] > ema_34_w_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0, Bull Power > 0, Lips < Jaw < Teeth (bearish alignment), volume filter
-            elif (bear_power_1d_aligned[i] < 0 and bull_power_1d_aligned[i] > 0 and 
-                  lips_1d_aligned[i] < jaw_1d_aligned[i] < teeth_1d_aligned[i] and vol_filter[i]):
+            # Short: price breaks below Donchian lower + weekly trend down + volume filter
+            elif close[i] < donchian_lower[i] and close[i] < ema_34_w_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bull Power <= 0 or alignment breaks
-            if (bull_power_1d_aligned[i] <= 0 or not (lips_1d_aligned[i] > jaw_1d_aligned[i] > teeth_1d_aligned[i])):
+            # Exit long: price breaks below Donchian lower
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bear Power >= 0 or alignment breaks
-            if (bear_power_1d_aligned[i] >= 0 or not (lips_1d_aligned[i] < jaw_1d_aligned[i] < teeth_1d_aligned[i])):
+            # Exit short: price breaks above Donchian upper
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
