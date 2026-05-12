@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 # 4h_1D_R4S4_Breakout_1dTrend_Volume
 # Hypothesis: Breakouts at daily Camarilla R4/S4 levels with 1d EMA trend filter and volume confirmation.
