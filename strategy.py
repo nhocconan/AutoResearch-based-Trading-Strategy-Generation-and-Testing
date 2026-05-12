@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_TRIX_Trend_Reversal_1dTrend_Volume
-# Hypothesis: TRIX detects momentum reversals; long when TRIX crosses above zero with volume spike and daily uptrend, short when TRIX crosses below zero with volume spike and daily downtrend. Uses TRIX(12) for momentum signal, daily EMA50 for trend filter, and volume > 1.5x 20-period average for confirmation. Designed for 4h timeframe to avoid overtrading and capture reversals in both bull and bear markets.
+# 4h_KAMA_Trend_Filter_1dTrend_Volume
+# Hypothesis: KAMA adapts to market volatility, providing smooth trend direction. Long when price crosses above KAMA with volume spike and daily uptrend, short when price crosses below KAMA with volume spike and daily downtrend. Designed for 4h timeframe to avoid overtrading. Works in bull markets via trend continuation and in bear markets via trend reversals.
 
-name = "4h_TRIX_Trend_Reversal_1dTrend_Volume"
+name = "4h_KAMA_Trend_Filter_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,13 +29,16 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # TRIX: Triple Exponential Moving Average (12-period)
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - then percentage change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = ema3.pct_change() * 100  # Convert to percentage
-    trix_values = trix.values
+    # KAMA (10-period ER, 2 and 30 for fast/slow SC)
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(10)).values
+    volatility = close_s.diff(1).abs().rolling(window=10, min_periods=10).sum().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -44,9 +47,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(10, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix_values[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,26 +62,26 @@ def generate_signals(prices):
         price_below_daily_ema = close[i] < ema_50_1d_aligned[i]
 
         if position == 0:
-            # LONG: TRIX crosses above zero with volume spike and daily uptrend
-            if i > 0 and not np.isnan(trix_values[i-1]) and trix_values[i-1] <= 0 and trix_values[i] > 0 and volume_ok[i] and price_above_daily_ema:
+            # LONG: Price crosses above KAMA with volume spike and daily uptrend
+            if i > 0 and not np.isnan(kama[i-1]) and close[i-1] <= kama[i-1] and close[i] > kama[i] and volume_ok[i] and price_above_daily_ema:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero with volume spike and daily downtrend
-            elif i > 0 and not np.isnan(trix_values[i-1]) and trix_values[i-1] >= 0 and trix_values[i] < 0 and volume_ok[i] and price_below_daily_ema:
+            # SHORT: Price crosses below KAMA with volume spike and daily downtrend
+            elif i > 0 and not np.isnan(kama[i-1]) and close[i-1] >= kama[i-1] and close[i] < kama[i] and volume_ok[i] and price_below_daily_ema:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero or trend turns down
-            if i > 0 and not np.isnan(trix_values[i-1]) and trix_values[i-1] >= 0 and trix_values[i] < 0 or not price_above_daily_ema:
+            # EXIT LONG: Price crosses below KAMA or trend turns down
+            if i > 0 and not np.isnan(kama[i-1]) and close[i-1] >= kama[i-1] and close[i] < kama[i] or not price_above_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero or trend turns up
-            if i > 0 and not np.isnan(trix_values[i-1]) and trix_values[i-1] <= 0 and trix_values[i] > 0 or not price_below_daily_ema:
+            # EXIT SHORT: Price crosses above KAMA or trend turns up
+            if i > 0 and not np.isnan(kama[i-1]) and close[i-1] <= kama[i-1] and close[i] > kama[i] or not price_below_daily_ema:
                 signals[i] = 0.0
                 position = 0
             else:
