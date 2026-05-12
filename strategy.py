@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_4H_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Breakout above R1 or below S1 from daily Camarilla pivots with daily trend filter and volume confirmation. Designed for 20-50 trades/year on 4h timeframe to work in both bull and bear markets by using strong institutional levels and filtering with trend and volume.
+4h_4H_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
+Hypothesis: Breakout above R1 or below S1 from daily Camarilla pivots with daily trend filter (EMA34) and volume confirmation (1.5x 20-bar avg). Uses tighter entry logic to reduce trade frequency and avoid overtrading. Designed for 20-50 trades/year on 4h timeframe to work in both bull and bear markets by using strong institutional levels and filtering with trend and volume.
 """
 
-name = "4h_4H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_4H_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -77,21 +77,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below EMA34 or Camarilla S3 (strong reversal)
-            camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1/4  # S3 level
-            s3_aligned = align_htf_to_ltf(prices, df_1d, 
-                                np.full_like(close_1d, camarilla_s3))
-            if close[i] < ema34_val or close[i] < s3_aligned[i]:
+            # EXIT LONG: Close below EMA34 or below S1 (re-entry level)
+            if close[i] < ema34_val or close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above EMA34 or Camarilla R3 (strong reversal)
-            camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1/4  # R3 level
-            r3_aligned = align_htf_to_ltf(prices, df_1d, 
-                                np.full_like(close_1d, camarilla_r3))
-            if close[i] > ema34_val or close[i] > r3_aligned[i]:
+            # EXIT SHORT: Close above EMA34 or above R1 (re-entry level)
+            if close[i] > ema34_val or close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
