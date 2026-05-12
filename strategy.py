@@ -1,90 +1,38 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Trend_RSI_Filter
-# Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) for trend direction on 12h,
-# filtered by RSI(14) to avoid overbought/oversold extremes and volume confirmation.
-# Enter long when price > KAMA and RSI < 50, short when price < KAMA and RSI > 50.
-# Exit when price crosses back through KAMA. Designed for low frequency (10-30 trades/year)
-# to avoid fee drag. Works in bull (ride trends) and bear (catch reversals from extremes).
+# 4h_Momentum_Fade_12hTrend
+# Hypothesis: Use 4h RSI(2) for mean reversion entries in overbought/oversold conditions,
+# filtered by 12h trend direction (EMA50) and volume confirmation.
+# Exit on RSI reversal or trend failure. Designed for low frequency (~20-40 trades/year)
+# to avoid fee drag. Works in bull (fade overextended rallies) and bear (fade oversold bounces).
 
-name = "12h_KAMA_Trend_RSI_Filter"
-timeframe = "12h"
+name = "4h_Momentum_Fade_12hTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """
-    Kaufman Adaptive Moving Average (KAMA)
-    Returns KAMA array.
-    """
-    n = len(close)
-    kama = np.zeros(n)
-    kama[:] = np.nan
-    
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=period))  # |close[t] - close[t-period]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close[i] - close[i-1]| over period
-    
-    # Handle first period elements
-    for i in range(period, n):
-        if volatility[i] > 0:
-            er = change[i] / volatility[i]
-        else:
-            er = 0
-        
-        # Smoothing constants
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        
-        if i == period:
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
-    
-    return kama
-
-def calculate_rsi(close, period=14):
-    """
-    Relative Strength Index (RSI)
-    Returns RSI array.
-    """
-    n = len(close)
-    rsi = np.zeros(n)
-    rsi[:] = np.nan
-    
-    # Price changes
-    delta = np.diff(close)
-    
-    # Gains and losses
+def rsi(close, period):
+    """Calculate Relative Strength Index."""
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    # Average gain and loss
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
     
-    for i in range(n):
-        if i < period:
-            if i > 0:
-                avg_gain[i] = np.mean(gain[:i]) if i > 0 else 0
-                avg_loss[i] = np.mean(loss[:i]) if i > 0 else 0
-            else:
-                avg_gain[i] = 0
-                avg_loss[i] = 0
-        else:
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+    # Wilder's smoothing
+    avg_gain[period] = np.mean(gain[1:period+1])
+    avg_loss[period] = np.mean(loss[1:period+1])
     
-    # Calculate RSI
-    for i in range(period, n):
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-        else:
-            rsi[i] = 100 if avg_gain[i] > 0 else 0
+    for i in range(period + 1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     
-    return rsi
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_vals = 100 - (100 / (1 + rs))
+    return rsi_vals
 
 def generate_signals(prices):
     n = len(prices)
@@ -96,28 +44,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for additional filters (optional, can be removed if not needed)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate KAMA on 12h data
-    kama = calculate_kama(close, period=10, fast=2, slow=30)
+    close_12h = df_12h['close'].values
     
-    # Calculate RSI on 12h data
-    rsi = calculate_rsi(close, period=14)
+    # Calculate RSI(2) on 4h
+    rsi_2 = rsi(close, 2)
+    
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume confirmation: 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Align 12h data to 4h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure indicators are stable (max of KAMA period, RSI period, vol MA)
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(rsi_2[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -125,36 +78,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        
-        # RSI filter: avoid extremes (RSI < 50 for long, RSI > 50 for short)
-        rsi_ok_long = rsi[i] < 50
-        rsi_ok_short = rsi[i] > 50
+        # Trend filter: price above/below 12h EMA50
+        trend_up = close[i] > ema_50_12h_aligned[i]
+        trend_down = close[i] < ema_50_12h_aligned[i]
         
         # Volume filter
         vol_ok = volume[i] > vol_ma_20[i]
         
+        # RSI signals
+        rsi_oversold = rsi_2[i] < 10
+        rsi_overbought = rsi_2[i] > 90
+        
         if position == 0:
-            # LONG: price > KAMA, RSI < 50, volume confirmation
-            if price_above_kama and rsi_ok_long and vol_ok:
+            # LONG: RSI oversold + uptrend + volume confirmation
+            if rsi_oversold and trend_up and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price < KAMA, RSI > 50, volume confirmation
-            elif price_below_kama and rsi_ok_short and vol_ok:
+            # SHORT: RSI overbought + downtrend + volume confirmation
+            elif rsi_overbought and trend_down and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: price crosses below KAMA
-            if price_below_kama:
+            # EXIT LONG: RSI crosses above 50 or trend fails
+            if rsi_2[i] > 50 or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above KAMA
-            if price_above_kama:
+            # EXIT SHORT: RSI crosses below 50 or trend fails
+            if rsi_2[i] < 50 or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
