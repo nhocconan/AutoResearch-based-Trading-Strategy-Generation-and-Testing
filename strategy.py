@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
-# 12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS
-# Hypothesis: Camarilla R1/S1 levels from daily chart act as key support/resistance; breakout in direction of 1d trend with volume confirmation provides high-probability entries. Uses 12h timeframe to reduce trade frequency and improve generalization across BTC, ETH, and SOL in both bull and bear markets.
+# 4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v2
+# Hypothesis: Enhanced version with stricter entry conditions (volume spike multiplier) and tighter exits to reduce trade frequency. Maintains the core logic of trading breakouts from daily Camarilla R1/S1 levels in the direction of the daily trend, but with volume confirmation requiring 1.5x average volume to filter out weak breakouts. Aims for 50-150 total trades over 4 years to avoid fee drag while maintaining edge in both bull and bear markets by following higher-timeframe trend.
 
-name = "12h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1_S1_Breakout_Trend_VolumeS_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,7 +33,7 @@ def generate_signals(prices):
     r1 = close_1d + 1.1 * camarilla_range / 12
     s1 = close_1d - 1.1 * camarilla_range / 12
 
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
@@ -42,17 +41,18 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate 12h volume SMA10 for volume confirmation
+    # Calculate 4h volume SMA20 for volume confirmation (with spike filter)
     volume_series = pd.Series(volume)
-    volume_sma10 = volume_series.rolling(window=10, min_periods=10).mean().values
+    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(10, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma10[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,12 +61,12 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Breakout above R1 in 1d uptrend with volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume[i] > volume_sma10[i]:
+            # LONG: Breakout above R1 in 1d uptrend with volume spike confirmation
+            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume[i] > volume_spike_threshold[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 in 1d downtrend with volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume[i] > volume_sma10[i]:
+            # SHORT: Breakdown below S1 in 1d downtrend with volume spike confirmation
+            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume[i] > volume_spike_threshold[i]:
                 signals[i] = -0.25
                 position = -1
             else:
