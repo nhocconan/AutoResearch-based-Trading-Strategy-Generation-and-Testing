@@ -1,91 +1,47 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels from daily timeframe (R1/S1) as breakout levels.
-# Long when price breaks above R1 with volume confirmation and daily trend up.
-# Short when price breaks below S1 with volume confirmation and daily trend down.
-# Uses daily EMA34 for trend filter and volume spike (volume > 1.5x 20-period average).
-# Designed for low frequency (20-40 trades/year) to avoid fee drag.
-# Works in bull markets via breakouts and in bear markets via short breakdowns.
+# 12h_Engulfing_Candle_1dTrend
+# Hypothesis: Use bullish/bearish engulfing candles on 12h for entry, filtered by 1d EMA trend direction.
+# Go long on bullish engulfing when price > 1d EMA50, short on bearish engulfing when price < 1d EMA50.
+# Exit on opposite engulfing signal. Designed for low frequency (<30 trades/year) to avoid fee drag.
+# Engulfing candles signal strong momentum shifts, effective in both bull and bear markets when aligned with higher timeframe trend.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Engulfing_Candle_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """
-    Calculate Camarilla pivot levels for given high, low, close.
-    Returns R1, S1, R2, S2, R3, S3, R4, S4, PP (pivot point).
-    """
-    typical = (high + low + close) / 3
-    range_ = high - low
-    
-    # Avoid division by zero
-    range_ = np.where(range_ == 0, 1e-10, range_)
-    
-    # Calculate pivot point
-    pp = typical
-    
-    # Calculate levels
-    r1 = pp + (range_ * 1.1 / 12)
-    s1 = pp - (range_ * 1.1 / 12)
-    r2 = pp + (range_ * 1.1 / 6)
-    s2 = pp - (range_ * 1.1 / 6)
-    r3 = pp + (range_ * 1.1 / 4)
-    s3 = pp - (range_ * 1.1 / 4)
-    r4 = pp + (range_ * 1.1 / 2)
-    s4 = pp - (range_ * 1.1 / 2)
-    
-    return r1, s1, r2, s2, r3, s3, r4, s4, pp
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
+    # Get daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla levels
-    r1_1d, s1_1d, _, _, _, _, _, _, pp_1d = calculate_camarilla(high_1d, low_1d, close_1d)
-    
-    # Calculate daily EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align daily Camarilla levels and EMA to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Calculate volume spike: volume > 1.5x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 1.5)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure EMA is stable
+    start_idx = 1  # Need at least 2 candles for engulfing pattern
     
     for i in range(start_idx, n):
-        # Skip if any critical data is not ready
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        # Skip if EMA data not ready
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,33 +49,45 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        breakout_above_r1 = close[i] > r1_1d_aligned[i]
-        breakdown_below_s1 = close[i] < s1_1d_aligned[i]
+        # Bullish engulfing: current green candle completely engulfs previous red candle
+        bullish_engulfing = (
+            close[i] > open_price[i] and  # current candle is green
+            open_price[i-1] > close[i-1] and  # previous candle is red
+            close[i] >= open_price[i-1] and  # current close >= previous open
+            open_price[i] <= close[i-1]  # current open <= previous close
+        )
         
-        # Trend filter: price above/below daily EMA34
-        trend_up = close[i] > ema34_1d_aligned[i]
-        trend_down = close[i] < ema34_1d_aligned[i]
+        # Bearish engulfing: current red candle completely engulfs previous green candle
+        bearish_engulfing = (
+            close[i] < open_price[i] and  # current candle is red
+            open_price[i-1] < close[i-1] and  # previous candle is green
+            close[i] <= open_price[i-1] and  # current close <= previous open
+            open_price[i] >= close[i-1]  # current open >= previous close
+        )
+        
+        # Trend filter: price relative to 1d EMA50
+        price_above_ema = close[i] > ema50_1d_aligned[i]
+        price_below_ema = close[i] < ema50_1d_aligned[i]
         
         if position == 0:
-            # LONG: Breakout above R1 + volume spike + daily trend up
-            if breakout_above_r1 and volume_spike[i] and trend_up:
+            # LONG: Bullish engulfing AND price above 1d EMA50
+            if bullish_engulfing and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 + volume spike + daily trend down
-            elif breakdown_below_s1 and volume_spike[i] and trend_down:
+            # SHORT: Bearish engulfing AND price below 1d EMA50
+            elif bearish_engulfing and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Breakdown below S1 OR trend turns down
-            if breakdown_below_s1 or not trend_up:
+            # EXIT LONG: Bearish engulfing signal
+            if bearish_engulfing:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Breakout above R1 OR trend turns up
-            if breakout_above_r1 or not trend_down:
+            # EXIT SHORT: Bullish engulfing signal
+            if bullish_engulfing:
                 signals[i] = 0.0
                 position = 0
             else:
