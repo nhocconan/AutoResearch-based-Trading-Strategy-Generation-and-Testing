@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R1/S1 breakout from daily levels with 1d EMA trend filter and volume spike confirmation on 12h timeframe.
-# Uses Camarilla pivot levels (R1, S1) calculated from prior day's OHLC. Long when price breaks above R1 with uptrend (price > EMA34) and volume spike.
-# Short when price breaks below S1 with downtrend (price < EMA34) and volume spike. Designed for low trade frequency (12-37/year) to avoid fee drag.
-# Works in bull/bear markets by following daily EMA trend direction. Exit on opposite Camarilla level touch (S1 for long exit, R1 for short exit).
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
+# Hypothesis: Refined Camarilla R1/S1 breakout with volume confirmation and trend filter.
+# Uses prior day's OHLC to calculate same-day Camarilla levels (R1, S1).
+# Enters long when price breaks above R1 with price > EMA34 and volume > 1.5x 20-period average.
+# Enters short when price breaks below S1 with price < EMA34 and volume > 1.5x 20-period average.
+# Exits on touch of opposite level (S1 for long exit, R1 for short exit).
+# Designed for low trade frequency (12-37/year) to avoid fee drag on 12h timeframe.
+# Works in bull/bear markets by following daily EMA trend direction.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
@@ -48,10 +51,10 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Calculate volume spike threshold (2.0x 20-period SMA on 12h)
+    # Calculate volume spike threshold (1.5x 20-period SMA on 12h)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 2.0
+    volume_spike_threshold = volume_sma20 * 1.5
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,13 +74,13 @@ def generate_signals(prices):
             # LONG: price breaks above R1 with uptrend and volume spike
             if (close[i] > camarilla_r1_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
-                volume[i] > volume_sma20[i]):
+                volume[i] > volume_spike_threshold[i]):
                 signals[i] = 0.25
                 position = 1
             # SHORT: price breaks below S1 with downtrend and volume spike
             elif (close[i] < camarilla_s1_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > volume_sma20[i]):
+                  volume[i] > volume_spike_threshold[i]):
                 signals[i] = -0.25
                 position = -1
             else:
