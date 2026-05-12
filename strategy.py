@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_PremiumBreakout_VolumeFilter"
-timeframe = "1d"
+name = "6h_1d_OrderBlock_TrendFollow_12hVolume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,26 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly context: 1w trend via EMA34
-    df_1w = get_htf_data(prices, '1w')
-    close_w = df_1w['close'].values
-    ema34_w = pd.Series(close_w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_w_aligned = align_htf_to_ltf(prices, df_1w, ema34_w)
+    # 1d Order Blocks (bullish: strong up candle after consolidation)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    open_1d = df_1d['open'].values
     
-    # Daily indicators
-    # Donchian(20) channels
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Volume filter: volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
+    # Bullish OB: previous candle bearish, current bullish with strong body
+    body_1d = np.abs(close_1d - open_1d)
+    range_1d = high_1d - low_1d
+    # Avoid division by zero
+    body_ratio = np.where(range_1d > 0, body_1d / range_1d, 0)
+    prev_bearish = close_1d < open_1d
+    curr_bullish = close_1d > open_1d
+    strong_body = body_ratio > 0.6
+    bullish_ob = prev_bearish & curr_bullish & strong_body
+    
+    # Bearish OB: previous candle bullish, current bearish with strong body
+    prev_bullish = close_1d > open_1d
+    curr_bearish = close_1d < open_1d
+    bearish_ob = prev_bullish & curr_bearish & strong_body
+    
+    # OB levels: use the candle's range
+    ob_high = np.where(bullish_ob | bearish_ob, high_1d, np.nan)
+    ob_low = np.where(bullish_ob | bearish_ob, low_1d, np.nan)
+    
+    # Forward fill OB levels until next OB
+    ob_high_series = pd.Series(ob_high)
+    ob_low_series = pd.Series(ob_low)
+    ob_high_ffill = ob_high_series.ffill().values
+    ob_low_ffill = ob_low_series.ffill().values
+    
+    # 12h Volume filter: above average volume
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
+    vol_ma = pd.Series(volume_12h).rolling(window=24, min_periods=24).mean().values  # 24 * 12h = 12 days
+    vol_ratio = volume_12h / vol_ma
+    
+    # Align to 6h
+    ob_high_6h = align_htf_to_ltf(prices, df_1d, ob_high_ffill)
+    ob_low_6h = align_htf_to_ltf(prices, df_1d, ob_low_ffill)
+    vol_ratio_6h = align_htf_to_ltf(prices, df_12h, vol_ratio)
+    
+    # 6h trend: EMA(20) vs EMA(50)
+    ema_fast = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_up = ema_fast > ema_slow
+    trend_down = ema_fast < ema_slow
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # wait for EMA warmup
-        # Skip if weekly trend not ready
-        if np.isnan(ema34_w_aligned[i]):
+    start_idx = max(50, 24)  # EMA50 and volume MA
+    
+    for i in range(start_idx, n):
+        # Skip if data not ready
+        if np.isnan(ob_high_6h[i]) or np.isnan(ob_low_6h[i]) or np.isnan(vol_ratio_6h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -44,32 +81,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        weekly_up = close[i] > ema34_w_aligned[i]
-        weekly_down = close[i] < ema34_w_aligned[i]
+        # Volume filter: only trade when volume is above average
+        vol_filter = vol_ratio_6h[i] > 1.2
         
         if position == 0:
-            # Long: weekly uptrend + breakout above Donchian high + volume spike
-            if (weekly_up and 
-                close[i] > donch_high[i] and 
-                vol_ratio[i] > 1.5):
+            # Long: price above bullish OB + uptrend + volume filter
+            if (close[i] > ob_high_6h[i] and 
+                trend_up[i] and 
+                vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + breakdown below Donchian low + volume spike
-            elif (weekly_down and 
-                  close[i] < donch_low[i] and 
-                  vol_ratio[i] > 1.5):
+            # Short: price below bearish OB + downtrend + volume filter
+            elif (close[i] < ob_low_6h[i] and 
+                  trend_down[i] and 
+                  vol_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below Donchian low or trend change
-            if close[i] < donch_low[i] or not weekly_up:
+            # Exit long: price below bearish OB or trend change
+            if close[i] < ob_low_6h[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above Donchian high or trend change
-            if close[i] > donch_high[i] or not weekly_down:
+            # Exit short: price above bullish OB or trend change
+            if close[i] > ob_high_6h[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
