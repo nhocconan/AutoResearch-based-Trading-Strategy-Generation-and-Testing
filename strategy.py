@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_VWAP_MeanReversion_Range
-Hypothesis: In ranging markets (choppy regime), price reverts to VWAP with high probability.
-Long when price crosses above VWAP from below with volume confirmation, short when crosses below VWAP from above.
-Uses 1d ADX < 25 to identify ranging regime and avoid trending markets. Targets 12-37 trades/year on 12h timeframe.
+4h_RSI_Trend_Filter_Breakout
+Hypothesis: On 4-hour timeframe, RSI(14) > 60 with price above EMA50 and volume above 1.5x 20-period average signals strong momentum in bull markets; RSI < 40 with price below EMA50 and volume spike signals bearish momentum. Uses daily ADX > 25 to filter trending regimes only, avoiding range-bound whipsaws. Targets 20-50 trades/year (80-200 total over 4 years) with discrete position sizing to minimize fee churn.
 """
 
-name = "12h_VWAP_MeanReversion_Range"
-timeframe = "12h"
+name = "4h_RSI_Trend_Filter_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,15 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate VWAP (typical price * volume) cumulative
-    typical_price = (high + low + close) / 3
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = vwap_num / vwap_den
-    # Handle division by zero at start
-    vwap = np.where(vwap_den == 0, typical_price, vwap)
-
-    # Get 1d data for ADX ranging filter
+    # Get daily data for ADX filter (call once before loop)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -41,69 +31,63 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate ADX (14) on 1d data
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(low)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            hl = high[i] - low[i]
-            hc = abs(high[i] - close[i-1])
-            lc = abs(low[i] - close[i-1])
-            tr[i] = max(hl, hc, lc)
-            
-            up = high[i] - high[i-1]
-            down = low[i-1] - low[i]
-            if up > down and up > 0:
-                plus_dm[i] = up
-            else:
-                plus_dm[i] = 0
-            if down > up and down > 0:
-                minus_dm[i] = down
-            else:
-                minus_dm[i] = 0
-        
-        # Smooth using Wilder's smoothing (alpha = 1/period)
-        atr = np.zeros_like(tr)
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(low)
-        
-        atr[period-1] = np.mean(tr[1:period])
-        plus_dm_smooth = np.zeros_like(plus_dm)
-        minus_dm_smooth = np.zeros_like(minus_dm)
-        plus_dm_smooth[period-1] = np.mean(plus_dm[1:period])
-        minus_dm_smooth[period-1] = np.mean(minus_dm[1:period])
-        
-        for i in range(period, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        dx = np.zeros_like(high)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = np.zeros_like(high)
-        adx[2*period-2] = np.mean(dx[period-1:2*period-1])
-        for i in range(2*period-1, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Calculate daily ADX(14) for trend strength filter
+    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    prev_close = np.roll(close_1d, 1)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - prev_close)
+    tr3 = np.abs(low_1d - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
 
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # +DM and -DM
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    # Smoothed +DM, -DM, TR
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+
+    # +DI and -DI
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+
+    # Calculate EMA50 on 4h close
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+
+    # Calculate RSI(14) on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+
+    # Volume confirmation: 1.5x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
-        adx_val = adx_1d_aligned[i]
-        vwap_val = vwap[i]
-        vol_avg_10 = np.mean(volume[max(0, i-9):i+1]) if i >= 9 else np.mean(volume[:i+1])
+        # Get aligned values for current 4h bar
+        adx_val = adx_aligned[i]
+        ema50_val = ema50[i]
+        rsi_val = rsi[i]
+        vol_avg_val = vol_avg_20[i]
 
-        # Skip if ADX not available
-        if np.isnan(adx_val):
+        # Skip if any required data is NaN
+        if (np.isnan(adx_val) or np.isnan(ema50_val) or 
+            np.isnan(rsi_val) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -111,8 +95,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Range filter: only trade when ADX < 25 (ranging market)
-        if adx_val >= 25:
+        # Trend filter: only trade when ADX > 25 (trending market)
+        if adx_val <= 25:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -121,28 +105,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price crosses above VWAP with volume confirmation
-            if (close[i] > vwap_val and close[i-1] <= vwap[i-1] and 
-                volume[i] > vol_avg_10 * 1.5):
+            # LONG: RSI > 60 + price above EMA50 + volume surge
+            if (rsi_val > 60 and 
+                close[i] > ema50_val and 
+                volume[i] > vol_avg_val * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below VWAP with volume confirmation
-            elif (close[i] < vwap_val and close[i-1] >= vwap[i-1] and 
-                  volume[i] > vol_avg_10 * 1.5):
+            # SHORT: RSI < 40 + price below EMA50 + volume surge
+            elif (rsi_val < 40 and 
+                  close[i] < ema50_val and 
+                  volume[i] > vol_avg_val * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below VWAP
-            if close[i] < vwap_val and close[i-1] >= vwap[i-1]:
+            # EXIT LONG: RSI < 50 or price below EMA50
+            if (rsi_val < 50 or close[i] < ema50_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above VWAP
-            if close[i] > vwap_val and close[i-1] <= vwap[i-1]:
+            # EXIT SHORT: RSI > 50 or price above EMA50
+            if (rsi_val > 50 or close[i] > ema50_val):
                 signals[i] = 0.0
                 position = 0
             else:
