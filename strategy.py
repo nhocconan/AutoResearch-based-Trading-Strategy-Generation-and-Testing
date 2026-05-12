@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 6h_1D_RSI20_80_MeanReversion_TrendFilter
-# Hypothesis: Mean reversion at extreme RSI levels (20/80) on 6h timeframe, filtered by 1d EMA trend.
-# Works in bull/bear by only taking reversals in the direction of higher timeframe trend.
-# Targets ~15-25 trades/year on 6h to avoid fee drag.
+# 4h_12h_Camarilla_R3_S3_Breakout_Volume
+# Hypothesis: Breakouts at 12h Camarilla R3/S3 levels with volume confirmation on 4h timeframe.
+# Uses 12h timeframe for Camarilla levels and 4h for entry/exit, designed to work in both bull and bear markets.
+# Targets 20-50 trades/year on 4h timeframe to avoid excessive trading and fee drag.
+# Volume confirmation requires current volume > 1.5x the average of the last 10 periods.
 
-name = "6h_1D_RSI20_80_MeanReversion_TrendFilter"
-timeframe = "6h"
+name = "4h_12h_Camarilla_R3_S3_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,42 +21,44 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
 
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 12h close for Camarilla calculation
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
 
-    # Calculate 6h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 periods
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:13] = np.nan  # Not enough data for first 13 periods
+    # Calculate Camarilla R3 and S3 levels from previous 12h OHLC
+    prev_close = close_12h[1:]  # shift(1) equivalent
+    prev_high = high_12h[1:]
+    prev_low = low_12h[1:]
+    # Pad with NaN for the first element
+    prev_close = np.concatenate([[np.nan], prev_close])
+    prev_high = np.concatenate([[np.nan], prev_high])
+    prev_low = np.concatenate([[np.nan], prev_low])
+
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+
+    # Volume confirmation: current volume > 1.5x average of last 10 periods
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    volume_ok = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,31 +66,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter: price above/below 1d EMA50
-        bullish_trend = close[i] > ema_1d_aligned[i]
-        bearish_trend = close[i] < ema_1d_aligned[i]
-
         if position == 0:
-            # LONG: RSI < 20 (oversold) in bullish trend
-            if rsi[i] < 20 and bullish_trend:
+            # LONG: Break above Camarilla R3 with volume confirmation
+            if close[i] > camarilla_r3_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI > 80 (overbought) in bearish trend
-            elif rsi[i] > 80 and bearish_trend:
+            # SHORT: Break below Camarilla S3 with volume confirmation
+            elif close[i] < camarilla_s3_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (40-60) or trend turns bearish
-            if rsi[i] > 40 or not bullish_trend:
+            # EXIT LONG: Price re-enters below R3
+            if close[i] < camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (40-60) or trend turns bullish
-            if rsi[i] < 60 or not bearish_trend:
+            # EXIT SHORT: Price re-enters above S3
+            if close[i] > camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
