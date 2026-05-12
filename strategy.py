@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_12h_Camarilla_R2_S2_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_Vortex_Vortex_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Data for trend and Camarilla levels ===
+    # === 1d Data for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
@@ -27,14 +27,29 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Daily Camarilla levels (R2, S2) from previous day ===
-    camarilla_range = (high_1d - low_1d) * 1.1
-    r2_level = close_1d + camarilla_range / 2.0
-    s2_level = close_1d - camarilla_range / 2.0
+    # === Vortex Indicator (4h) ===
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
     
-    # Align Camarilla levels to 12h
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_level)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_level)
+    # VM+ and VM-
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus[0] = 0
+    vm_minus[0] = 0
+    
+    # Sum over 14 periods
+    period = 14
+    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
+    
+    # VI+ and VI-
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
     
     # === Volume spike detection (20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,13 +58,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 34)  # Ensure enough data for all indicators
+    start_idx = max(200, 34, 14)  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or
-            np.isnan(s2_aligned[i])):
+            np.isnan(vi_plus[i]) or
+            np.isnan(vi_minus[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,28 +73,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R2 with volume spike and 1d trend up
-            if (close[i] > r2_aligned[i] and 
+            # Long: VI+ > VI- (bullish trend) + volume spike + 1d trend up
+            if (vi_plus[i] > vi_minus[i] and 
                 volume_spike[i] and
                 close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S2 with volume spike and 1d trend down
-            elif (close[i] < s2_aligned[i] and 
+            # Short: VI- > VI+ (bearish trend) + volume spike + 1d trend down
+            elif (vi_minus[i] > vi_plus[i] and 
                   volume_spike[i] and
                   close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price crosses back below R2 or trend breaks
-            if close[i] < r2_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: VI- crosses above VI+ or trend breaks
+            if vi_minus[i] > vi_plus[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price crosses back above S2 or trend breaks
-            if close[i] > s2_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: VI+ crosses above VI- or trend breaks
+            if vi_plus[i] > vi_minus[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
