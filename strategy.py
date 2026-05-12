@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_WilliamsAlligator_ElderRay_1wTrend"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeSpike_1dTrend_ADX"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,52 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1W DATA FOR TREND FILTER (EMA13) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
-    
-    # === 1D DATA FOR WILLIAMS ALLIGATOR ===
+    # === DAILY TREND FILTER: EMA34 ===
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === DAILY ADX (14) ===
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Williams Alligator lines (13, 8, 5 SMAs with 8, 5, 3 shifts)
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first value
     
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw, additional_delay_bars=0)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth, additional_delay_bars=0)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips, additional_delay_bars=0)
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = -np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Elder Ray Power (13-period EMA)
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = (high_1d - ema13_1d).values
-    bear_power = (low_1d - ema13_1d).values
+    # Smoothed values
+    def wilder_smoothing(values, period):
+        result = np.full_like(values, np.nan, dtype=float)
+        if len(values) >= period:
+            result[period-1] = np.nansum(values[:period])
+            for i in range(period, len(values)):
+                result[i] = result[i-1] - (result[i-1] / period) + values[i]
+        return result
     
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power, additional_delay_bars=0)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power, additional_delay_bars=0)
+    tr14 = wilder_smoothing(tr, 14)
+    plus_dm14 = wilder_smoothing(plus_dm, 14)
+    minus_dm14 = wilder_smoothing(minus_dm, 14)
     
-    # === 12H VOLUME SPIKE (20-period) ===
+    # DI values
+    plus_di = np.where(tr14 > 0, (plus_dm14 / tr14) * 100, 0)
+    minus_di = np.where(tr14 > 0, (minus_dm14 / tr14) * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) > 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = np.full_like(dx, np.nan, dtype=float)
+    if len(dx) >= 14:
+        adx[13] = np.nanmean(dx[:14])
+        for i in range(14, len(dx)):
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14
+    
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # === 4H DONCHIAN CHANNEL (20) ===
+    def donchian_channels(high_arr, low_arr, window):
+        upper = np.full_like(high_arr, np.nan, dtype=float)
+        lower = np.full_like(low_arr, np.nan, dtype=float)
+        for i in range(window-1, len(high_arr)):
+            upper[i] = np.max(high_arr[i-window+1:i+1])
+            lower[i] = np.min(low_arr[i-window+1:i+1])
+        return upper, lower
+    
+    donchian_upper, donchian_lower = donchian_channels(high, low, 20)
+    
+    # === VOLUME SPIKE (20) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(13, 20)
+    start_idx = max(34, 20)  # Wait for daily EMA34 and Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema13_1w_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or
-            np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or
-            np.isnan(bear_power_aligned[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -71,45 +102,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Williams Alligator alignment: all three lines ordered
-        # Bullish: lips > teeth > jaw
-        # Bearish: lips < teeth < jaw
-        bullish_alligator = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        bearish_alligator = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
-        
-        # Elder Ray: bull power > 0 and bear power < 0 for strong trend
-        strong_bull = bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0
-        strong_bear = bull_power_aligned[i] < 0 and bear_power_aligned[i] > 0
+        # Only trade in trending markets (ADX > 25)
+        if adx_aligned[i] <= 25:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
         
         if position == 0:
-            # LONG: Bullish Alligator + 1W uptrend + Elder Ray bull + volume spike
-            if (bullish_alligator and 
-                close[i] > ema13_1w_aligned[i] and
-                strong_bull and
+            # LONG: Price breaks above Donchian upper + above daily EMA34 + volume spike
+            if (close[i] > donchian_upper[i] and 
+                close[i] > ema34_1d_aligned[i] and
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish Alligator + 1W downtrend + Elder Ray bear + volume spike
-            elif (bearish_alligator and 
-                  close[i] < ema13_1w_aligned[i] and
-                  strong_bear and
+            # SHORT: Price breaks below Donchian lower + below daily EMA34 + volume spike
+            elif (close[i] < donchian_lower[i] and 
+                  close[i] < ema34_1d_aligned[i] and
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Any condition breaks
-            if not (bullish_alligator and 
-                    close[i] > ema13_1w_aligned[i] and
-                    strong_bull):
+            # EXIT LONG: Price breaks below Donchian lower OR below daily EMA34
+            if close[i] < donchian_lower[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Any condition breaks
-            if not (bearish_alligator and 
-                    close[i] < ema13_1w_aligned[i] and
-                    strong_bear):
+            # EXIT SHORT: Price breaks above Donchian upper OR above daily EMA34
+            if close[i] > donchian_upper[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
