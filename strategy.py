@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-6H_CAMARILLA_R3_S3_BREAKOUT_1DVOLUMESPIKE_WKPIVOT
-Hypothesis: Combine daily Camarilla R3/S3 breakout with weekly pivot direction filter to reduce whipsaw.
-In bull markets (price above weekly pivot), only take longs from R3 breakout.
-In bear markets (price below weekly pivot), only take shorts from S3 breakdown.
-Volume spike (2.0x 20-period) confirms institutional participation.
-Minimum 6-bar hold time prevents premature exits.
-Target: 20-30 trades/year (80-120 total over 4 years) to stay within 6h limits.
-Works in bull markets (breakouts continue with trend) and bear markets (mean reversion from extremes).
+12H_DONCHIAN_BREAKOUT_VOLUME_CONFIRMATION_1W_TREND_FILTER
+Hypothesis: Use 20-period Donchian breakout on 12h timeframe with weekly trend filter and volume confirmation.
+In weekly uptrend (price above 100-period SMA), only take longs from upper band breakout.
+In weekly downtrend (price below 100-period SMA), only take shorts from lower band breakout.
+Volume spike (2.0x 20-period) confirms breakout strength. Target 20-30 trades/year (80-120 total).
+Designed for low-frequency, high-conviction trades to minimize fee drag while capturing strong trends.
+Works in bull (catch breakouts) and bear (short breakdowns) markets.
 """
-name = "6H_CAMARILLA_R3_S3_BREAKOUT_1DVOLUMESPIKE_WKPIVOT"
-timeframe = "6h"
+name = "12H_DONCHIAN_BREAKOUT_VOLUME_CONFIRMATION_1W_TREND_FILTER"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -31,41 +30,25 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from prior day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    rang = prev_high - prev_low
-    R3 = prev_close + rang * 1.1 / 2
-    S3 = prev_close - rang * 1.1 / 2
-    
-    # Align Camarilla levels to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Weekly data for pivot direction filter
+    # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    if len(df_1w) < 100:
         return np.zeros(n)
     
-    # Weekly pivot point: (H + L + C) / 3
-    weekly_pivot = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    weekly_pivot_vals = weekly_pivot.values
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_vals)
+    # Weekly 100-period SMA for trend filter
+    weekly_sma = pd.Series(df_1w['close'].values).rolling(window=100, min_periods=100).mean().values
+    weekly_sma_aligned = align_htf_to_ltf(prices, df_1w, weekly_sma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    for i in range(20, n):  # Start after warmup for volume MA
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or 
-            np.isnan(weekly_pivot_aligned[i])):
+    for i in range(20, n):  # Start after warmup for Donchian and volume MA
+        if np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(weekly_sma_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,16 +61,16 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # LONG: Price above weekly pivot (bullish bias) + break above R3 + volume spike
-            if (close[i] > weekly_pivot_aligned[i] and 
-                close[i] > R3_aligned[i] and 
+            # LONG: Weekly uptrend (price above weekly SMA) + break above upper Donchian + volume spike
+            if (close[i] > weekly_sma_aligned[i] and 
+                close[i] > high_roll[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # SHORT: Price below weekly pivot (bearish bias) + break below S3 + volume spike
-            elif (close[i] < weekly_pivot_aligned[i] and 
-                  close[i] < S3_aligned[i] and 
+            # SHORT: Weekly downtrend (price below weekly SMA) + break below lower Donchian + volume spike
+            elif (close[i] < weekly_sma_aligned[i] and 
+                  close[i] < low_roll[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -95,18 +78,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Only after minimum 6 bars AND (price re-enters range OR closes below weekly pivot)
-            if bars_since_entry >= 6 and ((close[i] < R3_aligned[i] and close[i] > S3_aligned[i]) or 
-                                          close[i] < weekly_pivot_aligned[i]):
+            # EXIT LONG: Price re-enters Donchian channel (below upper band)
+            if close[i] < high_roll[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Only after minimum 6 bars AND (price re-enters range OR closes above weekly pivot)
-            if bars_since_entry >= 6 and ((close[i] < R3_aligned[i] and close[i] > S3_aligned[i]) or 
-                                          close[i] > weekly_pivot_aligned[i]):
+            # EXIT SHORT: Price re-enters Donchian channel (above lower band)
+            if close[i] > low_roll[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
