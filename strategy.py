@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_Pivot_R1S1_Breakout_12hTrend_Volume
-# Hypothesis: On 4h timeframe, use daily Camarilla pivot levels (R1/S1) for entries with 12h EMA50 trend filter and volume confirmation.
-# Enter long when price closes above R1 with volume > 1.5x 20-bar average and 12h EMA50 uptrend.
-# Enter short when price closes below S1 with volume > 1.5x 20-bar average and 12h EMA50 downtrend.
-# Exit when price returns to the daily pivot point (mean reversion) or reverses at opposite level (R1 for longs, S1 for shorts).
-# Targets 20-40 trades/year to minimize fee drag while capturing meaningful moves in both bull and bear markets.
+# 1d_PV_CRSI_Range_Reversal
+# Hypothesis: On 1d timeframe, use PV_CRSI (price-volume adjusted RSI) to identify extreme mean-reversion opportunities
+# in ranging markets. Enter long when PV_CRSI < 15 and price below VWAP, short when PV_CRSI > 85 and price above VWAP.
+# Use weekly ADX < 20 as range filter to avoid trending markets. Exit when PV_CRSI returns to neutral (40-60 range).
+# Targets 15-25 trades/year to minimize fee drift while capturing mean reversion in BTC/ETH ranging regimes.
 
-name = "4h_Camarilla_Pivot_R1S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1d_PV_CRSI_Range_Reversal"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,40 +23,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot calculation (using previous day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate VWAP (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = vwap_num / vwap_den
+    
+    # Calculate PV_CRSI (Price-Volume Weighted RSI)
+    # 1. Price change
+    delta = np.diff(close, prepend=close[0])
+    # 2. Volume-weighted gains/losses
+    vol_weighted_gain = np.where(delta > 0, delta * volume, 0.0)
+    vol_weighted_loss = np.where(delta < 0, -delta * volume, 0.0)
+    # 3. Smoothed averages (Wilder's smoothing)
+    alpha = 1.0 / 14
+    avg_gain = np.zeros_like(vol_weighted_gain)
+    avg_loss = np.zeros_like(vol_weighted_loss)
+    avg_gain[0] = vol_weighted_gain[0]
+    avg_loss[0] = vol_weighted_loss[0]
+    for i in range(1, n):
+        avg_gain[i] = (1 - alpha) * avg_gain[i-1] + alpha * vol_weighted_gain[i]
+        avg_loss[i] = (1 - alpha) * avg_loss[i-1] + alpha * vol_weighted_loss[i]
+    # 4. RSI calculation
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    pvcrsi = 100 - (100 / (1 + rs))
+    
+    # Load weekly data for ADX range filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate ADX on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate pivot point and range
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_range = daily_high - daily_low
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    tr3 = np.abs(low_1w - np.concatenate([[close_1w[0]], close_1w[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Camarilla R1 and S1 levels (most significant for breakouts)
-    r1 = daily_pivot + daily_range * 1.083
-    s1 = daily_pivot - daily_range * 1.083
+    # Directional Movement
+    dm_plus = np.where((high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]])) > 
+                       (np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w), 
+                       np.maximum(high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w) > 
+                        (high_1w - np.concatenate([[high_1w[0]], high_1w[:-1]])), 
+                        np.maximum(np.concatenate([[low_1w[0]], low_1w[:-1]]) - low_1w, 0), 0)
     
-    # Align daily levels to 4h timeframe (wait for completed daily bar)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    # Smoothed values
+    def wilders_smoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    tr14 = wilders_smoothing(tr, 14)
+    dm_plus_14 = wilders_smoothing(dm_plus, 14)
+    dm_minus_14 = wilders_smoothing(dm_minus, 14)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # DI and DX
+    di_plus = np.divide(dm_plus_14, tr14, out=np.zeros_like(dm_plus_14), where=tr14!=0) * 100
+    di_minus = np.divide(dm_minus_14, tr14, out=np.zeros_like(dm_minus_14), where=tr14!=0) * 100
+    dx = np.divide(np.abs(di_plus - di_minus), (di_plus + di_minus), out=np.zeros_like(di_plus), where=(di_plus + di_minus)!=0) * 100
+    adx = wilders_smoothing(dx, 14)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Align weekly ADX to daily (wait for completed weekly bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Volume confirmation: current volume > 1.3 * 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirm = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,9 +104,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(pvcrsi[i]) or np.isnan(vwap[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,33 +113,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        pivot_val = pivot_aligned[i]
-        ema12h_trend = ema50_12h_aligned[i]
+        pvcrsi_val = pvcrsi[i]
+        vwap_val = vwap[i]
+        adx_val = adx_aligned[i]
         vol_confirm = volume_confirm[i]
         
         if position == 0:
-            # LONG: Price closes above R1 with volume confirmation and 12h uptrend
-            if close[i] > r1_val and close[i] > ema12h_trend and vol_confirm:
+            # LONG: PV_CRSI oversold (<15), price below VWAP, ranging market (ADX<20), volume confirmation
+            if pvcrsi_val < 15 and close[i] < vwap_val and adx_val < 20 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below S1 with volume confirmation and 12h downtrend
-            elif close[i] < s1_val and close[i] < ema12h_trend and vol_confirm:
+            # SHORT: PV_CRSI overbought (>85), price above VWAP, ranging market (ADX<20), volume confirmation
+            elif pvcrsi_val > 85 and close[i] > vwap_val and adx_val < 20 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to pivot (mean reversion) or breaks below S1 (invalidates bullish bias)
-            if close[i] <= pivot_val or close[i] < s1_val:
+            # EXIT LONG: PV_CRSI returns to neutral range (40-60) or breaks above VWAP with strength
+            if pvcrsi_val > 40 and pvcrsi_val < 60:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > vwap_val and pvcrsi_val > 50:  # Early exit if momentum shifts
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot (mean reversion) or breaks above R1 (invalidates bearish bias)
-            if close[i] >= pivot_val or close[i] > r1_val:
+            # EXIT SHORT: PV_CRSI returns to neutral range (40-60) or breaks below VWAP with weakness
+            if pvcrsi_val > 40 and pvcrsi_val < 60:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < vwap_val and pvcrsi_val < 50:  # Early exit if momentum shifts
                 signals[i] = 0.0
                 position = 0
             else:
