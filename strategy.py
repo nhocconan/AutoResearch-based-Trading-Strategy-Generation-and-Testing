@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1D_Camarilla_R3S3_Breakout_Trend_Volume
+# 12h_1D_Camarilla_R3S3_Breakout_Trend_Volume
 # Hypothesis: Breakout at daily Camarilla R3/S3 levels with volume confirmation and 1d trend filter.
-# Uses 1d timeframe for Camarilla levels and trend filter, 4h for entry/exit.
+# Uses 12h timeframe for entries and 1d timeframe for trend filter and Camarilla levels.
 # Designed to work in both bull and bear markets by requiring volume confirmation and trend alignment.
-# Targets 20-50 trades/year on 4h timeframe to avoid fee drag.
+# Targets 15-35 trades/year on 12h timeframe to avoid fee drag.
 
-name = "4h_1D_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "4h"
+name = "12h_1D_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
