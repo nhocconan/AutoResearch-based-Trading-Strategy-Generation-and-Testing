@@ -1,7 +1,6 @@
-#%%
 #!/usr/bin/env python3
-name = "1d_WeeklyDonchian20_WeeklyTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_Ichimoku_TK_Cross_CloudFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -10,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,40 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1w Donchian(20) breakout ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # === 1d Ichimoku components ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Donchian upper/lower from weekly data
-    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Conversion line (Tenkan-sen): (9-period high + low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    # Base line (Kijun-sen): (26-period high + low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # === 1w EMA50 trend filter ===
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Leading Span A: (Tenkan + Kijun)/2 shifted 26 periods ahead
+    span_a = ((tenkan + kijun) / 2)
     
-    # === 1w Volume spike filter ===
-    vol_avg_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1w = volume_1w > (2.0 * vol_avg_1w)
-    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w.astype(float))
+    # Leading Span B: (52-period high + low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    span_b = ((period52_high + period52_low) / 2)
+    
+    # Align all components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
+    span_a_aligned = align_htf_to_ltf(prices, df_1d, span_a)
+    span_b_aligned = align_htf_to_ltf(prices, df_1d, span_b)
+    
+    # === 6h Volume confirmation ===
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_avg)  # 1.5x average volume
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200
+    start_idx = 100  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper_aligned[i]) or 
-            np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(vol_spike_1w_aligned[i])):
+        if (np.isnan(tenkan_aligned[i]) or 
+            np.isnan(kijun_aligned[i]) or
+            np.isnan(span_a_aligned[i]) or
+            np.isnan(span_b_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,33 +69,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Determine cloud top and bottom
+        cloud_top = max(span_a_aligned[i], span_b_aligned[i])
+        cloud_bottom = min(span_a_aligned[i], span_b_aligned[i])
+        
         if position == 0:
-            # Long: Close above Donchian upper + above weekly EMA50 + volume spike
-            if (close[i] > donchian_upper_aligned[i] and
-                close[i] > ema50_1w_aligned[i] and
-                vol_spike_1w_aligned[i] > 0.5):
+            # Long: TK cross bullish + price above cloud + volume spike
+            if (tenkan_aligned[i] > kijun_aligned[i] and
+                close[i] > cloud_top and
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below Donchian lower + below weekly EMA50 + volume spike
-            elif (close[i] < donchian_lower_aligned[i] and
-                  close[i] < ema50_1w_aligned[i] and
-                  vol_spike_1w_aligned[i] > 0.5):
+            # Short: TK cross bearish + price below cloud + volume spike
+            elif (tenkan_aligned[i] < kijun_aligned[i] and
+                  close[i] < cloud_bottom and
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below Donchian lower or below weekly EMA50
-            if close[i] < donchian_lower_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit long: Price drops below cloud or TK cross bearish
+            if close[i] < cloud_bottom or tenkan_aligned[i] < kijun_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above Donchian upper or above weekly EMA50
-            if close[i] > donchian_upper_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit short: Price rises above cloud or TK cross bullish
+            if close[i] > cloud_top or tenkan_aligned[i] > kijun_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-#%%
