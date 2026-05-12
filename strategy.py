@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_12h_1d_AdaptiveChannel_Breakout_Target
-Hypothesis: Adaptive channel breakouts using 6h Donchian (20) with 12h trend filter and volume confirmation.
-Targets 6h timeframe to reduce trade frequency (target: 15-35 trades/year) while using proven breakout structure.
-Uses dynamic channel width based on ATR volatility to adapt to changing market conditions.
-Only takes long when price breaks above upper channel with volume spike and 12h uptrend, short when breaks below lower channel with volume spike and 12h downtrend.
-Adaptive channel prevents overtrading in low volatility and undertrading in high volatility.
+4h_Supertrend_1dVWAP_MeanReversion
+Hypothesis: In mean-reverting markets (BTC/ETH), price reverts to VWAP after extreme deviations. Supertrend on 4h determines regime: long when price < VWAP in uptrend, short when price > VWAP in downtrend. Uses 1d VWAP for institutional reference and avoids overtrading with strict entry conditions. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend).
 """
 
-name = "6h_12h_1d_AdaptiveChannel_Breakout_Target"
-timeframe = "6h"
+name = "4h_Supertrend_1dVWAP_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,47 +22,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >2.0x 30-period average (on 6h timeframe)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Supertrend on 4h: ATR(10), factor=3.0
+    atr_period = 10
+    factor = 3.0
     
-    # Adaptive channel: Donchian with ATR-based width adjustment
-    # Calculate ATR(14) for volatility measurement
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Base Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Adaptive channel width: base width + ATR multiplier
-    base_width = donch_high - donch_low
-    atr_multiplier = 0.5  # Adjusts channel width based on volatility
-    channel_width = base_width + (atr_multiplier * atr)
+    # Supertrend calculation
+    hl2 = (high + low) / 2
+    upper_band = hl2 + factor * atr
+    lower_band = hl2 - factor * atr
     
-    # Upper and lower adaptive channels
-    upper_channel = donch_high + (channel_width * 0.1)  # 10% of adaptive width above Donchian high
-    lower_channel = donch_low - (channel_width * 0.1)   # 10% of adaptive width below Donchian low
+    # Initialize bands
+    upper_band_final = np.full_like(upper_band, np.nan)
+    lower_band_final = np.full_like(lower_band, np.nan)
+    supertrend = np.full_like(close, np.nan)
+    trend = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    upper_band_final[0] = upper_band[0]
+    lower_band_final[0] = lower_band[0]
+    supertrend[0] = upper_band_final[0]
+    trend[0] = 1
+    
+    for i in range(1, n):
+        if close[i-1] > upper_band_final[i-1]:
+            trend[i] = -1
+        elif close[i-1] < lower_band_final[i-1]:
+            trend[i] = 1
+        else:
+            trend[i] = trend[i-1]
+        
+        if trend[i] == 1:
+            upper_band_final[i] = min(upper_band[i], upper_band_final[i-1])
+            lower_band_final[i] = lower_band[i]
+            supertrend[i] = lower_band_final[i]
+        else:
+            upper_band_final[i] = upper_band[i]
+            lower_band_final[i] = max(lower_band[i], lower_band_final[i-1])
+            supertrend[i] = upper_band_final[i]
+    
+    # 1d data for VWAP calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Typical price and VWAP
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_values = vwap.values
+    
+    # Align 1d VWAP to 4h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_values)
+    
+    # Volume filter: >1.5x 20-period average (avoid chop)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        if (np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(upper_channel[i]) or
-            np.isnan(lower_channel[i])):
+    for i in range(50, n):
+        if (np.isnan(supertrend[i]) or 
+            np.isnan(vwap_aligned[i]) or
+            np.isnan(trend[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,30 +102,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper channel + volume spike + price above 12h EMA50
-            if (close[i] > upper_channel[i] and 
-                volume_spike[i] and 
-                close[i] > ema_50_12h_aligned[i]):
+            # LONG: Price below VWAP in uptrend (buy the dip)
+            if (close[i] < vwap_aligned[i] and 
+                trend[i] == 1 and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower channel + volume spike + price below 12h EMA50
-            elif (close[i] < lower_channel[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema_50_12h_aligned[i]):
+            # SHORT: Price above VWAP in downtrend (sell the rally)
+            elif (close[i] > vwap_aligned[i] and 
+                  trend[i] == -1 and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below upper channel OR closes below 12h EMA50
-            if close[i] < upper_channel[i] or close[i] < ema_50_12h_aligned[i]:
+            # EXIT LONG: Price crosses above VWAP or trend turns down
+            if close[i] > vwap_aligned[i] or trend[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above lower channel OR closes above 12h EMA50
-            if close[i] > lower_channel[i] or close[i] > ema_50_12h_aligned[i]:
+            # EXIT SHORT: Price crosses below VWAP or trend turns up
+            if close[i] < vwap_aligned[i] or trend[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
