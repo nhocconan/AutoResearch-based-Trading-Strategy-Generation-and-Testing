@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1d_RSI_Reversal_Wide
-# Hypothesis: Daily RSI reversal with weekly trend filter and volume confirmation.
-# In bull markets, buy when RSI < 30 in uptrend; in bear markets, sell when RSI > 70 in downtrend.
-# Weekly trend filter avoids counter-trend trades. Volume confirmation ensures momentum.
-# Designed for 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+# 6h_PivotPoint_Reversal_Strategy
+# Hypothesis: 6h Pivot Point reversal strategy using 12h pivot levels for context and volume confirmation.
+# Longs near S1/S2 in 12h uptrend, shorts near R1/R2 in 12h downtrend.
+# Pivot points provide institutional support/resistance levels that work in both bull and bear markets.
+# Targets 50-150 total trades over 4 years (12-37/year) with 0.25 position size to minimize fee drag.
 
-name = "1d_RSI_Reversal_Wide"
-timeframe = "1d"
+name = "6h_PivotPoint_Reversal_Strategy"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -23,35 +23,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for pivot point calculation (higher timeframe context)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
 
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend direction
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
 
-    # Daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate pivot points for 12h timeframe
+    # Pivot Point = (High + Low + Close) / 3
+    pp = (high_12h + low_12h + close_12h) / 3
+    # Resistance 1 = (2 * PP) - Low
+    r1 = (2 * pp) - low_12h
+    # Support 1 = (2 * PP) - High
+    s1 = (2 * pp) - high_12h
+    # Resistance 2 = PP + (High - Low)
+    r2 = pp + (high_12h - low_12h)
+    # Support 2 = PP - (High - Low)
+    s2 = pp - (high_12h - low_12h)
 
-    # Daily volume SMA20 for confirmation
+    # Align pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_12h, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
+
+    # Calculate 6h volume SMA for confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike_threshold = volume_sma20 * 1.3  # Require 1.3x average volume
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after warmup
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,26 +71,37 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI oversold in weekly uptrend with volume confirmation
-            if rsi[i] < 30 and close[i] > ema50_1w_aligned[i] and volume[i] > volume_sma20[i]:
+            # LONG: Price near support levels in 12h uptrend with volume confirmation
+            # 12h uptrend: close > pivot point
+            near_support = (close[i] <= s1_aligned[i] * 1.02) or (close[i] <= s2_aligned[i] * 1.02)
+            in_uptrend = close_12h[-1] > pp[-1] if len(close_12h) > 0 and len(pp) > 0 else False
+            # More robust uptrend check: current 12h close > current 12h pivot
+            if i < len(pp_aligned):
+                in_uptrend = close[i] > pp_aligned[i]  # Simplified: 6h close > 12h pivot
+            
+            if near_support and in_uptrend and volume[i] > volume_sma20[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought in weekly downtrend with volume confirmation
-            elif rsi[i] > 70 and close[i] < ema50_1w_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: Price near resistance levels in 12h downtrend with volume confirmation
+            # 12h downtrend: close < pivot point
+            near_resistance = (close[i] >= r1_aligned[i] * 0.98) or (close[i] >= r2_aligned[i] * 0.98)
+            in_downtrend = close[i] < pp_aligned[i]  # 6h close < 12h pivot
+            
+            if near_resistance and in_downtrend and volume[i] > volume_sma20[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought or trend change
-            if rsi[i] > 70 or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Price reaches pivot point or shows weakness
+            if close[i] >= pp_aligned[i] or close[i] <= s1_aligned[i] * 0.98:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold or trend change
-            if rsi[i] < 30 or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Price reaches pivot point or shows strength
+            if close[i] <= pp_aligned[i] or close[i] >= r1_aligned[i] * 1.02:
                 signals[i] = 0.0
                 position = 0
             else:
