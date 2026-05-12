@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Keltner_Channel_RSI_Trend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,54 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Keltner Channel and RSI
+    # Get daily data once before loop
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Keltner Channel components on daily
-    # ATR(10)
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate previous day's Camarilla levels
+    # Using previous day's data to avoid look-ahead
+    prev_high = np.concatenate([[high_1d[0]], high_1d[:-1]])
+    prev_low = np.concatenate([[low_1d[0]], low_1d[:-1]])
+    prev_close = np.concatenate([[close_1d[0]], close_1d[:-1]])
     
-    # EMA(20) as middle line
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate pivot and range
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    # Keltner Bands
-    keltner_upper_1d = ema20_1d + (2.0 * atr10_1d)
-    keltner_lower_1d = ema20_1d - (2.0 * atr10_1d)
+    # Camarilla levels (S3 and R3)
+    s3 = pivot - (1.1 * range_val / 2.0)
+    r3 = pivot + (1.1 * range_val / 2.0)
     
-    # RSI(14) on daily
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Align to 12h timeframe
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
     
-    # Align all to 6h
-    keltner_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, keltner_upper_1d)
-    keltner_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, keltner_lower_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike on 6h: current volume > 1.5x 20-period average
+    # Volume spike on 12h: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(keltner_upper_1d_aligned[i]) or np.isnan(keltner_lower_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(s3_12h[i]) or np.isnan(r3_12h[i]) or 
+            np.isnan(ema34_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,28 +66,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above upper Keltner + RSI > 50 + volume spike
-            if (close[i] > keltner_upper_1d_aligned[i] and 
-                rsi_1d_aligned[i] > 50 and 
+            # Long: price breaks above R3 + above EMA34 + volume spike
+            if (close[i] > r3_12h[i] and 
+                close[i] > ema34_12h[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Keltner + RSI < 50 + volume spike
-            elif (close[i] < keltner_lower_1d_aligned[i] and 
-                  rsi_1d_aligned[i] < 50 and 
+            # Short: price breaks below S3 + below EMA34 + volume spike
+            elif (close[i] < s3_12h[i] and 
+                  close[i] < ema34_12h[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below lower Keltner or RSI < 40
-            if close[i] < keltner_lower_1d_aligned[i] or rsi_1d_aligned[i] < 40:
+            # Exit long: price closes below S3 or below EMA34
+            if close[i] < s3_12h[i] or close[i] < ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above upper Keltner or RSI > 60
-            if close[i] > keltner_upper_1d_aligned[i] or rsi_1d_aligned[i] > 60:
+            # Exit short: price closes above R3 or above EMA34
+            if close[i] > r3_12h[i] or close[i] > ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
