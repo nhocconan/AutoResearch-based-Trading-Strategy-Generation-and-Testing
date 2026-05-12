@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-Hypothesis: Breakout above R1 or below S1 from daily Camarilla pivots with 12h EMA50 trend filter and volume confirmation. Designed for 20-50 trades/year on 4h timeframe to work in both bull and bear markets by using strong institutional levels and filtering with 12h trend and volume.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Breakout above R1 or below S1 from daily Camarilla pivots with 1d EMA50 trend filter and volume confirmation. Designed for 12-37 trades/year on 12h timeframe to work in both bull and bear markets by using strong institutional levels and filtering with 1d trend and volume.
 """
 
-name = "4h_4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -37,19 +37,15 @@ def generate_signals(prices):
     r1_1d = close_1d + hl_range * 1.1 / 12
     s1_1d = close_1d - hl_range * 1.1 / 12
 
-    # Align to 4h timeframe (values from previous day's close)
+    # Align to 12h timeframe (values from previous day's close)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
 
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Get 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume confirmation: 4h volume > 1.5x 20-period average
+    # Volume confirmation: 12h volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
@@ -58,7 +54,7 @@ def generate_signals(prices):
     for i in range(50, n):
         r1_val = r1_1d_aligned[i]
         s1_val = s1_1d_aligned[i]
-        ema50_val = ema50_12h_aligned[i]
+        ema50_val = ema50_1d_aligned[i]
         vol_avg_val = vol_avg_20[i]
 
         if np.isnan(r1_val) or np.isnan(s1_val) or np.isnan(ema50_val) or np.isnan(vol_avg_val):
