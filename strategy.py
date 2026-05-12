@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1d_KC_Reversal_Signal_1dATR_Trend
-# Hypothesis: Combines Keltner Channel reversals on 4h with 1d ATR-based trend filter.
-# In trending markets (1d ATR rising), look for mean-reversion entries at KC extremes.
-# In ranging markets (1d ATR falling), trade breakouts of KC bands.
-# Volume confirmation ensures institutional participation. Designed for low trade frequency.
-# Works in bull/bear markets by adapting to volatility regime via ATR trend.
+# 4h_1d_Multi_Timeframe_Structure_Breakout
+# Hypothesis: Combines 1d market structure (HH/HL/LH/LL) with 4h breakouts for trend-following entries.
+# Uses 1d swing points to determine trend direction, and breaks of 4h swing highs/lows for entry timing.
+# Volume confirmation (>1.5x 20-period average) filters for institutional participation.
+# Designed for low trade frequency (<200 total 4h trades) to minimize fee drag.
+# Works in bull/bear markets by following 1d structure while using 4h breaks for precise entries.
 
-name = "4h_1d_KC_Reversal_Signal_1dATR_Trend"
+name = "4h_1d_Multi_Timeframe_Structure_Breakout"
 timeframe = "4h"
 leverage = 1.0
 
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,37 +24,100 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Keltner Channel (20, 2.0) on 4h
-    ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values
-    upper = ma + 2 * atr
-    lower = ma - 2 * atr
-    
-    # Volume spike: >1.5x 20-period average
+    # Volume spike: >1.5x 20-period average (on 4h timeframe)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
     
-    # Daily ATR trend filter: rising ATR = trending market, falling ATR = ranging
+    # Daily data for market structure (swing points)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    atr_1d = pd.Series(high_1d - low_1d).rolling(window=14, min_periods=14).mean().values
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
-    atr_rising = atr_1d > atr_ma_1d  # trending market
+    # Calculate 1d swing points: Higher Highs (HH), Lower Lows (LL)
+    # Swing high: current high > previous high AND current high > next high
+    # Swing low: current low < previous low AND current low < next low
+    swing_high = np.zeros(len(high_1d), dtype=bool)
+    swing_low = np.zeros(len(low_1d), dtype=bool)
     
-    # Align daily ATR trend to 4h
-    atr_rising_aligned = align_htf_to_ltf(prices, df_1d, atr_rising)
+    for i in range(1, len(high_1d)-1):
+        if high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i+1]:
+            swing_high[i] = True
+        if low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i+1]:
+            swing_low[i] = True
+    
+    # Determine trend structure: HH/HL = uptrend, LH/LL = downtrend
+    # We'll track the last swing high and low to determine structure
+    last_swing_high = np.full(len(high_1d), np.nan)
+    last_swing_low = np.full(len(low_1d), np.nan)
+    
+    last_high_val = np.nan
+    last_low_val = np.nan
+    
+    for i in range(len(high_1d)):
+        if swing_high[i]:
+            last_high_val = high_1d[i]
+        if swing_low[i]:
+            last_low_val = low_1d[i]
+        last_swing_high[i] = last_high_val
+        last_swing_low[i] = last_low_val
+    
+    # Determine market structure: 
+    # Uptrend: making higher highs and higher lows
+    # Downtrend: making lower highs and lower lows
+    # We'll use the relationship between current price and last swing points
+    structure_long = np.zeros(len(high_1d), dtype=bool)   # Bullish structure
+    structure_short = np.zeros(len(high_1d), dtype=bool)  # Bearish structure
+    
+    for i in range(len(high_1d)):
+        if not np.isnan(last_swing_high[i]) and not np.isnan(last_swing_low[i]):
+            # Bullish structure: price above last swing low and making higher highs
+            if close_1d[i] > last_swing_low[i]:
+                structure_long[i] = True
+            # Bearish structure: price below last swing high and making lower lows
+            if close_1d[i] < last_swing_high[i]:
+                structure_short[i] = True
+    
+    # Align 1d structure to 4h timeframe
+    structure_long_aligned = align_htf_to_ltf(prices, df_1d, structure_long)
+    structure_short_aligned = align_htf_to_ltf(prices, df_1d, structure_short)
+    
+    # 4h swing points for entry timing
+    swing_high_4h = np.zeros(len(high), dtype=bool)
+    swing_low_4h = np.zeros(len(low), dtype=bool)
+    
+    for i in range(1, len(high)-1):
+        if high[i] > high[i-1] and high[i] > high[i+1]:
+            swing_high_4h[i] = True
+        if low[i] < low[i-1] and low[i] < low[i+1]:
+            swing_low_4h[i] = True
+    
+    # Calculate 4h swing high and low levels for breakout entries
+    last_swing_high_4h = np.full(len(high), np.nan)
+    last_swing_low_4h = np.full(len(low), np.nan)
+    
+    last_high_4h = np.nan
+    last_low_4h = np.nan
+    
+    for i in range(len(high)):
+        if swing_high_4h[i]:
+            last_high_4h = high[i]
+        if swing_low_4h[i]:
+            last_low_4h = low[i]
+        last_swing_high_4h[i] = last_high_4h
+        last_swing_low_4h[i] = last_low_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        if np.isnan(ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(atr_rising_aligned[i]):
+    for i in range(50, n):
+        if (np.isnan(structure_long_aligned[i]) or
+            np.isnan(structure_short_aligned[i]) or
+            np.isnan(last_swing_high_4h[i]) or
+            np.isnan(last_swing_low_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,36 +126,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            if atr_rising_aligned[i]:
-                # TRENDING: mean reversion at KC extremes
-                if close[i] < lower[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] > upper[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # LONG: Bullish 1d structure + price breaks above 4h swing high + volume spike
+            if (structure_long_aligned[i] and 
+                close[i] > last_swing_high_4h[i] and 
+                volume_spike[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Bearish 1d structure + price breaks below 4h swing low + volume spike
+            elif (structure_short_aligned[i] and 
+                  close[i] < last_swing_low_4h[i] and 
+                  volume_spike[i]):
+                signals[i] = -0.25
+                position = -1
             else:
-                # RANGING: breakout of KC bands
-                if close[i] > upper[i] and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < lower[i] and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses back above midpoint OR ATR regime changes
-            if close[i] > ma[i] or not atr_rising_aligned[i]:
+            # EXIT LONG: Price breaks below 4h swing low OR 1d structure turns bearish
+            if (close[i] < last_swing_low_4h[i]) or \
+               not structure_long_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses back below midpoint OR ATR regime changes
-            if close[i] < ma[i] or not atr_rising_aligned[i]:
+            # EXIT SHORT: Price breaks above 4h swing high OR 1d structure turns bullish
+            if (close[i] > last_swing_high_4h[i]) or \
+               not structure_short_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
