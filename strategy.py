@@ -1,9 +1,14 @@
-#!/usr/bin/env python3
-# 12h_1D_Camarilla_R3S3_Breakout_Volume
-# Hypothesis: Breakouts above daily R3 or below daily S3 on 12h timeframe with volume confirmation and 1d EMA34 trend filter. Designed for 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while capturing strong momentum moves in both bull and bear markets.
+# USDT-M Perpetual Futures Strategy: 1h_4H_1D_Camarilla_R3S3_Breakout_Volume_Trend
+# Hypothesis: Breakouts above daily R3 or below daily S3 on 1h timeframe with volume confirmation and 1d EMA34 trend filter.
+# Uses daily timeframe for both trend and pivot levels to reduce noise and avoid overtrading.
+# Designed for 15-37 trades/year on 1h timeframe to minimize fee drag while capturing strong momentum moves.
+# Works in both bull and bear markets by using 1d trend filter - only trades in direction of higher timeframe trend.
+# Entry: Price breaks above/below daily R3/S3 with volume confirmation and aligned daily trend.
+# Exit: Trend reversal or price retracement to opposite S3/R3 level.
+# Timeframe: 1h (primary), 4h/1d for trend context (per instructions).
 
-name = "12h_1D_Camarilla_R3S3_Breakout_Volume"
-timeframe = "12h"
+name = "1h_4H_1D_Camarilla_R3S3_Breakout_Volume_Trend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -42,7 +47,7 @@ def generate_signals(prices):
     R3 = prev_close + rang * 1.1 / 4
     S3 = prev_close - rang * 1.1 / 4
 
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 1h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
 
@@ -50,13 +55,26 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > (1.5 * vol_ma)
 
+    # Session filter: 08-20 UTC (reduce noise trades)
+    hours = prices.index.hour  # Already datetime64[ms], .hour works directly
+    session_ok = (hours >= 8) & (hours <= 20)
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(volume_ok[i])):
+            np.isnan(volume_ok[i]) or np.isnan(session_ok[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        # Only trade during active session
+        if not session_ok[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,11 +89,11 @@ def generate_signals(prices):
         if position == 0:
             # LONG: Price crosses above R3 with bullish daily trend and volume confirmation
             if close[i] > R3_aligned[i] and close[i-1] <= R3_aligned[i-1] and bullish_trend and volume_ok[i]:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # SHORT: Price crosses below S3 with bearish daily trend and volume confirmation
             elif close[i] < S3_aligned[i] and close[i-1] >= S3_aligned[i-1] and bearish_trend and volume_ok[i]:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
@@ -85,13 +103,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # EXIT SHORT: Price crosses above R3 or daily trend turns bullish
             if close[i] > R3_aligned[i] and close[i-1] <= R3_aligned[i-1] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
