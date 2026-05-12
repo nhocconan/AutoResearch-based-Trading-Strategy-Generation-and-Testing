@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_1D_Camarilla_R1_S1_Breakout_TrendVol
-Hypothesis: 12-hour breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
+4h_1D_Camarilla_R1_S1_Breakout_TrendVol_v2
+Hypothesis: 4-hour breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
 Only takes long when price breaks above R1 with volume spike and daily uptrend, short when breaks below S1 with volume spike and daily downtrend.
-Uses tight entry conditions (trend + volume + level break) to target 20-30 trades per year on 12h timeframe, avoiding overtrading.
-Works in bull markets via trend-following breaks and in bear markets via counter-trend reversals at extreme daily levels.
+Uses tighter entry conditions (added ATR filter) to reduce trade frequency and improve robustness in both bull and bear markets.
 """
 
-name = "12h_1D_Camarilla_R1_S1_Breakout_TrendVol"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R1_S1_Breakout_TrendVol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -29,6 +28,13 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
+    # ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     # Daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
@@ -46,7 +52,7 @@ def generate_signals(prices):
     R1_1d = prev_close_1d + 1.1 * rang_1d * 1.0 / 4
     S1_1d = prev_close_1d - 1.1 * rang_1d * 1.0 / 4
     
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
     S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
@@ -56,7 +62,8 @@ def generate_signals(prices):
     for i in range(50, n):
         if (np.isnan(R1_1d_aligned[i]) or 
             np.isnan(S1_1d_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,16 +72,18 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + volume spike + price above daily EMA50 (daily uptrend)
+            # LONG: Price breaks above R1 + volume spike + price above daily EMA50 + ATR filter
             if (close[i] > R1_1d_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > ema_50_1d_aligned[i]):
+                close[i] > ema_50_1d_aligned[i] and
+                close[i] > low[i] + 0.5 * atr[i]):  # price above low + half ATR
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + volume spike + price below daily EMA50 (daily downtrend)
+            # SHORT: Price breaks below S1 + volume spike + price below daily EMA50 + ATR filter
             elif (close[i] < S1_1d_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < ema_50_1d_aligned[i]):
+                  close[i] < ema_50_1d_aligned[i] and
+                  close[i] < high[i] - 0.5 * atr[i]):  # price below high - half ATR
                 signals[i] = -0.25
                 position = -1
             else:
