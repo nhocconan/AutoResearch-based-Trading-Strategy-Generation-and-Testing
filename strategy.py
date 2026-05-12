@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 6h_WilliamsAlligator_Trend_Filter
-# Hypothesis: Williams Alligator (3 SMAs) on 6h with 12h trend filter and volume confirmation.
-# The Alligator identifies trend state: jaws (13), teeth (8), lips (5) SMAs.
-# In uptrend: lips > teeth > jaws; downtrend: lips < teeth < jaws.
-# Only take trades aligned with 12h EMA50 trend to avoid counter-trend whipsaw.
-# Volume spike (>1.5x SMA20) confirms momentum. Designed for 50-150 trades over 4 years.
-# Works in bull/bear by following 12h trend and using Alligator for entry/exit.
+# 4h_TRIX_VolumeSpike_TrendFilter
+# Hypothesis: 4h TRIX momentum with 1d EMA trend filter and volume spike confirmation.
+# TRIX filters noise and captures sustained momentum; 1d EMA avoids counter-trend trades; volume spike confirms breakout strength.
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drift. Works in bull/bear by following 1d trend.
+# Uses TRIX(12) signal line crossovers for entries, volume > 1.5x SMA20 for confirmation, and 1d EMA20 for trend filter.
 
-name = "6h_WilliamsAlligator_Trend_Filter"
-timeframe = "6h"
+name = "4h_TRIX_VolumeSpike_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,38 +19,42 @@ def generate_signals(prices):
         return np.zeros(n)
 
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 6h data for Williams Alligator
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 13:
+    # Get 4h data for TRIX calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
 
-    close_6h = df_6h['close'].values
+    close_4h = df_4h['close'].values
 
-    # Williams Alligator: SMAs of median price (high+low)/2
-    median_price = (df_6h['high'].values + df_6h['low'].values) / 2
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values  # SMA5
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values  # SMA8
-    jaws = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values # SMA13
-
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
 
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    close_1d = df_1d['close'].values
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
 
-    # Align Alligator lines to 6h timeframe
-    lips_aligned = align_htf_to_ltf(prices, df_6h, lips)
-    teeth_aligned = align_htf_to_ltf(prices, df_6h, teeth)
-    jaws_aligned = align_htf_to_ltf(prices, df_6h, jaws)
+    # Calculate TRIX: EMA of EMA of EMA of log(close), then ROC
+    # Step 1: EMA1
+    ema1 = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Step 2: EMA2
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Step 3: EMA3
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Step 4: ROC of EMA3
+    trix_raw = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
+    trix_raw[0] = 0  # First value undefined
+    # Signal line: 9-period EMA of TRIX
+    trix_signal = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
 
-    # Calculate 6h volume SMA20 for volume confirmation
+    # Align TRIX and signal line to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_4h, trix_raw)
+    trix_signal_aligned = align_htf_to_ltf(prices, df_4h, trix_signal)
+
+    # Calculate 4h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
@@ -60,10 +62,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(13, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(jaws_aligned[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(trix_signal_aligned[i]) or
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,34 +73,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Determine Alligator trend state
-        lips_val = lips_aligned[i]
-        teeth_val = teeth_aligned[i]
-        jaws_val = jaws_aligned[i]
-        bullish_aligned = lips_val > teeth_val > jaws_val  # Lips > Teeth > Jaws
-        bearish_aligned = lips_val < teeth_val < jaws_val  # Lips < Teeth < Jaws
-
         if position == 0:
-            # LONG: Bullish Alligator alignment + price above 12h EMA50 + volume spike
-            if bullish_aligned and close[i] > ema50_12h_aligned[i] and volume[i] > volume_sma20[i]:
+            # LONG: TRIX crosses above signal line in 1d uptrend with volume spike
+            if trix_aligned[i] > trix_signal_aligned[i] and trix_aligned[i-1] <= trix_signal_aligned[i-1] and close[i] > ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish Alligator alignment + price below 12h EMA50 + volume spike
-            elif bearish_aligned and close[i] < ema50_12h_aligned[i] and volume[i] > volume_sma20[i]:
+            # SHORT: TRIX crosses below signal line in 1d downtrend with volume spike
+            elif trix_aligned[i] < trix_signal_aligned[i] and trix_aligned[i-1] >= trix_signal_aligned[i-1] and close[i] < ema20_1d_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alligator turns bearish (lips < teeth) or price below 12h EMA50
-            if not bullish_aligned or close[i] < ema50_12h_aligned[i]:
+            # EXIT LONG: TRIX crosses below signal line (momentum fade)
+            if trix_aligned[i] < trix_signal_aligned[i] and trix_aligned[i-1] >= trix_signal_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator turns bullish (lips > teeth) or price above 12h EMA50
-            if not bearish_aligned or close[i] > ema50_12h_aligned[i]:
+            # EXIT SHORT: TRIX crosses above signal line (momentum fade)
+            if trix_aligned[i] > trix_signal_aligned[i] and trix_aligned[i-1] <= trix_signal_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
