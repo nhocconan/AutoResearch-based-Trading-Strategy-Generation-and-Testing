@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h Williams Alligator + Volume Spike + Chop Regime Filter
-Hypothesis: Williams Alligator identifies trend presence and direction; combined with volume
-spike confirmation and chop filter to avoid false signals in ranging markets. Designed for
-moderate trade frequency (~20-40/year) to balance signal quality and fee drag, effective in
-both bull and bear markets by avoiding whipsaws in low volatility regimes.
+1d Donchian Breakout + Weekly Volume Spike + KAMA Trend Filter
+Hypothesis: Donchian breakouts capture strong trends; weekly volume spike confirms institutional interest;
+KAMA(30) filters false breakouts in ranging markets. Designed for low trade frequency (<20/year)
+to minimize fee decay while capturing sustained moves in bull/bear markets.
 """
-name = "4h_WilliamsAlligator_Volume_Chop"
-timeframe = "4h"
+name = "1d_Donchian_Volume_KAMA"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,34 +23,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Williams Alligator ===
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # === Weekly KAMA Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
+    volatility = np.abs(np.diff(close_1w))
+    er = np.zeros(len(close_1w))
+    for i in range(1, len(close_1w)):
+        if np.sum(volatility[max(0, i-9):i+1]) > 0:
+            er[i] = change[i] / np.sum(volatility[max(0, i-9):i+1])
+        else:
+            er[i] = 0
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama_1w = np.zeros(len(close_1w))
+    kama_1w[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        kama_1w[i] = kama_1w[i-1] + sc[i] * (close_1w[i] - kama_1w[i-1])
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # === Chop Index (14) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr14 * 14 / (highest_high - lowest_low)) / np.log10(14)
+    # === Daily Donchian Channels (20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === Volume Spike (20) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # === Weekly Volume Spike (20) ===
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1w = vol_1w > (vol_ma_1w * 2.0)
+    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure all indicators ready
+    start_idx = 60  # Ensure all indicators ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(chop[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_1w_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_spike_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,26 +70,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Lips > Teeth > Jaw (bullish alignment) + chop < 61.8 + volume spike
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
-                chop[i] < 61.8 and vol_spike[i]):
+            # LONG: Price breaks above upper Donchian + weekly KAMA uptrend + weekly volume spike
+            if (close[i] > highest_high[i] and 
+                close[i] > kama_1w_aligned[i] and 
+                vol_spike_1w_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Lips < Teeth < Jaw (bearish alignment) + chop < 61.8 + volume spike
-            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
-                  chop[i] < 61.8 and vol_spike[i]):
+            # SHORT: Price breaks below lower Donchian + weekly KAMA downtrend + weekly volume spike
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < kama_1w_aligned[i] and 
+                  vol_spike_1w_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Lips < Teeth OR chop > 61.8 (loss of bullish alignment or ranging)
-            if lips[i] < teeth[i] or chop[i] > 61.8:
+            # EXIT LONG: Price closes below weekly KAMA
+            if close[i] < kama_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Lips > Teeth OR chop > 61.8 (loss of bearish alignment or ranging)
-            if lips[i] > teeth[i] or chop[i] > 61.8:
+            # EXIT SHORT: Price closes above weekly KAMA
+            if close[i] > kama_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
