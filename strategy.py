@@ -1,6 +1,13 @@
+# 1h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Use 1d Camarilla R1/S1 breakouts with 1d EMA trend filter and volume spike confirmation.
+# 1h timeframe for precise entry timing, 1d for signal direction.
+# Works in bull (breakouts continue) and bear (mean reversion at S1/R1 in ranging markets).
+# Volume spike filters out low-conviction breakouts.
+# Target: 15-35 trades/year to stay under fee drag limits.
+
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn_v2"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -41,6 +48,9 @@ def generate_signals(prices):
     vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
     vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -59,18 +69,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:
             # Long: Close above R1 + above daily EMA34 + volume spike
             if (close[i] > camarilla_r1_aligned[i] and
                 close[i] > ema34_1d_aligned[i] and
                 vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short: Close below S1 + below daily EMA34 + volume spike
             elif (close[i] < camarilla_s1_aligned[i] and
                   close[i] < ema34_1d_aligned[i] and
                   vol_spike_1d_aligned[i] > 0.5):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Exit long: Close below S1 or below EMA34
@@ -78,13 +99,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Exit short: Close above R1 or above EMA34
             if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
