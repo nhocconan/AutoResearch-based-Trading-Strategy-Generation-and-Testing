@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_FisherTransform_1dTrend
-Hypothesis: Ehlers Fisher Transform identifies turning points with leading signals. 
-Applied on 6h price, filtered by 1d EMA trend (EMA34) to trade in direction of higher timeframe trend.
-In bull market: long when Fisher crosses above -1.5 with 1d uptrend. 
-In bear market: short when Fisher crosses below +1.5 with 1d downtrend.
-Uses volume confirmation to filter weak signals. Targets 15-35 trades/year.
+12h_Keltner_Channel_Breakout_1wTrend
+Hypothesis: In trending markets, price breaks above/below the Keltner Channel (EMA20 ± 2*ATR) signal strong momentum. 
+The 1-week EMA50 filter ensures we only trade in the direction of the higher timeframe trend, avoiding counter-trend whipsaws.
+Volume confirmation (volume > 1.5x 20-period average) filters out low-momentum breakouts.
+Works in both bull and bear markets by following the 1w trend direction.
 """
 
-name = "6h_FisherTransform_1dTrend"
-timeframe = "6h"
+name = "12h_Keltner_Channel_Breakout_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,35 +25,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
 
-    # Ehlers Fisher Transform (9 period)
-    price = (high + low) / 2
-    max_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    min_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    range_val = max_high - min_low
-    # Avoid division by zero
-    value1 = np.where(range_val != 0, 2 * ((price - min_low) / range_val - 0.5), 0)
-    # Smooth value1
-    value2 = np.zeros_like(value1)
-    for i in range(1, n):
-        value2[i] = 0.33 * value1[i] + 0.67 * value2[i-1]
-    # Clamp to [-0.99, 0.99] to avoid domain errors in log
-    value2 = np.clip(value2, -0.99, 0.99)
-    fish = 0.5 * np.log((1 + value2) / (1 - value2)) + 0.5 * np.roll(fish if 'fish' in locals() else np.zeros(n), 1)
-    # Initialize first value
-    if n > 0:
-        fish[0] = 0
-    for i in range(1, n):
-        fish[i] = 0.5 * np.log((1 + value2[i]) / (1 - value2[i])) + 0.5 * fish[i-1]
+    # Calculate EMA20 and ATR(14) for Keltner Channel (12h timeframe)
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
 
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Keltner Channel bounds
+    kc_upper = ema20 + 2 * atr
+    kc_lower = ema20 - 2 * atr
+
+    # 1-week EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
 
     # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,8 +55,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(10, n):
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or np.isnan(fish[i]) or np.isnan(fish[i-1]):
+    for i in range(20, n):
+        if np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_20[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,26 +65,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Fisher crosses above -1.5 + 1d uptrend + volume spike
-            if fish[i-1] <= -1.5 and fish[i] > -1.5 and close[i] > ema34_1d_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # LONG: Price breaks above Keltner Upper + 1w uptrend + volume spike
+            if close[i] > kc_upper[i] and close[i] > ema50_1w_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Fisher crosses below +1.5 + 1d downtrend + volume spike
-            elif fish[i-1] >= 1.5 and fish[i] < 1.5 and close[i] < ema34_1d_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
+            # SHORT: Price breaks below Keltner Lower + 1w downtrend + volume spike
+            elif close[i] < kc_lower[i] and close[i] < ema50_1w_aligned[i] and volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Fisher crosses below +1.5 or 1d trend turns down
-            if fish[i-1] >= 1.5 and fish[i] < 1.5 or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price closes below EMA20 or 1w trend turns down
+            if close[i] < ema20[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Fisher crosses above -1.5 or 1d trend turns up
-            if fish[i-1] <= -1.5 and fish[i] > -1.5 or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price closes above EMA20 or 1w trend turns up
+            if close[i] > ema20[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
