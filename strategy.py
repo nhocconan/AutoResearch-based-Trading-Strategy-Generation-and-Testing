@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12H_POWER_INDEX_CROSSOVER_1D_TREND_FILTER
-# Hypothesis: Power Index (bull power minus bear power) on daily timeframe
-# measures net institutional pressure. Cross above/below zero with trend filter
-# (price relative to daily EMA34) captures momentum shifts in both bull and bear markets.
-# Uses 12h timeframe for lower frequency trading to reduce fee drag.
-# Target: 12-37 trades/year (50-150 total over 4 years) on 12h timeframe.
+# 4H_DONCHIAN_BREAKOUT_20_VOLUME_CONFIRMATION_12H_TREND_FILTER
+# Hypothesis: Donchian channel breakouts with volume confirmation and 12h trend filter
+# captures momentum moves while avoiding chop. Works in both bull and bear markets.
+# Entry: Price breaks above Donchian(20) high with volume > 1.5x avg volume and 12h EMA50 uptrend
+# Exit: Price breaks below Donchian(20) low or trend reversal
+# Target: 20-50 trades/year on 4h timeframe (80-200 total over 4 years).
 
-name = "12H_POWER_INDEX_CROSSOVER_1D_TREND_FILTER"
-timeframe = "12h"
+name = "4H_DONCHIAN_BREAKOUT_20_VOLUME_CONFIRMATION_12H_TREND_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,39 +22,35 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Daily data for Power Index calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # EMA13 for Power Index calculation
-    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # EMA50 for 12h trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Bull Power = EMA13 - Low (buying pressure)
-    # Bear Power = High - EMA13 (selling pressure)
-    # Power Index = Bull Power - Bear Power = 2*EMA13 - (High + Low)
-    power_index = 2 * ema13 - (high_1d + low_1d)
+    # Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # EMA34 for trend filter
-    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align to 12h timeframe
-    power_index_aligned = align_htf_to_ltf(prices, df_1d, power_index)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
+    # Volume average (20-period)
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Need at least one day of data
+    start_idx = 20  # Need enough data for Donchian and volume average
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(power_index_aligned[i]) or np.isnan(ema34_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(vol_avg_20[i]) or np.isnan(ema50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,34 +59,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Power Index crosses above zero in uptrend
-            if (power_index_aligned[i] > 0 and 
-                power_index_aligned[i-1] <= 0 and
-                close[i] > ema34_aligned[i]):
+            # LONG: Price breaks above Donchian high with volume confirmation and uptrend
+            if (close[i] > high_20[i] and 
+                volume[i] > 1.5 * vol_avg_20[i] and
+                close[i] > ema50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Power Index crosses below zero in downtrend
-            elif (power_index_aligned[i] < 0 and 
-                  power_index_aligned[i-1] >= 0 and
-                  close[i] < ema34_aligned[i]):
+            # SHORT: Price breaks below Donchian low with volume confirmation and downtrend
+            elif (close[i] < low_20[i] and 
+                  volume[i] > 1.5 * vol_avg_20[i] and
+                  close[i] < ema50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Power Index crosses below zero or trend reversal
-            if (power_index_aligned[i] < 0 and 
-                power_index_aligned[i-1] >= 0) or \
-               close[i] <= ema34_aligned[i]:
+            # EXIT LONG: Price breaks below Donchian low or trend reversal
+            if (close[i] < low_20[i] or 
+                close[i] <= ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Power Index crosses above zero or trend reversal
-            if (power_index_aligned[i] > 0 and 
-                power_index_aligned[i-1] <= 0) or \
-               close[i] >= ema34_aligned[i]:
+            # EXIT SHORT: Price breaks above Donchian high or trend reversal
+            if (close[i] > high_20[i] or 
+                close[i] >= ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
