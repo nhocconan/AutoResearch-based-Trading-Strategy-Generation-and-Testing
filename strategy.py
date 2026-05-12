@@ -1,15 +1,15 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_Pivot_Reversal_with_1w_Trend_Filter
-Hypothesis: Daily reversals at weekly key levels (weekly high/low) with volume confirmation 
-and weekly trend filter work in both bull and bear markets. Uses weekly high/low as dynamic 
-support/resistance, entering reversals when price rejects these levels with volume spike.
-Weekly trend filter ensures we only take reversals against the weekly trend (counter-trend 
-in strong trends, but only when exhaustion is likely). Designed for 10-25 trades/year.
+6h_Volume_Weighted_CCI_Trend
+Hypothesis: Combines CCI momentum with volume-weighted price action on 6h timeframe.
+Uses 12h trend filter (EMA50) to align with higher timeframe direction and volume confirmation
+to filter false signals. Designed for 15-35 trades/year to minimize fee drift while capturing
+trends in both bull and bear markets. Volume weighting reduces noise and improves signal quality.
 """
 
-name = "1d_Pivot_Reversal_with_1w_Trend_Filter"
-timeframe = "1d"
+name = "6h_Volume_Weighted_CCI_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,36 +26,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data (call once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 12h data (call once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
 
-    # Calculate weekly high and low
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
 
-    # Weekly trend: EMA(5) vs EMA(20) on weekly close
-    ema5_1w = pd.Series(weekly_close).ewm(span=5, adjust=False, min_periods=5).mean().values
-    ema20_1w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_uptrend = ema5_1w > ema20_1w  # True when weekly uptrend
+    # Calculate EMA50 on 12h close
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
 
-    # Align weekly levels to daily
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    # Calculate VWAP on 6h (typical price * volume)
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(typical_price, np.nan), where=vwap_den!=0)
 
-    # Daily volume spike: volume > 1.5x 20-day average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_avg_20 * 1.5)
+    # Calculate CCI(20) on 6h typical price
+    tp = typical_price
+    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    cci = np.divide((tp - sma_tp), (0.015 * mad), out=np.full_like(tp, np.nan), where=(mad != 0))
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        # Skip if weekly data not yet aligned
-        if np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]):
+    for i in range(50, n):
+        # Skip if any required data is NaN
+        if np.isnan(cci[i]) or np.isnan(vwap[i]) or np.isnan(ema50_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,34 +65,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        wh = weekly_high_aligned[i]
-        wl = weekly_low_aligned[i]
-        w_up = weekly_uptrend_aligned[i] > 0.5
-        vol_spike = volume_spike[i]
+        # Determine 12h trend
+        trend_up = close_12h[i // 2] > ema50_12h[i // 2] if i // 2 < len(close_12h) else False
+        trend_down = close_12h[i // 2] < ema50_12h[i // 2] if i // 2 < len(close_12h) else False
 
         if position == 0:
-            # LONG: Price rejects weekly low with volume spike in weekly downtrend
-            # (expecting bounce in downtrend)
-            if close[i] <= wl * 1.002 and not w_up and vol_spike:
+            # LONG: CCI > 50 + price > VWAP + 12h uptrend
+            if cci[i] > 50 and close[i] > vwap[i] and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price rejects weekly high with volume spike in weekly uptrend
-            # (expecting rejection in uptrend)
-            elif close[i] >= wh * 0.998 and w_up and vol_spike:
+            # SHORT: CCI < -50 + price < VWAP + 12h downtrend
+            elif cci[i] < -50 and close[i] < vwap[i] and trend_down:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches weekly high or loses momentum
-            if close[i] >= wh * 0.995 or (close[i] < close[i-1] and not vol_spike):
+            # EXIT LONG: CCI < -50 or trend reversal
+            if cci[i] < -50 or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches weekly low or loses momentum
-            if close[i] <= wl * 1.005 or (close[i] > close[i-1] and not vol_spike):
+            # EXIT SHORT: CCI > 50 or trend reversal
+            if cci[i] > 50 or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
