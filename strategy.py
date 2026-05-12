@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_ComboBreakout_VolumeTrend_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Filtered"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,29 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1h Donchian breakout (entry timing) ===
-    # Use 1h data for entry timing precision, but trend from 4h
-    df_1h = get_htf_data(prices, '1h')
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
+    # === 1d Camarilla pivot levels ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    donchian_high = pd.Series(high_1h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1h).rolling(window=20, min_periods=20).min().values
+    # Camarilla R1, S1 levels
+    rango = high_1d - low_1d
+    camarilla_r1 = close_1d + (rango * 1.1 / 12)
+    camarilla_s1 = close_1d - (rango * 1.1 / 12)
     
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1h, donchian_low)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === 4h trend filter: EMA50 ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # === 1d EMA34 trend filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === 4h volume filter ===
-    volume_4h = df_4h['volume'].values
-    vol_avg_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume_4h > (1.5 * vol_avg_4h)
-    volume_surge_aligned = align_htf_to_ltf(prices, df_4h, volume_surge.astype(float))
+    # === 1d Volume spike filter ===
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (2.0 * vol_avg_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    
+    # === 4h Volume filter (to avoid low-volume false breakouts) ===
+    vol_avg_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike_4h = volume > (1.5 * vol_avg_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,10 +52,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema50_4h_aligned[i]) or
-            np.isnan(volume_surge_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,28 +64,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above Donchian high + above EMA50 + volume surge
-            if (close[i] > donchian_high_aligned[i] and
-                close[i] > ema50_4h_aligned[i] and
-                volume_surge_aligned[i] > 0.5):
+            # Long: Close above R1 + above daily EMA34 + volume spike (both 1d and 4h)
+            if (close[i] > camarilla_r1_aligned[i] and
+                close[i] > ema34_1d_aligned[i] and
+                vol_spike_1d_aligned[i] > 0.5 and
+                vol_spike_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low + below EMA50 + volume surge
-            elif (close[i] < donchian_low_aligned[i] and
-                  close[i] < ema50_4h_aligned[i] and
-                  volume_surge_aligned[i] > 0.5):
+            # Short: Close below S1 + below daily EMA34 + volume spike (both 1d and 4h)
+            elif (close[i] < camarilla_s1_aligned[i] and
+                  close[i] < ema34_1d_aligned[i] and
+                  vol_spike_1d_aligned[i] > 0.5 and
+                  vol_spike_4h[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Break below Donchian low or below EMA50
-            if close[i] < donchian_low_aligned[i] or close[i] < ema50_4h_aligned[i]:
+            # Exit long: Close below S1 or below EMA34
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Break above Donchian high or above EMA50
-            if close[i] > donchian_high_aligned[i] or close[i] > ema50_4h_aligned[i]:
+            # Exit short: Close above R1 or above EMA34
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
