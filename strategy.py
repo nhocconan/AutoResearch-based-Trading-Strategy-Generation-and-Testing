@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_With_200SMA_Filter
-# Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) to determine trend direction on 4h, confirmed by price position relative to 200-period SMA (trend filter). Enter long when KAMA > SMA200 and price > KAMA; short when KAMA < SMA200 and price < KAMA. Exit on opposite signal. This captures trending markets while avoiding whipsaws in sideways action. Designed for low trade frequency (<30/year) to minimize fee drag and work in both bull/bear markets via dual trend confirmation.
+# 4h_Vortex_Volume_Trend_Filter
+# Hypothesis: Use Vortex Indicator (VI+) and (VI-) to detect trend direction on 4h, confirmed by 1d trend (EMA50) and volume spikes (>2x 20-period average). Enter long when VI+ > VI- and price > 1d EMA50 with volume spike; short when VI- > VI+ and price < 1d EMA50 with volume spike. Exit on Vortex crossover reverse. Targets 20-50 trades/year to minimize fee drag and work in both bull/bear markets via trend filter.
 
-name = "4h_KAMA_Trend_With_200SMA_Filter"
+name = "4h_Vortex_Volume_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -12,57 +12,87 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Calculate KAMA (2-period ER, 30-period smoothing constant)
-    change = np.abs(close - np.roll(close, 1))
-    change[0] = 0
-    dir = np.abs(close - np.roll(close, 9))  # 10-period direction
-    dir[0] = 0
-    vol = np.sum(change[1:10])  # 9-period volatility
-    er = np.where(vol != 0, dir / vol, 0)
-    sc = (er * (0.6665 - 0.0645) + 0.0645) ** 2  # smoothing constant
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # 200-period SMA for trend filter
-    sma200 = np.convolve(close, np.ones(200)/200, mode='same')
-    # Handle edges: use expanding mean for first 200 periods
-    for i in range(200):
-        sma200[i] = np.mean(close[:i+1])
+    # Calculate Vortex Indicator (VI) on 4h
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high[0] - low[0]  # first bar true range
+
+    # Vortex Movement
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus[0] = np.abs(high[0] - low[0])
+    vm_minus[0] = np.abs(low[0] - high[0])
+
+    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / \
+              pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / \
+               pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+
+    # Volume confirmation: volume > 2x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(10, n):  # Start after KAMA warmup
+    for i in range(14, n):
+        # Skip if any required value is NaN
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
         if position == 0:
-            # LONG: KAMA > SMA200 (bullish trend) and price > KAMA (momentum confirmation)
-            if kama[i] > sma200[i] and close[i] > kama[i]:
+            # LONG: VI+ > VI- (bullish vortex) + price > 1d EMA50 + volume spike
+            if (vi_plus[i] > vi_minus[i] and 
+                close[i] > ema50_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA < SMA200 (bearish trend) and price < KAMA (momentum confirmation)
-            elif kama[i] < sma200[i] and close[i] < kama[i]:
+            # SHORT: VI- > VI+ (bearish vortex) + price < 1d EMA50 + volume spike
+            elif (vi_minus[i] > vi_plus[i] and 
+                  close[i] < ema50_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA < SMA200 (trend turns bearish)
-            if kama[i] < sma200[i]:
+            # EXIT LONG: Vortex turns bearish (VI- > VI+)
+            if vi_minus[i] > vi_plus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA > SMA200 (trend turns bullish)
-            if kama[i] > sma200[i]:
+            # EXIT SHORT: Vortex turns bullish (VI+ > VI-)
+            if vi_plus[i] > vi_minus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
