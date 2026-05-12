@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4H_MULTI_TIMEFRAME_RSI_WITH_ATR_FILTER
-# Hypothesis: Combines RSI momentum (14-period) with 1d trend filter (EMA50) and ATR volatility filter to capture medium-term reversals in BTC/ETH.
-# Long when RSI crosses above 30 from below with ATR expansion and price above 1d EMA50.
-# Short when RSI crosses below 70 from above with ATR expansion and price below 1d EMA50.
-# Exit when RSI returns to opposite extreme (70 for long, 30 for short) or trend invalidates.
-# Designed for 4h timeframe to balance trade frequency and signal quality, targeting 20-40 trades/year.
+# 4H_CAMARILLA_R1_S1_BREAKOUT_1DVOLUME_CONFIRMATION
+# Hypothesis: Camarilla R1/S1 breakouts on 4h with 1d volume confirmation to filter false breakouts.
+# Long when 4h close breaks above R1 and 1d volume > 1.5x 20-period average; short when breaks below S1 with same volume filter.
+# Uses 1d EMA50 trend filter to avoid counter-trend trades. Designed for low-frequency, high-probability setups in all market regimes.
+# Targets 25-40 trades/year to minimize fee drag while capturing institutional interest levels.
 
-name = "4H_MULTI_TIMEFRAME_RSI_WITH_ATR_FILTER"
+name = "4H_CAMARILLA_R1_S1_BREAKOUT_1DVOLUME_CONFIRMATION"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,32 +23,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla levels for each 4h bar using prior bar's OHLC
+    # R1 = C + (H-L)*1.12/12, S1 = C - (H-L)*1.12/12
+    # We use the previous bar's OHLC to avoid look-ahead
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # Initialize first value
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    # ATR for volatility filter (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values  # 10-period ATR EMA for expansion
+    rang = prev_high - prev_low
+    r1 = prev_close + rang * 1.12 / 12
+    s1 = prev_close - rang * 1.12 / 12
     
-    # 1d EMA50 for trend filter
+    # 1d volume confirmation: compare current 1d volume to its 20-period average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 25:  # Need enough for 20-period average
         return np.zeros(n)
-    pclose = df_1d['close'].values
-    ema1d = pd.Series(pclose).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema1d_aligned = align_htf_to_ltf(prices, df_1d, ema1d)
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_1d_avg = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    
+    # 1d EMA50 trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,7 +59,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(atr_ma[i]) or np.isnan(ema1d_aligned[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(vol_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,30 +68,30 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volatility filter: current ATR > 1.1x ATR EMA (expansion)
-        vol_expansion = atr[i] > atr_ma[i] * 1.1
+        # Volume filter: current 1d volume > 1.5x 20-period average
+        vol_filter = vol_1d_aligned[i] > vol_ma_20_aligned[i] * 1.5
         
         if position == 0:
-            # LONG: RSI crosses above 30 from below with vol expansion and uptrend
-            if rsi[i] > 30 and rsi[i-1] <= 30 and vol_expansion and close[i] > ema1d_aligned[i]:
+            # LONG: close breaks above R1 with volume confirmation and uptrend
+            if close[i] > r1[i] and vol_filter and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI crosses below 70 from above with vol expansion and downtrend
-            elif rsi[i] < 70 and rsi[i-1] >= 70 and vol_expansion and close[i] < ema1d_aligned[i]:
+            # SHORT: close breaks below S1 with volume confirmation and downtrend
+            elif close[i] < s1[i] and vol_filter and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to overbought or trend breaks
-            if rsi[i] >= 70 or close[i] < ema1d_aligned[i]:
+            # EXIT LONG: close returns below R1 or trend breaks
+            if close[i] < r1[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to oversold or trend breaks
-            if rsi[i] <= 30 or close[i] > ema1d_aligned[i]:
+            # EXIT SHORT: close returns above S1 or trend breaks
+            if close[i] > s1[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
