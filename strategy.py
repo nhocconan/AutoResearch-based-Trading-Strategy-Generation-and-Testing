@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Ratio"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Breakout_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,46 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data once for trend filter and Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data once for Donchian and trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Daily EMA(34) for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly Donchian channels (20-period)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower)
     
-    # Daily OHLC for Camarilla R1 and S1 (previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # Weekly EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Camarilla R1 and S1 for previous day
-    p = (high_1d + low_1d + close_1d_vals) / 3
-    r1 = close_1d_vals + (high_1d - low_1d) * 1.1 / 2
-    s1 = close_1d_vals - (high_1d - low_1d) * 1.1 / 2
-    
-    # Align Camarilla levels to 4h (wait for daily close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Volume ratio: current volume / 20-period average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_avg
-    vol_ratio[vol_ratio == np.inf] = 0  # handle division by zero
-    
-    # EMA slope: positive when current EMA > previous EMA
-    ema_slope = ema34_1d_aligned > np.roll(ema34_1d_aligned, 1)
-    ema_slope[0] = False  # first value invalid
+    vol_spike = volume > (2.0 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # ensure indicators have enough data
+    start_idx = 200  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,33 +54,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + daily trend up + volume ratio > 1.5 + EMA slope up
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                vol_ratio[i] > 1.5 and 
-                ema_slope[i]):
-                signals[i] = 0.25
+            # Long: price breaks above weekly upper + weekly trend up + volume spike
+            if (close[i] > upper_aligned[i] and 
+                close[i] > ema50_1w_aligned[i] and 
+                vol_spike[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below S1 + daily trend down + volume ratio > 1.5 + EMA slope down
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  vol_ratio[i] > 1.5 and 
-                  not ema_slope[i]):
-                signals[i] = -0.25
+            # Short: price breaks below weekly lower + weekly trend down + volume spike
+            elif (close[i] < lower_aligned[i] and 
+                  close[i] < ema50_1w_aligned[i] and 
+                  vol_spike[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price closes below S1
-            if close[i] < s1_aligned[i]:
+            # Exit long: price closes below weekly lower
+            if close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: price closes above R1
-            if close[i] > r1_aligned[i]:
+            # Exit short: price closes above weekly upper
+            if close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
