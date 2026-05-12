@@ -1,9 +1,13 @@
-# 6h_ChandelierTrend_Retracement
-# Trend-following with dynamic stop: Chandelier Exit for exit, price retracement to EMA for entry.
-# Works in bull by catching breakouts, in bear by shorting retracements in downtrends.
-# Uses 6h EMA21 trend filter and Chandelier(22,3) for exits. Low frequency (<30/year).
-name = "6h_ChandelierTrend_Retracement"
-timeframe = "6h"
+#!/usr/bin/env python3
+"""
+4h Donchian Breakout with Volume Confirmation and 1d EMA Trend Filter
+Hypothesis: Donchian breakouts capture strong momentum moves, volume confirms institutional participation,
+and 1d EMA filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
+Designed for low trade frequency (20-40/year) to minimize fee drag while capturing sustained moves.
+Works in both bull (long breakouts) and bear (short breakdowns) markets.
+"""
+name = "4h_Donchian_Breakout_Volume_1dEMA"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -12,35 +16,36 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # EMA21 trend filter
-    close_s = pd.Series(close)
-    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
+    # === Donchian Channel (20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Chandelier Exit (22,3): uses ATR(22)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr22 = pd.Series(tr).ewm(span=22, adjust=False, min_periods=22).mean().values
-    highest_high_22 = pd.Series(high).rolling(window=22, min_periods=22).max().values
-    lowest_low_22 = pd.Series(low).rolling(window=22, min_periods=22).min().values
-    long_stop = highest_high_22 - 3 * atr22
-    short_stop = lowest_low_22 + 3 * atr22
+    # === Volume Spike (20) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
+    
+    # === 1d EMA (34) for Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure indicators ready
+    start_idx = 50  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if np.isnan(ema21[i]) or np.isnan(long_stop[i]) or np.isnan(short_stop[i]):
+        # Skip if data not ready
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -49,27 +54,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: price > EMA21 (uptrend) and retracing to EMA21 from above
-            if close[i] > ema21[i] and close[i] <= ema21[i] * 1.005:  # within 0.5% above EMA
-                signals[i] = 0.25
+            # LONG: Price breaks above Donchian upper + volume spike + above 1d EMA (uptrend)
+            if (close[i] > highest_high[i] and 
+                vol_spike[i] and
+                close[i] > ema_34_1d_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # SHORT: price < EMA21 (downtrend) and retracing to EMA21 from below
-            elif close[i] < ema21[i] and close[i] >= ema21[i] * 0.995:  # within 0.5% below EMA
-                signals[i] = -0.25
+            # SHORT: Price breaks below Donchian lower + volume spike + below 1d EMA (downtrend)
+            elif (close[i] < lowest_low[i] and 
+                  vol_spike[i] and
+                  close[i] < ema_34_1d_aligned[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # EXIT LONG: price hits Chandelier long stop
-            if close[i] <= long_stop[i]:
+            # EXIT LONG: Price breaks below Donchian lower (reversal signal)
+            if close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: price hits Chandelier short stop
-            if close[i] >= short_stop[i]:
+            # EXIT SHORT: Price breaks above Donchian upper (reversal signal)
+            if close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
