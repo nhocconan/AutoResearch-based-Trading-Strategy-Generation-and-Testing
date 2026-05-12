@@ -1,11 +1,13 @@
-# #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-12H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
-Hypothesis: On 12h timeframe, breakouts of daily Camarilla R3/S3 levels with volume spike confirmation capture institutional moves in both bull and bear markets. 
-Using higher timeframe (12h) reduces trade frequency to avoid fee drag while maintaining effectiveness. Volume spike ensures breakouts have conviction.
+4H_RSI2_MEANREVERSION_1D_TREND_FILTER
+Hypothesis: RSI(2) mean-reversion on 4h with 1-day EMA50 trend filter.
+Long when RSI2 < 10 and price above daily EMA50, short when RSI2 > 90 and price below daily EMA50.
+Filters out countertrend trades to work in both bull and bear markets.
+Targets ~25-35 trades/year to minimize fee drag.
 """
-name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
-timeframe = "12h"
+name = "4H_RSI2_MEANREVERSION_1D_TREND_FILTER"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,39 +16,36 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # Calculate daily Camarilla levels from previous day's OHLC
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
+    # RSI(2) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    # Use shift(1) to get previous day's values for each bar
-    for i in range(1, n):
-        camarilla_r3[i] = close[i-1] + (high[i-1] - low[i-1]) * 1.1 / 2
-        camarilla_s3[i] = close[i-1] - (high[i-1] - low[i-1]) * 1.1 / 2
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi2 = 100 - (100 / (1 + rs))
     
-    # Get 1D data for volume spike confirmation
+    # 1-day EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    vol_1d = df_1d['volume'].values
-    vol_ma_20d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike = vol_1d / vol_ma_20d  # Current volume / 20-day average
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(vol_spike_aligned[i])):
+    for i in range(2, n):  # Start from 2 to have RSI2 ready
+        if np.isnan(rsi2[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,28 +54,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Break above R3 with volume spike
-            if (high[i] > camarilla_r3[i] and 
-                vol_spike_aligned[i] > 1.5):
+            # LONG: RSI2 oversold and above daily EMA50 (uptrend)
+            if rsi2[i] < 10 and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S3 with volume spike
-            elif (low[i] < camarilla_s3[i] and 
-                  vol_spike_aligned[i] > 1.5):
+            # SHORT: RSI2 overbought and below daily EMA50 (downtrend)
+            elif rsi2[i] > 90 and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S3 (reversion to mean)
-            if close[i] < camarilla_s3[i]:
+            # EXIT LONG: RSI2 crosses above 50 (mean reversion complete)
+            if rsi2[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R3 (reversion to mean)
-            if close[i] > camarilla_r3[i]:
+            # EXIT SHORT: RSI2 crosses below 50 (mean reversion complete)
+            if rsi2[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
