@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
-Hypothesis: On 1h timeframe, use 4h EMA50 for trend direction and 1d volume spike for confirmation.
-Enter long when price breaks above Camarilla R1 level (from prior 4h) with 4h uptrend and 1d volume > 2x 20-period average.
-Enter short when price breaks below Camarilla S1 level with 4h downtrend and volume spike.
-Use 1d Bollinger Band width < 60th percentile to avoid choppy markets.
-Targets 15-37 trades/year (60-150 total over 4 years) with low turnover.
-Works in bull via momentum breaks and bear via mean-reversion at extremes with trend filter.
+1d_TRIX_ZeroCross_WeekTrend_Volume
+Hypothesis: On 1d timeframe, TRIX(9) crossing zero with 1-week EMA trend and volume > 1.5x 20-day average provides reliable momentum entries. 
+TRIX filters noise by focusing on momentum changes; weekly trend ensures alignment with higher timeframe direction. 
+Volume confirmation avoids low-liquidity breakouts. 
+Exit on reverse TRIX cross or trend violation. 
+Designed for low turnover (target: 10-25 trades/year) to minimize fee drag in 2025+ bearish/range markets.
+Works in bull via momentum acceleration and bear via mean-reversion at trend extremes.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "1d_TRIX_ZeroCross_WeekTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,87 +19,51 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for trend and Camarilla levels (call once before loop)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 60:
+    # Get 1w data (call once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
 
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
 
-    # Get 1d data for volume and volatility filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
-        return np.zeros(n)
+    # Calculate TRIX(9) on daily close: triple EMA of ROC
+    # ROC = (close/t - close/t-1) / close/t-1
+    roc = np.zeros_like(close)
+    roc[1:] = (close[1:] - close[:-1]) / close[:-1]
+    # Triple EMA of ROC
+    ema1 = pd.Series(roc).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = ema3 * 100  # scale for readability
+    trix_prev = np.roll(trix, 1)
+    trix_prev[0] = np.nan
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Calculate 1-week EMA34 for trend
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
 
-    # Calculate 4h EMA50 for trend
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-
-    # Calculate 1d volume average (20-period)
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-
-    # Calculate 1d Bollinger Band width (20, 2) for chop filter
-    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb_1d = sma20_1d + 2 * std20_1d
-    lower_bb_1d = sma20_1d - 2 * std20_1d
-    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma20_1d
-    bb_width_rank = pd.Series(bb_width_1d).rolling(window=50, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
-    bb_width_rank_aligned = align_htf_to_ltf(prices, df_1d, bb_width_rank)
-
-    # Calculate 4h Camarilla levels from previous 4h bar
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    prev_close_4h = np.roll(close_4h, 1)
-    prev_high_4h = np.roll(high_4h, 1)
-    prev_low_4h = np.roll(low_4h, 1)
-    camarilla_mult = 1.1 / 12
-    r1_4h = prev_close_4h + (prev_high_4h - prev_low_4h) * camarilla_mult
-    s1_4h = prev_close_4h - (prev_high_4h - prev_low_4h) * camarilla_mult
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    # Volume confirmation: 1.5x 20-day average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
-        # Get aligned values for current 1h bar
-        ema50 = ema50_4h_aligned[i]
-        vol_avg = vol_avg_20_1d_aligned[i]
-        bb_rank = bb_width_rank_aligned[i]
-        r1_level = r1_4h_aligned[i]
-        s1_level = s1_4h_aligned[i]
+    for i in range(50, n):
+        # Get aligned values for current day
+        trix_now = trix[i]
+        trix_prev_val = trix_prev[i]
+        ema34 = ema34_1w_aligned[i]
+        vol_avg_val = vol_avg_20[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(ema50) or np.isnan(vol_avg) or 
-            np.isnan(bb_rank) or np.isnan(r1_level) or 
-            np.isnan(s1_level)):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Chop filter: only trade when BB width is in lower 60% (avoid extreme chop)
-        if bb_rank > 0.6:
+        if (np.isnan(trix_now) or np.isnan(trix_prev_val) or 
+            np.isnan(ema34) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -108,33 +72,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + 4h uptrend + volume spike
-            if (close[i] > r1_level and 
-                close[i] > ema50 and 
-                volume[i] > vol_avg * 2.0):
-                signals[i] = 0.20
+            # LONG: TRIX crosses above zero + price above weekly EMA34 + volume surge
+            if (trix_prev_val <= 0 and trix_now > 0 and 
+                close[i] > ema34 and 
+                volume[i] > vol_avg_val * 1.5):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + 4h downtrend + volume spike
-            elif (close[i] < s1_level and 
-                  close[i] < ema50 and 
-                  volume[i] > vol_avg * 2.0):
-                signals[i] = -0.20
+            # SHORT: TRIX crosses below zero + price below weekly EMA34 + volume surge
+            elif (trix_prev_val >= 0 and trix_now < 0 and 
+                  close[i] < ema34 and 
+                  volume[i] > vol_avg_val * 1.5):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or 4h trend turns down
-            if (close[i] < s1_level or close[i] < ema50):
+            # EXIT LONG: TRIX crosses below zero or price below weekly EMA34
+            if (trix_prev_val >= 0 and trix_now < 0) or close[i] < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or 4h trend turns up
-            if (close[i] > r1_level or close[i] > ema50):
+            # EXIT SHORT: TRIX crosses above zero or price above weekly EMA34
+            if (trix_prev_val <= 0 and trix_now > 0) or close[i] > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
