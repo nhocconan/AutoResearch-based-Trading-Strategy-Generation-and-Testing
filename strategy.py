@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Trade breakouts above daily Camarilla R1 or below S1 on 12h timeframe when aligned with 1d EMA50 trend and confirmed by volume spike. This strategy targets 12-37 trades/year by requiring confluence of price level breakout, trend alignment, and volume confirmation. Works in both bull and bear markets by using trend-following entries and mean-reversion exits at the daily pivot point. Timeframe: 12h
+1h_PriceAction_4hTrend_1dVolatility
+Hypothesis: Trade pullbacks in 1h timeframe aligned with 4h EMA trend and 1d volatility filter.
+- Long when: price pulls back to 4h EMA20 in uptrend, 1d ATR < 50-day ATR median (low volatility)
+- Short when: price rallies to 4h EMA20 in downtrend, 1d ATR < 50-day ATR median
+- Uses session filter (08-20 UTC) to avoid low-liquidity hours
+- Target: 15-35 trades/year by requiring trend alignment + volatility filter + session
+- Works in bull/bear by following 4h trend; volatility filter avoids choppy markets
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_PriceAction_4hTrend_1dVolatility"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,36 +27,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Pre-compute session hours (08-20 UTC) to avoid low-liquidity hours
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+
+    # Get 4h data for EMA20 trend filter ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
 
-    # Calculate daily Camarilla pivot levels (using prior day's OHLC)
-    ph = df_1d['high'].shift(1).values  # prior day high
-    pl = df_1d['low'].shift(1).values   # prior day low
-    pc = df_1d['close'].shift(1).values # prior day close
-    r1 = pc + (ph - pl) * 1.1 / 12
-    s1 = pc - (ph - pl) * 1.1 / 12
-    # Align to 12h: daily Camarilla values are constant through the day
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
 
-    # Get daily data for EMA50 trend filter ONCE before loop
+    # Get 1d data for ATR volatility filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
-    # Volume spike: current > 2.0x average of last 2 bars (1 day on 12h)
-    vol_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Calculate True Range and ATR(14) for 1d
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period: use high-low
+    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+
+    # 50-day median ATR for volatility regime filter
+    atr_median_50 = pd.Series(atr_14_1d).rolling(window=50, min_periods=50).median().values
+    atr_median_50_aligned = align_htf_to_ltf(prices, df_1d, atr_median_50)
+
+    # Current 14-period ATR (aligned to 1h)
+    tr_l = np.abs(high - low)
+    tr_hc = np.abs(high - np.roll(close, 1))
+    tr_lc = np.abs(low - np.roll(close, 1))
+    tr_1h = np.maximum(tr_l, np.maximum(tr_hc, tr_lc))
+    tr_1h[0] = tr_l[0]
+    atr_14_1h = pd.Series(tr_1h).ewm(span=14, adjust=False, min_periods=14).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):  # Start after EMA50 warmup
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(100, n):  # Start after warmup
+        if (np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(atr_median_50_aligned[i]) or
+            np.isnan(atr_14_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,38 +82,53 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        # Volatility filter: only trade when current 1h ATR < 50% of 1d median ATR (low volatility regime)
+        vol_filter = atr_14_1h[i] < (0.5 * atr_median_50_aligned[i])
+
         if position == 0:
-            # LONG: close > daily R1 + price > 1d EMA50 + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_spike[i]):
-                signals[i] = 0.25
+            # LONG: price near 4h EMA20 (within 0.5*ATR) + uptrend + low volatility
+            ema_distance = abs(close[i] - ema_20_4h_aligned[i])
+            uptrend = close[i] > ema_20_4h_aligned[i]
+            if (ema_distance < (0.5 * atr_14_1h[i]) and 
+                uptrend and 
+                vol_filter):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: close < daily S1 + price < 1d EMA50 + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_spike[i]):
-                signals[i] = -0.25
+            # SHORT: price near 4h EMA20 (within 0.5*ATR) + downtrend + low volatility
+            elif (ema_distance < (0.5 * atr_14_1h[i]) and 
+                  not uptrend and 
+                  vol_filter):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: close < daily pivot P
-            pp = (ph + pl + pc) / 3.0
-            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-            if close[i] < pp_aligned[i]:
+            # EXIT LONG: price moves away from EMA or trend reverses
+            ema_distance = abs(close[i] - ema_20_4h_aligned[i])
+            uptrend = close[i] > ema_20_4h_aligned[i]
+            if (ema_distance > (1.0 * atr_14_1h[i]) or 
+                not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: close > daily pivot P
-            pp = (ph + pl + pc) / 3.0
-            pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-            if close[i] > pp_aligned[i]:
+            # EXIT SHORT: price moves away from EMA or trend reverses
+            ema_distance = abs(close[i] - ema_20_4h_aligned[i])
+            uptrend = close[i] > ema_20_4h_aligned[i]
+            if (ema_distance > (1.0 * atr_14_1h[i]) or 
+                uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
