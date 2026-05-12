@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
 # 4H_1D_Camarilla_R1S1_Breakout_Trend_Volume
-# Hypothesis: Buy near Camarilla R1 in uptrend, sell near S1 in downtrend on 4H timeframe with daily trend filter and volume confirmation.
-# Uses 4H for execution to limit trades (target: 20-50/year) and daily timeframe for trend filter.
-# Combines price channel breakout (Camarilla) with trend and volume filters to reduce false signals.
-# Designed to work in both bull and bear markets via trend-following logic.
+# Hypothesis: Buy when price breaks above daily Camarilla R1 with 1-day EMA34 uptrend and volume spike.
+# Sell when price breaks below daily Camarilla S1 with 1-day EMA34 downtrend and volume spike.
+# Uses daily Camarilla levels for precise entries, EMA34 for trend filter, volume spike for confirmation.
+# Designed for low frequency (20-50 trades/year) to minimize fee drag and work in both bull and bear markets.
 
 name = "4H_1D_Camarilla_R1S1_Breakout_Trend_Volume"
 timeframe = "4h"
@@ -24,7 +24,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter and Camarilla calculation
+    # Get daily data for Camarilla levels, trend filter, and volume calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -35,6 +35,7 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
     # Calculate daily Camarilla levels (based on previous day)
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     prev_high = np.roll(df_1d['high'].values, 1)
     prev_low = np.roll(df_1d['low'].values, 1)
     prev_close = np.roll(df_1d['close'].values, 1)
@@ -45,19 +46,18 @@ def generate_signals(prices):
     rang = prev_high - prev_low
     R1 = prev_close + rang * 1.1 / 12
     S1 = prev_close - rang * 1.1 / 12
-
-    # Align daily levels to 4H timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
 
-    # Volume confirmation: current volume > 1.3x average of last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.3 * vol_ma)
+    # Volume confirmation: current daily volume > 1.3x average of last 20 days
+    vol_ma = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_ok_raw = df_1d['volume'].values > (1.3 * vol_ma)
+    volume_ok = align_htf_to_ltf(prices, df_1d, volume_ok_raw)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
             np.isnan(volume_ok[i])):
