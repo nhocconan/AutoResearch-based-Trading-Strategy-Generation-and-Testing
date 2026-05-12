@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-4H_CAMARILLA_R3_S3_BREAKOUT_1DVOLUMESPIKE_V2
-Hypothesis: Refine the original by tightening entry conditions to reduce trade frequency and avoid overtrading.
-Use the same core logic (R3/S3 breakout + volume spike + 1d EMA34 trend filter) but add:
-- Minimum 4-bar hold time to prevent whipsaw exits
-- Volume spike threshold increased to 2.0x (from 1.5x) for stronger confirmation
-- Entry only when price closes beyond the level (not just intraday touch)
-Target: 15-25 trades/year to stay well under the 400 total 4h trade limit.
-Works in bull markets (breakouts continue) and bear markets (sharp reversals from S3/R3).
+4H_RSI_DIVERGENCE_VOLUME_CONFIRMATION
+Hypothesis: Use RSI divergence (bullish/bearish) with volume confirmation and 1d trend filter to capture reversals in both bull and bear markets.
+RSI divergence signals exhaustion of momentum, and when confirmed by volume and trend, provides high-probability reversals.
+Trades only on clear divergences to keep trade frequency low (target: 20-40/year).
+Works in bull markets (catching pullbacks in uptrend) and bear markets (catching rallies in downtrend).
 """
-name = "4H_CAMARILLA_R3_S3_BREAKOUT_1DVOLUMESPIKE_V2"
+name = "4H_RSI_DIVERGENCE_VOLUME_CONFIRMATION"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,39 +24,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: volume > 2.0 * 20-period average (stricter)
+    # RSI calculation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Volume spike: volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
     
-    # 1d data for Camarilla levels and trend filter
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from prior day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    rang = prev_high - prev_low
-    R3 = prev_close + rang * 1.1 / 2
-    S3 = prev_close - rang * 1.1 / 2
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Detect RSI divergence (bullish and bearish)
+    # Bullish divergence: price makes lower low, RSI makes higher low
+    # Bearish divergence: price makes higher high, RSI makes lower high
+    lookback = 10  # lookback period for divergence
+    bullish_div = np.zeros(n, dtype=bool)
+    bearish_div = np.zeros(n, dtype=bool)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    for i in range(lookback, n):
+        # Bullish divergence
+        if low[i] < low[i-lookback] and rsi[i] > rsi[i-lookback]:
+            # Check if RSI is making a higher low
+            min_rsi_idx = np.argmin(rsi[i-lookback:i+1])
+            min_price_idx = np.argmin(low[i-lookback:i+1])
+            if min_rsi_idx > min_price_idx:  # RSI low occurs after price low
+                bullish_div[i] = True
+        # Bearish divergence
+        if high[i] > high[i-lookback] and rsi[i] < rsi[i-lookback]:
+            # Check if RSI is making a lower high
+            max_rsi_idx = np.argmax(rsi[i-lookback:i+1])
+            max_price_idx = np.argmax(high[i-lookback:i+1])
+            if max_rsi_idx < max_price_idx:  # RSI high occurs before price high
+                bearish_div[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    for i in range(34, n):  # Start after warmup for EMA34
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+    for i in range(50, n):  # Start after warmup
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,33 +88,29 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # LONG: Break above R3 + volume spike + above 1d EMA34 (uptrend)
-            if (close[i] > R3_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > ema34_1d_aligned[i]):
+            # LONG: Bullish divergence + volume spike + above 1d EMA50 (uptrend context)
+            if bullish_div[i] and volume_spike[i] and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # SHORT: Break below S3 + volume spike + below 1d EMA34 (downtrend)
-            elif (close[i] < S3_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+            # SHORT: Bearish divergence + volume spike + below 1d EMA50 (downtrend context)
+            elif bearish_div[i] and volume_spike[i] and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Only after minimum 4 bars AND (price re-enters OR trend reversal)
-            if bars_since_entry >= 4 and ((close[i] < R3_aligned[i] and close[i] > S3_aligned[i]) or close[i] < ema34_1d_aligned[i]):
+            # EXIT LONG: RSI overbought (>=70) or trend reversal
+            if rsi[i] >= 70 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Only after minimum 4 bars AND (price re-enters OR trend reversal)
-            if bars_since_entry >= 4 and ((close[i] < R3_aligned[i] and close[i] > S3_aligned[i]) or close[i] > ema34_1d_aligned[i]):
+            # EXIT SHORT: RSI oversold (<=30) or trend reversal
+            if rsi[i] <= 30 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
