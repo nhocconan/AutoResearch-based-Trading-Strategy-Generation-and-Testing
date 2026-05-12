@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_Volume_Regime_Breakout_12hTrend
-Hypothesis: Uses 6h timeframe with breakout from 20-period high/low, filtered by 12h trend (via EMA50) and volume regime (low volatility followed by spike). 
-This strategy aims to capture momentum bursts after periods of consolidation, working in both bull and bear markets by aligning with the 12h trend.
-Only takes long when price breaks above 20-period high in 12h uptrend with volume spike after low volatility.
-Only takes short when price breaks below 20-period low in 12h downtrend with volume spike after low volatility.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Uses 4h timeframe with breakouts from Camarilla R3/S3 levels (derived from 1d high/low/close),
+filtered by 1d EMA34 trend and volume spike after low volatility.
+Captures momentum bursts after consolidation, aligned with daily trend.
+Works in both bull and bear markets by following the 1d trend direction.
 Uses discrete position sizing (0.25) to minimize fee churn.
+Target: 20-50 trades/year per symbol.
 """
 
-name = "6h_Volume_Regime_Breakout_12hTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,22 +27,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter (call once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for trend filter and Camarilla levels (call once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
 
-    # Calculate 20-period high/low for breakout levels (using close-based donchian for simplicity)
-    period20_high = pd.Series(close).rolling(window=20, min_periods=20).max().values
-    period20_low = pd.Series(close).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels from 1d OHLC
+    # R3 = close + (high - low) * 1.1/2
+    # S3 = close - (high - low) * 1.1/2
+    daily_range = df_1d['high'] - df_1d['low']
+    camarilla_r3 = df_1d['close'] + daily_range * 1.1 / 2
+    camarilla_s3 = df_1d['close'] - daily_range * 1.1 / 2
     
     # Volume indicators: 20-period average and volatility regime
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_std_20 = pd.Series(volume).rolling(window=20, min_periods=20).std().values
-    # Low volatility regime: when volatility is below 50-period average
     vol_avg_50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     low_vol_regime = vol_std_20 < (vol_avg_50 * 0.5)  # volatility less than half of 50-period average
     
@@ -49,14 +52,16 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):  # Start from 50 to have enough data for all indicators
-        # Get aligned values for current 6h bar
-        ema50_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)[i]
+        # Get aligned values for current 4h bar
+        ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)[i]
+        camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)[i]
+        camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)[i]
         vol_avg_val = vol_avg_20[i]
         low_vol = low_vol_regime[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(period20_high[i]) or np.isnan(period20_low[i]) or 
-            np.isnan(ema50_aligned) or np.isnan(vol_avg_val) or np.isnan(low_vol)):
+        if (np.isnan(ema34_aligned) or np.isnan(camarilla_r3_aligned) or 
+            np.isnan(camarilla_s3_aligned) or np.isnan(vol_avg_val) or np.isnan(low_vol)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,16 +70,16 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above 20-period high + 12h uptrend + low vol regime + volume spike
-            if (close[i] > period20_high[i] and 
-                close[i] > ema50_aligned and 
+            # LONG: Price breaks above Camarilla R3 + 1d uptrend + low vol regime + volume spike
+            if (close[i] > camarilla_r3_aligned and 
+                close[i] > ema34_aligned and 
                 low_vol and 
                 volume[i] > vol_avg_val * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 20-period low + 12h downtrend + low vol regime + volume spike
-            elif (close[i] < period20_low[i] and 
-                  close[i] < ema50_aligned and 
+            # SHORT: Price breaks below Camarilla S3 + 1d downtrend + low vol regime + volume spike
+            elif (close[i] < camarilla_s3_aligned and 
+                  close[i] < ema34_aligned and 
                   low_vol and 
                   volume[i] > vol_avg_val * 2.0):
                 signals[i] = -0.25
@@ -82,15 +87,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 20-period low or trend turns down
-            if (close[i] < period20_low[i] or close[i] < ema50_aligned):
+            # EXIT LONG: Price breaks below Camarilla S3 or trend turns down
+            if (close[i] < camarilla_s3_aligned or close[i] < ema34_aligned):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 20-period high or trend turns up
-            if (close[i] > period20_high[i] or close[i] > ema50_aligned):
+            # EXIT SHORT: Price breaks above Camarilla R3 or trend turns up
+            if (close[i] > camarilla_r3_aligned or close[i] > ema34_aligned):
                 signals[i] = 0.0
                 position = 0
             else:
