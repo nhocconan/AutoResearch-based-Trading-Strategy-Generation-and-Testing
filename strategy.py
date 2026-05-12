@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-# Hypothesis: Price breaking above/below daily Camarilla R1/S1 levels with 12-hour EMA50 trend filter and volume confirmation captures strong trending moves while avoiding false breakouts. Works in bull/bear by following the higher timeframe trend direction. Uses 4h timeframe with 12h EMA50 trend filter for higher timeframe context.
+# 6h_Aroon_Signal_WeeklyTrend_Confirm
+# Hypothesis: Aroon oscillator (25-period) identifies strong trends, with weekly trend filter (price vs 50-week SMA) and volume confirmation (1.5x 20-period average). Aroon > 50 indicates uptrend strength, < -50 indicates downtrend. Works in bull/bear by following higher timeframe trend. Target: 15-30 trades/year.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "6h_Aroon_Signal_WeeklyTrend_Confirm"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,31 +20,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
 
-    # Calculate daily high, low, close for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 50-week SMA for trend filter
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
 
-    # Calculate Camarilla levels: R1, S1
-    # R1 = close + 1.1 * (high - low) / 4
-    # S1 = close - 1.1 * (high - low) / 4
-    camarilla_range = high_1d - low_1d
-    r1_level = close_1d + 1.1 * camarilla_range / 4
-    s1_level = close_1d - 1.1 * camarilla_range / 4
-
-    # Align Camarilla levels to 4h timeframe
-    r1_level_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
-    s1_level_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
-
-    # 12h EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-
+    # Aroon oscillator (25-period)
+    period = 25
+    aroon_up = np.full(n, np.nan)
+    aroon_down = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        # Periods since highest high
+        highest_high_idx = i - np.argmax(high[i-period:i+1])
+        # Periods since lowest low
+        lowest_low_idx = i - np.argmin(low[i-period:i+1])
+        aroon_up[i] = ((period - highest_high_idx) / period) * 100
+        aroon_down[i] = ((period - lowest_low_idx) / period) * 100
+    
+    aroon_osc = aroon_up - aroon_down  # Range: -100 to +100
+    
     # Volume confirmation: >1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
@@ -52,9 +50,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after EMA50 warmup
-        if (np.isnan(r1_level_aligned[i]) or np.isnan(s1_level_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_confirm[i])):
+    for i in range(50, n):  # Start after weekly SMA warmup
+        if (np.isnan(sma_50_1w_aligned[i]) or np.isnan(aroon_osc[i]) or 
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,30 +61,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + 12h EMA50 uptrend + volume confirmation
-            if (close[i] > r1_level_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
+            # LONG: Aroon > 50 (uptrend) + price > 50-week SMA + volume confirmation
+            if (aroon_osc[i] > 50 and 
+                close[i] > sma_50_1w_aligned[i] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + 12h EMA50 downtrend + volume confirmation
-            elif (close[i] < s1_level_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
+            # SHORT: Aroon < -50 (downtrend) + price < 50-week SMA + volume confirmation
+            elif (aroon_osc[i] < -50 and 
+                  close[i] < sma_50_1w_aligned[i] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below 12h EMA50 (trend reversal)
-            if close[i] < ema_50_12h_aligned[i]:
+            # EXIT LONG: Aroon <= 0 (trend weakening) or price < 50-week SMA
+            if (aroon_osc[i] <= 0 or 
+                close[i] < sma_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above 12h EMA50 (trend reversal)
-            if close[i] > ema_50_12h_aligned[i]:
+            # EXIT SHORT: Aroon >= 0 (trend weakening) or price > 50-week SMA
+            if (aroon_osc[i] >= 0 or 
+                close[i] > sma_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
