@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA trend filter and volume confirmation.
-# Uses 4h EMA for trend direction (avoid counter-trend trades), 1h for entry timing.
-# Volume spike confirms breakout strength. Session filter (08-20 UTC) reduces noise.
-# Designed for 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-# Works in bull/bear by following 4h trend.
+# 6h_ElderRay_BullBearPower_1dTrend_VolumeFilter
+# Hypothesis: Elder Ray Index (Bull Power = High - EMA13, Bear Power = Low - EMA13) combined with 1d trend filter.
+# In bull markets (1d close > EMA50), go long when Bull Power turns positive; in bear markets (1d close < EMA50),
+# go short when Bear Power turns negative. Volume confirmation ensures momentum legitimacy.
+# Designed for 50-150 total trades over 4 years (12-37/year) on 6h timeframe. Works in both bull/bear by following 1d trend.
+# Uses Elder Ray to detect institutional buying/selling pressure at micro-structure level.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_BullBearPower_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,57 +24,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 4h data for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 6h data for EMA13 (Elder Ray base)
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 13:
         return np.zeros(n)
 
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    close_6h = df_6h['close'].values
+    ema13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_6h_aligned = align_htf_to_ltf(prices, df_6h, ema13_6h)
 
-    # Get daily data for Camarilla pivot levels
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Calculate Camarilla levels for each daily bar
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.12
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema13_6h_aligned
+    bear_power = low - ema13_6h_aligned
 
-    # Align Camarilla levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-
-    # Calculate 1h volume SMA20 for volume confirmation
+    # Calculate 6h volume SMA20 for volume confirmation
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike_threshold = volume_sma20 * 1.5  # Require 1.5x average volume
 
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(13, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema20_4h_aligned[i]) or np.isnan(volume_sma20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Apply session filter: only trade between 08-20 UTC
-        if not in_session[i]:
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,29 +66,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Breakout above R1 in 4h uptrend with volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema20_4h_aligned[i] and volume[i] > volume_sma20[i]:
-                signals[i] = 0.20
+            # LONG: Bull Power > 0 (buying pressure) in 1d uptrend with volume spike
+            if bull_power[i] > 0 and close[i] > ema50_1d_aligned[i] and volume[i] > volume_sma20[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 in 4h downtrend with volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema20_4h_aligned[i] and volume[i] > volume_sma20[i]:
-                signals[i] = -0.20
+            # SHORT: Bear Power < 0 (selling pressure) in 1d downtrend with volume spike
+            elif bear_power[i] < 0 and close[i] < ema50_1d_aligned[i] and volume[i] > volume_sma20[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S1 (reversal signal)
-            if close[i] < s1_aligned[i]:
+            # EXIT LONG: Bear Power turns negative (selling pressure emerges)
+            if bear_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R1 (reversal signal)
-            if close[i] > r1_aligned[i]:
+            # EXIT SHORT: Bull Power turns positive (buying pressure emerges)
+            if bull_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
