@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Price breaking above/below daily Camarilla R3/S3 levels with 1-day trend filter and volume confirmation captures strong trending moves. Works in bull/bear by following daily trend direction. Uses 12h timeframe to reduce trade frequency and avoid fee drag, with daily timeframe for trend context and breakout levels.
+# 4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeS_v2
+# Hypothesis: Price breaking above/below daily Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation captures strong trending moves while avoiding false breakouts. Works in bull/bear by following the higher timeframe trend direction. Uses 4h timeframe with daily EMA34 trend filter for higher timeframe context. Updated to reduce trade frequency and improve robustness.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeS_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -29,28 +29,42 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
 
     # Calculate Camarilla levels: R3, S3
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
     camarilla_range = high_1d - low_1d
     r3_level = close_1d + 1.1 * camarilla_range / 2
     s3_level = close_1d - 1.1 * camarilla_range / 2
 
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_level_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_level_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
 
-    # 1d trend filter: price above/below close (simple trend)
-    trend_1d = close_1d  # Using close as trend proxy
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # Volume confirmation: >1.5x 20-period average
+    # Volume confirmation: >1.5x 20-period average (requires 20 bars)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
+
+    # Additional volatility filter: ATR-based to avoid choppy markets
+    # Calculate ATR(14) for volatility filter
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Only trade when volatility is above average (avoid low volatility chop)
+    vol_filter = atr > np.nanmedian(atr) if np.sum(~np.isnan(atr)) > 0 else np.ones_like(atr, dtype=bool)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after volume MA warmup
+    for i in range(34, n):  # Start after EMA34 warmup
         if (np.isnan(r3_level_aligned[i]) or np.isnan(s3_level_aligned[i]) or 
-            np.isnan(trend_1d_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm[i]) or 
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,30 +73,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R3 + price above daily close + volume confirmation
+            # LONG: Price breaks above R3 + EMA34 uptrend + volume confirmation + volatility filter
             if (close[i] > r3_level_aligned[i] and 
-                close[i] > trend_1d_aligned[i] and 
-                volume_confirm[i]):
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_confirm[i] and 
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + price below daily close + volume confirmation
+            # SHORT: Price breaks below S3 + EMA34 downtrend + volume confirmation + volatility filter
             elif (close[i] < s3_level_aligned[i] and 
-                  close[i] < trend_1d_aligned[i] and 
-                  volume_confirm[i]):
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_confirm[i] and 
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below daily close (trend reversal)
-            if close[i] < trend_1d_aligned[i]:
+            # EXIT LONG: Price closes below EMA34 (trend reversal)
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above daily close (trend reversal)
-            if close[i] > trend_1d_aligned[i]:
+            # EXIT SHORT: Price closes above EMA34 (trend reversal)
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
