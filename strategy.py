@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4h Williams Alligator + Volume Spike + Daily Trend
-# Hypothesis: Williams Alligator identifies trend formation (jaws/teeth/lips divergence).
-# Jaw (13-period smoothed), Teeth (8-period), Lips (5-period). 
-# Strong uptrend when Lips > Teeth > Jaws; strong downtrend when Lips < Teeth < Jaws.
-# Combined with volume spikes for confirmation and daily EMA trend filter to align with higher timeframe trend.
-# Works in both bull and bear markets by following Alligator-defined trends.
-# Designed for low trade frequency (~20-40/year) with clear entry/exit rules.
+# 6h Bollinger Band Width + RSI Mean Reversion + Weekly Trend
+# Hypothesis: In ranging markets (low BB width), RSI extremes provide mean-reversion opportunities.
+# In trending markets (high BB width), we avoid trades to prevent whipsaw.
+# Weekly trend filter ensures we only take mean-reversion trades in the direction of the higher timeframe trend.
+# Works in both bull and bear markets by adapting to volatility regimes and using weekly trend filter.
+# Designed for low trade frequency (~15-30/year) with clear entry/exit rules.
 
-name = "4h_WilliamsAlligator_Volume_DailyTrend"
-timeframe = "4h"
+name = "6h_BBW_RSI_MeanReversion_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,55 +22,42 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === Daily Data for EMA Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === Weekly Data for Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    daily_close_1d = df_1d['close'].values
+    weekly_close_1w = df_1w['close'].values
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(daily_close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(weekly_close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_6h = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # === Williams Alligator (periods: 13, 8, 5) ===
-    # Smoothed Moving Average (SMMA) function
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        # First value: simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA formula
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # === Bollinger Band Width (20, 2) on 6h ===
+    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle
     
-    jaws = smma(high, 13)  # Jaw (Blue) - 13-period SMMA of Median Price
-    teeth = smma(high, 8)  # Teeth (Red) - 8-period SMMA of Median Price
-    lips = smma(high, 5)   # Lips (Green) - 5-period SMMA of Median Price
-    
-    # Use median price (typical price) for Alligator calculation
-    median_price = (high + low) / 2
-    jaws = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
-    
-    # === Volume Spike (20-period on 4h) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # === RSI (14) on 6h ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure all indicators ready
+    start_idx = 20  # Ensure BB and RSI ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaws[i]) or 
-            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(bb_width[i]) or np.isnan(rsi[i]) or np.isnan(ema_20_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,29 +65,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if position == 0:
-            # LONG: Lips > Teeth > Jaws (bullish alignment) + volume spike + price above daily EMA34
-            if (lips[i] > teeth[i] and teeth[i] > jaws[i] and 
-                vol_spike[i] and
-                close[i] > ema_34_4h[i]):
+        # Regime filter: only trade when BB width is low (rangy market)
+        is_ranging = bb_width[i] < 0.05  # 5% width threshold
+        
+        if position == 0 and is_ranging:
+            # LONG: RSI oversold (<30) and price above weekly EMA20 (uptrend)
+            if rsi[i] < 30 and close[i] > ema_20_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Lips < Teeth < Jaws (bearish alignment) + volume spike + price below daily EMA34
-            elif (lips[i] < teeth[i] and teeth[i] < jaws[i] and 
-                  vol_spike[i] and
-                  close[i] < ema_34_4h[i]):
+            # SHORT: RSI overbought (>70) and price below weekly EMA20 (downtrend)
+            elif rsi[i] > 70 and close[i] < ema_20_6h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Alligator lines cross (Lips < Teeth or Teeth < Jaws) - trend weakening
-            if lips[i] < teeth[i] or teeth[i] < jaws[i]:
+            # EXIT LONG: RSI overbought (>70) or price below weekly EMA20 (trend change)
+            if rsi[i] > 70 or close[i] < ema_20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator lines cross (Lips > Teeth or Teeth > Jaws) - trend weakening
-            if lips[i] > teeth[i] or teeth[i] > jaws[i]:
+            # EXIT SHORT: RSI oversold (<30) or price above weekly EMA20 (trend change)
+            if rsi[i] < 30 or close[i] > ema_20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
