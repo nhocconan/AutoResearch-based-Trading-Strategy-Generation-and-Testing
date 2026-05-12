@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-# 1H_4H_1D_Trend_Structure
-# Hypothesis: On 1h timeframe, use 4h Supertrend for trend direction and 1d Donchian breakout for entry timing.
-# Long when: 4h Supertrend = up, price breaks above 1d upper Donchian (20), volume > 20-period MA.
-# Short when: 4h Supertrend = down, price breaks below 1d lower Donchian (20), volume > 20-period MA.
-# Exit when: 4h Supertrend reverses.
-# Uses 4h Supertrend for trend filter and 1d Donchian for structure to reduce whipsaw.
-# Targets 15-30 trades/year for low fee drag on 1h timeframe.
+"""
+6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike
+Hypothesis: On 6h timeframe, enter long when price closes above weekly R3 with volume spike and price > 1w EMA50.
+Enter short when price closes below weekly S3 with volume spike and price < 1w EMA50.
+Exit when price crosses 1w EMA50 (trend reversal).
+Uses weekly EMA50 for trend filter and weekly Camarilla R3/S3 for breakout levels.
+Volume confirmation reduces false breakouts.
+Designed to work in both bull and bear markets by following weekly trend.
+Target: 15-30 trades/year for low fee drag.
+"""
 
-name = "1H_4H_1D_Trend_Structure"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,77 +28,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load 4h data for Supertrend calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Load weekly data for Camarilla pivot calculation and EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h Supertrend (ATR=10, multiplier=3.0)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # True Range
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with indices
+    # Calculate pivot point and range
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_range = weekly_high - weekly_low
     
-    # ATR(10)
-    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Camarilla R3 and S3 levels
+    r3 = weekly_pivot + weekly_range * 1.250
+    s3 = weekly_pivot - weekly_range * 1.250
     
-    # Basic Upper and Lower Bands
-    basic_ub = (high_4h + low_4h) / 2 + 3.0 * atr_10
-    basic_lb = (high_4h + low_4h) / 2 - 3.0 * atr_10
+    # Calculate 1w EMA50
+    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Final Upper and Lower Bands
-    final_ub = np.zeros_like(close_4h)
-    final_lb = np.zeros_like(close_4h)
-    for i in range(len(close_4h)):
-        if i == 0:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
-        else:
-            if close_4h[i-1] <= final_ub[i-1]:
-                final_ub[i] = min(basic_ub[i], final_ub[i-1])
-            else:
-                final_ub[i] = basic_ub[i]
-            if close_4h[i-1] >= final_lb[i-1]:
-                final_lb[i] = max(basic_lb[i], final_lb[i-1])
-            else:
-                final_lb[i] = basic_lb[i]
+    # Align weekly levels and 1w EMA50 to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Supertrend
-    supertrend = np.zeros_like(close_4h)
-    for i in range(len(close_4h)):
-        if i == 0:
-            supertrend[i] = 1.0  # start with uptrend
-        else:
-            if close_4h[i] <= final_ub[i]:
-                supertrend[i] = 1.0  # uptrend
-            else:
-                supertrend[i] = -1.0  # downtrend
-    
-    # Load 1d data for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1d Donchian channels (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align indicators to 1h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Volume confirmation: 20-period moving average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 24-period moving average (4 days of 6h bars)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -104,8 +63,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(supertrend_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -113,35 +72,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        st = supertrend_aligned[i]
-        dch = donchian_high_aligned[i]
-        dcl = donchian_low_aligned[i]
+        r3_val = r3_aligned[i]
+        s3_val = s3_aligned[i]
+        ema1w_trend = ema50_1w_aligned[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: 4h uptrend, price breaks above 1d upper Donchian, volume > 20MA
-            if st == 1.0 and close[i] > dch and volume[i] > vol_ma_val:
-                signals[i] = 0.20
+            # LONG: Price closes above R3 with price > 1w EMA50 and volume > 2x MA
+            if close[i] > r3_val and close[i] > ema1w_trend and volume[i] > 2.0 * vol_ma_val:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 4h downtrend, price breaks below 1d lower Donchian, volume > 20MA
-            elif st == -1.0 and close[i] < dcl and volume[i] > vol_ma_val:
-                signals[i] = -0.20
+            # SHORT: Price closes below S3 with price < 1w EMA50 and volume > 2x MA
+            elif close[i] < s3_val and close[i] < ema1w_trend and volume[i] > 2.0 * vol_ma_val:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 4h trend reverses to down
-            if st == -1.0:
+            # EXIT LONG: Price closes below 1w EMA50 (trend reversal)
+            if close[i] < ema1w_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 4h trend reverses to up
-            if st == 1.0:
+            # EXIT SHORT: Price closes above 1w EMA50 (trend reversal)
+            if close[i] > ema1w_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
