@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_Pivot_Squeeze
-# Hypothesis: Uses Camarilla pivot levels (S1/S2/R1/R2) from daily data with Bollinger Band squeeze
-# (low volatility breakout) to capture breakouts in both bull and bear markets. 
-# Entry when price breaks S2/R1 with volume confirmation and Bollinger Band width < 50th percentile.
-# Exit when price returns to S1/R2 or Bollinger Band width > 80th percentile (volatility expansion).
-# Designed for 4h timeframe with 1d/1w HTF context to limit trades (target: 20-50/year).
+# 4h_12h_1d_Donchian_Breakout_VolumeTrend_v2
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation. Targets breakouts in the direction of the 12h trend, with volume confirming institutional participation. Uses 1d ATR for volatility filtering to avoid choppy markets. Designed for fewer trades (<50/year) to minimize fee drag and improve generalization.
 
-name = "4h_Camarilla_Pivot_Squeeze"
+name = "4h_12h_1d_Donchian_Breakout_VolumeTrend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,68 +15,62 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Band width regime filter (20, 2)
-    close_series = pd.Series(close)
-    bb_mid = close_series.rolling(window=20, min_periods=20).mean()
-    bb_std = close_series.rolling(window=20, min_periods=20).std()
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_mid
-    bb_width_percentile = bb_width.rolling(window=50, min_periods=20).rank(pct=True) * 100
-    bb_width_squeeze = bb_width_percentile < 50  # Low volatility regime
-    bb_width_expansion = bb_width_percentile > 80  # High volatility exit
+    # Volume spike: >2.0x 20-period average (on 4h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Volume confirmation: >1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_spike = volume > (1.5 * vol_ma)
-    
-    # Daily data for Camarilla pivot levels
+    # 1d data for ATR filter (avoid choppy markets)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R4 = C + ((H-L) * 1.5/2), R3 = C + ((H-L) * 1.25/2), R2 = C + ((H-L) * 1.1/2), R1 = C + ((H-L) * 1.05/2)
-    # S1 = C - ((H-L) * 1.05/2), S2 = C - ((H-L) * 1.1/2), S3 = C - ((H-L) * 1.25/2), S4 = C - ((H-L) * 1.5/2)
-    # We use S2, S1, R1, R2 for entries/exits
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot levels using previous day's values (shifted by 1 to avoid look-ahead)
-    range_1d = high_1d - low_1d
-    # Use previous day's data for today's levels
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = np.nan
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with 1d index
     
-    # Calculate Camarilla levels
-    R1 = prev_close_1d + (range_1d * 1.05 / 2)
-    S1 = prev_close_1d - (range_1d * 1.05 / 2)
-    R2 = prev_close_1d + (range_1d * 1.1 / 2)
-    S2 = prev_close_1d - (range_1d * 1.1 / 2)
+    # ATR(14) on daily
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Align levels to 4h timeframe (using previous day's levels)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    # 4h Donchian(20)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 12h EMA34 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 10:
+        return np.zeros(n)
+    
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or
-            np.isnan(bb_width_squeeze[i]) or np.isnan(bb_width_expansion[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr_14_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volatility filter: avoid trading when ATR is too low (choppy market)
+        if atr_14_1d_aligned[i] < 0.01 * close[i]:  # less than 1% of price
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -89,30 +79,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 with volume squeeze and volume spike
-            if (close[i] > R1_aligned[i] and 
-                bb_width_squeeze[i] and 
-                volume_spike[i]):
+            # LONG: Price breaks above Donchian high + volume spike + price above 12h EMA34
+            if (close[i] > highest_high[i] and 
+                volume_spike[i] and 
+                close[i] > ema_34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S2 with volume squeeze and volume spike
-            elif (close[i] < S2_aligned[i] and 
-                  bb_width_squeeze[i] and 
-                  volume_spike[i]):
+            # SHORT: Price breaks below Donchian low + volume spike + price below 12h EMA34
+            elif (close[i] < lowest_low[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_34_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to S2 OR volatility expansion
-            if (close[i] < S2_aligned[i]) or bb_width_expansion[i]:
+            # EXIT LONG: Price re-enters below Donchian high OR closes below 12h EMA34
+            if (close[i] < highest_high[i]) or \
+               close[i] < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to R1 OR volatility expansion
-            if (close[i] > R1_aligned[i]) or bb_width_expansion[i]:
+            # EXIT SHORT: Price re-enters above Donchian low OR closes above 12h EMA34
+            if (close[i] > lowest_low[i]) or \
+               close[i] > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
