@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Price breaking above/below Camarilla R1/S1 levels (derived from 1d high-low-close) with 1d EMA trend filter and volume confirmation (1.5x average) captures strong trending moves while avoiding false breakouts. R1/S1 levels provide more frequent entries than R3/S3, improving trade frequency while maintaining reliability. Works in bull/bear by following 1d trend direction.
+1d_KAMA_Plus_RSI_With_Chop_Filter
+Hypothesis: KAMA identifies the 1-day trend direction, RSI filters for overbought/oversold conditions within the trend, and Choppiness Index avoids ranging markets. This combination works in both bull and bear markets by following the trend only when momentum aligns and markets are trending (not choppy).
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_KAMA_Plus_RSI_With_Chop_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,85 +17,118 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data ONCE before loop
+    # Get 1-week data ONCE before loop for Choppiness Index
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on 1-day data
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla levels from 1d data
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C = close, H = high, L = low of previous day
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Shift by 1 to use previous day's data
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = np.nan
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
+    # KAMA parameters
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    camarilla_upper = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
-    camarilla_lower = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
+    # Calculate Efficiency Ratio and Smoothing Constant
+    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # 10-period volatility
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_upper_aligned = align_htf_to_ltf(prices, df_1d, camarilla_upper)
-    camarilla_lower_aligned = align_htf_to_ltf(prices, df_1d, camarilla_lower)
+    # Handle the array operations properly
+    change_full = np.concatenate([np.full(10, np.nan), change])
+    volatility_full = np.concatenate([np.full(10, np.nan), volatility])
     
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    er = np.where(volatility_full != 0, change_full / volatility_full, 0)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Volume spike: >1.5x 20-period average (4h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    kama_1d = kama
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    
+    # RSI (14-period) on 1-day data
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Choppiness Index (14-period) on 1-week data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range
+    tr1 = np.abs(np.diff(high_1w, prepend=high_1w[0]))
+    tr2 = np.abs(np.diff(low_1w, prepend=low_1w[0]))
+    tr3 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Sum of TR over 14 periods
+    tr_sum = np.full_like(tr, np.nan)
+    for i in range(13, len(tr)):
+        tr_sum[i] = np.sum(tr[i-13:i+1])
+    
+    # Highest high and lowest low over 14 periods
+    hh = np.full_like(high_1w, np.nan)
+    ll = np.full_like(low_1w, np.nan)
+    for i in range(13, len(high_1w)):
+        hh[i] = np.max(high_1w[i-13:i+1])
+        ll[i] = np.min(low_1w[i-13:i+1])
+    
+    # Choppiness Index
+    chop = np.full_like(tr, np.nan)
+    for i in range(13, len(tr)):
+        if tr_sum[i] > 0 and hh[i] != ll[i]:
+            chop[i] = 100 * np.log10(tr_sum[i] / (hh[i] - ll[i])) / np.log10(14)
+        else:
+            chop[i] = 50  # neutral
+    
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after EMA34 warmup
-        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_spike[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
+    for i in range(30, n):  # Start after sufficient warmup
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(chop_1w_aligned[i])):
+            signals[i] = 0.0
             continue
         
-        if position == 0:
-            # LONG: Price breaks above Camarilla R1 + 1d EMA34 uptrend + volume spike
-            if (close[i] > camarilla_upper_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_spike[i]):
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Price breaks below Camarilla S1 + 1d EMA34 downtrend + volume spike
-            elif (close[i] < camarilla_lower_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_spike[i]):
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # EXIT LONG: Price closes below Camarilla S1 (reversal level)
-            if close[i] < camarilla_lower_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # EXIT SHORT: Price closes above Camarilla R1 (reversal level)
-            if close[i] > camarilla_upper_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        # Only trade when market is trending (Choppiness < 61.8)
+        if chop_1w_aligned[i] > 61.8:
+            signals[i] = 0.0
+            continue
+        
+        # LONG: Price above KAMA + RSI not overbought
+        if close[i] > kama_1d_aligned[i] and rsi_1d_aligned[i] < 70:
+            signals[i] = 0.25
+        # SHORT: Price below KAMA + RSI not oversold
+        elif close[i] < kama_1d_aligned[i] and rsi_1d_aligned[i] > 30:
+            signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
