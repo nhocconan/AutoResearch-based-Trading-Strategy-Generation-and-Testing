@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h_4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
 Hypothesis: Breakout above R1 or below S1 from daily Camarilla pivots with 12h EMA50 trend filter and volume confirmation. Designed for 20-50 trades/year on 4h timeframe to work in both bull and bear markets by using strong institutional levels and filtering with 12h trend and volume.
 """
 
