@@ -1,19 +1,14 @@
-#!/usr/bin/env python3
-"""
-6H_WILLIAMS_FRACTAL_REVERSAL_1D_VOLUME_FILTER
-Hypothesis: Daily Williams Fractals identify reversal points. Price rejection at
-bearish fractal (sell signal) or bullish fractal (buy signal) with volume
-confirmation and EMA21 trend filter works in both bull (buy dips) and bear
-(sell rallies) markets. Uses 6h timeframe for entries with 1d fractals as
-structure. Target: 20-50 trades/year on 6h timeframe (80-200 total over 4 years).
-"""
-name = "6H_WILLIAMS_FRACTAL_REVERSAL_1D_VOLUME_FILTER"
-timeframe = "6h"
+# 12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER
+# Hypothesis: Camarilla pivot levels (R3/S3) from daily chart act as strong support/resistance.
+# Price breaking above R3 with volume and 1d trend indicates bullish breakout; breaking below S3 indicates bearish breakout.
+# Works in bull markets (buy breakouts) and bear markets (sell breakdowns). Target: 15-30 trades/year on 12h.
+name = "12H_CAMARILLA_R3_S3_BREAKOUT_1D_TREND_FILTER"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,39 +20,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Williams Fractals and filters
+    # Daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams Fractals (need 5 bars: 2 left, center, 2 right)
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # EMA21 for trend filter
-    ema21 = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Camarilla levels: R3, S3
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    camarilla_range = prev_high - prev_low
+    R3 = prev_close + camarilla_range * 1.1 / 4
+    S3 = prev_close - camarilla_range * 1.1 / 4
     
-    # Volume spike: current 6h volume > 1.5x 20-period average
+    # 1d EMA34 for trend filter
+    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume spike: current 12h volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
-    volume_spike = volume > 1.5 * vol_ma
+    volume_spike = volume > 2.0 * vol_ma
     
-    # Williams Fractals need 2-bar confirmation after the center bar
-    bearish_fractal_confirm = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_confirm = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
-    ema21_aligned = align_htf_to_ltf(prices, df_1d, ema21)
+    # Align daily data to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 2  # Need fractal formation
+    start_idx = 1  # Need previous day data
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(bearish_fractal_confirm[i]) or np.isnan(bullish_fractal_confirm[i]) or 
-            np.isnan(ema21_aligned[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,35 +73,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price holds above bullish fractal with volume spike in uptrend
-            if (low[i] > bullish_fractal_confirm[i] and 
+            # LONG: Price breaks above R3 with volume spike in uptrend
+            if (close[i] > R3_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > ema21_aligned[i]):
+                close[i] > ema34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price holds below bearish fractal with volume spike in downtrend
-            elif (high[i] < bearish_fractal_confirm[i] and 
+            # SHORT: Price breaks below S3 with volume spike in downtrend
+            elif (close[i] < S3_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < ema21_aligned[i]):
+                  close[i] < ema34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below bullish fractal or trend reversal
-            if (low[i] <= bullish_fractal_confirm[i] or 
-                close[i] < ema21_aligned[i]):
+            # EXIT LONG: Price breaks below S3 or trend reversal
+            if (close[i] < S3_aligned[i] or 
+                close[i] < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above bearish fractal or trend reversal
-            if (high[i] >= bearish_fractal_confirm[i] or 
-                close[i] > ema21_aligned[i]):
+            # EXIT SHORT: Price breaks above R3 or trend reversal
+            if (close[i] > R3_aligned[i] or 
+                close[i] > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+#!/usr/bin/env python3
