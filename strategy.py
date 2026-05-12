@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h Vortex Indicator + Volume Spike + Daily Trend Filter
-# Hypothesis: Vortex Indicator identifies trend direction (VI+ > VI- for uptrend, VI- > VI+ for downtrend).
+# 4h Aroon Oscillator + Volume Spike + Daily Trend Filter
+# Hypothesis: Aroon Oscillator identifies strong trends (values near +100/-100 indicate strong uptrend/downtrend).
 # Combined with volume spikes to confirm institutional participation and daily EMA trend filter,
 # this strategy captures strong momentum moves while avoiding chop. Designed for low trade frequency (~20-30/year).
 # Works in both bull and bear markets by following the trend as defined by higher timeframe.
 
-name = "4h_Vortex_Volume_DailyTrend"
+name = "4h_Aroon_Volume_DailyTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,27 +34,21 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(daily_close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # === Vortex Indicator on 4h (period=14) ===
-    # True Range
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # === Aroon Oscillator (period=25) ===
+    # Days since highest high
+    highest_high_idx = pd.Series(high).rolling(window=25, min_periods=1).apply(lambda x: x.argmax(), raw=True)
+    days_since_high = 24 - highest_high_idx  # 25-period: 0 to 24 days ago
     
-    # +VM and -VM
-    vm_plus = np.abs(high[1:] - low[:-1])
-    vm_minus = np.abs(low[1:] - high[:-1])
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
+    # Days since lowest low
+    lowest_low_idx = pd.Series(low).rolling(window=25, min_periods=1).apply(lambda x: x.argmin(), raw=True)
+    days_since_low = 24 - lowest_low_idx
     
-    # Sum of last 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    # Aroon Up and Down
+    aroon_up = ((25 - days_since_high) / 25) * 100
+    aroon_down = ((25 - days_since_low) / 25) * 100
     
-    # VI+ and VI-
-    vi_plus = vm_plus_sum / tr_sum
-    vi_minus = vm_minus_sum / tr_sum
+    # Aroon Oscillator
+    aroon_osc = aroon_up - aroon_down  # Range: -100 to +100
     
     # === Volume Spike (20-period on 4h) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,8 +61,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tr_sum[i]) or np.isnan(vm_plus_sum[i]) or np.isnan(vm_minus_sum[i]) or
-            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(aroon_osc[i]) or np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,28 +70,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: VI+ > VI- (uptrend) + volume spike + price above daily EMA34 (uptrend)
-            if (vi_plus[i] > vi_minus[i] and 
+            # LONG: Aroon Oscillator > 50 (strong uptrend) + volume spike + price above daily EMA34
+            if (aroon_osc[i] > 50 and 
                 vol_spike[i] and
                 close[i] > ema_34_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: VI- > VI+ (downtrend) + volume spike + price below daily EMA34 (downtrend)
-            elif (vi_minus[i] > vi_plus[i] and 
+            # SHORT: Aroon Oscillator < -50 (strong downtrend) + volume spike + price below daily EMA34
+            elif (aroon_osc[i] < -50 and 
                   vol_spike[i] and
                   close[i] < ema_34_4h[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Trend turns down (VI- > VI+)
-            if vi_minus[i] >= vi_plus[i]:
+            # EXIT LONG: Trend weakens (Aroon Oscillator < 0)
+            if aroon_osc[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend turns up (VI+ > VI-)
-            if vi_plus[i] >= vi_minus[i]:
+            # EXIT SHORT: Trend weakens (Aroon Oscillator > 0)
+            if aroon_osc[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
