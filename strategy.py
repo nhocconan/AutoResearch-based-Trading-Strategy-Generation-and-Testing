@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Ichimoku_Breakout_VolumeTrend
-# Hypothesis: Ichimoku cloud breakout with volume confirmation and trend filter on 4h timeframe.
-# Long: Price breaks above Kumo (cloud) + volume > 1.5x SMA20 + price > Senkou Span A
-# Short: Price breaks below Kumo + volume > 1.5x SMA20 + price < Senkou Span B
-# Exit: Price re-enters the Kumo (cloud)
-# Uses daily trend filter to avoid counter-trend trades in strong trends.
+# 1d_WilliamsAlligator_Trend_Confirmation
+# Hypothesis: Williams Alligator (three SMAs) identifies trend direction; trades occur when price aligns with Alligator jaws on daily timeframe with weekly trend filter and volume confirmation. Works in bull/bear by only taking trades in direction of weekly trend, reducing whipsaw. Targets 15-25 trades/year on daily timeframe to minimize fee drag.
 
-name = "4h_Ichimoku_Breakout_VolumeTrend"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_Trend_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,34 +20,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
 
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
 
-    # Ichimoku calculations (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    tenkan_sen = (high_series.rolling(window=9, min_periods=9).max() + 
-                  low_series.rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (high_series.rolling(window=26, min_periods=26).max() + 
-                 low_series.rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_b = ((high_series.rolling(window=52, min_periods=52).max() + 
-                 low_series.rolling(window=52, min_periods=52).min()) / 2).shift(26)
-    # Kumo (Cloud): between Senkou Span A and Senkou Span B
+    # Williams Alligator on daily: Jaw (13), Teeth (8), Lips (5) SMAs
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
 
-    # Daily trend filter: EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
 
-    # Volume confirmation: 1.5x 20-period SMA
+    # Volume confirmation: 1.5x 20-day SMA
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_threshold = volume_sma20 * 1.5
@@ -59,15 +44,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(52, n):  # Start after Ichimoku calculations are valid
-        # Get aligned values for current 4h bar
-        ema50_aligned = ema50_1d_aligned[i]
-        vol_threshold_val = volume_threshold[i]
-
+    for i in range(13, n):  # start after jaw period
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_sen.iloc[i]) or np.isnan(kijun_sen.iloc[i]) or 
-            np.isnan(senkou_a.iloc[i]) or np.isnan(senkou_b.iloc[i]) or
-            np.isnan(ema50_aligned) or np.isnan(vol_threshold_val)):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,43 +55,44 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Current Ichimoku values
-        tenkan = tenkan_sen.iloc[i]
-        kijun = kijun_sen.iloc[i]
-        senkou_a_val = senkou_a.iloc[i]
-        senkou_b_val = senkou_b.iloc[i]
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend; Lips < Teeth < Jaw = downtrend
+        lips_gt_teeth = lips[i] > teeth[i]
+        teeth_gt_jaw = teeth[i] > jaw[i]
+        lips_lt_teeth = lips[i] < teeth[i]
+        teeth_lt_jaw = teeth[i] < jaw[i]
 
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_a_val, senkou_b_val)
-        cloud_bottom = min(senkou_a_val, senkou_b_val)
+        uptrend_aligned = lips_gt_teeth and teeth_gt_jaw
+        downtrend_aligned = lips_lt_teeth and teeth_lt_jaw
 
         if position == 0:
-            # LONG: Price breaks above cloud + volume spike + bullish alignment
-            if (close[i] > cloud_top and
-                volume[i] > vol_threshold_val and
-                close[i] > ema50_aligned and
-                tenkan > kijun):  # Additional bullish confirmation
+            # LONG: Price > Lips, Alligator aligned up, weekly uptrend, volume spike
+            if (close[i] > lips[i] and
+                uptrend_aligned and
+                close[i] > ema34_1w_aligned[i] and
+                volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below cloud + volume spike + bearish alignment
-            elif (close[i] < cloud_bottom and
-                  volume[i] > vol_threshold_val and
-                  close[i] < ema50_aligned and
-                  tenkan < kijun):  # Additional bearish confirmation
+            # SHORT: Price < Lips, Alligator aligned down, weekly downtrend, volume spike
+            elif (close[i] < lips[i] and
+                  downtrend_aligned and
+                  close[i] < ema34_1w_aligned[i] and
+                  volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters the cloud (falls below cloud top)
-            if close[i] < cloud_top:
+            # EXIT LONG: Price crosses below Lips or weekly trend turns down
+            if (close[i] < lips[i] or
+                close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters the cloud (rises above cloud bottom)
-            if close[i] > cloud_bottom:
+            # EXIT SHORT: Price crosses above Lips or weekly trend turns up
+            if (close[i] > lips[i] or
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
