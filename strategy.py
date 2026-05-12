@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_ChaikinMoneyFlow_Trend_Filter
-# Hypothesis: On 12h timeframe, trade long when CMF > 0.15 and price > weekly EMA50; short when CMF < -0.15 and price < weekly EMA50.
-# Chaikin Money Flow measures institutional accumulation/distribution; weekly EMA50 filters trend.
-# Designed for low turnover: only trade when strong money flow aligns with weekly trend.
-# Works in bull (strong inflows in uptrend) and bear (strong outflows in downtrend) markets.
+# 1d_WeeklyPivot_Trend_Filter
+# Hypothesis: Trade weekly pivot breakouts on daily timeframe only when aligned with weekly trend (EMA20) and confirmed by volume spike.
+# Weekly pivots from weekly timeframe provide institutional reference points.
+# Weekly EMA20 filters counter-trend moves; volume spike ensures institutional participation.
+# Designed for low turnover: only trade when price breaks key weekly levels with trend and volume confirmation.
+# Works in bull (breakouts up in uptrend) and bear (breakdowns in downtrend) markets.
 
-name = "12h_ChaikinMoneyFlow_Trend_Filter"
-timeframe = "12h"
+name = "1d_WeeklyPivot_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -26,30 +27,37 @@ def generate_signals(prices):
     # Get weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
 
-    # Calculate weekly EMA50 trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate weekly pivot levels (using prior week's OHLC)
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # P = (H + L + C) / 3
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    ph = df_1w['high'].shift(1).values  # prior week high
+    pl = df_1w['low'].shift(1).values   # prior week low
+    pc = df_1w['close'].shift(1).values # prior week close
+    p = (ph + pl + pc) / 3.0
+    r1 = 2 * p - pl
+    s1 = 2 * p - ph
+    # Align to daily: weekly pivot values are constant through the week
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
 
-    # Calculate Chaikin Money Flow (CMF) on 12h data
-    # CMF = ADL(21) / Volume(21)
-    # ADL = ((Close - Low) - (High - Close)) / (High - Low) * Volume
-    # Avoid division by zero
-    hl_range = high - low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)  # prevent div by zero
-    clv = ((close - low) - (high - close)) / hl_range
-    adl = clv * volume
-    # Use pandas for rolling sum with min_periods
-    adl_sum = pd.Series(adl).rolling(window=21, min_periods=21).sum().values
-    vol_sum = pd.Series(volume).rolling(window=21, min_periods=21).sum().values
-    cmf = adl_sum / vol_sum
-    cmf = np.where(vol_sum == 0, 0, cmf)  # handle zero volume
+    # Weekly EMA20 trend filter
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+
+    # Volume spike: current > 2.0x average of last 20 days (~1 month)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after EMA50 warmup
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(cmf[i])):
+    for i in range(60, n):  # Start after EMA20 and volume MA warmup
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,30 +66,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: CMF > 0.15 and price > weekly EMA50
-            if (cmf[i] > 0.15 and 
-                close[i] > ema_50_1w_aligned[i]):
+            # LONG: close > weekly R1 + price > weekly EMA20 + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_20_1w_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: CMF < -0.15 and price < weekly EMA50
-            elif (cmf[i] < -0.15 and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # SHORT: close < weekly S1 + price < weekly EMA20 + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_20_1w_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: CMF < 0 or trend breaks
-            if (cmf[i] < 0 or 
-                close[i] < ema_50_1w_aligned[i]):
+            # EXIT LONG: close < weekly pivot P or trend breaks
+            p_aligned = align_htf_to_ltf(prices, df_1w, p)
+            if (close[i] < p_aligned[i] or 
+                close[i] < ema_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: CMF > 0 or trend breaks
-            if (cmf[i] > 0 or 
-                close[i] > ema_50_1w_aligned[i]):
+            # EXIT SHORT: close > weekly pivot P or trend breaks
+            p_aligned = align_htf_to_ltf(prices, df_1w, p)
+            if (close[i] > p_aligned[i] or 
+                close[i] > ema_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
