@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 1d_KAMA_RSI_Chop_Filter
-# Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
-# combined with RSI for momentum confirmation and Choppiness Index for regime filtering.
-# Enter long when KAMA upward, RSI > 50, and market is trending (CHOP < 38.2).
-# Enter short when KAMA downward, RSI < 50, and market is trending (CHOP < 38.2).
-# Exit when trend reverses or market becomes choppy (CHOP >= 38.2).
-# Designed for low trade frequency (target: 10-25 trades/year) to minimize fee drag
-# and work in both bull and bear markets via adaptive trend and regime filters.
+# 6h_ElderRay_Ray_Momentum
+# Hypothesis: Elder Ray index (bull power = high - EMA13, bear power = EMA13 - low) captures bull/bear strength.
+# Combine with 13-period EMA for trend and 14-period RSI for overbought/oversold filter.
+# Go long when bull power > 0, price > EMA13, and RSI < 70 (avoid overextended longs).
+# Go short when bear power > 0, price < EMA13, and RSI > 30 (avoid overextended shorts).
+# Use 1d trend filter (EMA50) to align with higher timeframe direction.
+# Targets 15-35 trades/year to minimize fee drag and work in both bull/bear markets via trend filter.
 
-name = "1d_KAMA_RSI_Chop_Filter"
-timeframe = "1d"
+name = "6h_ElderRay_Ray_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,66 +17,47 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate Efficiency Ratio (ER) for KAMA over 10 periods
-    change = np.abs(close - np.roll(close, 10))
-    change[0:10] = 0  # first 10 values invalid
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly below
-    # Recompute volatility correctly: sum of absolute daily changes over 10 periods
-    volatility = np.zeros_like(close)
-    for i in range(10, n):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.zeros_like(close)
-    kama[9] = close[9]  # start at index 9
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
 
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)  # align length
+    # Calculate EMA13 for Elder Ray and trend
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+
+    # Elder Ray components
+    bull_power = high - ema13
+    bear_power = ema13 - low
+
+    # RSI for momentum filter
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
 
-    # Calculate Choppiness Index (CHOP) over 14 periods
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]  # first bar
-    # Sum of true ranges over 14 periods
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    chop = np.where(atr_sum != 0, -100 * np.log10((hh - ll) / atr_sum) / np.log10(14), 50)
-    # Handle edge cases where hh == ll
-    chop = np.where((hh - ll) == 0, 50, chop)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(14, n):
         # Skip if any required value is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,30 +66,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: KAMA upward (close > kama), RSI > 50, trending market (CHOP < 38.2)
-            if (close[i] > kama[i] and 
-                rsi[i] > 50 and
-                chop[i] < 38.2):
+            # LONG: Bull power positive (bullish momentum) + price > EMA13 + RSI not overbought + 1d uptrend
+            if (bull_power[i] > 0 and 
+                close[i] > ema13[i] and
+                rsi[i] < 70 and
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA downward (close < kama), RSI < 50, trending market (CHOP < 38.2)
-            elif (close[i] < kama[i] and 
-                  rsi[i] < 50 and
-                  chop[i] < 38.2):
+            # SHORT: Bear power positive (bearish momentum) + price < EMA13 + RSI not oversold + 1d downtrend
+            elif (bear_power[i] > 0 and 
+                  close[i] < ema13[i] and
+                  rsi[i] > 30 and
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA turns downward OR market becomes choppy
-            if (close[i] < kama[i]) or (chop[i] >= 38.2):
+            # EXIT LONG: Bear power becomes positive (momentum shifts) or RSI overbought
+            if bear_power[i] > 0 or rsi[i] >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA turns upward OR market becomes choppy
-            if (close[i] > kama[i]) or (chop[i] >= 38.2):
+            # EXIT SHORT: Bull power becomes positive (momentum shifts) or RSI oversold
+            if bull_power[i] > 0 or rsi[i] <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
