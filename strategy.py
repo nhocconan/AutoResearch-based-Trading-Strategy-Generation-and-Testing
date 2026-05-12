@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 6h_ADX_Volume_Trend_Filter
-# Hypothesis: Use ADX(14) to identify strong trends (ADX > 25) on 6h, combined with +DI/-DI crossover for direction, confirmed by volume spikes (>1.5x 20-period average). Enter long when +DI crosses above -DI with ADX > 25 and volume spike; short when -DI crosses above +DI with ADX > 25 and volume spike. Exit when ADX falls below 20 (trend weakening) or reverse crossover. Targets 15-30 trades/year to avoid fee decay while capturing strong trends in both bull and bear markets.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Price breakout above Camarilla R1 or below S1 on 4h, filtered by 1d EMA34 trend and volume spikes (>1.5x 20-period avg). Uses Camarilla levels from prior 1d session for structure. Targets 20-40 trades/year to avoid fee drag. Works in bull/bear via trend filter.
 
-name = "6h_ADX_Volume_Trend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,34 +20,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate ADX and DI components
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Directional Movement
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # Calculate Camarilla levels from prior 1d session
+    # R1 = C + 1.1*(H-L)/12, S1 = C - 1.1*(H-L)/12
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
 
-    # Smoothed values
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    # Align Camarilla levels to 4h (use prior day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
-    # DI values
-    plus_di = 100 * plus_dm_sum / tr_sum
-    minus_di = 100 * minus_dm_sum / tr_sum
-
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
     # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,10 +47,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
+    for i in range(1, n):  # Start from 1 to have prior day's Camarilla
         # Skip if any required value is NaN
-        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,28 +59,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: +DI crosses above -DI with ADX > 25 and volume spike
-            if (plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1] and
-                adx[i] > 25 and volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Break above R1 + price > 1d EMA34 + volume spike
+            if (close[i] > camarilla_r1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: -DI crosses above +DI with ADX > 25 and volume spike
-            elif (minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1] and
-                  adx[i] > 25 and volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Break below S1 + price < 1d EMA34 + volume spike
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: ADX < 20 (trend weakening) or -DI crosses above +DI
-            if adx[i] < 20 or (minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1]):
+            # EXIT LONG: Price breaks below S1 (reversal signal)
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: ADX < 20 (trend weakening) or +DI crosses above -DI
-            if adx[i] < 20 or (plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1]):
+            # EXIT SHORT: Price breaks above R1 (reversal signal)
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
