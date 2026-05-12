@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Filtered
-Hypothesis: On 4h timeframe, buy when price breaks above Camarilla R1 from previous 1d with volume >2x average and 1d EMA34 trending up; sell when price breaks below Camarilla S1 with volume >2x average and 1d EMA34 trending down. Added ADX(14) > 25 trend filter to reduce false breakouts in ranging markets. Targets 20-50 trades per year to reduce fee drag and improve generalization in bull/bear markets.
+6h_Stochastic_Bollinger_Bands_Reversal
+Hypothesis: On 6h timeframe, mean reversion works in BTC/ETH due to overextended moves during high volatility.
+Enter long when price touches lower Bollinger Band (20,2) and Stochastic %K < 20 (oversold).
+Enter short when price touches upper Bollinger Band (20,2) and Stochastic %K > 80 (overbought).
+Use 1d ADX < 25 to filter ranging markets where mean reversion works best.
+Exit when price crosses the 20-period SMA or Stochastic crosses 50.
+Target: 20-40 trades/year to minimize fee drag in ranging markets.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Filtered"
-timeframe = "4h"
+name = "6h_Stochastic_Bollinger_Bands_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +27,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 1d data for ADX filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -30,37 +35,29 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Camarilla levels from previous 1d bar
-    # Camarilla: R1 = close + (high - low) * 1.12/12, S1 = close - (high - low) * 1.12/12
-    range_1d = high_1d - low_1d
-    camarilla_r1 = close_1d + range_1d * 1.12 / 12
-    camarilla_s1 = close_1d - range_1d * 1.12 / 12
+    # Bollinger Bands (20,2) on 6h
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
 
-    # Use previous 1d bar's levels (shift by 1)
-    camarilla_r1_prev = np.roll(camarilla_r1, 1)
-    camarilla_s1_prev = np.roll(camarilla_s1, 1)
-    camarilla_r1_prev[0] = np.nan
-    camarilla_s1_prev[0] = np.nan
+    # Stochastic Oscillator (14,3,3) on 6h
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close - lowest_low_14) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero
+    k_percent = np.where((highest_high_14 - lowest_low_14) != 0, k_percent, 50)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
 
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_prev)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_prev)
-
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # 1d ADX(14) for trend strength filter
-    # Calculate True Range
+    # 1d ADX(14) for ranging market filter
     tr1 = high_1d - low_1d
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # first value has no previous close
+    tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate +DM and -DM
     up_move = high_1d - np.roll(high_1d, 1)
     down_move = np.roll(low_1d, 1) - low_1d
     up_move[0] = 0
@@ -68,10 +65,11 @@ def generate_signals(prices):
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smoothed values
     def smooth_wilder(arr, period):
         result = np.zeros_like(arr)
-        result[period-1] = np.nansum(arr[:period])  # first value is sum
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])
         for i in range(period, len(arr)):
             result[i] = result[i-1] - (result[i-1] / period) + arr[i]
         return result
@@ -80,27 +78,22 @@ def generate_signals(prices):
     plus_dm_smooth = smooth_wilder(plus_dm, 14)
     minus_dm_smooth = smooth_wilder(minus_dm, 14)
     
-    # Calculate DI+ and DI-
     plus_di = 100 * plus_dm_smooth / tr_smooth
     minus_di = 100 * minus_dm_smooth / tr_smooth
-    # Avoid division by zero
     dx = np.where((plus_di + minus_di) != 0, 
                   100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 
                   0)
     adx = smooth_wilder(dx, 14)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-
-    # Volume confirmation: volume > 2x 24-period average (approx 12 hours)
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    adx_1d = adx  # Already 1d values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(30, n):  # Start after warmup for indicators
         # Skip if any required value is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_24[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(lower_bb[i]) or np.isnan(upper_bb[i]) or
+            np.isnan(k_percent[i]) or np.isnan(d_percent[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -109,32 +102,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 + 1d uptrend + volume spike + ADX > 25
-            if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume[i] > vol_avg_24[i] * 2.0 and
-                adx_aligned[i] > 25):
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Price breaks below Camarilla S1 + 1d downtrend + volume spike + ADX > 25
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > vol_avg_24[i] * 2.0 and
-                  adx_aligned[i] > 25):
-                signals[i] = -0.25
-                position = -1
+            # Only trade in ranging markets (ADX < 25)
+            if adx_aligned[i] < 25:
+                # LONG: Price touches lower BB and Stochastic oversold
+                if close[i] <= lower_bb[i] and k_percent[i] < 20:
+                    signals[i] = 0.25
+                    position = 1
+                # SHORT: Price touches upper BB and Stochastic overbought
+                elif close[i] >= upper_bb[i] and k_percent[i] > 80:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S1 OR trend turns down OR ADX weakens
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i] or adx_aligned[i] < 20:
+            # EXIT LONG: Price crosses above SMA OR Stochastic crosses above 50
+            if close[i] > sma_20[i] or k_percent[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R1 OR trend turns up OR ADX weakens
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i] or adx_aligned[i] < 20:
+            # EXIT SHORT: Price crosses below SMA OR Stochastic crosses below 50
+            if close[i] < sma_20[i] or k_percent[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
