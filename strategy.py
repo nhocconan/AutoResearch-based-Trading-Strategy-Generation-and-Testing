@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filter_4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -32,7 +32,7 @@ def generate_signals(prices):
     r1 = p + (high_1d - low_1d) * 1.1 / 12
     s1 = p - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h (wait for daily close)
+    # Align Camarilla levels to 4h (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -56,7 +56,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_avg[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
