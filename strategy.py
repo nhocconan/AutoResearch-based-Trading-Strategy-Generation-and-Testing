@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 1d_1W_Camarilla_R4S4_Breakout_TrendFilter_Volume
-# Hypothesis: Breakouts at weekly Camarilla R4/S4 levels with volume confirmation and 1-week EMA trend filter.
-# Uses 1d timeframe for execution and 1w for trend and level calculation. Designed to work in both bull and bear markets.
-# Targets 15-25 trades/year on 1d timeframe to minimize fee drag and avoid overtrading.
+# 6h_1D_RSI20_80_MeanReversion_TrendFilter
+# Hypothesis: Mean reversion at extreme RSI levels (20/80) on 6h timeframe, filtered by 1d EMA trend.
+# Works in bull/bear by only taking reversals in the direction of higher timeframe trend.
+# Targets ~15-25 trades/year on 6h to avoid fee drag.
 
-name = "1d_1W_Camarilla_R4S4_Breakout_TrendFilter_Volume"
-timeframe = "1d"
+name = "6h_1D_RSI20_80_MeanReversion_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,40 +20,42 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
 
-    # Get 1w data for trend and Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate 1w EMA for trend filter (34-period)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Calculate weekly Camarilla R4 and S4 levels from previous 1w OHLC
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-
-    camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
-
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
-
-    # Volume confirmation: current volume > 1.5x average of last 10 periods
-    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    # Calculate 6h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 periods
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:13] = np.nan  # Not enough data for first 13 periods
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(camarilla_r4_aligned[i]) or
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,31 +63,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter: price above/below 34-period EMA on 1w
-        bullish_trend = close[i] > ema_1w_aligned[i]
-        bearish_trend = close[i] < ema_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        bullish_trend = close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_1d_aligned[i]
 
         if position == 0:
-            # LONG: Break above weekly Camarilla R4 with bullish trend and volume confirmation
-            if (close[i] > camarilla_r4_aligned[i] and bullish_trend and volume_ok[i]):
+            # LONG: RSI < 20 (oversold) in bullish trend
+            if rsi[i] < 20 and bullish_trend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below weekly Camarilla S4 with bearish trend and volume confirmation
-            elif (close[i] < camarilla_s4_aligned[i] and bearish_trend and volume_ok[i]):
+            # SHORT: RSI > 80 (overbought) in bearish trend
+            elif rsi[i] > 80 and bearish_trend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R4 or trend turns bearish
-            if close[i] < camarilla_r4_aligned[i] or not bullish_trend:
+            # EXIT LONG: RSI returns to neutral (40-60) or trend turns bearish
+            if rsi[i] > 40 or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S4 or trend turns bullish
-            if close[i] > camarilla_s4_aligned[i] or not bearish_trend:
+            # EXIT SHORT: RSI returns to neutral (40-60) or trend turns bullish
+            if rsi[i] < 60 or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
