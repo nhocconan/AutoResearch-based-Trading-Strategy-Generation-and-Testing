@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Channel_Breakout_Volume_Filter
-# Hypothesis: Keltner Channel breakout with volume confirmation and 1d EMA trend filter on 4h timeframe.
-# Uses ATR-based channels to capture volatility breakouts, filters by trend direction from higher timeframe EMA,
-# and requires volume spike for confirmation. Designed for low trade frequency (<50/year) to minimize fee drag.
-# Works in bull markets by following uptrend breakouts, in bear markets by following downtrend breakouts.
-# Exit on opposite channel touch to avoid whipsaw.
+# 1D_Donchian_Breakout_1W_Trend_Volume
+# Hypothesis: Daily Donchian(20) breakout with weekly trend filter (EMA34) and volume confirmation.
+# Long when price breaks above 20-day high with weekly uptrend (price > weekly EMA34) and volume spike.
+# Short when price breaks below 20-day low with weekly downtrend (price < weekly EMA34) and volume spike.
+# Designed for low trade frequency (<25/year) and works in both bull and bear markets by following weekly trend.
+# Exit on opposite Donchian breakout or trend reversal.
 
-name = "4h_Keltner_Channel_Breakout_Volume_Filter"
-timeframe = "4h"
+name = "1D_Donchian_Breakout_1W_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,54 +24,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 4h data for Keltner Channel calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-
-    # Calculate ATR(10) for Keltner Channel width
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-
-    # Calculate EMA(20) for Keltner Channel middle line
-    ema20 = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-
-    # Calculate Keltner Channel bands
-    kc_upper = ema20 + 2 * atr
-    kc_lower = ema20 - 2 * atr
-
-    # Align Keltner Channel bands to lower timeframe
-    kc_upper_aligned = align_htf_to_ltf(prices, df_4h, kc_upper)
-    kc_lower_aligned = align_htf_to_ltf(prices, df_4h, kc_lower)
-
-    # Get 1d data for EMA(50) trend filter
+    # Get 1d data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
 
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
 
-    # Calculate volume spike threshold (1.5x 20-period SMA)
+    # Calculate Donchian channels (20-period)
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+
+    # Calculate volume spike threshold (2.0x 20-period SMA)
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.5
+    volume_spike_threshold = volume_sma20 * 2.0
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,30 +67,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above upper Keltner Channel in uptrend with volume spike
-            if (close[i] > kc_upper_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and 
+            # LONG: Price breaks above Donchian high in weekly uptrend with volume spike
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema34_1w_aligned[i] and 
                 volume[i] > volume_sma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Keltner Channel in downtrend with volume spike
-            elif (close[i] < kc_lower_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
+            # SHORT: Price breaks below Donchian low in weekly downtrend with volume spike
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema34_1w_aligned[i] and 
                   volume[i] > volume_sma20[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price touches or crosses below lower Keltner Channel
-            if close[i] < kc_lower_aligned[i]:
+            # EXIT LONG: Price breaks below Donchian low or weekly trend turns down
+            if (close[i] < donchian_low[i] or 
+                close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price touches or crosses above upper Keltner Channel
-            if close[i] > kc_upper_aligned[i]:
+            # EXIT SHORT: Price breaks above Donchian high or weekly trend turns up
+            if (close[i] > donchian_high[i] or 
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
