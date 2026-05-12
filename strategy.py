@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_12hTrend_Volume
-Hypothesis: On 4h timeframe, buy when price breaks above 20-period Donchian high with volume >1.5x average and 12h EMA50 trending up; sell when price breaks below 20-period Donchian low with volume >1.5x average and 12h EMA50 trending down. Uses 12h EMA50 as trend filter to avoid false breakouts in ranging markets. Targets 20-40 trades per year to minimize fee drag and improve performance in both bull and bear markets.
+6h_HeikinAshi_KeltnerTrend_Follow
+Hypothesis: In both bull and bear markets, strong trends persist with momentum. Uses Heikin Ashi candles on 6h to filter noise, combined with Keltner Channel breakout and 1d EMA trend alignment. Enters long when HA close > upper Keltner + bullish candle + 1d EMA up; short when HA close < lower Keltner + bearish candle + 1d EMA down. Exits on opposite signal or trend reversal. Designed for low frequency (target 20-40 trades/year) to minimize fee drag.
 """
 
-name = "4h_Donchian_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "6h_HeikinAshi_KeltnerTrend_Follow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,32 +20,51 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_ = prices['open'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # --- Heikin Ashi Calculation ---
+    ha_close = (open_ + high + low + close) / 4
+    ha_open = np.zeros_like(open_)
+    ha_open[0] = (open_[0] + close[0]) / 2
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
+    ha_high = np.maximum(np.maximum(high, low), np.maximum(ha_open, ha_close))
+    ha_low = np.minimum(np.minimum(high, low), np.minimum(ha_open, ha_close))
+
+    # --- Keltner Channel (20, 2) ---
+    # Typical Price
+    tp = (high + low + close) / 3
+    # EMA of TP for middle line
+    ema_tp = pd.Series(tp).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # ATR for bands
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    keltner_upper = ema_tp + 2 * atr
+    keltner_lower = ema_tp - 2 * atr
+
+    # --- 1d EMA34 for trend filter ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-
-    # Calculate 20-period Donchian channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):  # Start after warmup
         # Skip if any required value is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ha_open[i]) or np.isnan(ha_close[i]) or 
+            np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,31 +72,30 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        ha_bullish = ha_close[i] > ha_open[i]
+        ha_bearish = ha_close[i] < ha_open[i]
+
         if position == 0:
-            # LONG: Price breaks above Donchian high + 12h uptrend + volume spike
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema50_12h_aligned[i] and 
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: HA bullish, close above upper Keltner, 1d EMA up
+            if ha_bullish and ha_close[i] > keltner_upper[i] and ha_close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low + 12h downtrend + volume spike
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: HA bearish, close below lower Keltner, 1d EMA down
+            elif ha_bearish and ha_close[i] < keltner_lower[i] and ha_close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low OR trend turns down
-            if close[i] < donchian_low[i] or close[i] < ema50_12h_aligned[i]:
+            # EXIT LONG: HA bearish OR close below lower Keltner OR trend turns down
+            if ha_bearish or ha_close[i] < keltner_lower[i] or ha_close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high OR trend turns up
-            if close[i] > donchian_high[i] or close[i] > ema50_12h_aligned[i]:
+            # EXIT SHORT: HA bullish OR close above upper Keltner OR trend turns up
+            if ha_bullish or ha_close[i] > keltner_upper[i] or ha_close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
