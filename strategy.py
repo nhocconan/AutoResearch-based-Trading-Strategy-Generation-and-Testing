@@ -1,17 +1,23 @@
-# 12h_1D_1W_Camarilla_R1_S1_Breakout_VolumeSpike_TrendFilter
-# Hypothesis: Breakouts from daily-derived Camarilla R1/S1 levels on 12h timeframe, confirmed by volume spikes and weekly trend filter, with daily volatility filter to avoid chop. Targets 12-37 trades/year by requiring confluence of strong breakout, volume confirmation, trend alignment, and volatility regime.
+#!/usr/bin/env python3
+# 6h_1W_1D_LinearRegression_Channel_Breakout_VolumeFilter
+# Hypothesis: 6-hour breakouts from weekly linear regression channel with volume confirmation.
+# Uses weekly linear regression of closing prices to define dynamic support/resistance channels.
+# In bull markets: price breaks above upper channel line + volume = continuation long.
+# In bear markets: price breaks below lower channel line + volume = continuation short.
+# Includes volume filter to reduce false breakouts. Targets 12-30 trades per year.
 
-name = "12h_1D_1W_Camarilla_R1_S1_Breakout_VolumeSpike_TrendFilter"
-timeframe = "12h"
+name = "6h_1W_1D_LinearRegression_Channel_Breakout_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,49 +25,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels and volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Volume spike: >1.8x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
     
-    # Weekly data for trend filter
+    # Weekly data for linear regression channel
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Daily ATR for volatility filter (14-period)
-    atr_14 = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
-    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
-    vol_filter = atr_14 > (0.5 * atr_ma_50)  # Avoid low volatility chop
+    # Calculate linear regression for last 30 weekly closes
+    # Using weekly close prices for the regression
+    weekly_closes = df_1w['close'].values
     
-    # Volume spike: >2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Initialize arrays for channel bounds
+    upper_channel = np.full(len(weekly_closes), np.nan)
+    lower_channel = np.full(len(weekly_closes), np.nan)
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate linear regression for each window of 30 weeks
+    for i in range(30, len(weekly_closes)):
+        y = weekly_closes[i-30:i]
+        x = np.arange(30)
+        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        # Predict next value (forward projection)
+        pred = slope * 30 + intercept
+        # Channel width based on standard error
+        channel_width = std_err * 1.5
+        upper_channel[i] = pred + channel_width
+        lower_channel[i] = pred - channel_width
     
-    # Daily Camarilla R1 and S1 from previous day
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
-    rang_1d = prev_high_1d - prev_low_1d
-    R1_1d = prev_close_1d + 1.1 * rang_1d * 1.0 / 4
-    S1_1d = prev_close_1d - 1.1 * rang_1d * 1.0 / 4
-    
-    # Align daily levels to 12h timeframe
-    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    # Align weekly channel to 6h timeframe
+    upper_channel_aligned = align_htf_to_ltf(prices, df_1w, upper_channel)
+    lower_channel_aligned = align_htf_to_ltf(prices, df_1w, lower_channel)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(R1_1d_aligned[i]) or 
-            np.isnan(S1_1d_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(vol_filter[i])):
+    for i in range(100, n):
+        if (np.isnan(upper_channel_aligned[i]) or 
+            np.isnan(lower_channel_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,34 +72,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + volume spike + price above weekly EMA34 (uptrend) + volatility filter
-            if (close[i] > R1_1d_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > ema_34_1w_aligned[i] and
-                vol_filter[i]):
+            # LONG: Price breaks above upper channel + volume spike
+            if close[i] > upper_channel_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + volume spike + price below weekly EMA34 (downtrend) + volatility filter
-            elif (close[i] < S1_1d_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema_34_1w_aligned[i] and
-                  vol_filter[i]):
+            # SHORT: Price breaks below lower channel + volume spike
+            elif close[i] < lower_channel_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters previous day's H-L range OR closes below weekly EMA34
-            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
-               close[i] < ema_34_1w_aligned[i]:
+            # EXIT LONG: Price re-enters channel or breaks below lower channel
+            if close[i] < upper_channel_aligned[i] and close[i] > lower_channel_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters previous day's H-L range OR closes above weekly EMA34
-            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
-               close[i] > ema_34_1w_aligned[i]:
+            # EXIT SHORT: Price re-enters channel or breaks above upper channel
+            if close[i] < upper_channel_aligned[i] and close[i] > lower_channel_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
