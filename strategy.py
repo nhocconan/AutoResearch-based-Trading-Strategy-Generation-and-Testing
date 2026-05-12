@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
-# 6h_1W_1D_LinearRegression_Channel_Breakout_VolumeFilter
-# Hypothesis: 6-hour breakouts from weekly linear regression channel with volume confirmation.
-# Uses weekly linear regression of closing prices to define dynamic support/resistance channels.
-# In bull markets: price breaks above upper channel line + volume = continuation long.
-# In bear markets: price breaks below lower channel line + volume = continuation short.
-# Includes volume filter to reduce false breakouts. Targets 12-30 trades per year.
+# 12h_1D_Camarilla_R3_S3_Breakout_TrendFilter
+# Hypothesis: 12h breakouts from daily-derived Camarilla R3 and S3 levels with trend filter from daily EMA34.
+# Works in bull markets via breakout continuation and in bear markets via mean-reversion from extremes.
+# Targets 15-30 trades per year by requiring strict confluence of conditions.
 
-name = "6h_1W_1D_LinearRegression_Channel_Breakout_VolumeFilter"
-timeframe = "6h"
+name = "12h_1D_Camarilla_R3_S3_Breakout_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,45 +22,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike: >1.8x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Weekly data for linear regression channel
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Daily data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate linear regression for last 30 weekly closes
-    # Using weekly close prices for the regression
-    weekly_closes = df_1w['close'].values
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Initialize arrays for channel bounds
-    upper_channel = np.full(len(weekly_closes), np.nan)
-    lower_channel = np.full(len(weekly_closes), np.nan)
+    # Daily Camarilla R3 and S3 from previous day
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    rang_1d = prev_high_1d - prev_low_1d
+    R3_1d = prev_close_1d + 1.1 * rang_1d * 3.0 / 4
+    S3_1d = prev_close_1d - 1.1 * rang_1d * 3.0 / 4
     
-    # Calculate linear regression for each window of 30 weeks
-    for i in range(30, len(weekly_closes)):
-        y = weekly_closes[i-30:i]
-        x = np.arange(30)
-        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
-        # Predict next value (forward projection)
-        pred = slope * 30 + intercept
-        # Channel width based on standard error
-        channel_width = std_err * 1.5
-        upper_channel[i] = pred + channel_width
-        lower_channel[i] = pred - channel_width
-    
-    # Align weekly channel to 6h timeframe
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1w, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1w, lower_channel)
+    # Align daily levels to 12h timeframe
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        if (np.isnan(upper_channel_aligned[i]) or 
-            np.isnan(lower_channel_aligned[i])):
+    for i in range(50, n):
+        if (np.isnan(R3_1d_aligned[i]) or 
+            np.isnan(S3_1d_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,26 +62,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper channel + volume spike
-            if close[i] > upper_channel_aligned[i] and volume_spike[i]:
+            # LONG: Price breaks above R3 + volume spike + price above daily EMA34 (uptrend)
+            if (close[i] > R3_1d_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower channel + volume spike
-            elif close[i] < lower_channel_aligned[i] and volume_spike[i]:
+            # SHORT: Price breaks below S3 + volume spike + price below daily EMA34 (downtrend)
+            elif (close[i] < S3_1d_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters channel or breaks below lower channel
-            if close[i] < upper_channel_aligned[i] and close[i] > lower_channel_aligned[i]:
+            # EXIT LONG: Price re-enters previous day's H-L range OR closes below daily EMA34
+            if (close[i] < R3_1d_aligned[i] and close[i] > S3_1d_aligned[i]) or \
+               close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters channel or breaks above upper channel
-            if close[i] < upper_channel_aligned[i] and close[i] > lower_channel_aligned[i]:
+            # EXIT SHORT: Price re-enters previous day's H-L range OR closes above daily EMA34
+            if (close[i] < R3_1d_aligned[i] and close[i] > S3_1d_aligned[i]) or \
+               close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
