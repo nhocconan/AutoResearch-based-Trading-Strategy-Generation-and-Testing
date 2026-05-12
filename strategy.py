@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 6h_WilliamsAlligator_ElderRay_TrendFollow
-# Hypothesis: On 6h timeframe, use Williams Alligator (3 SMAs) for trend direction and Elder Ray (bull/bear power) for momentum confirmation.
-# Enter long when price > Alligator teeth (middle SMA) and bull power > 0 and rising.
-# Enter short when price < Alligator teeth and bear power < 0 and falling.
-# Exit when price crosses Alligator teeth or Elder Ray momentum fades.
-# Uses Williams Alligator (13,8,5 SMAs) and Elder Ray (EMA13) to capture trends while avoiding whipsaws in both bull and bear markets.
+# 12h_Donchian_Breakout_1wTrend_VolumeFilter
+# Hypothesis: On 12h timeframe, enter long when price breaks above 20-period Donchian high with weekly EMA50 trend alignment and volume confirmation.
+# Enter short when price breaks below 20-period Donchian low with weekly EMA50 trend alignment and volume confirmation.
+# Exit when price crosses weekly EMA50 (trend reversal).
+# Uses weekly trend filter to reduce whipsaw and improve performance in both bull and bear markets.
 # Targets 15-25 trades/year for low fee drag.
 
-name = "6h_WilliamsAlligator_ElderRay_TrendFollow"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_1wTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,30 +24,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator: Jaw (13-period SMMA), Teeth (8-period SMMA), Lips (5-period SMMA)
-    # Using SMA as proxy for SMMA (Smoothed Moving Average) for simplicity
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # Alligator Jaw
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values   # Alligator Teeth
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values    # Alligator Lips
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    weekly_close = df_1w['close'].values
     
-    # Smooth Elder Ray for momentum confirmation
-    bull_power_smooth = pd.Series(bull_power).ewm(span=5, adjust=False, min_periods=5).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # Calculate weekly EMA50
+    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align weekly EMA50 to 12h timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: 20-period moving average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,31 +62,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        teeth_val = teeth[i]
-        bull_val = bull_power_smooth[i]
-        bear_val = bear_power_smooth[i]
+        donchian_high_val = donchian_high[i]
+        donchian_low_val = donchian_low[i]
+        weekly_trend = ema50_1w_aligned[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: Price > Alligator teeth AND bull power > 0 AND bull power rising
-            if close[i] > teeth_val and bull_val > 0 and bull_val > bull_power_smooth[i-1]:
+            # LONG: Price breaks above Donchian high with weekly trend up and volume confirmation
+            if close[i] > donchian_high_val and close[i] > weekly_trend and volume[i] > vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price < Alligator teeth AND bear power < 0 AND bear power falling (more negative)
-            elif close[i] < teeth_val and bear_val < 0 and bear_val < bear_power_smooth[i-1]:
+            # SHORT: Price breaks below Donchian low with weekly trend down and volume confirmation
+            elif close[i] < donchian_low_val and close[i] < weekly_trend and volume[i] > vol_ma_val:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price < Alligator teeth OR bull power <= 0 OR bull power falling
-            if close[i] < teeth_val or bull_val <= 0 or bull_val < bull_power_smooth[i-1]:
+            # EXIT LONG: Price crosses below weekly EMA50 (trend reversal)
+            if close[i] < weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price > Alligator teeth OR bear power >= 0 OR bear power rising (less negative)
-            if close[i] > teeth_val or bear_val >= 0 or bear_val > bear_power_smooth[i-1]:
+            # EXIT SHORT: Price crosses above weekly EMA50 (trend reversal)
+            if close[i] > weekly_trend:
                 signals[i] = 0.0
                 position = 0
             else:
