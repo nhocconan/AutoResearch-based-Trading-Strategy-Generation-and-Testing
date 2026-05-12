@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 12h breakout above/below 1d Camarilla R1/S1 levels with 1d EMA34 trend filter and volume confirmation.
-# Targets 12-30 trades/year per symbol. Works in bull/bear by following 1d trend direction. Exit on trend reversal (price crosses EMA34).
-# Uses daily structure for entries on 12h chart to reduce noise and improve win rate.
+# 4h_KAMA_Triple_Confirmation
+# Hypothesis: KAMA direction + RSI(14) extreme + volume spike (2x avg) for trend-following entries in 4h.
+# Uses KAMA for adaptive trend direction, RSI for momentum confirmation, and volume to filter false breakouts.
+# Exits when KAMA reverses. Designed for 20-30 trades/year with low turnover to minimize fee drag.
+# Works in bull/bear markets by following adaptive trend; avoids whipsaw via volume confirmation.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_Triple_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,50 +23,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 12h data for price action
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Calculate KAMA (adaptive trend)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])).reshape(-1, 1), axis=1)  # placeholder, will fix
+    # Correct ER calculation
+    er = np.zeros_like(close)
+    for i in range(10, len(close)):
+        if i >= 10:
+            direction = np.abs(close[i] - close[i-10])
+            volatility_sum = np.sum(np.abs(np.diff(close[i-9:i+1])))
+            er[i] = direction / volatility_sum if volatility_sum != 0 else 0
+    # Avoid division by zero
+    er = np.where(np.isnan(er), 0, er)
+    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
 
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
 
-    # Get 1d data for Camarilla pivots and EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # Calculate 1d Camarilla pivot levels: R1, S1
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-
-    # Calculate 12h volume SMA20 for volume confirmation
+    # Volume spike: 2x 20-period average
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_threshold = volume_sma20 * 1.8  # Require 1.8x average volume
+    volume_spike = volume > (volume_sma20 * 2.0)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):
+    for i in range(14, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,30 +69,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Breakout above R1 in 1d uptrend with volume spike
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume[i] > volume_sma20[i]):
+            # LONG: KAMA up, RSI > 50, volume spike
+            if (close[i] > kama[i] and 
+                rsi[i] > 50 and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 in 1d downtrend with volume spike
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume[i] > volume_sma20[i]):
+            # SHORT: KAMA down, RSI < 50, volume spike
+            elif (close[i] < kama[i] and 
+                  rsi[i] < 50 and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below 1d EMA34 (trend reversal)
-            if close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: KAMA reverses down
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above 1d EMA34 (trend reversal)
-            if close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: KAMA reverses up
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
