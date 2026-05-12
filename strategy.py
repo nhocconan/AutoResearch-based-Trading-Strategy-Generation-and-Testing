@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 
-# 4h_Donchian20_Breakout_1dTrend_Volume
-# Hypothesis: Enter long when price breaks above Donchian upper band (20-period high) with daily uptrend and volume confirmation.
-# Enter short when price breaks below Donchian lower band (20-period low) with daily downtrend and volume confirmation.
-# Uses 4h primary timeframe with daily trend filter to reduce whipsaw and capture major trends.
-# Volume confirmation filters out weak breakouts. Designed for ~30-50 trades/year to minimize fee drag.
+# 12h_1D_Camarilla_R1S1_Breakout_Trend_Volume
+# Hypothesis: Breakout above daily R1 with 12h price > 12h EMA21 (trend) and volume confirmation.
+# In bear markets, short below daily S1 with 12h price < 12h EMA21 and volume confirmation.
+# Uses 12h timeframe for low frequency (12-37 trades/year target) and daily Camarilla levels for structure.
+# Weekly trend filter is omitted to reduce complexity; trend is derived from 12h EMA21.
+# Volume confirmation requires current volume > 1.5x 20-period average to avoid false breakouts.
 
-name = "4h_Donchian20_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_1D_Camarilla_R1S1_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,19 +25,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
 
-    # Calculate daily EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 12h EMA21 for trend filter
+    ema_12h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
 
-    # Calculate Donchian channels (20-period) on 4h data
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla levels (based on previous day)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    rang = prev_high - prev_low
+    R1 = prev_close + rang * 1.1 / 12
+    S1 = prev_close - rang * 1.1 / 12
+
+    # Align daily levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
 
     # Volume confirmation: current volume > 1.5x average of last 20 periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,9 +56,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(21, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or
+        if (np.isnan(ema_12h[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
             np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,31 +67,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Daily trend filter
-        bullish_trend = close[i] > ema_1d_aligned[i]
-        bearish_trend = close[i] < ema_1d_aligned[i]
-
         if position == 0:
-            # LONG: Price breaks above Donchian upper band with daily uptrend and volume confirmation
-            if close[i] > high_max[i] and bullish_trend and volume_ok[i]:
+            # LONG: Price crosses above R1 with 12h uptrend and volume confirmation
+            if close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1] and close[i] > ema_12h[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian lower band with daily downtrend and volume confirmation
-            elif close[i] < low_min[i] and bearish_trend and volume_ok[i]:
+            # SHORT: Price crosses below S1 with 12h downtrend and volume confirmation
+            elif close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1] and close[i] < ema_12h[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian lower band or daily trend turns bearish
-            if close[i] < low_min[i] or not bullish_trend:
+            # EXIT LONG: Price crosses below S1 or 12h trend turns down
+            if close[i] < S1_aligned[i] and close[i-1] >= S1_aligned[i-1] or close[i] < ema_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian upper band or daily trend turns bullish
-            if close[i] > high_max[i] or not bearish_trend:
+            # EXIT SHORT: Price crosses above R1 or 12h trend turns up
+            if close[i] > R1_aligned[i] and close[i-1] <= R1_aligned[i-1] or close[i] > ema_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
