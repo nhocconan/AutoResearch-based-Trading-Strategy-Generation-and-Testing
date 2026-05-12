@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# 12h_1D_Camarilla_R3S3_Breakout_Volume_Trend
-# Hypothesis: Breakouts above daily R3 or below daily S3 on 12h timeframe with volume confirmation and 1d EMA34 trend filter. Designed for low trade frequency (12-37/year) to minimize fee drift while capturing strong momentum moves in both bull and bear markets. Uses only daily timeframe for trend and pivot levels to reduce noise.
+# 4h_1D_Camarilla_R3S3_Breakout_Volume_Trend_v4
+# Hypothesis: Breakouts above daily R3 or below daily S3 on 4h timeframe with volume confirmation and 1d EMA34 trend filter.
+# Uses daily timeframe for both trend and pivot levels to reduce noise and avoid overtrading. Designed for 20-50 trades/year to minimize fee drag while capturing strong momentum moves in both bull and bear markets.
 
-name = "12h_1D_Camarilla_R3S3_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "4h_1D_Camarilla_R3S3_Breakout_Volume_Trend_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -42,7 +43,7 @@ def generate_signals(prices):
     R3 = prev_close + rang * 1.1 / 4
     S3 = prev_close - rang * 1.1 / 4
 
-    # Align daily levels to 12h timeframe
+    # Align daily levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
 
