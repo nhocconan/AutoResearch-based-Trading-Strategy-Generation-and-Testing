@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Use Camarilla pivot levels (R1/S1) from 1d for entries, confirmed by 1d EMA trend and volume spikes (>2x 20-period average). Enter long at R1 break with uptrend, short at S1 break with downtrend. Exit at close crossing 1d EMA. Targets 25-35 trades/year to minimize fee drag and work in both bull/bear via trend filter.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Use Camarilla pivot levels (R1/S1) from 1d for entries, confirmed by 1d EMA trend and volume spikes (>2x 20-period average). Enter long at R1 break with uptrend, short at S1 break with downtrend. Exit at close crossing 1d EMA. Targets 15-30 trades/year to minimize fee drag and work in both bull/bear via trend filter.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -36,7 +36,7 @@ def generate_signals(prices):
     r1 = close_1d + (high_1d - low_1d) * 1.1 / 12.0
     s1 = close_1d - (high_1d - low_1d) * 1.1 / 12.0
 
-    # Align Camarilla levels to 4h timeframe (available after 1d candle closes)
+    # Align Camarilla levels to 12h timeframe (available after 1d candle closes)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
