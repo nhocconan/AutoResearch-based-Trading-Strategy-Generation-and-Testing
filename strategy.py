@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_RSI200_Trend_Breakout_With_Volume
-Hypothesis: On 6h timeframe, RSI(14) cross above 60 with price above 200-period EMA
-and volume > 1.5x 20-period average signals strong momentum continuation in bull markets;
-RSI < 40 with price below 200 EMA and volume surge signals bearish continuation.
-Uses 1d ADX > 25 to filter trending regimes only, avoiding choppy markets.
-Targets 12-37 trades/year (50-150 total over 4 years) with low turnover to minimize fee drag.
-Works in bull via momentum breaks above resistance and bear via breakdowns below support.
+4h_RSI200_Trend_Breakout_With_Volume
+Hypothesis: On 4h timeframe, buy when RSI(200) > 50 and price breaks above Donchian(20) high with volume > 1.5x 20-period average; sell when RSI(200) < 50 and price breaks below Donchian(20) low with volume > 1.5x average. 
+Use 1d EMA50 trend filter: only long when price > EMA50, short when price < EMA50. 
+Add 1d Bollinger Band width < 50th percentile to avoid choppy regimes. 
+Exit when price crosses Donchian midpoint or RSI(200) crosses 50 in opposite direction. 
+Target 20-50 trades per year with strong trend filtration to reduce false signals.
 """
 
-name = "6h_RSI200_Trend_Breakout_With_Volume"
-timeframe = "6h"
+name = "4h_RSI200_Trend_Breakout_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -29,93 +28,57 @@ def generate_signals(prices):
 
     # Get 1d data (call once before loop)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate 1d ADX(14) for trend filter
-    # ADX calculation: +DM, -DM, TR, then DX, then smoothed ADX
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First value
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-        # Directional Movement
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm[0] = 0.0
-        minus_dm[0] = 0.0
+    # Calculate 1d Bollinger Band width (20, 2) for regime filter
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma20_1d + 2 * std20_1d
+    lower_bb_1d = sma20_1d - 2 * std20_1d
+    bb_width_1d = (upper_bb_1d - lower_bb_1d) / sma20_1d
+    bb_width_rank = pd.Series(bb_width_1d).rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    bb_width_rank_aligned = align_htf_to_ltf(prices, df_1d, bb_width_rank)
 
-        # Smoothed values
-        def smooth(values, period):
-            smoothed = np.zeros_like(values)
-            smoothed[period-1] = np.nansum(values[:period])
-            for i in range(period, len(values)):
-                smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
-            return smoothed
+    # Calculate RSI(200) on 4h close
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/200, adjust=False, min_periods=200).mean()
+    avg_loss = loss.ewm(alpha=1/200, adjust=False, min_periods=200).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when insufficient data
 
-        tr_smooth = smooth(tr, period)
-        plus_dm_smooth = smooth(plus_dm, period)
-        minus_dm_smooth = smooth(minus_dm, period)
-
-        # Directional Indicators
-        plus_di = 100 * plus_dm_smooth / tr_smooth
-        minus_di = 100 * minus_dm_smooth / tr_smooth
-
-        # DX and ADX
-        dx = np.zeros_like(close)
-        dx[tr_smooth != 0] = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = smooth(dx, period)
-        return adx
-
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-
-    # Calculate 200-period EMA on 6h close
-    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
-
-    # Calculate RSI(14) on 6h close
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0.0)
-        loss = np.where(delta < 0, -delta, 0.0)
-        
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        avg_gain[period] = np.mean(gain[:period+1])
-        avg_loss[period] = np.mean(loss[:period+1])
-        
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-
-    rsi = calculate_rsi(close, 14)
-
-    # Volume confirmation: 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(200, n):
-        # Get aligned values for current 6h bar
-        adx = adx_1d_aligned[i]
+        # Get aligned values for current 4h bar
+        ema50 = ema50_1d_aligned[i]
+        bb_rank = bb_width_rank_aligned[i]
+        rsi_val = rsi[i]
+        donch_high = donchian_high[i]
+        donch_low = donchian_low[i]
+        donch_mid = donchian_mid[i]
 
         # Skip if any required data is NaN
-        if (np.isnan(adx) or np.isnan(ema200[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema50) or np.isnan(bb_rank) or 
+            np.isnan(rsi_val) or np.isnan(donch_high) or 
+            np.isnan(donch_low) or np.isnan(donch_mid)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -123,8 +86,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend filter: only trade when ADX > 25 (trending market)
-        if adx <= 25:
+        # Regime filter: only trade when BB width is in lower 50% (contraction/low volatility)
+        if bb_rank > 0.5:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -133,30 +96,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI > 60 + price above EMA200 + volume surge
-            if (rsi[i] > 60 and 
-                close[i] > ema200[i] and 
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: RSI > 50, price breaks above Donchian high, price > EMA50, volume surge
+            if (rsi_val > 50 and 
+                close[i] > donch_high and 
+                close[i] > ema50 and 
+                volume[i] > np.nanmean(volume[max(0, i-20):i+1]) * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI < 40 + price below EMA200 + volume surge
-            elif (rsi[i] < 40 and 
-                  close[i] < ema200[i] and 
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: RSI < 50, price breaks below Donchian low, price < EMA50, volume surge
+            elif (rsi_val < 50 and 
+                  close[i] < donch_low and 
+                  close[i] < ema50 and 
+                  volume[i] > np.nanmean(volume[max(0, i-20):i+1]) * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI < 50 or price below EMA200
-            if (rsi[i] < 50 or close[i] < ema200[i]):
+            # EXIT LONG: price crosses below Donchian mid OR RSI crosses below 50
+            if (close[i] < donch_mid or rsi_val < 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI > 50 or price above EMA200
-            if (rsi[i] > 50 or close[i] > ema200[i]):
+            # EXIT SHORT: price crosses above Donchian mid OR RSI crosses above 50
+            if (close[i] > donch_mid or rsi_val > 50):
                 signals[i] = 0.0
                 position = 0
             else:
