@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1d_WeeklyDonchian_Breakout_1wEMA34_Trend_Volume
-# Hypothesis: On daily timeframe, breakouts above/below weekly Donchian channels with volume confirmation
-# and weekly EMA trend filter capture major trends in both bull and bear markets. Weekly EMA filter
-# ensures alignment with higher timeframe trend, reducing whipsaws. Volume confirmation ensures
-# breakouts are supported by participation. Designed for 1d timeframe to target 10-25 trades per year.
+# 12h_Vortex_Trend_Confirmation
+# Hypothesis: Vortex Indicator identifies trend direction and strength. Combined with daily EMA trend filter
+# and volume confirmation, it provides high-probability entries in both bull and bear markets.
+# Designed for 12h timeframe to target 12-37 trades per year, minimizing fee drag.
 
-name = "1d_WeeklyDonchian_Breakout_1wEMA34_Trend_Volume"
-timeframe = "1d"
+name = "12h_Vortex_Trend_Confirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,45 +22,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Donchian channels and EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get daily data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
 
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate weekly Donchian channels (20-period)
-    # Upper band = max(high over past 20 weeks)
-    # Lower band = min(low over past 20 weeks)
-    high_series = pd.Series(high_1w)
-    low_series = pd.Series(low_1w)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Vortex Indicator (VI) on 12h data
+    # VI+ = |current high - prior low|, VI- = |current low - prior high|
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    
+    # True Range
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Set first values to avoid roll issues
+    vm_plus[0] = 0
+    vm_minus[0] = 0
+    tr[0] = tr1[0]
+    
+    # Smooth using 14-period sums (standard Vortex)
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # VI+ and VI- (normalized)
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
 
-    # Calculate weekly EMA34 for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Align weekly indicators to daily timeframe (using completed weekly bars)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-
-    # Volume confirmation: 1.8x 20-week SMA (higher threshold to reduce trades)
-    volume_series_1w = pd.Series(volume_1w)
-    volume_sma20_1w = volume_series_1w.rolling(window=20, min_periods=20).mean().values
-    volume_threshold_1w = volume_sma20_1w * 1.8
-    volume_threshold_aligned = align_htf_to_ltf(prices, df_1w, volume_threshold_1w)
+    # Volume confirmation: 1.5x 20-period SMA (moderate threshold to avoid overtrading)
+    volume_series = pd.Series(volume)
+    volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_threshold = volume_sma20 * 1.5
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after Donchian needs 20 weeks
+    for i in range(14, n):  # Start after VI needs 14 bars
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_threshold_aligned[i])):
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,30 +78,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above weekly Donchian high with volume confirmation and uptrend
-            if (close[i] > donchian_high_aligned[i] and
-                volume[i] > volume_threshold_aligned[i] and
-                close[i] > ema34_1w_aligned[i]):
+            # LONG: VI+ > VI- (bullish trend) with volume confirmation and uptrend
+            if (vi_plus[i] > vi_minus[i] and
+                volume[i] > volume_threshold[i] and
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly Donchian low with volume confirmation and downtrend
-            elif (close[i] < donchian_low_aligned[i] and
-                  volume[i] > volume_threshold_aligned[i] and
-                  close[i] < ema34_1w_aligned[i]):
+            # SHORT: VI- > VI+ (bearish trend) with volume confirmation and downtrend
+            elif (vi_minus[i] > vi_plus[i] and
+                  volume[i] > volume_threshold[i] and
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below weekly Donchian low (opposite side)
-            if close[i] < donchian_low_aligned[i]:
+            # EXIT LONG: Trend weakness (VI- > VI+)
+            if vi_minus[i] > vi_plus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above weekly Donchian high (opposite side)
-            if close[i] > donchian_high_aligned[i]:
+            # EXIT SHORT: Trend weakness (VI+ > VI-)
+            if vi_plus[i] > vi_minus[i]:
                 signals[i] = 0.0
                 position = 0
             else:
