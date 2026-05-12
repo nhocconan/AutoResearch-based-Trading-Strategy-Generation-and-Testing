@@ -1,44 +1,17 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyHullTrend_WeeklyVolumeSpike"
-timeframe = "1d"
+name = "6h_Adaptive_Kelly_Signal_Strength"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from scipy import stats
+from scipy.signal import argrelextrema
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def hull_moving_average(arr, period):
-    """Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))"""
-    n = len(arr)
-    if n < period:
-        return np.full(n, np.nan)
-    half = period // 2
-    sqrt_n = int(np.sqrt(period))
-    
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, 'valid') / (window * (window + 1) / 2)
-    
-    wma_half = np.full(n, np.nan)
-    wma_full = np.full(n, np.nan)
-    
-    for i in range(half, n):
-        wma_half[i] = wma(arr[i-half+1:i+1], half)[-1] if i-half+1 >= 0 else np.nan
-    for i in range(period, n):
-        wma_full[i] = wma(arr[i-period+1:i+1], period)[-1] if i-period+1 >= 0 else np.nan
-    
-    raw = 2 * wma_half - wma_full
-    hull = np.full(n, np.nan)
-    
-    for i in range(sqrt_n-1, n):
-        if not np.isnan(raw[i]):
-            hull[i] = wma(raw[i-sqrt_n+1:i+1], sqrt_n)[-1] if i-sqrt_n+1 >= 0 else np.nan
-    
-    return hull
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -46,62 +19,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly data for trend and volume ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
+    # === 1d Data for trend and volatility ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # === Weekly Hull Moving Average (21) for trend ===
-    hull_21_1w = hull_moving_average(close_1w, 21)
-    hull_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hull_21_1w)
+    # === 1d ATR for volatility ===
+    tr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr_1d = np.concatenate([[np.nan], tr_1d])
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # === Weekly Volume Spike Detection ===
-    vol_ma_1w = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
-    volume_spike_1w = volume_1w > (vol_ma_1w * 2.0)
-    volume_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_spike_1w.astype(float))
+    # === 1d EMA50 for trend ===
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
+    # === 6h price position in 1d range ===
+    # Calculate 1d range for each 6h bar
+    range_1d = high_1d - low_1d
+    range_1d_expanded = np.repeat(range_1d, 4)  # 4x 6h bars per day
+    range_1d_expanded = range_1d_expanded[:n]  # trim to match
+    
+    # Get the 1d low for each 6h bar
+    low_1d_expanded = np.repeat(low_1d, 4)
+    low_1d_expanded = low_1d_expanded[:n]
+    
+    # Price position in daily range (0 to 1)
+    price_pos = (close - low_1d_expanded) / np.maximum(range_1d_expanded, 1e-8)
+    price_pos = np.clip(price_pos, 0, 1)
+    
+    # === 6h RSI for momentum ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.maximum(avg_loss, 1e-8)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === 6h volume profile ===
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 6 days
+    vol_ratio = volume / np.maximum(vol_ma, 1e-8)
+    
+    # === Signal strength calculation ===
+    # Component 1: Trend alignment (0 to 1)
+    trend_aligned = np.where(close > ema50_1d, 1.0, 0.0)
+    
+    # Component 2: Momentum (RSI normalized)
+    momentum = (rsi - 50) / 50  # -1 to 1
+    momentum = np.clip(momentum, -1, 1)
+    
+    # Component 3: Volatility adjustment (inverse ATR)
+    vol_component = 1.0 / (1.0 + atr_1d / np.mean(atr_1d[~np.isnan(atr_1d)])) if np.any(~np.isnan(atr_1d)) else 1.0
+    
+    # Component 4: Volume confirmation
+    vol_confirm = np.where(vol_ratio > 1.5, 1.0, 0.0)
+    
+    # Component 5: Price position in daily range (mean reversion edge)
+    # In ranging markets, fade extremes; in trends, follow momentum
+    range_signal = 0.5 - np.abs(price_pos - 0.5)  # 0 at extremes, 0.5 at middle
+    range_signal = range_signal * 2  # 0 to 1
+    
+    # Combine components with weights
+    signal_strength = (
+        0.3 * trend_aligned +
+        0.2 * momentum +
+        0.2 * vol_component +
+        0.2 * vol_confirm +
+        0.1 * range_signal
+    )
+    
+    # Apply Kelly-inspired scaling: bet size proportional to edge
+    # Only take signals when strength exceeds threshold
+    signal_threshold = 0.6
+    signal_strength = np.where(signal_strength > signal_threshold, signal_strength, 0)
+    
+    # Scale to position size (0 to 0.35)
+    max_position = 0.35
+    signal_size = signal_strength * max_position
+    
+    # Apply direction based on momentum
+    signal_direction = np.where(momentum > 0, 1, -1)
+    signal_size = signal_size * signal_direction
+    
+    # Ensure we don't exceed limits
+    signal_size = np.clip(signal_size, -0.35, 0.35)
+    
+    # Apply minimum holding period to reduce churn
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    last_signal_change = -100
+    min_hold_bars = 12  # 3 days minimum hold
     
-    start_idx = max(50, 21, 10)
-    
-    for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(hull_21_1w_aligned[i]) or 
-            np.isnan(volume_spike_1w_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
+    for i in range(100, n):
+        if i - last_signal_change < min_hold_bars:
+            signals[i] = signals[i-1]
             continue
+            
+        target_signal = signal_size[i]
+        current_signal = signals[i-1] if i > 0 else 0
         
-        if position == 0:
-            # Long: Price above weekly Hull MA + weekly volume spike
-            if (close[i] > hull_21_1w_aligned[i] and 
-                volume_spike_1w_aligned[i] > 0.5):
-                signals[i] = 0.25
-                position = 1
-            # Short: Price below weekly Hull MA + weekly volume spike
-            elif (close[i] < hull_21_1w_aligned[i] and 
-                  volume_spike_1w_aligned[i] > 0.5):
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Exit long: Price below weekly Hull MA
-            if close[i] < hull_21_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit short: Price above weekly Hull MA
-            if close[i] > hull_21_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        # Only change if signal difference is significant
+        if abs(target_signal - current_signal) > 0.1:
+            signals[i] = target_signal
+            last_signal_change = i
+        else:
+            signals[i] = current_signal
     
     return signals
