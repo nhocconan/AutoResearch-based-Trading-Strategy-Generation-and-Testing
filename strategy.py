@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Ichimoku_Cloud_1d_Filter_Volume
-# Hypothesis: Ichimoku Cloud (TK cross + cloud filter) on 1d provides trend direction for 6b entries.
-# Volume confirmation filters false signals. Works in both bull/bear via cloud color and TK cross.
-# Target: 50-150 total trades over 4 years.
+# 4h_Keltner_Breakout_Trend_Confirm_v1
+# Hypothesis: Keltner Channel breakouts (ATR-based) combined with 12h EMA trend and volume
+# confirmation work in both bull and bear markets. Breakouts capture momentum,
+# while the EMA filter ensures we trade with the higher timeframe trend.
+# Volume filter reduces false breakouts. Designed for ~30-40 trades/year to minimize fee drag.
 
-name = "6h_Ichimoku_Cloud_1d_Filter_Volume"
-timeframe = "6h"
+name = "4h_Keltner_Breakout_Trend_Confirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -22,39 +23,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Ichimoku
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
 
-    # Ichimoku components (9, 26, 52)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Calculate ATR for Keltner Channels (20-period)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
 
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
+    # Calculate 20-period EMA for Keltner Center
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
 
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Keltner Channels: EMA(20) ± 2 * ATR
+    keltner_upper = ema20 + 2 * atr
+    keltner_lower = ema20 - 2 * atr
 
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-
-    # Align Ichimoku components to 6b timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    # Get 12h EMA21 for trend filter
+    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
 
     # Volume confirmation: 1.8x 20-period SMA
     volume_series = pd.Series(volume)
@@ -64,11 +57,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(52, n):  # Start after Ichimoku needs 52 bars
+    for i in range(20, n):  # Start after indicators need 20 bars
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
-            np.isnan(volume_sma20[i])):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
+            np.isnan(ema21_12h_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,35 +68,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Cloud top and bottom
-        cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-
         if position == 0:
-            # LONG: Price above cloud, TK cross bullish, volume confirmation
-            if (close[i] > cloud_top and 
-                tenkan_sen_aligned[i] > kijun_sen_aligned[i] and 
-                volume[i] > volume_threshold[i]):
+            # LONG: Price breaks above Keltner Upper + volume + 12h uptrend
+            if (close[i] > keltner_upper[i] and
+                volume[i] > volume_threshold[i] and
+                close[i] > ema21_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below cloud, TK cross bearish, volume confirmation
-            elif (close[i] < cloud_bottom and 
-                  tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
-                  volume[i] > volume_threshold[i]):
+            # SHORT: Price breaks below Keltner Lower + volume + 12h downtrend
+            elif (close[i] < keltner_lower[i] and
+                  volume[i] > volume_threshold[i] and
+                  close[i] < ema21_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price below cloud OR TK cross bearish
-            if close[i] < cloud_top or tenkan_sen_aligned[i] < kijun_sen_aligned[i]:
+            # EXIT LONG: Price closes below Keltner Center OR 12h trend turns down
+            if close[i] < ema20[i] or close[i] < ema21_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above cloud OR TK cross bullish
-            if close[i] > cloud_bottom or tenkan_sen_aligned[i] > kijun_sen_aligned[i]:
+            # EXIT SHORT: Price closes above Keltner Center OR 12h trend turns up
+            if close[i] > ema20[i] or close[i] > ema21_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
