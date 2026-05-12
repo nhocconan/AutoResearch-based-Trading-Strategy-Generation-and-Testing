@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -38,7 +38,7 @@ def generate_signals(prices):
     r4 = prev_close_1d + (range_1d * 1.1 / 2)
     s4 = prev_close_1d - (range_1d * 1.1 / 2)
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
