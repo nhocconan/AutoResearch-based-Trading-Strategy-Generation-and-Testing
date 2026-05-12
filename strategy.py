@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_With_Volume_Confirmation
-# Hypothesis: Kaufman Adaptive Moving Average (KAMA) trend direction with volume spike confirmation on daily timeframe.
-# Long when KAMA slope is positive and volume > 1.5x 20-day average volume.
-# Short when KAMA slope is negative and volume > 1.5x 20-day average volume.
-# Exit when KAMA slope changes sign or volume drops below threshold.
-# Designed for low trade frequency (7-25/year) to avoid fee drag. Works in both bull and bear markets by following adaptive trend.
+# 6h_Retracement_to_Pivot_with_OrderFlow
+# Hypothesis: On 6h timeframe, price often retraces to key pivot levels (PP, S1, R1) before continuing the trend.
+# We use daily pivot points calculated from prior day's OHLC. Enter long when price retraces to S1 or PP in an uptrend (price > 200 EMA),
+# and short when price retraces to R1 or PP in a downtrend (price < 200 EMA). Volume confirmation filters out false retraces.
+# Exit when price reaches the opposite pivot level or shows exhaustion (volume dry-up). Designed for low frequency (15-35 trades/year).
+# Works in bull markets by buying dips in uptrends, and in bear markets by selling rallies in downtrends.
 
-name = "1d_KAMA_Trend_With_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_Retracement_to_Pivot_with_OrderFlow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,48 +16,52 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 200:
         return np.zeros(n)
 
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter (optional, can be removed if not needed)
-    # For now, we focus on daily KAMA and volume
+    # Get daily data for pivot points and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
 
-    # Calculate KAMA ( Kaufman Adaptive Moving Average )
-    # Parameters: ER fast/slow, lookback for volatility
-    fast_sc = 2 / (2 + 1)   # for EMA 2
-    slow_sc = 2 / (30 + 1)  # for EMA 30
-    window = 10             # ER lookback period
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=window))  # |close[t] - close[t-window]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # sum of |close[t] - close[t-1]| over window
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate daily pivot points (using prior day's OHLC to avoid look-ahead)
+    # Pivot Point (PP) = (High + Low + Close) / 3
+    # Resistance 1 (R1) = (2 * PP) - Low
+    # Support 1 (S1) = (2 * PP) - High
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = (2 * pp_1d) - low_1d
+    s1_1d = (2 * pp_1d) - high_1d
 
-    # KAMA slope (1-period change)
-    kama_slope = np.diff(kama, prepend=0)
+    # Align pivot levels to 6h timeframe (use prior day's levels for current day)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
 
-    # Volume spike threshold: 1.5x 20-day average volume
+    # Get 200 EMA for trend filter (daily)
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+
+    # Volume filter: 1.5x 20-period SMA on 6h
     volume_series = pd.Series(volume)
     volume_sma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_threshold = volume_sma20 * 1.5
+    volume_filter = volume_sma20 * 1.5
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # start after volume SMA warmup
+    for i in range(200, n):
         # Skip if any required data is NaN
-        if np.isnan(kama_slope[i]) or np.isnan(volume_sma20[i]):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema200_aligned[i]) or np.isnan(volume_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,26 +70,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: positive KAMA slope and volume spike
-            if kama_slope[i] > 0 and volume[i] > volume_threshold[i]:
+            # LONG: price retraces to S1 or PP in uptrend with volume
+            retrace_to_support = (abs(close[i] - s1_aligned[i]) < 0.001 * close[i]) or (abs(close[i] - pp_aligned[i]) < 0.001 * close[i])
+            if retrace_to_support and close[i] > ema200_aligned[i] and volume[i] > volume_sma20[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: negative KAMA slope and volume spike
-            elif kama_slope[i] < 0 and volume[i] > volume_threshold[i]:
-                signals[i] = -0.25
-                position = -1
+            # SHORT: price retraces to R1 or PP in downtrend with volume
+            elif (abs(close[i] - r1_aligned[i]) < 0.001 * close[i]) or (abs(close[i] - pp_aligned[i]) < 0.001 * close[i]):
+                if close[i] < ema200_aligned[i] and volume[i] > volume_sma20[i]:
+                    signals[i] = -0.25
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA slope turns negative or volume drops
-            if kama_slope[i] <= 0 or volume[i] <= volume_threshold[i]:
+            # EXIT LONG: price reaches R1 or shows weakness (low volume near PP)
+            if (abs(close[i] - r1_aligned[i]) < 0.001 * close[i]) or \
+               (abs(close[i] - pp_aligned[i]) < 0.001 * close[i] and volume[i] < volume_sma20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA slope turns positive or volume drops
-            if kama_slope[i] >= 0 or volume[i] <= volume_threshold[i]:
+            # EXIT SHORT: price reaches S1 or shows weakness (low volume near PP)
+            if (abs(close[i] - s1_aligned[i]) < 0.001 * close[i]) or \
+               (abs(close[i] - pp_aligned[i]) < 0.001 * close[i] and volume[i] < volume_sma20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
