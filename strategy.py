@@ -1,12 +1,13 @@
+#3/26/2025, 2:10:41 PM
 #!/usr/bin/env python3
 
-# 4h_1W_Camarilla_R3S3_Breakout_Trend_Volume
-# Hypothesis: Buy near Camarilla R3 in uptrend, sell near S3 in downtrend on 4-hour timeframe with weekly trend filter and volume confirmation.
-# Camarilla levels provide precise support/resistance. Weekly trend ensures alignment with higher timeframe momentum.
-# Volume confirmation filters breakouts. Designed for low frequency (15-30 trades/year) to minimize fee drag.
+# 1d_1W_RSI_Reversion_with_WeeklyTrend
+# Hypothesis: Buy when daily RSI < 30 in weekly uptrend, sell when RSI > 70 in weekly downtrend.
+# RSI mean reversion works in ranging markets, weekly trend filter ensures alignment with higher timeframe momentum.
+# Designed for low frequency (10-25 trades/year) to minimize fee drag.
 
-name = "4h_1W_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "4h"
+name = "1d_1W_RSI_Reversion_with_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,13 +16,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
 
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -33,30 +33,23 @@ def generate_signals(prices):
     ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
 
-    # Calculate 4-hour Camarilla levels (based on previous 4h bar)
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Calculate daily RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    rang = prev_high - prev_low
-    R3 = prev_close + rang * 1.1 / 4
-    S3 = prev_close - rang * 1.1 / 4
-
-    # Volume confirmation: current volume > 1.5x average of last 20 bars
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or
-            np.isnan(volume_ok[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,26 +62,26 @@ def generate_signals(prices):
         bearish_trend = close[i] < ema_1w_aligned[i]
 
         if position == 0:
-            # LONG: Price crosses above R3 with bullish weekly trend and volume confirmation
-            if close[i] > R3[i] and close[i-1] <= R3[i-1] and bullish_trend and volume_ok[i]:
+            # LONG: RSI oversold in weekly uptrend
+            if rsi[i] < 30 and bullish_trend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below S3 with bearish weekly trend and volume confirmation
-            elif close[i] < S3[i] and close[i-1] >= S3[i-1] and bearish_trend and volume_ok[i]:
+            # SHORT: RSI overbought in weekly downtrend
+            elif rsi[i] > 70 and bearish_trend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S3 or weekly trend turns bearish
-            if close[i] < S3[i] and close[i-1] >= S3[i-1] or not bullish_trend:
+            # EXIT LONG: RSI overbought or weekly trend turns bearish
+            if rsi[i] > 70 or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R3 or weekly trend turns bullish
-            if close[i] > R3[i] and close[i-1] <= R3[i-1] or not bearish_trend:
+            # EXIT SHORT: RSI oversold or weekly trend turns bullish
+            if rsi[i] < 30 or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
