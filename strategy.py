@@ -1,11 +1,15 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-12h_Volume_Weighted_RSI_Trend_Filter
-Hypothesis: Combines RSI momentum with volume-weighted price action on 12h timeframe to capture sustained trends while avoiding whipsaws. Uses volume-weighted RSI (VW-RSI) to identify overextended conditions, with trend confirmation from 1d EMA50. Volume confirmation ensures institutional participation. Designed for 12-30 trades/year to minimize fee drag while working in both bull (trend continuation) and bear (mean reversion at extremes) regimes.
+1h_Camarilla_R1S1_Breakout_4hTrend_1dVolumeFilter
+Hypothesis: Combines intraday mean reversion with multi-timeframe trend and volume confirmation.
+Uses 1h price action for entry timing (break of Camarilla R1/S1 levels), 4h for trend direction (price above/below EMA50),
+and 1d volume spike to confirm institutional participation. Designed for 15-35 trades/year to minimize fee drag
+while capturing breakouts in both bull and bear markets. The 1d volume filter reduces false breakouts during low
+liquidity periods, and the session filter (08-20 UTC) avoids Asian session noise.
 """
 
-name = "12h_Volume_Weighted_RSI_Trend_Filter"
-timeframe = "12h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolumeFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,53 +26,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend context (call once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for trend (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
 
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
 
-    # Calculate 1d EMA50 for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Get 1d data for Camarilla levels and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
 
-    # Calculate 12-period RSI on close prices
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
-    
-    for i in range(15, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = 50  # Neutral before enough data
+    # Use previous day's OHLC for Camarilla calculation (avoid look-ahead)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
 
-    # Calculate volume-weighted RSI (VW-RSI)
-    # Weight RSI by volume to emphasize moves with participation
-    vol_weight = volume / (np.mean(volume) + 1e-10)  # Avoid division by zero
-    vw_rsi = rsi * vol_weight
-    vw_rsi = np.clip(vw_rsi, 0, 100)  # Keep in RSI bounds
+    # Calculate Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+
+    # Align Camarilla levels to 1h timeframe with 1-day delay
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1, additional_delay_bars=1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1, additional_delay_bars=1)
+
+    # Calculate 1d volume average (20-period) for spike detection
+    vol_avg_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d, additional_delay_bars=1)
+
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
-        vw_rsi_val = vw_rsi[i]
-        ema50_val = ema50_1d_aligned[i]
-        vol_ma = np.mean(volume[max(0, i-20):i+1])  # 20-period volume average
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
 
-        if np.isnan(vw_rsi_val) or np.isnan(ema50_val):
+        camarilla_r1_val = camarilla_r1_aligned[i]
+        camarilla_s1_val = camarilla_s1_aligned[i]
+        ema50_val = ema50_4h_aligned[i]
+        vol_avg_val = vol_avg_20_1d_aligned[i]
+        vol_1d_val = df_1d['volume'].values[i // 24]  # 24x 1h bars in 1d
+
+        if np.isnan(camarilla_r1_val) or np.isnan(camarilla_s1_val) or np.isnan(ema50_val) or np.isnan(vol_avg_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,29 +88,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: VW-RSI > 60 (bullish momentum with volume) + price above 1d EMA50 (uptrend)
-            if vw_rsi_val > 60 and close[i] > ema50_val:
-                signals[i] = 0.25
+            # LONG: Break above R1 + 4h uptrend + volume spike
+            if close[i] > camarilla_r1_val and close[i] > ema50_val and vol_1d_val > vol_avg_val * 1.8:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: VW-RSI < 40 (bearish momentum with volume) + price below 1d EMA50 (downtrend)
-            elif vw_rsi_val < 40 and close[i] < ema50_val:
-                signals[i] = -0.25
+            # SHORT: Break below S1 + 4h downtrend + volume spike
+            elif close[i] < camarilla_s1_val and close[i] < ema50_val and vol_1d_val > vol_avg_val * 1.8:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: VW-RSI < 50 (loss of bullish momentum) or trend reversal
-            if vw_rsi_val < 50 or close[i] < ema50_val:
+            # EXIT LONG: Price below S1 or trend reversal
+            if close[i] < camarilla_s1_val or close[i] < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: VW-RSI > 50 (loss of bearish momentum) or trend reversal
-            if vw_rsi_val > 50 or close[i] > ema50_val:
+            # EXIT SHORT: Price above R1 or trend reversal
+            if close[i] > camarilla_r1_val or close[i] > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
