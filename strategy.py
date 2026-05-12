@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-# Hypothesis: Use 12h EMA50 as trend filter to avoid counter-trend trades. Enter long when price closes above daily R1 with volume > 2x average and 12h trend up (close > EMA50). Enter short when price closes below daily S1 with volume > 2x average and 12h trend down (close < EMA50). Exit when price crosses daily EMA34 (trend reversal). This reduces false breakouts in choppy markets, improving win rate and reducing trade frequency for better generalization.
+# 1h_Camarilla_R1S1_Breakout_4hTrend_Volume
+# Hypothesis: On 1h timeframe, enter long when price closes above 4h R1 with close > 4h EMA34 and volume > 1.5x average.
+# Enter short when price closes below 4h S1 with close < 4h EMA34 and volume > 1.5x average.
+# Exit when price crosses 4h EMA34 (trend reversal).
+# Uses 4h for signal direction (trend + S/R levels) and 1h only for entry timing.
+# Session filter: 08-20 UTC to avoid low-volume Asian session.
+# Target: 15-37 trades/year (~60-150 total over 4 years) to minimize fee drag.
+# Works in bull markets via breakouts and in bear via short reversals at S1.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,52 +26,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:  # Need at least 1 day for pivot, but more for EMA
+    # Load 4h data for Camarilla pivot calculation and EMA34
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 35:
         return np.zeros(n)
     
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate 4h pivot point and range
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate pivot point and range
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_range = daily_high - daily_low
+    pivot_4h = (high_4h + low_4h + close_4h) / 3.0
+    range_4h = high_4h - low_4h
     
-    # Camarilla R1 and S1 levels
-    r1 = daily_pivot + daily_range * 1.083
-    s1 = daily_pivot - daily_range * 1.083
+    # Camarilla R1 and S1 levels (4h)
+    r1_4h = pivot_4h + range_4h * 1.083
+    s1_4h = pivot_4h - range_4h * 1.083
     
-    # 1-day EMA34 for exit (trend reversal)
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 4h EMA34 for trend filter
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Load 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Align 4h levels to 1h timeframe
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume confirmation: 24-period moving average (1h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # Align all to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Volume confirmation: 20-period moving average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Session filter: 08-20 UTC (avoid low-volume Asian session)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure indicators are stable
+    start_idx = 50  # Ensure indicators are stable
     
     for i in range(start_idx, n):
-        # Skip if any critical data is not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if any critical data is not ready or outside session
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(ema34_4h_aligned[i]) or np.isnan(vol_ma[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,36 +75,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        ema1d_trend = ema34_1d_aligned[i]
-        ema12h_trend = ema50_12h_aligned[i]
+        r1_val = r1_4h_aligned[i]
+        s1_val = s1_4h_aligned[i]
+        ema4h_trend = ema34_4h_aligned[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # LONG: Price closes above R1 with volume > 2x average, close > daily EMA34, and 12h trend up
-            if close[i] > r1_val and close[i] > ema1d_trend and close[i] > ema12h_trend and volume[i] > 2.0 * vol_ma_val:
-                signals[i] = 0.25
+            # LONG: Price closes above 4h R1 with volume > 1.5x average and close > 4h EMA34
+            if close[i] > r1_val and close[i] > ema4h_trend and volume[i] > 1.5 * vol_ma_val:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price closes below S1 with volume > 2x average, close < daily EMA34, and 12h trend down
-            elif close[i] < s1_val and close[i] < ema1d_trend and close[i] < ema12h_trend and volume[i] > 2.0 * vol_ma_val:
-                signals[i] = -0.25
+            # SHORT: Price closes below 4h S1 with volume > 1.5x average and close < 4h EMA34
+            elif close[i] < s1_val and close[i] < ema4h_trend and volume[i] > 1.5 * vol_ma_val:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below daily EMA34 (trend reversal)
-            if close[i] < ema1d_trend:
+            # EXIT LONG: Price closes below 4h EMA34 (trend reversal)
+            if close[i] < ema4h_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price closes above daily EMA34 (trend reversal)
-            if close[i] > ema1d_trend:
+            # EXIT SHORT: Price closes above 4h EMA34 (trend reversal)
+            if close[i] > ema4h_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
