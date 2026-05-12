@@ -1,104 +1,182 @@
-# 4h_Camarilla_Pivot_R3S3_Breakout_12hEMA50_Trend
-# Hypothesis: Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
-# R3/S3 are strong pivot levels from the previous day; breakout indicates momentum.
-# 12h EMA50 ensures trades align with higher timeframe trend, reducing whipsaw.
-# Volume filter confirms institutional participation. Designed for low frequency (20-50 trades/year)
-# to avoid fee drag. Works in both bull and bear markets by following higher timeframe trend.
+#!/usr/bin/env python3
+# 1d_KAMA_Direction_RSI_Filter
+# Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) for trend direction on 1d timeframe,
+# combined with RSI for momentum confirmation on 1d. Enter long when KAMA slopes up and RSI > 50,
+# short when KAMA slopes down and RSI < 50. Filter trades with weekly ADX > 25 to ensure trending market.
+# Designed for low frequency (10-25 trades/year) to avoid fee drag. KAMA adapts to market noise,
+# reducing whipsaws in sideways markets, while RSI confirms momentum. Weekly ADX filter ensures
+# we only trade in trending conditions, improving performance in both bull and bear markets.
 
-name = "4h_Camarilla_Pivot_R3S3_Breakout_12hEMA50_Trend"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
+def calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30):
     """
-    Calculate Camarilla pivot levels for the previous period.
-    R4 = C + ((H-L) * 1.5000)
-    R3 = C + ((H-L) * 1.2500)
-    R2 = C + ((H-L) * 1.1666)
-    R1 = C + ((H-L) * 1.0833)
-    PP = (H + L + C) / 3
-    S1 = C - ((H-L) * 1.0833)
-    S2 = C - ((H-L) * 1.1666)
-    S3 = C - ((H-L) * 1.2500)
-    S4 = C - ((H-L) * 1.5000)
+    Calculate Kaufman Adaptive Moving Average (KAMA).
+    Returns kama array.
     """
-    typical = (high + low + close) / 3
-    range_ = high - low
-    r4 = close + range_ * 1.5000
-    r3 = close + range_ * 1.2500
-    r2 = close + range_ * 1.1666
-    r1 = close + range_ * 1.0833
-    pp = typical
-    s1 = close - range_ * 1.0833
-    s2 = close - range_ * 1.1666
-    s3 = close - range_ * 1.2500
-    s4 = close - range_ * 1.5000
-    return r1, r2, r3, r4, s1, s2, s3, s4
+    n = len(close)
+    kama = np.full(n, np.nan)
+    if n < er_period:
+        return kama
+    
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_period))  # |close - close[er_period]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # sum of |diff| over er_period
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    
+    # Initialize KAMA
+    kama[er_period] = close[er_period]
+    
+    # Calculate KAMA
+    for i in range(er_period + 1, n):
+        if not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = close[i]
+    
+    return kama
+
+def calculate_rsi(close, period=14):
+    """
+    Calculate Relative Strength Index (RSI).
+    Returns rsi array.
+    """
+    n = len(close)
+    rsi = np.full(n, np.nan)
+    if n < period + 1:
+        return rsi
+    
+    # Calculate price changes
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Calculate average gain and loss
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    
+    # Initial average
+    avg_gain[period] = np.mean(gain[:period])
+    avg_loss[period] = np.mean(loss[:period])
+    
+    # Subsequent averages (Wilder's smoothing)
+    for i in range(period + 1, n):
+        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
+    
+    # Calculate RS and RSI
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi
+
+def calculate_adx(high, low, close, period=14):
+    """
+    Calculate Average Directional Index (ADX).
+    Returns adx array.
+    """
+    n = len(high)
+    adx = np.full(n, np.nan)
+    if n < period * 2:
+        return adx
+    
+    # Calculate True Range (TR)
+    high_low = high - low
+    high_close = np.abs(high - np.roll(close, 1))
+    low_close = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]  # First TR is just high-low
+    
+    # Calculate Directional Movement (DM)
+    up_move = np.diff(high)
+    down_move = -np.diff(low)  # Positive when low decreases
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
+    atr = np.full(n, np.nan)
+    plus_dm_smooth = np.full(n, np.nan)
+    minus_dm_smooth = np.full(n, np.nan)
+    
+    # Initial values
+    atr[period] = np.mean(tr[:period])
+    plus_dm_smooth[period] = np.mean(plus_dm[:period])
+    minus_dm_smooth[period] = np.mean(minus_dm[:period])
+    
+    # Subsequent values
+    for i in range(period + 1, n):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period - 1) + plus_dm[i]) / period
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period - 1) + minus_dm[i]) / period
+    
+    # Calculate Directional Indicators
+    plus_di = np.where(atr != 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr != 0, 100 * minus_dm_smooth / atr, 0)
+    
+    # Calculate DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    
+    # Smooth DX to get ADX
+    adx_smooth = np.full(n, np.nan)
+    adx_smooth[2*period] = np.mean(dx[period:2*period])
+    
+    for i in range(2*period + 1, n):
+        adx_smooth[i] = (adx_smooth[i-1] * (period - 1) + dx[i]) / period
+    
+    adx = adx_smooth
+    
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot (based on previous day)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate KAMA on 1d close
+    kama = calculate_kama(close, er_period=10, fast_sc=2, slow_sc=30)
     
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    r1, r2, r3, r4, s1, s2, s3, s4 = calculate_camarilla(
-        high_1d[:-1], low_1d[:-1], close_1d[:-1]
-    )
+    # Calculate RSI on 1d close
+    rsi = calculate_rsi(close, period=14)
     
-    # For current day, we use the previous day's levels
-    # Pad with NaN for the first element (no previous day)
-    r1 = np.concatenate([np.array([np.nan]), r1])
-    r2 = np.concatenate([np.array([np.nan]), r2])
-    r3 = np.concatenate([np.array([np.nan]), r3])
-    s1 = np.concatenate([np.array([np.nan]), s1])
-    s2 = np.concatenate([np.array([np.nan]), s2])
-    s3 = np.concatenate([np.array([np.nan]), s3])
+    # Calculate ADX on weekly data
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, period=14)
     
-    # Align daily Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume filter: 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align weekly ADX to daily timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure volume MA and indicators are ready
+    start_idx = 30  # Ensure indicators are stable
     
     for i in range(start_idx, n):
         # Skip if any critical data is not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(adx_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -106,28 +184,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_ok = volume[i] > 1.5 * vol_ma[i]
+        # KAMA direction: slope of KAMA (using 2-period change)
+        kama_rising = kama[i] > kama[i-2] if i >= 2 else False
+        kama_falling = kama[i] < kama[i-2] if i >= 2 else False
+        
+        # RSI filter: >50 for bullish momentum, <50 for bearish
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
+        
+        # ADX filter: trending market (ADX > 25)
+        trending = adx_1w_aligned[i] > 25
         
         if position == 0:
-            # LONG: Price breaks above R3 AND above 12h EMA50 AND volume confirmation
-            if close[i] > r3_aligned[i] and close[i] > ema_50_aligned[i] and volume_ok:
+            # LONG: KAMA rising AND RSI > 50 AND trending market
+            if kama_rising and rsi_bullish and trending:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 AND below 12h EMA50 AND volume confirmation
-            elif close[i] < s3_aligned[i] and close[i] < ema_50_aligned[i] and volume_ok:
+            # SHORT: KAMA falling AND RSI < 50 AND trending market
+            elif kama_falling and rsi_bearish and trending:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # EXIT LONG: Price falls below S3 OR below 12h EMA50
-            if close[i] < s3_aligned[i] or close[i] < ema_50_aligned[i]:
+            # EXIT LONG: KAMA falling OR RSI < 50 OR market not trending
+            if not (kama_rising and rsi_bullish and trending):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above R3 OR above 12h EMA50
-            if close[i] > r3_aligned[i] or close[i] > ema_50_aligned[i]:
+            # EXIT SHORT: KAMA rising OR RSI > 50 OR market not trending
+            if not (kama_falling and rsi_bearish and trending):
                 signals[i] = 0.0
                 position = 0
             else:
