@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_RangeBreakout
-Hypothesis: Uses weekly pivot levels to identify key support/resistance zones.
-Enters long when price breaks above weekly R1 with bullish weekly trend (price > weekly VWAP),
-enters short when price breaks below weekly S1 with bearish weekly trend (price < weekly VWAP).
-Uses volume confirmation to avoid false breakouts. Designed for 6h timeframe to capture
-multi-day moves while avoiding excessive trading. Weekly pivot provides structural levels
-that work in both bull and bear markets by adapting to current price regime.
+6h_Camarilla_R3_S3_Breakout_WeeklyTrend_Volume
+Hypothesis: Uses daily Camarilla pivot levels (R3/S3) for breakout entries,
+confirmed by weekly trend (price above/below weekly VWAP) and volume surge.
+Designed for 6h timeframe to capture multi-day moves with low trade frequency.
+Works in both bull and bear markets by adapting to weekly trend context.
 """
 
-name = "6h_WeeklyPivot_RangeBreakout"
+name = "6h_Camarilla_R3_S3_Breakout_WeeklyTrend_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -27,44 +25,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot points and trend filter (call once before loop)
+    # Get daily data for Camarilla pivot points (call once before loop)
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 5:
+        return np.zeros(n)
+
+    # Get weekly data for trend filter
     df_w = get_htf_data(prices, '1w')
     if len(df_w) < 5:
         return np.zeros(n)
+
+    # Calculate daily Camarilla pivot levels (standard formula)
+    # Based on previous day's high, low, close
+    hh_d = df_d['high'].values
+    ll_d = df_d['low'].values
+    cc_d = df_d['close'].values
+
+    # Camarilla levels
+    # R4 = C + (H-L)*1.1/2
+    # R3 = C + (H-L)*1.1/4
+    # R2 = C + (H-L)*1.1/6
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    # S2 = C - (H-L)*1.1/6
+    # S3 = C - (H-L)*1.1/4
+    # S4 = C - (H-L)*1.1/2
+    r3_d = cc_d + (hh_d - ll_d) * 1.1 / 4
+    s3_d = cc_d - (hh_d - ll_d) * 1.1 / 4
 
     # Calculate weekly VWAP for trend filter
     typical_price_w = (df_w['high'] + df_w['low'] + df_w['close']) / 3
     vwap_w = (typical_price_w * df_w['volume']).cumsum() / df_w['volume'].cumsum()
     vwap_w = vwap_w.values
 
-    # Calculate weekly pivot points (standard formula)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    hh_w = df_w['high'].values
-    ll_w = df_w['low'].values
-    cc_w = df_w['close'].values
-    
-    pivot_w = (hh_w + ll_w + cc_w) / 3
-    r1_w = 2 * pivot_w - ll_w
-    s1_w = 2 * pivot_w - hh_w
-
-    # Volume confirmation: 24-period average (4 days of 6h data)
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: 12-period average (3 days of 6h data)
+    vol_avg_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(24, n):  # Start from 24 to have enough data for volume average
+    for i in range(12, n):  # Start from 12 to have enough data for volume average
         # Get aligned values for current 6h bar
+        r3_d_aligned = align_htf_to_ltf(prices, df_d, r3_d)[i]
+        s3_d_aligned = align_htf_to_ltf(prices, df_d, s3_d)[i]
         vwap_w_aligned = align_htf_to_ltf(prices, df_w, vwap_w)[i]
-        r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)[i]
-        s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)[i]
-        vol_avg_val = vol_avg_24[i]
+        vol_avg_val = vol_avg_12[i]
         
         # Skip if any required data is NaN
-        if (np.isnan(vwap_w_aligned) or np.isnan(r1_w_aligned) or np.isnan(s1_w_aligned) or 
-            np.isnan(vol_avg_val)):
+        if (np.isnan(r3_d_aligned) or np.isnan(s3_d_aligned) or 
+            np.isnan(vwap_w_aligned) or np.isnan(vol_avg_val)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,30 +82,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above weekly R1 with bullish weekly trend and volume surge
-            if (close[i] > r1_w_aligned and 
+            # LONG: Break above daily R3 with bullish weekly trend and volume surge
+            if (close[i] > r3_d_aligned and 
                 close[i] > vwap_w_aligned and 
-                volume[i] > vol_avg_val * 1.5):
+                volume[i] > vol_avg_val * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below weekly S1 with bearish weekly trend and volume surge
-            elif (close[i] < s1_w_aligned and 
+            # SHORT: Break below daily S3 with bearish weekly trend and volume surge
+            elif (close[i] < s3_d_aligned and 
                   close[i] < vwap_w_aligned and 
-                  volume[i] > vol_avg_val * 1.5):
+                  volume[i] > vol_avg_val * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below weekly VWAP or breaks below S1 (reversal signal)
-            if (close[i] < vwap_w_aligned or close[i] < s1_w_aligned):
+            # EXIT LONG: Price falls below daily S3 or weekly VWAP (reversal signal)
+            if (close[i] < s3_d_aligned or close[i] < vwap_w_aligned):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above weekly VWAP or breaks above R1 (reversal signal)
-            if (close[i] > vwap_w_aligned or close[i] > r1_w_aligned):
+            # EXIT SHORT: Price rises above daily R3 or weekly VWAP (reversal signal)
+            if (close[i] > r3_d_aligned or close[i] > vwap_w_aligned):
                 signals[i] = 0.0
                 position = 0
             else:
