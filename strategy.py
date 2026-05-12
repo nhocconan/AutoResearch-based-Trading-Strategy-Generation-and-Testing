@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 6H_RSI_OVERBOUGHT_OVERSOLD_1D_TREND_FILTER
-# Hypothesis: RSI(14) overbought/oversold levels on 6h chart, filtered by 1d EMA trend, capture mean reversion moves.
-# Works in both bull and bear markets: in uptrends, buy oversold pullbacks; in downtrends, sell overbought bounces.
-# Target: 20-40 trades/year on 6h timeframe.
+# 4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE
+# Hypothesis: Camarilla R3/S3 levels from daily chart act as strong support/resistance.
+# Breakouts above R3 or below S3 with volume spike confirmation capture momentum moves.
+# Volume filter reduces false breakouts and improves win rate. Works in bull and bear markets.
+# Target: 20-40 trades/year on 4h timeframe.
 
-name = "6H_RSI_OVERBOUGHT_OVERSOLD_1D_TREND_FILTER"
-timeframe = "6h"
+name = "4H_CAMARILLA_R3_S3_BREAKOUT_1D_VOLUME_SPIKE"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,35 +19,40 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 1d data for EMA trend filter
+    # Daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate EMA20 for trend filter
-    ema20 = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate RSI(14) on 6h closes
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # R3 = C + (H-L)*1.25/2, S3 = C - (H-L)*1.25/2
+    r3 = close_1d + (high_1d - low_1d) * 1.25 / 2
+    s3 = close_1d - (high_1d - low_1d) * 1.25 / 2
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Volume spike: current volume > 1.5 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 14  # Need RSI warmup
+    start_idx = 1  # Need at least one day of data
     
     for i in range(start_idx, n):
-        # Skip if trend data not ready
-        if np.isnan(ema20_aligned[i]):
+        # Skip if any critical data is not ready
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(volume_spike_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,26 +61,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: RSI oversold (<30) in uptrend (price above EMA20)
-            if rsi[i] < 30 and close[i] > ema20_aligned[i]:
+            # LONG: Price breaks above R3 with volume spike
+            if (close[i] > r3_aligned[i] and volume_spike_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought (>70) in downtrend (price below EMA20)
-            elif rsi[i] > 70 and close[i] < ema20_aligned[i]:
+            # SHORT: Price breaks below S3 with volume spike
+            elif (close[i] < s3_aligned[i] and volume_spike_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought or trend reversal
-            if rsi[i] > 70 or close[i] <= ema20_aligned[i]:
+            # EXIT LONG: Price falls below S3
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold or trend reversal
-            if rsi[i] < 30 or close[i] >= ema20_aligned[i]:
+            # EXIT SHORT: Price rises above R3
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
