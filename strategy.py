@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -36,7 +36,7 @@ def generate_signals(prices):
     camarilla_h3 = close_1d + range_1d * 1.1 / 4
     camarilla_l3 = close_1d - range_1d * 1.1 / 4
     
-    # Align to 12h
+    # Align to 4h
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
