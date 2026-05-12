@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -29,7 +29,7 @@ def generate_signals(prices):
     
     # Calculate 1d Camarilla levels (using previous day's data)
     # Camarilla: Pivot = (H+L+C)/3
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     # We use previous day's OHLC to avoid look-ahead
     shift_high_1d = np.roll(high_1d, 1)
     shift_low_1d = np.roll(low_1d, 1)
@@ -41,12 +41,12 @@ def generate_signals(prices):
     
     camarilla_pivot = (shift_high_1d + shift_low_1d + shift_close_1d) / 3
     camarilla_range = shift_high_1d - shift_low_1d
-    camarilla_r3 = camarilla_pivot + camarilla_range * 1.1 / 2
-    camarilla_s3 = camarilla_pivot - camarilla_range * 1.1 / 2
+    camarilla_r1 = camarilla_pivot + camarilla_range * 1.1 / 12
+    camarilla_s1 = camarilla_pivot - camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,8 +59,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,24 +69,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + above 1d EMA34 + volume filter
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
+            # Long: price breaks above R1 + above 1d EMA34 + volume filter
+            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + below 1d EMA34 + volume filter
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
+            # Short: price breaks below S1 + below 1d EMA34 + volume filter
+            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below S3
-            if close[i] < camarilla_s3_aligned[i]:
+            # Exit long: price breaks below S1
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above R3
-            if close[i] > camarilla_r3_aligned[i]:
+            # Exit short: price breaks above R1
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
