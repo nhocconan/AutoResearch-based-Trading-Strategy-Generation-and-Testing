@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ElderRay_Alligator_Trend_Signal"
-timeframe = "6h"
+name = "4h_Keltner_Breakout_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,51 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data for Elder Ray and Alligator
+    # Load 1d data for trend filter and ATR
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === Elder Ray components ===
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    # Calculate 1d EMA20 for trend filter
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # === Alligator components (13,8,5 SMAs with future shifts) ===
-    # Jaw (13-period, shifted 8 bars)
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # shift forward 8 bars
-    # Teeth (8-period, shifted 5 bars)
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # shift forward 5 bars
-    # Lips (5-period, shifted 3 bars)
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # shift forward 3 bars
+    # Calculate ATR(14) on 1d for Keltner channels
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Align all to 6h timeframe (wait for daily close)
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Calculate Keltner channels on 4h using 1d ATR
+    ema_20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema_20_4h + (2.0 * atr_14_1d_aligned)
+    lower_keltner = ema_20_4h - (2.0 * atr_14_1d_aligned)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume spike: current volume > 1.8x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_avg)
+    vol_spike = volume > (1.8 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,29 +60,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bull power > 0, Bear power < 0, Lips > Teeth > Jaw (bullish alignment), Volume confirm
-            if (bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0 and 
-                lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and vol_confirm[i]):
-                signals[i] = 0.25
+            # Long: price breaks above upper Keltner + above 1d EMA20 + volume spike
+            if close[i] > upper_keltner[i] and close[i] > ema_20_1d_aligned[i] and vol_spike[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Bear power > 0, Bull power < 0, Lips < Teeth < Jaw (bearish alignment), Volume confirm
-            elif (bear_power_aligned[i] > 0 and bull_power_aligned[i] < 0 and 
-                  lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and vol_confirm[i]):
-                signals[i] = -0.25
+            # Short: price breaks below lower Keltner + below 1d EMA20 + volume spike
+            elif close[i] < lower_keltner[i] and close[i] < ema_20_1d_aligned[i] and vol_spike[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: Bear power becomes positive OR Alligator alignment breaks
-            if (bear_power_aligned[i] > 0 or not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i])):
+            # Exit long: price closes below lower Keltner
+            if close[i] < lower_keltner[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: Bull power becomes positive OR Alligator alignment breaks
-            if (bull_power_aligned[i] > 0 or not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i])):
+            # Exit short: price closes above upper Keltner
+            if close[i] > upper_keltner[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
