@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: On 4h timeframe, Camarilla R1/S1 levels from prior 1d act as strong support/resistance. 
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: On 12h timeframe, Camarilla R1/S1 levels from prior 1d act as strong support/resistance. 
 Breaks above R1 with 1d EMA34 uptrend and volume > 1.5x 20-period average generate long signals; 
 breaks below S1 with 1d EMA34 downtrend and volume surge generate shorts. 
 Uses 1d Bollinger Band width < 50th percentile to filter choppy regimes. 
-Targets 20-50 trades/year (80-200 total over 4 years) with low turnover to minimize fee drag.
+Targets 12-37 trades/year (50-150 total over 4 years) with low turnover to minimize fee drag.
 Works in bull via momentum breaks and bear via mean-reversion at extremes with trend filter.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -52,7 +52,7 @@ def generate_signals(prices):
     ).values
     bb_width_rank_aligned = align_htf_to_ltf(prices, df_1d, bb_width_rank)
 
-    # Calculate 4h Camarilla levels from previous 1d OHLC
+    # Calculate 12h Camarilla levels from previous 1d OHLC
     # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     # We need previous day's HLC, so shift by 1
     prev_close = np.roll(close_1d, 1)
@@ -72,7 +72,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(60, n):
-        # Get aligned values for current 4h bar
+        # Get aligned values for current 12h bar
         ema34 = ema34_1d_aligned[i]
         bb_rank = bb_width_rank_aligned[i]
         r1_level = r1_aligned[i]
