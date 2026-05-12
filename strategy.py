@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RVOL_Trend_Reversal"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,33 +17,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # ===== 1d Trend Filter (HTF) =====
+    # === 1d Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # 1d EMA(34) for trend
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === Relative Volume (RVOL) ===
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    rvol = volume / vol_avg_20  # RVOL > 1.5 = volume spike
     
-    # ===== 1d Camarilla Pivot Levels (HTF) =====
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = np.roll(close_1d, 1)
-    close_1d_prev[0] = close_1d[0]  # first day uses same close
-    
-    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
-    r1 = close_1d_prev + range_1d * 1.1 / 12
-    s1 = close_1d_prev - range_1d * 1.1 / 12
-    
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # ===== Volume Spike Filter =====
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_avg)
+    # === 4h Price Momentum (ROC 3-period) ===
+    roc3 = np.zeros_like(close)
+    roc3[3:] = (close[3:] - close[:-3]) / close[:-3] * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,9 +38,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_spike[i])):
+        if np.isnan(ema100_1d_aligned[i]) or np.isnan(rvol[i]) or np.isnan(roc3[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +47,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close crosses above R1 + above 1d EMA34 + volume spike
-            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and
-                close[i] > ema34_1d_aligned[i] and
-                vol_spike[i]):
+            # Long: Price above 1d EMA100, positive momentum, and volume spike
+            if (close[i] > ema100_1d_aligned[i] and 
+                roc3[i] > 0.1 and 
+                rvol[i] > 1.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close crosses below S1 + below 1d EMA34 + volume spike
-            elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and
-                  close[i] < ema34_1d_aligned[i] and
-                  vol_spike[i]):
+            # Short: Price below 1d EMA100, negative momentum, and volume spike
+            elif (close[i] < ema100_1d_aligned[i] and 
+                  roc3[i] < -0.1 and 
+                  rvol[i] > 1.8):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close crosses below S1 OR below 1d EMA34
-            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Price crosses below 1d EMA100 OR momentum turns negative
+            if close[i] < ema100_1d_aligned[i] or roc3[i] < -0.05:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close crosses above R1 OR above 1d EMA34
-            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Price crosses above 1d EMA100 OR momentum turns positive
+            if close[i] > ema100_1d_aligned[i] or roc3[i] > 0.05:
                 signals[i] = 0.0
                 position = 0
             else:
