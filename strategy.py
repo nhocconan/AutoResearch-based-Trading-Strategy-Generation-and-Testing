@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_Follow_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_Keltner_RSI_MeanReversion_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # KAMA on daily price
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period volatility
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # Initialize KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Keltner Channel parameters
+    atr_length = 10
+    keltner_mult = 1.5
+    ema_length = 20
     
-    # Volume filter: current volume > 1.5x 20-day average
+    # True Range and ATR
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=atr_length, adjust=False, min_periods=atr_length).mean().values
+    
+    # EMA for Keltner middle line
+    ema_keltner = pd.Series(close).ewm(span=ema_length, adjust=False, min_periods=ema_length).mean().values
+    
+    # Keltner Bands
+    upper_keltner = ema_keltner + (keltner_mult * atr)
+    lower_keltner = ema_keltner - (keltner_mult * atr)
+    
+    # RSI for overbought/oversold
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_avg)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # ensure indicators have enough data
+    start_idx = 100  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama[i]) or np.isnan(vol_filter[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_keltner[i]) or 
+            np.isnan(lower_keltner[i]) or np.isnan(rsi[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,24 +74,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above KAMA + above weekly EMA50 + volume filter
-            if close[i] > kama[i] and close[i] > ema_50_1w_aligned[i] and vol_filter[i]:
+            # Long: price touches lower Keltner + RSI oversold (<30) + above daily EMA50 + volume filter
+            if low[i] <= lower_keltner[i] and rsi[i] < 30 and close[i] > ema_50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA + below weekly EMA50 + volume filter
-            elif close[i] < kama[i] and close[i] < ema_50_1w_aligned[i] and vol_filter[i]:
+            # Short: price touches upper Keltner + RSI overbought (>70) + below daily EMA50 + volume filter
+            elif high[i] >= upper_keltner[i] and rsi[i] > 70 and close[i] < ema_50_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below KAMA or below weekly EMA50
-            if close[i] < kama[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: price touches upper Keltner or RSI overbought
+            if high[i] >= upper_keltner[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above KAMA or above weekly EMA50
-            if close[i] > kama[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: price touches lower Keltner or RSI oversold
+            if low[i] <= lower_keltner[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
