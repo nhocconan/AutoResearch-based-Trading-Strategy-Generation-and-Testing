@@ -1,6 +1,13 @@
+# 1d_RSI_Momentum_With_Volume_Filter
+# Hypothesis: Daily RSI momentum with volume confirmation provides robust trend signals across bull/bear markets.
+# Uses RSI(14) > 60 for longs, < 40 for shorts with volume > 1.5x 20-day average.
+# Weekly trend filter ensures alignment with higher timeframe momentum.
+# Designed for low turnover (<20 trades/year) to minimize fee drag while capturing major moves.
+# Works in bull markets via momentum continuation and in bear markets via mean-reversion exhaustion.
+
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_RSI_Momentum_With_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,56 +16,40 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    open_ = prices['open'].values
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily trend filter: EMA34 on 1d close
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Weekly Camarilla pivot levels (levels R3 and S3)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla levels for weekly
-    camarilla_width = (high_1w - low_1w) * 1.1 / 8
-    r3 = close_1w + camarilla_width * 3
-    s3 = close_1w - camarilla_width * 3
-    
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3, additional_delay_bars=0)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3, additional_delay_bars=0)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
+    
+    # Weekly trend filter: EMA50 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # ensure indicators have enough data
+    start_idx = 50  # ensure EMA50 has enough data
     
     for i in range(start_idx, n):
-        # Skip if EMA data not ready
-        if np.isnan(ema34_1d_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Skip if Camarilla data not ready
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if weekly EMA data not ready
+        if np.isnan(ema50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,24 +58,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above weekly R3 + above daily EMA34 + volume expansion
-            if (close[i] > r3_aligned[i]) and (close[i] > ema34_1d_aligned[i]) and volume_filter[i]:
+            # Long: RSI > 60 (bullish momentum) + volume expansion + price above weekly EMA50
+            if (rsi[i] > 60) and volume_filter[i] and (close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S3 + below daily EMA34 + volume expansion
-            elif (close[i] < s3_aligned[i]) and (close[i] < ema34_1d_aligned[i]) and volume_filter[i]:
+            # Short: RSI < 40 (bearish momentum) + volume expansion + price below weekly EMA50
+            elif (rsi[i] < 40) and volume_filter[i] and (close[i] < ema50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below daily EMA34
-            if close[i] < ema34_1d_aligned[i]:
+            # Exit long: RSI falls below 50 (momentum loss) or price crosses below weekly EMA50
+            if (rsi[i] < 50) or (close[i] < ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above daily EMA34
-            if close[i] > ema34_1d_aligned[i]:
+            # Exit short: RSI rises above 50 (momentum loss) or price crosses above weekly EMA50
+            if (rsi[i] > 50) or (close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
