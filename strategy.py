@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1wTrend_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,15 +17,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1w data for trend filter (long-term bias)
+    # Load weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA200 for trend filter
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Load 1d data for Camarilla pivots
+    # Load daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -36,7 +36,7 @@ def generate_signals(prices):
     r1 = p + (high_1d - low_1d) * 1.1 / 12
     s1 = p - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 4h (wait for daily close)
+    # Align Camarilla levels to daily (wait for daily close)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -47,12 +47,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # ensure indicators have enough data
+    start_idx = 50  # ensure indicators have enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_spike[i])):
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,12 +61,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + above 1w EMA200 + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_200_1w_aligned[i] and vol_spike[i]:
+            # Long: price breaks above R1 + above weekly EMA34 + volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema_34_1w_aligned[i] and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 1w EMA200 + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_200_1w_aligned[i] and vol_spike[i]:
+            # Short: price breaks below S1 + below weekly EMA34 + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema_34_1w_aligned[i] and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
