@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above upper BB(20,2) AND BB width < 20th percentile (squeeze) AND close > 1d EMA50 AND volume > 1.5x 20-period average.
-# Short when price breaks below lower BB(20,2) AND BB width < 20th percentile (squeeze) AND close < 1d EMA50 AND volume > 1.5x 20-period average.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above 20-period high AND close > 1d EMA50 AND volume > 1.8x 20-period average.
+# Short when price breaks below 20-period low AND close < 1d EMA50 AND volume > 1.8x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
-# Bollinger Band squeeze identifies low volatility periods preceding breakouts, effective in both trending and ranging markets.
+# Discrete position sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# Donchian channels provide clear trend-following structure that works in both bull and bear markets.
 # EMA50 on 1d provides medium-term trend filter to avoid counter-trend trades.
-# Volume confirmation reduces false breakouts. Discrete position sizing (0.25) minimizes fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
+# Volume confirmation reduces false breakouts.
 
-name = "6h_BollingerSqueeze_Breakout_1dEMA50_Volume_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -34,21 +34,7 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Bollinger Bands (20,2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * std)
-    lower_band = sma - (bb_std * std)
-    bb_width = (upper_band - lower_band) / sma  # Normalized width
-    
-    # Calculate BB width percentile (20th) for squeeze condition
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile_20 = bb_width_series.rolling(window=100, min_periods=100).quantile(0.20).values
-    squeeze_condition = bb_width < bb_width_percentile_20
-    
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA50
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
@@ -56,9 +42,13 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate volume confirmation: volume > 1.5x 20-period average
+    # Calculate Donchian channels (20-period) on primary timeframe
+    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Calculate volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,19 +57,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(bb_width_percentile_20[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(high_ma_20[i]) or np.isnan(low_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > upper BB AND squeeze condition AND close > EMA50 AND volume confirmation
-            if close[i] > upper_band[i] and squeeze_condition[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
+            # LONG: Price > 20-period high AND close > EMA50 AND volume confirmation
+            if close[i] > high_ma_20[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < lower BB AND squeeze condition AND close < EMA50 AND volume confirmation
-            elif close[i] < lower_band[i] and squeeze_condition[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
+            # SHORT: Price < 20-period low AND close < EMA50 AND volume confirmation
+            elif close[i] < low_ma_20[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
