@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: 4h breakout at 1d Camarilla R1/S1 with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above R1 in uptrend with volume spike, short when breaks below S1 in downtrend.
-# Exit when price returns to 1d pivot point or trend reverses. Designed for 20-50 trades/year.
-# Uses 1d HTF for structure, 4t for execution to minimize noise while capturing moves.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Use 1d Camarilla pivot levels (R3/S3) for breakout entries with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above R3 in uptrend with volume spike, short when price breaks below S3 in downtrend with volume spike.
+# Exit when price returns to the 1d pivot level (PP) or trend changes.
+# Designed for moderate trade frequency (50-150 total trades over 4 years) with clear entry/exit rules to avoid overtrading.
+# Target: 4h timeframe with 1d HTF for pivot and trend, focusing on BTC and ETH.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,25 +23,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot levels and EMA trend
+    # Get 1d data for Camarilla pivot calculation and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla pivot levels: R1, S1, and PP
+    # Calculate 1d Camarilla pivot levels: R3, S3, and PP (pivot point)
+    # Camarilla formulas:
     # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
+    # R3 = C + (H - L) * 1.1 / 2
+    # S3 = C - (H - L) * 1.1 / 2
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     pp_1d = typical_price.values
     hl_range = df_1d['high'] - df_1d['low']
-    r1_1d = df_1d['close'].values + hl_range.values * 1.1 / 12
-    s1_1d = df_1d['close'].values - hl_range.values * 1.1 / 12
+    r3_1d = df_1d['close'].values + hl_range.values * 1.1 / 2
+    s3_1d = df_1d['close'].values - hl_range.values * 1.1 / 2
     
     # Align 1d Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
 
-    # 1d EMA50 for trend filter
+    # Calculate 1d EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
@@ -53,7 +54,7 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
             np.isnan(pp_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
@@ -64,14 +65,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + price above 1d EMA50 (uptrend) + volume spike
-            if (close[i] > r1_1d_aligned[i] and 
+            # LONG: Price breaks above R3 + price above 1d EMA50 (uptrend) + volume spike
+            if (close[i] > r3_1d_aligned[i] and 
                 close[i] > ema_50_1d_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + price below 1d EMA50 (downtrend) + volume spike
-            elif (close[i] < s1_1d_aligned[i] and 
+            # SHORT: Price breaks below S3 + price below 1d EMA50 (downtrend) + volume spike
+            elif (close[i] < s3_1d_aligned[i] and 
                   close[i] < ema_50_1d_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
