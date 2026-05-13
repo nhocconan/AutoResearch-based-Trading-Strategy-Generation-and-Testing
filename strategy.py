@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R3_S3_Breakout_4hTrend_Filter
-Hypothesis: Camarilla R3/S3 levels on 4h act as strong support/resistance. A breakout above R3 or below S3 with volume confirmation and aligned 4h trend (close > EMA34) signals continuation. Uses 4h for signal direction and 1h for precise entry timing. Session filter (08-20 UTC) reduces noise. Targets 15-30 trades/year to minimize fee drag.
+6h_Elder_Ray_BullPower_Force_With_Volume_Regime
+Hypothesis: Elder Ray Bull/Bear Power measures bullish/bearish momentum relative to EMA13. 
+In trending markets (ADX > 25), strong Bull Power (> 0) with volume confirmation signals long; 
+strong Bear Power (< 0) with volume confirmation signals short. 
+Uses 6h timeframe with 13-period EMA for power calculation and 14-period ADX for trend filter.
+Designed for low trade frequency (~15-30/year) to minimize fee dash in 6-hour bars.
 """
 
-name = "1h_Camarilla_R3_S3_Breakout_4hTrend_Filter"
-timeframe = "1h"
+name = "6h_Elder_Ray_BullPower_Force_With_Volume_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,75 +26,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla pivots and trend filter (once before loop)
-    df_4h = get_htf_data(prices, '4h')
+    # Calculate EMA13 for Elder Ray (using close)
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Camarilla pivot levels from previous 4h bar
-    # Typical Price = (H + L + C) / 3
-    typical_price = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
-    # Range = H - L
-    range_ = df_4h['high'] - df_4h['low']
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
     
-    # Camarilla levels
-    # R3 = Close + (Range * 1.1/2)
-    # S3 = Close - (Range * 1.1/2)
-    camarilla_r3 = df_4h['close'] + (range_ * 1.1 / 2)
-    camarilla_s3 = df_4h['close'] - (range_ * 1.1 / 2)
+    # ADX calculation for trend strength (using Wilder's smoothing)
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First value has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align to 1h - use previous 4h bar's levels (available at 1h open after 4h close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3.values)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3.values)
+    # Calculate Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # 4h trend filter: EMA(34) on close
-    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value is simple average
+        result[period-1] = np.nanmean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Volume confirmation: current volume > 1.5x 24-period average (~1 day)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    tr14 = wilders_smoothing(tr, 14)
+    plus_dm14 = wilders_smoothing(plus_dm, 14)
+    minus_dm14 = wilders_smoothing(minus_dm, 14)
+    
+    # Calculate DI+ and DI-
+    plus_di14 = 100 * plus_dm14 / tr14
+    minus_di14 = 100 * minus_dm14 / tr14
+    
+    # Calculate DX and ADX
+    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
-        if not session_filter[i]:
+    for i in range(20, n):
+        # Skip if ADX not available (NaN from smoothing)
+        if np.isnan(adx[i]):
             signals[i] = 0.0
             continue
             
         if position == 0:
-            # LONG: Price breaks above R3, volume confirmation, price above 4h EMA34 (uptrend)
-            if (close[i] > camarilla_r3_aligned[i] and 
-                volume_filter[i] and 
-                close[i] > ema34_4h_aligned[i]):
-                signals[i] = 0.20
+            # LONG: ADX > 25 (trending), Bull Power > 0 (bullish momentum), volume confirmation
+            if (adx[i] > 25 and 
+                bull_power[i] > 0 and 
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3, volume confirmation, price below 4h EMA34 (downtrend)
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  volume_filter[i] and 
-                  close[i] < ema34_4h_aligned[i]):
-                signals[i] = -0.20
+            # SHORT: ADX > 25 (trending), Bear Power < 0 (bearish momentum), volume confirmation
+            elif (adx[i] > 25 and 
+                  bear_power[i] < 0 and 
+                  volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R3 (failed breakout) OR volume drops
-            if (close[i] < camarilla_r3_aligned[i] or 
-                not volume_filter[i]):
+            # EXIT LONG: ADX < 20 (trend weakening) OR Bull Power <= 0 (lost bullish momentum)
+            if (adx[i] < 20 or 
+                bull_power[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S3 (failed breakdown) OR volume drops
-            if (close[i] > camarilla_s3_aligned[i] or 
-                not volume_filter[i]):
+            # EXIT SHORT: ADX < 20 (trend weakening) OR Bear Power >= 0 (lost bearish momentum)
+            if (adx[i] < 20 or 
+                bear_power[i] >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
