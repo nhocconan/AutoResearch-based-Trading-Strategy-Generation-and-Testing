@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike > 1.8x average.
-# Long when price closes above upper Donchian(20) with 1d EMA34 uptrend (close > EMA34) and volume > 1.8x 20-bar average volume.
-# Short when price closes below lower Donchian(20) with 1d EMA34 downtrend (close < EMA34) and volume > 1.8x average.
-# Exit when price reverses and closes below/above the opposite Donchian level (lower for longs, upper for shorts).
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike > 2.0x average.
+# Long when price closes above R3 with 1d EMA34 uptrend (close > EMA34) and volume > 2.0x 20-bar average volume.
+# Short when price closes below S3 with 1d EMA34 downtrend (close < EMA34) and volume > 2.0x average.
+# Exit when price reverses and closes below/above the opposite Camarilla level (S3 for longs, R3 for shorts).
 # Uses discrete position sizing 0.25. Target: 75-200 total trades over 4 years on 4h timeframe.
+# Higher volume threshold (2.0x vs 1.8x) reduces overtrading and fee drag while maintaining edge in strong moves.
 # 1d EMA34 ensures we only trade in the direction of the higher timeframe trend, avoiding counter-trend false breakouts.
-# Volume spike confirms institutional participation in the breakout.
 
-name = "4h_Donchian20_1dEMA34_Trend_VolumeConfirm_v2"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,13 +25,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels
-    lookback = 20
+    # Calculate Camarilla levels from previous day (approx using 6x 4h bars)
+    lookback = 6  # 6 * 4h = 24h approx
     if n < lookback + 1:
         return np.zeros(n)
     
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    # Calculate rolling max/min/close for previous "day"
+    high_prev = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    low_prev = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    close_prev = pd.Series(close).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
+    
+    # Camarilla R3 and S3 levels
+    camarilla_range = high_prev - low_prev
+    r3 = close_prev + 1.1 * camarilla_range / 2
+    s3 = close_prev - 1.1 * camarilla_range / 2
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,36 +58,36 @@ def generate_signals(prices):
     
     for i in range(lookback + 20, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price closes above upper Donchian with 1d EMA34 uptrend and volume spike
-            if (close[i] > upper[i] and 
+            # LONG: Price closes above R3 with 1d EMA34 uptrend and volume spike > 2.0x
+            if (close[i] > r3[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 1.8 * avg_volume[i]):
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below lower Donchian with 1d EMA34 downtrend and volume spike
-            elif (close[i] < lower[i] and 
+            # SHORT: Price closes below S3 with 1d EMA34 downtrend and volume spike > 2.0x
+            elif (close[i] < s3[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 1.8 * avg_volume[i]):
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below lower Donchian (reversal signal)
-            if close[i] < lower[i]:
+            # EXIT LONG: Price closes below S3 (reversal signal)
+            if close[i] < s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above upper Donchian (reversal signal)
-            if close[i] > upper[i]:
+            # EXIT SHORT: Price closes above R3 (reversal signal)
+            if close[i] > r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
