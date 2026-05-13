@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Vortex_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Vortex indicator (VI+ > VI-) identifies trend direction with less whipsaw than traditional methods.
-# Enter long when VI+ crosses above VI- with volume spike and 1d EMA50 uptrend.
-# Enter short when VI- crosses above VI+ with volume spike and 1d EMA50 downtrend.
-# Exit when Vortex signal reverses.
-# Uses 4h timeframe with 1d trend filter to balance trade frequency and win rate.
-# Designed to work in both bull (buy in uptrend) and bear (sell in downtrend).
-# Target: 20-40 trades/year per symbol.
+# 12h_Keltner_Breakout_1dTrend_Volume
+# Hypothesis: Keltner Channel breakouts capture trend moves with fewer whipsaws than Bollinger Bands.
+# Enter long when price breaks above upper Keltner band with volume spike and 1d EMA uptrend.
+# Enter short when price breaks below lower Keltner band with volume spike and 1d EMA downtrend.
+# Exit when price crosses back to EMA(20) to avoid missed reversals.
+# Designed for 12h timeframe with 1d trend filter to reduce trade frequency and improve win rate.
+# Target: 15-25 trades/year per symbol.
 
-name = "4h_Vortex_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Keltner_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -35,43 +34,19 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Vortex Indicator (VI) on 4h data
-    # True Range
+    # Calculate EMA(20) and ATR(10) for Keltner Channel
+    close_s = pd.Series(close)
+    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+
     tr0 = np.abs(high - low)
     tr1 = np.abs(high - np.roll(close, 1))
     tr2 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr0, np.maximum(tr1, tr2))
-    tr[0] = tr0[0]  # First value
+    tr[0] = tr0[0]
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
 
-    # Positive and Negative Vortex Movements
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = 0
-    vm_minus[0] = 0
-
-    # Sum over 14 periods
-    tr14 = np.zeros(n)
-    vm_plus14 = np.zeros(n)
-    vm_minus14 = np.zeros(n)
-    for i in range(14, n):
-        tr14[i] = np.sum(tr[i-14:i])
-        vm_plus14[i] = np.sum(vm_plus[i-14:i])
-        vm_minus14[i] = np.sum(vm_minus[i-14:i])
-
-    # VI+ and VI-
-    vi_plus = np.zeros(n)
-    vi_minus = np.zeros(n)
-    for i in range(14, n):
-        if tr14[i] != 0:
-            vi_plus[i] = vm_plus14[i] / tr14[i]
-            vi_minus[i] = vm_minus14[i] / tr14[i]
-
-    # Vortex crossover signals
-    vi_plus_cross_above = np.zeros(n, dtype=bool)
-    vi_minus_cross_above = np.zeros(n, dtype=bool)
-    for i in range(15, n):
-        vi_plus_cross_above[i] = (vi_plus[i-1] <= vi_minus[i-1]) and (vi_plus[i] > vi_minus[i])
-        vi_minus_cross_above[i] = (vi_minus[i-1] <= vi_plus[i-1]) and (vi_minus[i] > vi_plus[i])
+    upper_keltner = ema_20 + (2.0 * atr_10)
+    lower_keltner = ema_20 - (2.0 * atr_10)
 
     # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -88,7 +63,7 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if data is not ready
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
             np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -98,26 +73,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: VI+ crosses above VI- with volume spike and 1d EMA uptrend
-            if vi_plus_cross_above[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+            # LONG: Price breaks above upper Keltner with volume spike and 1d EMA uptrend
+            if close[i] > upper_keltner[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: VI- crosses above VI+ with volume spike and 1d EMA downtrend
-            elif vi_minus_cross_above[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+            # SHORT: Price breaks below lower Keltner with volume spike and 1d EMA downtrend
+            elif close[i] < lower_keltner[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: VI- crosses above VI+ (trend reversal)
-            if vi_minus_cross_above[i]:
+            # EXIT LONG: Price crosses below EMA(20) (mean reversion signal)
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: VI+ crosses above VI- (trend reversal)
-            if vi_plus_cross_above[i]:
+            # EXIT SHORT: Price crosses above EMA(20) (mean reversion signal)
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
