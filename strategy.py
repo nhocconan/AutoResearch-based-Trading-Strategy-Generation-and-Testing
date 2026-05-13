@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d ADX(14) regime filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation, using discrete position sizing 0.25.
 # Long when price breaks above Donchian upper band with 1d ADX > 25 (trending) and volume > 1.8x 20-bar average.
 # Short when price breaks below Donchian lower band with 1d ADX > 25 and volume > 1.8x average.
-# Exit when price reverses and closes below/above the midpoint of the Donchian channel.
-# Uses discrete position sizing 0.25. Target: 50-150 total trades over 4 years on 12h timeframe.
+# Exit when price closes below/above the midpoint of the Donchian channel.
+# Uses discrete position sizing 0.25. Target: 75-200 total trades over 4 years on 4h timeframe.
 # ADX regime filter ensures we only trade in strong trends, avoiding whipsaws in ranging markets.
 # Volume confirmation validates breakout strength. Donchian exit provides clear, objective stop.
 
-name = "12h_Donchian20_1dADX_Regime_Volume_Breakout_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dADX_Regime_Volume_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -73,7 +73,7 @@ def generate_signals(prices):
         dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
         adx_1d = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
     
-    # Align 1d ADX to 12h timeframe (wait for 1d bar to close)
+    # Align 1d ADX to 4h timeframe (wait for 1d bar to close)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
