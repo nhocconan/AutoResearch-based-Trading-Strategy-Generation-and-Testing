@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator with 1w EMA50 trend filter and ATR-based position sizing.
-# Williams Alligator: Jaw (EMA13 of median price, 8-bar shift), Teeth (EMA8 of median price, 5-bar shift), Lips (EMA5 of median price, 3-bar shift).
-# Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1w EMA50.
-# Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1w EMA50.
-# Position size scaled by ATR regime: 0.30 in high volatility (ATR20 > ATR60), 0.15 in low volatility.
-# Uses discrete levels to minimize fee churn. Designed for 12-37 trades/year by requiring strong Alligator alignment and weekly trend filter.
-# Works in bull markets via bullish Alligator alignment and in bear markets via bearish Alligator alignment.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high AND close > 1d EMA50 AND volume > 1.5x 20-period average volume.
+# Short when price breaks below Donchian(20) low AND close < 1d EMA50 AND volume > 1.5x 20-period average volume.
+# Exit on opposite Donchian(10) break or when price crosses 1d EMA50.
+# Position size fixed at 0.25 to balance risk and reward, minimizing fee churn.
+# Designed for 20-50 trades/year on 4h timeframe by requiring confluence of trend, breakout, and volume.
+# Works in bull markets via breakout strength and in bear markets via short breakdowns with trend filter.
 
-name = "12h_WilliamsAlligator_1wTrend_ATR_Regime_v1"
-timeframe = "12h"
+name = "4h_DonchianBreakout_1dTrend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,77 +17,68 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Median price for Alligator
-    median_price = (high + low) / 2.0
+    # Get 1d data for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator components
-    jaw = pd.Series(median_price).ewm(span=13, adjust=False, min_periods=13).mean().values
-    jaw = np.roll(jaw, 8)  # 8-bar shift
-    teeth = pd.Series(median_price).ewm(span=8, adjust=False, min_periods=8).mean().values
-    teeth = np.roll(teeth, 5)  # 5-bar shift
-    lips = pd.Series(median_price).ewm(span=5, adjust=False, min_periods=5).mean().values
-    lips = np.roll(lips, 3)  # 3-bar shift
+    # Calculate EMA(50) on 1d close for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Donchian channels (20 for entry, 10 for exit)
+    def donchian_channel(high, low, lookback):
+        upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+        lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+        return upper, lower
     
-    # Calculate EMA(50) on 1w close for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    dc_20_upper, dc_20_lower = donchian_channel(high, low, 20)
+    dc_10_upper, dc_10_lower = donchian_channel(high, low, 10)
     
-    # ATR(20) and ATR(60) for volatility regime
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # first bar
-    atr20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    atr60 = pd.Series(tr).rolling(window=60, min_periods=60).mean().values
-    
-    # Volatility regime: ATR20 > ATR60 (high volatility) -> full size, else half size
-    vol_regime = atr20 > atr60
-    position_size = np.where(vol_regime, 0.30, 0.15)
+    # Volume confirmation: current volume > 1.5x 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
-           np.isnan(ema50_1w_aligned[i]) or np.isnan(atr20[i]) or np.isnan(atr60[i]):
+    for i in range(50, n):  # Start after sufficient data for all indicators
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(dc_20_upper[i]) or np.isnan(dc_20_lower[i]) or \
+           np.isnan(dc_10_upper[i]) or np.isnan(dc_10_lower[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Bullish Alligator alignment (Lips > Teeth > Jaw) AND price > 1w EMA50
-            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema50_1w_aligned[i]:
-                signals[i] = position_size[i]
+            # LONG: Price breaks above Donchian(20) high AND close > 1d EMA50 AND volume confirmation
+            if close[i] > dc_20_upper[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish Alligator alignment (Lips < Teeth < Jaw) AND price < 1w EMA50
-            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and close[i] < ema50_1w_aligned[i]:
-                signals[i] = -position_size[i]
+            # SHORT: Price breaks below Donchian(20) low AND close < 1d EMA50 AND volume confirmation
+            elif close[i] < dc_20_lower[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alligator alignment breaks (Lips <= Teeth or Teeth <= Jaw) OR price < 1w EMA50 (trend break)
-            if lips[i] <= teeth[i] or teeth[i] <= jaw[i] or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Price breaks below Donchian(10) low OR price crosses below 1d EMA50
+            if close[i] < dc_10_lower[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = position_size[i]
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator alignment breaks (Lips >= Teeth or Teeth >= Jaw) OR price > 1w EMA50 (trend break)
-            if lips[i] >= teeth[i] or teeth[i] >= jaw[i] or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Price breaks above Donchian(10) high OR price crosses above 1d EMA50
+            if close[i] > dc_10_upper[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -position_size[i]
+                signals[i] = -0.25
     
     return signals
