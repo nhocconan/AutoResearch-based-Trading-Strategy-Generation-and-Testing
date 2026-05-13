@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter, volume confirmation (>1.5x 20-bar avg volume), and choppiness regime filter (CHOP(14) > 61.8 for ranging markets).
-# Uses discrete sizing 0.25 to target 75-150 total trades over 4 years on 4h timeframe.
-# Donchian breakouts capture momentum; 1d EMA34 ensures higher timeframe trend alignment.
-# Volume confirmation filters breakouts with low participation. Choppiness filter avoids false breakouts in strong trends.
-# Designed for fewer, higher-quality trades to minimize fee drag while working in both bull and bear markets.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (>1.8x 20-bar avg volume).
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 12h timeframe.
+# Donchian channels provide clear breakout levels; 1d EMA34 ensures higher timeframe trend alignment.
+# Volume confirmation filters breakouts with low participation. Designed for fewer, higher-quality trades
+# to minimize fee drag while working in both bull and bear markets.
 
-name = "4h_Donchian20_1dEMA34_Volume_Chop_Filter"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -39,27 +39,13 @@ def generate_signals(prices):
     lookback_vol = 20
     avg_volume = pd.Series(volume).rolling(window=lookback_vol, min_periods=lookback_vol).mean().shift(1).values
     
-    # Calculate Choppiness Index (14-period) for regime filter
-    lookback_chop = 14
-    atr_series = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))))
-    atr_series.iloc[0] = high[0] - low[0]  # first ATR
-    tr_sum = atr_series.rolling(window=lookback_chop, min_periods=lookback_chop).sum().values
-    highest_high = pd.Series(high).rolling(window=lookback_chop, min_periods=lookback_chop).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_chop, min_periods=lookback_chop).min().values
-    chop = 100 * np.log10(tr_sum / (lookback_chop * (highest_high - lowest_low))) / np.log10(lookback_chop)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(lookback_dc, lookback_vol, lookback_chop, 1), n):
+    for i in range(max(lookback_dc, lookback_vol, 1), n):  # Start after sufficient data
         # Skip if any required data is NaN
         if (np.isnan(prior_high_max[i]) or np.isnan(prior_low_min[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i]) or np.isnan(chop[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Only trade in ranging markets (choppiness > 61.8)
-        if chop[i] <= 61.8:
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
@@ -67,13 +53,13 @@ def generate_signals(prices):
             # LONG: Price breaks above Donchian upper band, close > 1d EMA34, volume spike
             if (high[i] > prior_high_max[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 1.5 * avg_volume[i]):
+                volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
             # SHORT: Price breaks below Donchian lower band, close < 1d EMA34, volume spike
             elif (low[i] < prior_low_min[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 1.5 * avg_volume[i]):
+                  volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
