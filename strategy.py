@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_ParabolicSAR_1dTrend_Filter
-# Hypothesis: Parabolic SAR on 12h with 1d EMA trend filter for trend-following entries.
-# Works in bull/bear by following 1d trend; SAR provides dynamic stop/reversal.
-# Target: 20-50 trades/year per symbol to minimize fee drag.
+# 1D_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Daily chart Camarilla pivot (R1/S1) breakout filtered by 1-week trend and volume spike.
+# Uses weekly trend direction to filter breakouts, ensuring alignment with higher timeframe momentum.
+# Volume spike confirms institutional interest in the breakout.
+# Designed for low trade frequency (<25/year) to minimize fee drag and work in both bull/bear markets.
 
-name = "12h_ParabolicSAR_1dTrend_Filter"
-timeframe = "12h"
+name = "1D_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,53 +21,40 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
 
-    # Parabolic SAR on 12h
-    # Initialize
-    psar = np.zeros(n)
-    psar[0] = low[0]
-    trend = 1  # 1 for up, -1 for down
-    af = 0.02  # acceleration factor
-    max_af = 0.2
-    ep = high[0] if trend == 1 else low[0]  # extreme point
+    # Calculate Camarilla pivot levels for daily (based on previous daily bar)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
 
-    for i in range(1, n):
-        psar[i] = psar[i-1] + af * (ep - psar[i-1])
-        # Reverse trend if price crosses SAR
-        if trend == 1 and low[i] < psar[i]:
-            trend = -1
-            psar[i] = ep
-            af = 0.02
-            ep = low[i]
-        elif trend == -1 and high[i] > psar[i]:
-            trend = 1
-            psar[i] = ep
-            af = 0.02
-            ep = high[i]
-        else:
-            # Update extreme point and acceleration factor
-            if trend == 1:
-                if high[i] > ep:
-                    ep = high[i]
-                    af = min(af + 0.02, max_af)
-            else:
-                if low[i] < ep:
-                    ep = low[i]
-                    af = min(af + 0.02, max_af)
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+    rang = prev_high - prev_low
+    r1 = prev_close + rang * 1.1 / 12
+    s1 = prev_close - rang * 1.1 / 12
 
-    # Trend filter: 1d EMA50
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Trend filter: 1w EMA50
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+
+    # Volume confirmation: current volume > 2.0 x 20-period average (strong spike)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(1, n):
-        if (np.isnan(psar[i]) or np.isnan(ema50_1d_aligned[i])):
+    for i in range(20, n):
+        # Skip if any required value is NaN
+        if (np.isnan(r1[i]) or 
+            np.isnan(s1[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,26 +63,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above SAR and above 1d EMA50
-            if close[i] > psar[i] and close[i] > ema50_1d_aligned[i]:
+            # LONG: Break above R1 in uptrend with volume spike
+            if (close[i] > r1[i] and 
+                close[i] > ema50_1w_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below SAR and below 1d EMA50
-            elif close[i] < psar[i] and close[i] < ema50_1d_aligned[i]:
+            # SHORT: Break below S1 in downtrend with volume spike
+            elif (close[i] < s1[i] and 
+                  close[i] < ema50_1w_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below SAR or trend turns down
-            if close[i] < psar[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price breaks below S1 or trend turns down
+            if close[i] < s1[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above SAR or trend turns up
-            if close[i] > psar[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above R1 or trend turns up
+            if close[i] > r1[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
