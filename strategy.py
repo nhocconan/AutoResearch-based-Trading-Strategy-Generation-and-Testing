@@ -1,16 +1,9 @@
-#!/usr/bin/env python3
-# 6h_WeeklyPivot_Breakout_1dTrend_Volume
-# Hypothesis: Price reacts to weekly pivot levels (R2/S2) derived from weekly timeframe.
-# Go long when price breaks above R2 with 1d uptrend and volume confirmation.
-# Go short when price breaks below S2 with 1d downtrend and volume confirmation.
-# Using weekly pivots captures weekly market structure, reducing noise compared to daily.
-# Trend filter ensures alignment with higher timeframe momentum.
-# Volume spike confirms institutional participation, reducing false breakouts.
-# Works in bull markets (breakouts above R2 in uptrend) and bear markets (breakdowns below S2 in downtrend).
-# Target: 15-30 trades/year per symbol to minimize fee drag.
+# [12h_Williams_Alligator_Elder_Ray] Williams Alligator for trend direction + Elder Ray for momentum + volume confirmation on 12h
+# Works in bull/bear: Alligator identifies trend, Elder Ray confirms momentum, volume filters false signals
+# Target: 25-35 trades/year per symbol to minimize fee drag
 
-name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Williams_Alligator_Elder_Ray"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -27,44 +20,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot calculation
-    df_w = get_htf_data(prices, '1w')
+    # Get weekly data for trend context
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot levels (R2, S2) from previous weekly bar
-    # Pivot = (H + L + C) / 3
-    # R2 = Pivot + (H - L)
-    # S2 = Pivot - (H - L)
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Calculate weekly EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    pivot_w = (high_w + low_w + close_w) / 3
-    weekly_range = high_w - low_w
-    r2 = pivot_w + weekly_range
-    s2 = pivot_w - weekly_range
+    # Williams Alligator on 12h: SMAs with specific periods
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values  # 13-period SMA shifted 8
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values   # 8-period SMA shifted 5
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values    # 5-period SMA shifted 3
     
-    # 1d trend: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Align indicators to 6h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_w, s2)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike: volume > 2.0 * 4-period average (1 day worth at 6h)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_spike = volume > 2.0 * vol_ma_4
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,26 +57,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R2 + 1d uptrend + volume spike
-            if close[i] > r2_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+            # LONG: Lips > Teeth > Jaw (bullish alignment) + Bull Power > 0 + Weekly trend up + Volume confirm
+            if (lips[i] > teeth[i] > jaw[i] and 
+                bull_power[i] > 0 and 
+                close[i] > ema50_1w_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S2 + 1d downtrend + volume spike
-            elif close[i] < s2_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Jaw > Teeth > Lips (bearish alignment) + Bear Power < 0 + Weekly trend down + Volume confirm
+            elif (jaw[i] > teeth[i] > lips[i] and 
+                  bear_power[i] < 0 and 
+                  close[i] < ema50_1w_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S2 or trend reversal
-            if close[i] < s2_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Alligator turns bearish OR Bear Power negative OR Weekly trend breaks
+            if (jaw[i] > teeth[i] or bear_power[i] < 0 or close[i] < ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R2 or trend reversal
-            if close[i] > r2_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Alligator turns bullish OR Bull Power positive OR Weekly trend breaks
+            if (lips[i] > teeth[i] or bull_power[i] > 0 or close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
