@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_Breakout_Trend_Volume
-Hypothesis: Weekly pivot points (R1/S1) derived from weekly high/low/close act as strong support/resistance.
+1d_Weekly_R1_S1_Breakout_With_Pullback
+Hypothesis: Weekly pivot points (R1/S1) from weekly high/low/close act as strong support/resistance.
 Breakouts above weekly R1 or below S1 with volume confirmation and daily trend alignment capture momentum moves.
-Exit on reversion to weekly pivot point (PP) or trend reversal. Position size 0.25 targets ~15-25 trades/year to minimize fee drag.
+After breakout, wait for a pullback to the breakout level (R1/S1) or EMA20 before entering, reducing false breakouts.
+Exit on reversion to weekly pivot point (PP) or trend reversal. Position size 0.25 targets ~15-25 trades/year.
 Works in both bull (breakouts with trend) and bear (mean reversion at extremes) markets via trend filter.
 """
 
-name = "1d_Weekly_Pivot_Breakout_Trend_Volume"
+name = "1d_Weekly_R1_S1_Breakout_With_Pullback"
 timeframe = "1d"
 leverage = 1.0
 
@@ -49,23 +50,37 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
+    # EMA20 for pullback entry
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    breakout_level = 0.0  # tracks breakout level for pullback entry
     
     for i in range(50, n):  # Start after warmup
         if position == 0:
-            # LONG: Breakout above weekly R1 with volume confirmation and uptrend
-            if (close[i] > weekly_r1_aligned[i] and 
-                volume_filter[i] and 
-                close[i] > ema50[i]):
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Breakdown below weekly S1 with volume confirmation and downtrend
-            elif (close[i] < weekly_s1_aligned[i] and 
-                  volume_filter[i] and 
-                  close[i] < ema50[i]):
-                signals[i] = -0.25
-                position = -1
+            # Check for potential breakout
+            bullish_breakout = (close[i] > weekly_r1_aligned[i]) and volume_filter[i]
+            bearish_breakout = (close[i] < weekly_s1_aligned[i]) and volume_filter[i]
+            
+            if bullish_breakout:
+                # Set breakout level and wait for pullback
+                breakout_level = weekly_r1_aligned[i]
+                # Enter on pullback to breakout level or EMA20 with uptrend
+                if (close[i] <= breakout_level * 1.005 or close[i] <= ema20[i]) and close[i] > ema50[i]:
+                    signals[i] = 0.25
+                    position = 1
+                else:
+                    signals[i] = 0.0
+            elif bearish_breakout:
+                # Set breakout level and wait for pullback
+                breakout_level = weekly_s1_aligned[i]
+                # Enter on pullback to breakout level or EMA20 with downtrend
+                if (close[i] >= breakout_level * 0.995 or close[i] >= ema20[i]) and close[i] < ema50[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
