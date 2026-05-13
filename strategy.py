@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_1w_RSI_Divergence_Trend
-Hypothesis: On 1d timeframe, RSI divergence with price, confirmed by 1w trend,
-provides high-probability reversal signals in both bull and bear markets.
-RSI divergence indicates weakening momentum before price reverses.
-Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+6h_12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+Hypothesis: On 6h timeframe, Camarilla R3/S3 breakouts with 1d trend and volume confirmation
+provide high-probability continuation trades in both bull and bear markets.
+Camarilla levels act as key support/resistance; breakouts above R3 or below S3 with volume
+indicate strong momentum in the direction of the daily trend.
 """
 
-name = "1d_1w_RSI_Divergence_Trend"
-timeframe = "1d"
+name = "6h_12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,88 +17,108 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 14-period RSI
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:13] = 50  # Neutral value for initialization
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # 1w trend: 21 EMA
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    uptrend_1w = close_1w > ema_21_1w
-    downtrend_1w = close_1w < ema_21_1w
+    # Calculate Camarilla levels for each 12h bar
+    R3 = np.zeros(len(df_12h))
+    S3 = np.zeros(len(df_12h))
+    R4 = np.zeros(len(df_12h))
+    S4 = np.zeros(len(df_12h))
     
-    # Align 1w trend to 1d
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    for i in range(len(df_12h)):
+        H = high_12h[i]
+        L = low_12h[i]
+        C = close_12h[i]
+        R3[i] = C + (H - L) * 1.1 / 6
+        S3[i] = C - (H - L) * 1.1 / 6
+        R4[i] = C + (H - L) * 1.1 / 2
+        S4[i] = C - (H - L) * 1.1 / 2
     
-    # Calculate RSI slope (3-period) and price slope (3-period)
-    rsi_slope = np.zeros(n)
-    price_slope = np.zeros(n)
+    # Align Camarilla levels to 6h
+    R3_6h = align_htf_to_ltf(prices, df_12h, R3)
+    S3_6h = align_htf_to_ltf(prices, df_12h, S3)
+    R4_6h = align_htf_to_ltf(prices, df_12h, R4)
+    S4_6h = align_htf_to_ltf(prices, df_12h, S4)
     
-    for i in range(3, n):
-        rsi_slope[i] = rsi[i] - rsi[i-3]
-        price_slope[i] = close[i] - close[i-3]
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Detect divergences
-    # Bullish divergence: price makes lower low, RSI makes higher low
-    bullish_divergence = (price_slope < 0) & (rsi_slope > 0)
-    # Bearish divergence: price makes higher high, RSI makes lower high
-    bearish_divergence = (price_slope > 0) & (rsi_slope < 0)
+    close_1d = df_1d['close'].values
+    
+    # 1d trend: 34 EMA
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
+    
+    # Align 1d trend to 6h
+    uptrend_1d_6h = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_6h = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
+    # Volume filter: 20-bar average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Get aligned values
-        uptrend = uptrend_1w_aligned[i]
-        downtrend = downtrend_1w_aligned[i]
+    for i in range(100, n):
+        # Skip if volume filter not met
+        if not vol_filter[i]:
+            if position == 1:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        r3 = R3_6h[i]
+        s3 = S3_6h[i]
+        r4 = R4_6h[i]
+        s4 = S4_6h[i]
+        uptrend = uptrend_1d_6h[i]
+        downtrend = downtrend_1d_6h[i]
         
         if position == 0:
-            # LONG: 1w uptrend + bullish RSI divergence
-            if uptrend and bullish_divergence[i]:
+            # LONG: Price breaks above R3 with volume, in 1d uptrend
+            if uptrend and close[i] > r3 and close[i-1] <= r3:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1w downtrend + bearish RSI divergence
-            elif downtrend and bearish_divergence[i]:
+            # SHORT: Price breaks below S3 with volume, in 1d downtrend
+            elif downtrend and close[i] < s3 and close[i-1] >= s3:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 1w trend turns down or bearish divergence appears
-            if not uptrend or bearish_divergence[i]:
+            # EXIT LONG: Price reaches R4 or 1d trend turns down
+            if close[i] >= r4 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 1w trend turns up or bullish divergence appears
-            if not downtrend or bullish_divergence[i]:
+            # EXIT SHORT: Price reaches S4 or 1d trend turns up
+            if close[i] <= s4 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
