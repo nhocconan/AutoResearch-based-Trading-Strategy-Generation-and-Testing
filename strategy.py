@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 level AND close > 1d EMA34 AND volume > 2.0x average.
-# Short when price breaks below Camarilla S3 level AND close < 1d EMA34 AND volume > 2.0x average.
+# Hypothesis: 1h 4h Donchian breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above 4h Donchian upper channel (20) AND close > 1d EMA50 AND volume > 1.5x average.
+# Short when price breaks below 4h Donchian lower channel (20) AND close < 1d EMA50 AND volume > 1.5x average.
 # Uses ATR-based trailing stop (2.5x) for risk control.
-# Camarilla levels identify key intraday support/resistance from prior 1d session.
-# 1d EMA34 filters for primary trend alignment to avoid counter-trend trades.
-# Volume spike confirms institutional participation in breakout.
-# Target: 12-37 trades/year (50-150 total over 4 years) on 12h timeframe.
+# 4h Donchian provides structure, 1d EMA50 filters trend, volume confirms validity.
+# Target: 15-37 trades/year (60-150 total over 4 years) on 1h timeframe.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Volume_v1"
-timeframe = "12h"
+name = "1h_Donchian20_1dEMA50_Volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -34,30 +32,28 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels from prior 1d session
-    # Need prior 1d high, low, close - we'll use HTF 1d data shifted by 1 bar
+    # Get 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # Calculate Donchian channels (20-period) on 4h
+    highest_high_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    donchian_20_high = align_htf_to_ltf(prices, df_4h, highest_high_20)
+    donchian_20_low = align_htf_to_ltf(prices, df_4h, lowest_low_20)
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R3 and S3 levels from prior 1d candle
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    camarilla_r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Calculate EMA50 on 1d close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align HTF Camarilla levels to LTF (12h) - already aligned to completed 1d bar
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    
-    # Get 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: volume > 2.0x 20-period average (strict to reduce trades)
+    # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,20 +62,20 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_20_high[i]) or np.isnan(donchian_20_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Break above Camarilla R3 AND close > 1d EMA34 AND volume spike
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # LONG: Price > 4h Donchian upper AND close > 1d EMA50 AND volume confirmation
+            if close[i] > donchian_20_high[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
+                signals[i] = 0.20
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Break below Camarilla S3 AND close < 1d EMA34 AND volume spike
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # SHORT: Price < 4h Donchian lower AND close < 1d EMA50 AND volume confirmation
+            elif close[i] < donchian_20_low[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
+                signals[i] = -0.20
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
@@ -99,7 +95,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
@@ -114,7 +110,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
