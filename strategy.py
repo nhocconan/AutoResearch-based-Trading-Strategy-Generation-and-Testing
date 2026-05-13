@@ -1,12 +1,6 @@
-# 4h_Camarilla_R3S3_Breakout_1D_Trend_Volume
-# Hypothesis: Camarilla R3/S3 levels act as strong support/resistance. Breakouts above R3 or below S3 with
-# volume confirmation and daily trend alignment capture momentum moves. Works in both bull and bear markets
-# by following the dominant daily trend while using intraday levels for precise entries.
-# Target: 20-40 trades/year per symbol with disciplined entries to avoid fee drag.
-
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1D_Trend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,17 +17,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for each 4h bar using prior bar's OHLC
+    # Calculate Camarilla levels for each 12h bar using prior bar's OHLC
     camarilla_R3 = np.full(n, np.nan)
     camarilla_S3 = np.full(n, np.nan)
     
     for i in range(1, n):
-        # Use previous bar's OHLC to calculate current levels (no look-ahead)
         prev_high = high[i-1]
         prev_low = low[i-1]
         prev_close = close[i-1]
         range_val = prev_high - prev_low
-        
         camarilla_R3[i] = prev_close + range_val * 1.1 / 4
         camarilla_S3[i] = prev_close - range_val * 1.1 / 4
     
@@ -47,7 +39,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current volume > 1.5 x 20-period average
+    # Volume filter: current volume > 1.8 x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -63,7 +55,7 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        vol_condition = volume[i] > 1.5 * vol_ma_20[i]
+        vol_condition = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 0:
             # LONG: Break above R3 with daily uptrend and volume
