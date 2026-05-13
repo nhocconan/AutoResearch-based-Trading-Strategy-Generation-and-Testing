@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Use 4h Camarilla R3/S3 breakouts with 1d EMA34 trend filter and volume confirmation.
-# Camarilla levels provide precise support/resistance; EMA filter ensures trades align with higher-timeframe trend.
-# Works in bull (follows breaks with bullish 1d trend) and bear (avoids bullish breaks in bearish 1d trend).
-# Target: 75-200 total trades over 4 years = 19-50/year.
+# 12h_34EMA_Momentum_1wTrend_Volume
+# Hypothesis: 12h EMA34 momentum with weekly trend filter and volume confirmation.
+# In bull markets, price above 12h EMA34 captures momentum; weekly trend filter avoids counter-trend trades.
+# In bear markets, the weekly trend filter prevents longs in downtrends and shorts in uptrends.
+# Volume confirmation ensures breakouts have participation. Target: 50-150 total trades over 4 years.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_34EMA_Momentum_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,36 +23,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
 
-    # Volume filter: >1.5x 20-period average
+    # Volume filter: >1.5x 20-period average on 12h
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
-    # Calculate Camarilla levels from previous day's range
-    # Camarilla: R3 = close + 1.1*(high-low)*1.1/2, S3 = close - 1.1*(high-low)*1.1/2
-    # Using previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
-    camarilla_r3 = prev_close + 1.1 * prev_range * 1.1 / 2
-    camarilla_s3 = prev_close - 1.1 * prev_range * 1.1 / 2
-    
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate 12h EMA34 for momentum
+    ema_34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(34, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_avg_20[i]) or 
+            np.isnan(ema_34[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,30 +51,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above Camarilla R3 + price above 1d EMA (bullish trend) + volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_34_aligned[i] and
+            # LONG: price above 12h EMA34 + weekly uptrend + volume spike
+            if (close[i] > ema_34[i] and 
+                ema_34_1w_aligned[i] > ema_34_1w_aligned[max(0, i-1)] and  # weekly EMA rising
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below Camarilla S3 + price below 1d EMA (bearish trend) + volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and
+            # SHORT: price below 12h EMA34 + weekly downtrend + volume spike
+            elif (close[i] < ema_34[i] and 
+                  ema_34_1w_aligned[i] < ema_34_1w_aligned[max(0, i-1)] and  # weekly EMA falling
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below Camarilla S3 or price below 1d EMA
-            if (close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_aligned[i]):
+            # EXIT LONG: price below 12h EMA34 or weekly trend turns down
+            if (close[i] < ema_34[i] or 
+                ema_34_1w_aligned[i] < ema_34_1w_aligned[max(0, i-1)]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above Camarilla R3 or price above 1d EMA
-            if (close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_aligned[i]):
+            # EXIT SHORT: price above 12h EMA34 or weekly trend turns up
+            if (close[i] > ema_34[i] or 
+                ema_34_1w_aligned[i] > ema_34_1w_aligned[max(0, i-1)]):
                 signals[i] = 0.0
                 position = 0
             else:
