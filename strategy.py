@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: On 12h timeframe, breakout beyond Camarilla R1/S1 levels (daily support/resistance) 
-# with alignment to daily trend (price vs EMA34) and volume confirmation captures strong momentum moves.
-# Uses only two conditions: trend alignment + breakout + volume spike.
-# Designed for low-frequency, high-quality setups (target: 20-50 trades/year) to minimize fee drag.
-# Works in both bull and bear markets by following daily trend direction.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Breakout beyond daily Camarilla R1/S1 levels with daily trend alignment and volume
+# spike captures momentum in both bull and bear markets. Daily trend filter avoids counter-trend
+# trades. Volume spike ensures institutional participation. Targets low-frequency, high-quality
+# setups to minimize fee drag on 4h chart. Uses R1/S1 (not R3/S3) for slightly more frequent
+# but still filtered signals, balanced with strict trend and volume requirements.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -38,7 +38,7 @@ def generate_signals(prices):
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
 
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
 
@@ -46,7 +46,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Volume spike: volume > 2.0 * 20-period average (~10 days at 12h)
+    # Volume spike: volume > 2.0 * 20-period average (~3.3 days at 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * vol_ma_20
 
