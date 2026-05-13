@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Chaikin_Money_Flow_Trend_Filter
-Hypothesis: Chaikin Money Flow (CMF) measures institutional buying/selling pressure. 
-In bull markets: CMF > 0.10 + price > EMA50 = long. 
-In bear markets: CMF < -0.10 + price < EMA50 = short.
-Uses 12h trend filter for higher timeframe bias and volume confirmation to avoid false signals.
-Target: 20-40 trades/year per symbol with controlled risk.
+1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+Hypothesis: Camarilla pivot levels (R1/S1) on 1h with 4h trend filter and volume confirmation work in both bull and bear markets.
+Breakout above R1 with 4h uptrend and volume spike = long.
+Breakdown below S1 with 4h downtrend and volume spike = short.
+Exit on opposite level touch or trend reversal. Uses 1d trend filter for higher timeframe bias.
+Target: 15-35 trades/year per symbol (60-140 total over 4 years).
 """
 
-name = "4h_Chaikin_Money_Flow_Trend_Filter"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -21,81 +21,90 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Chaikin Money Flow (20-period)
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Avoid division by zero
-    hl_range = high - low
-    mfm = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0.0)
-    # Money Flow Volume = MFM * Volume
-    mfv = mfm * volume
-    # CMF = 20-period sum of MFV / 20-period sum of volume
-    mfv_sum = np.zeros(n)
-    vol_sum = np.zeros(n)
-    for i in range(20, n):
-        mfv_sum[i] = np.sum(mfv[i-20:i])
-        vol_sum[i] = np.sum(volume[i-20:i])
-    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0.0)
+    # Camarilla levels (H4, L4, R1, S1) - using previous bar's range
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # Using previous bar to avoid look-ahead
+    prev_high = np.concatenate([[high[0]], high[:-1]])
+    prev_low = np.concatenate([[low[0]], low[:-1]])
+    prev_close = np.concatenate([[close[0]], close[:-1]])
     
-    # EMA50 for trend
+    range_hl = prev_high - prev_low
+    r1 = prev_close + 1.1 * range_hl / 12
+    s1 = prev_close - 1.1 * range_hl / 12
+    
+    # 4h trend: EMA50
     ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_4h = close > ema_50
+    downtrend_4h = close < ema_50
     
-    # 12h trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1d trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = df_12h['close'].values > ema_50_12h
-    downtrend_12h = df_12h['close'].values < ema_50_12h
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 1.8 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.5 * vol_ma
+    volume_conf = volume > 1.8 * vol_ma
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
+        # Skip if outside session
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
+            
         # Get values
-        cmf_val = cmf[i]
-        price_above_ema = close[i] > ema_50[i]
-        price_below_ema = close[i] < ema_50[i]
-        uptrend = uptrend_12h_aligned[i]
-        downtrend = downtrend_12h_aligned[i]
+        r1_level = r1[i]
+        s1_level = s1[i]
+        uptrend = uptrend_4h[i]
+        downtrend = downtrend_4h[i]
+        uptrend_htf = uptrend_1d_aligned[i]
+        downtrend_htf = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: CMF > 0.10, price above EMA50, 12h uptrend, volume confirmation
-            if cmf_val > 0.10 and price_above_ema and uptrend and vol_conf:
-                signals[i] = 0.25
+            # LONG: break above R1, 4h uptrend, 1d uptrend filter, volume confirmation
+            if close[i] > r1_level and uptrend and uptrend_htf and vol_conf:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: CMF < -0.10, price below EMA50, 12h downtrend, volume confirmation
-            elif cmf_val < -0.10 and price_below_ema and downtrend and vol_conf:
-                signals[i] = -0.25
+            # SHORT: break below S1, 4h downtrend, 1d downtrend filter, volume confirmation
+            elif close[i] < s1_level and downtrend and downtrend_htf and vol_conf:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: CMF < 0.00 or price below EMA50
-            if cmf_val < 0.00 or price_below_ema:
+            # EXIT LONG: touch S1 or 4h trend turns down
+            if close[i] < s1_level or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: CMF > 0.00 or price above EMA50
-            if cmf_val > 0.00 or price_above_ema:
+            # EXIT SHORT: touch R1 or 4h trend turns up
+            if close[i] > r1_level or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
