@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R reversal with 1d EMA50 trend filter and volume confirmation.
-# Long when Williams %R(14) crosses above -80 (oversold reversal) AND price > 1d EMA50 AND volume > 1.5x 20-period average.
-# Short when Williams %R(14) crosses below -20 (overbought reversal) AND price < 1d EMA50 AND volume > 1.5x 20-period average.
-# Exit on opposite Williams %R signal or ATR(14) trailing stop (2.0x).
-# Williams %R captures mean reversion in 6h swings, EMA50 filters intermediate trend on 1d, volume confirms momentum.
-# Designed for BTC/ETH with strict entry to avoid overtrading and work in both bull/bear regimes.
+# Hypothesis: 12h Williams Alligator (Jaw/Teeth/Lips) with 1d EMA50 trend filter and volume confirmation.
+# Long when Alligator is bullish (Lips > Teeth > Jaw) AND price > 1d EMA50 AND volume > 2.0x 24-period average.
+# Short when Alligator is bearish (Lips < Teeth < Jaw) AND price < 1d EMA50 AND volume > 2.0x 24-period average.
+# Exit on ATR(14) trailing stop (2.0x). Uses 12h primary timeframe and 1d HTF for trend alignment.
+# Williams Alligator identifies trending vs ranging markets via smoothed SMAs, EMA50 filters intermediate trend,
+# volume spike confirms breakout authenticity. Designed for BTC/ETH with strict entry to avoid overtrading.
 
-name = "6h_WilliamsR_Reversal_1dEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,7 +29,7 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Get 1d data for EMA50 trend filter (MTF)
@@ -39,19 +39,28 @@ def generate_signals(prices):
     # Calculate EMA50 on 1d close
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF arrays to 6h timeframe (wait for completed 1d bar)
+    # Align HTF arrays to 12h timeframe (wait for completed 1d bar)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Williams %R(14) on 6h timeframe
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    # Williams Alligator on 12h: Jaw (13), Teeth (8), Lips (5) - all SMAs
+    # Jaw: 13-period SMA, shifted 8 bars
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)
+    jaw[:8] = np.nan  # First 8 values invalid due to shift
     
-    # Volume filter: current 6h volume > 1.5x 20-period average (momentum confirmation)
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_6h)
+    # Teeth: 8-period SMA, shifted 5 bars
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)
+    teeth[:5] = np.nan  # First 5 values invalid due to shift
+    
+    # Lips: 5-period SMA, shifted 3 bars
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips, 3)
+    lips[:3] = np.nan  # First 3 values invalid due to shift
+    
+    # Volume filter: current 12h volume > 2.0x 24-period average (spike confirmation)
+    vol_ma_12h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (2.0 * vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,19 +69,19 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_6h[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_12h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R crosses above -80 (oversold reversal) AND price > 1d EMA50 AND volume spike
-            if i > 0 and williams_r[i-1] <= -80 and williams_r[i] > -80 and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
+            # LONG: Alligator bullish (Lips > Teeth > Jaw) AND price > 1d EMA50 AND volume spike
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Williams %R crosses below -20 (overbought reversal) AND price < 1d EMA50 AND volume spike
-            elif i > 0 and williams_r[i-1] >= -20 and williams_r[i] < -20 and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
+            # SHORT: Alligator bearish (Lips < Teeth < Jaw) AND price < 1d EMA50 AND volume spike
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -85,10 +94,9 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: Williams %R crosses above -20 (overbought) OR trailing stop hit (2.0x ATR)
-            williams_exit = i > 0 and williams_r[i-1] < -20 and williams_r[i] >= -20
+            # EXIT LONG: trailing stop hit (2.0x ATR)
             trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
-            if williams_exit or trailing_stop:
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
@@ -101,10 +109,9 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: Williams %R crosses below -80 (oversold) OR trailing stop hit (2.0x ATR)
-            williams_exit = i > 0 and williams_r[i-1] > -80 and williams_r[i] <= -80
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
             trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
-            if williams_exit or trailing_stop:
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
