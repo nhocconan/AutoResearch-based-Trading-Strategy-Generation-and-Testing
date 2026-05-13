@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Kelly_RSI_Pullback_Trend
-Hypothesis: Daily RSI pullbacks in trending markets offer high-probability entries. 
-Uses RSI(14) < 30 for longs and > 70 for shorts in the direction of 200-day EMA trend.
-Kelly sizing (half-Kelly) with win rate 60% and win/loss ratio 1.5 gives ~22% position size.
-Volatility filter (ATR ratio) avoids choppy markets. Targets 15-25 trades/year.
+1h_OBV_Trend_Filter
+Hypothesis: On-Balance Volume (OBV) confirms trend strength. When OBV makes a new high/low with price confirmation and aligned 4h trend, it signals continuation. 1h timeframe for entry timing, 4h for trend filter. Target: 15-30 trades/year to avoid fee drag. Works in bull/bear via trend filter.
 """
 
-name = "1d_Kelly_RSI_Pullback_Trend"
-timeframe = "1d"
+name = "1h_OBV_Trend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,70 +14,53 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(50).values
+    # Get 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
     
-    # 200-day EMA trend filter
-    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate OBV
+    price_change = np.diff(close, prepend=close[0])
+    volume_signed = np.where(price_change > 0, volume, np.where(price_change < 0, -volume, 0))
+    obv = np.cumsum(volume_signed)
     
-    # ATR(14) for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # ATR ratio: current ATR / 50-day average ATR (low volatility filter)
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / (atr_ma + 1e-10)
-    low_volatility = atr_ratio < 1.5  # Only trade in normal/low volatility
+    # 4h trend filter: EMA(50) on close
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(1, n):
+        # Skip first bar for OBV calculation
         if position == 0:
-            # LONG: RSI oversold (<30) in uptrend (close > EMA200) + low volatility
-            if (rsi_values[i] < 30 and 
-                close[i] > ema200[i] and 
-                low_volatility[i]):
-                signals[i] = 0.22  # Half-Kelly size
+            # LONG: OBV makes new high, price above 4h EMA50 (uptrend)
+            if obv[i] > obv[i-1] and close[i] > ema50_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: RSI overbought (>70) in downtrend (close < EMA200) + low volatility
-            elif (rsi_values[i] > 70 and 
-                  close[i] < ema200[i] and 
-                  low_volatility[i]):
-                signals[i] = -0.22
+            # SHORT: OBV makes new low, price below 4h EMA50 (downtrend)
+            elif obv[i] < obv[i-1] and close[i] < ema50_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought (>70) or trend change
-            if rsi_values[i] > 70 or close[i] < ema200[i]:
+            # EXIT LONG: OBV makes new low OR price breaks below 4h EMA50
+            if obv[i] < obv[i-1] or close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.22
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: RSI oversold (<30) or trend change
-            if rsi_values[i] < 30 or close[i] > ema200[i]:
+            # EXIT SHORT: OBV makes new high OR price breaks above 4h EMA50
+            if obv[i] > obv[i-1] or close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.22
+                signals[i] = -0.20
     
     return signals
