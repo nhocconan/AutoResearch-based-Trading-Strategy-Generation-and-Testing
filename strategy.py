@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX regime filter and volume confirmation.
-# Long when price breaks above Donchian upper band AND 1d ADX > 25 (trending) AND volume > 2.0x 20-period average.
-# Short when price breaks below Donchian lower band AND 1d ADX > 25 (trending) AND volume > 2.0x 20-period average.
-# Uses ATR(14) trailing stop (2.5x) for risk control.
-# Donchian channels provide clear structure for breakouts in both bull and bear markets.
-# 1d ADX > 25 ensures we only trade in trending conditions, avoiding whipsaws in ranges.
-# Volume spike filter confirms breakout legitimacy. Target: 100-180 total trades over 4 years (25-45/year) on 4h.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and choppiness regime filter.
+# Long when price breaks above Camarilla R3 AND 1d volume > 2.0x 20-period average AND 4h choppiness index > 61.8 (range).
+# Short when price breaks below Camarilla S3 AND 1d volume > 2.0x 20-period average AND 4h choppiness index > 61.8 (range).
+# Uses ATR(14) trailing stop (2.0x) for risk control.
+# Camarilla pivots provide precise intraday support/resistance levels that work in ranging markets.
+# Choppiness index > 61.8 ensures we only trade in ranging conditions, avoiding false breakouts in strong trends.
+# Volume spike confirms breakout legitimacy. Target: 80-160 total trades over 4 years (20-40/year) on 4h.
 
-name = "4h_Donchian20_1dADX_Trend_Volume_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dVolume_Chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,50 +33,44 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Get 1d data for ADX calculation
+    # Calculate Camarilla levels (based on previous day's OHLC)
+    # For 4h timeframe, we use 1d OHLC to calculate Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX(14) on 1d data
-    # True Range
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Camarilla levels: R3, R2, R1, PP, S1, S2, S3
+    # PP = (high + low + close) / 3
+    # Range = high - low
+    # R3 = PP + Range * 1.1/2
+    # S3 = PP - Range * 1.1/2
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    rang = high_1d - low_1d
+    r3 = pp + (rang * 1.1 / 2.0)
+    s3 = pp - (rang * 1.1 / 2.0)
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Smoothed DM and TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    tr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False).mean().values
+    # Calculate volume confirmation: volume > 2.0x 20-period average (1d)
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_1d = df_1d['volume'].values > (2.0 * vol_ma_20_1d)
+    volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d.astype(float))
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align 1d ADX to 4h timeframe (wait for 1d bar to close)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate volume confirmation: volume > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    # Calculate 4h choppiness index (14-period)
+    # CHOP = 100 * log10(sum(ATR1) / (n * log10(highest_high - lowest_low))) / log10(n)
+    # Simplified: CHOP = 100 * log10(sum(TR14) / (14 * log10(HH14 - LL14))) / log10(14)
+    tr_4h = tr  # Already calculated TR for ATR
+    sum_tr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop_denominator = 14 * np.log10(highest_high_14 - lowest_low_14 + 1e-10)
+    chop_denominator = np.where(chop_denominator <= 0, np.nan, chop_denominator)
+    chop_ratio = sum_tr_14 / chop_denominator
+    chop_ratio = np.where(chop_ratio <= 0, np.nan, chop_ratio)
+    chop = 100 * np.log10(chop_ratio) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,19 +79,20 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(volume_confirm_1d_aligned[i]) or np.isnan(chop[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Donchian upper band AND 1d ADX > 25 AND volume confirmation spike
-            if close[i] > highest_high[i] and adx_1d_aligned[i] > 25 and volume_confirm[i]:
+            # LONG: Price > Camarilla R3 AND 1d volume confirmation AND chop > 61.8 (range)
+            if close[i] > r3_aligned[i] and volume_confirm_1d_aligned[i] > 0.5 and chop[i] > 61.8:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Donchian lower band AND 1d ADX > 25 AND volume confirmation spike
-            elif close[i] < lowest_low[i] and adx_1d_aligned[i] > 25 and volume_confirm[i]:
+            # SHORT: Price < Camarilla S3 AND 1d volume confirmation AND chop > 61.8 (range)
+            elif close[i] < s3_aligned[i] and volume_confirm_1d_aligned[i] > 0.5 and chop[i] > 61.8:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -110,8 +105,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -125,8 +120,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
