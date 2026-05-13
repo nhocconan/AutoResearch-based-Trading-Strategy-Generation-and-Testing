@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend_Filter
-Hypothesis: Use 20-period Donchian channel breakouts with volume confirmation and 12h EMA50 trend filter.
-In trending markets, breakouts capture momentum; in ranging markets, volume filter reduces false signals.
-12h trend filter aligns with higher timeframe momentum to avoid counter-trend trades.
-Target: 20-40 trades/year per symbol (~80-160 total over 4 years).
-Works in both bull and bear markets by only taking trades in direction of higher timeframe trend.
+4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn
+Hypothesis: Use daily Camarilla pivot levels (R3/S3) as strong support/resistance. 
+Breakout above R3 with 1d EMA34 uptrend and volume confirmation signals long. 
+Breakdown below S3 with 1d EMA34 downtrend and volume confirmation signals short. 
+Camarilla levels from higher timeframe provide robust S/R that works in both bull/bear markets, 
+while volume confirmation filters false breakouts. Target: 20-50 trades/year per symbol.
 """
 
-name = "4h_Donchian_Breakout_Volume_Trend_Filter"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,51 +26,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Daily Camarilla pivot levels (R3/S3)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = df_12h['close'].values > ema_50_12h
-    downtrend_12h = df_12h['close'].values < ema_50_12h
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
     
-    # 4h Donchian channel (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla pivot points
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+    daily_range = daily_high - daily_low
+    r3 = daily_pivot + (daily_range * 1.1 / 2)  # R3 = P + 1.1*(H-L)/2
+    s3 = daily_pivot - (daily_range * 1.1 / 2)  # S3 = P - 1.1*(H-L)/2
+    
+    # Align daily R3/S3 to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    uptrend_1d = daily_close > ema_34_1d
+    downtrend_1d = daily_close < ema_34_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average (stricter to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirm = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         if position == 0:
-            # LONG: break above upper band, 12h uptrend, volume confirmation
-            if close[i] > high_max[i] and uptrend_12h_aligned[i] and volume_confirm[i]:
+            # LONG: break above R3, 1d uptrend, volume confirmation
+            if close[i] > r3_aligned[i] and uptrend_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below lower band, 12h downtrend, volume confirmation
-            elif close[i] < low_min[i] and downtrend_12h_aligned[i] and volume_confirm[i]:
+            # SHORT: break below S3, 1d downtrend, volume confirmation
+            elif close[i] < s3_aligned[i] and downtrend_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price falls back below midpoint or trend reverses
-            midpoint = (high_max[i] + low_min[i]) / 2.0
-            if close[i] < midpoint or not uptrend_12h_aligned[i]:
+            # EXIT LONG: price falls back below daily pivot or trend reverses
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
+            if close[i] < pivot_aligned[i] or not uptrend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price rises back above midpoint or trend reverses
-            midpoint = (high_max[i] + low_min[i]) / 2.0
-            if close[i] > midpoint or not downtrend_12h_aligned[i]:
+            # EXIT SHORT: price rises back above daily pivot or trend reverses
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
+            if close[i] > pivot_aligned[i] or not downtrend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
