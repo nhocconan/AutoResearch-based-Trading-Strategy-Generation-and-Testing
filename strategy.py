@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume confirmation.
-# Long when Bull Power > 0 AND 1d EMA50 rising (uptrend) AND volume > 1.5x 20-period average.
-# Short when Bear Power < 0 AND 1d EMA50 falling (downtrend) AND volume > 1.5x 20-period average.
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R1 level AND 1d EMA50 > prior 1d EMA50 (uptrend) AND volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S1 level AND 1d EMA50 < prior 1d EMA50 (downtrend) AND volume > 1.5x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
-# Elder Ray measures bull/bear strength relative to EMA13, working in both trending and ranging markets.
-# 1d EMA50 ensures we trade with the dominant trend, reducing whipsaws in bear markets like 2025.
-# Volume confirmation adds validity to signals. Target: 50-150 total trades over 4 years (12-37/year) on 6h.
+# Camarilla levels provide precise intraday support/resistance that work in ranging and trending markets.
+# 1d EMA50 trend filter ensures we trade with the daily trend, reducing whipsaws.
+# Volume confirmation adds validity to breakouts. Target: 50-150 total trades over 4 years (12-37/year) on 12h.
 
-name = "6h_ElderRay_1dEMA50_Trend_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA50_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -33,21 +33,31 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate EMA(13) for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla levels (based on previous day's OHLC)
+    # We need daily OHLC for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    open_1d = df_1d['open'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Camarilla levels: R1, S1
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
     # Calculate EMA(50) on 1d data
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 6h timeframe (wait for 1d bar to close)
+    # Align 1d EMA50 to 12h timeframe (wait for 1d bar to close)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate volume confirmation: volume > 1.5x 20-period average
@@ -61,19 +71,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Bull Power > 0 AND 1d EMA50 rising (trending up) AND volume confirmation
-            if bull_power[i] > 0 and ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and volume_confirm[i]:
+            # LONG: Price > Camarilla R1 AND 1d EMA50 rising (trending up) AND volume confirmation
+            if close[i] > camarilla_r1_aligned[i] and ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Bear Power < 0 AND 1d EMA50 falling (trending down) AND volume confirmation
-            elif bear_power[i] < 0 and ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Price < Camarilla S1 AND 1d EMA50 falling (trending down) AND volume confirmation
+            elif close[i] < camarilla_s1_aligned[i] and ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
