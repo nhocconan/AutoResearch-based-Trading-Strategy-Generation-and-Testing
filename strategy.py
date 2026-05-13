@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA34 trend filter and ATR(14) volatility filter.
-# Long when price breaks above Donchian upper band, close > 1d EMA34, and ATR ratio > 0.8.
-# Short when price breaks below Donchian lower band, close < 1d EMA34, and ATR ratio > 0.8.
-# ATR ratio = current ATR(14) / 50-period ATR average to filter low-volatility breakouts.
-# Works in bull markets via trend-following breakouts and in bear markets via volatility expansion signals.
-# Discrete sizing 0.25 targets 50-150 total trades over 4 years on 6h timeframe.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 and close > 1d EMA34 with volume > 2.0x 20-bar average.
+# Short when price breaks below S3 and close < 1d EMA34 with volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 12h timeframe.
+# R3/S3 levels act as strong breakout zones; combined with 1d trend filter and volume spike reduces false breakouts.
+# Works in bull markets via breakouts and in bear markets via mean-reversion at extreme levels.
 
-name = "6h_Donchian20_1dEMA34_Trend_ATRFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,67 +24,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    lookback_dc = 20
-    highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().shift(1).values
+    lookback = 20  # for volume average
     
-    # Get 1d EMA34 for trend filter
+    # Calculate Camarilla levels (R3, S3) using previous day's OHLC
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
+    
+    # Calculate Camarilla for each 1d bar: based on previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla R3 = close + (high - low) * 1.1 / 4
+    # Camarilla S3 = close - (high - low) * 1.1 / 4
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Get 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ATR(14) for volatility filter
-    atr_period = 14
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(abs(high - pd.Series(close).shift(1)))
-    tr3 = pd.Series(abs(low - pd.Series(close).shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Calculate 50-period average ATR for volatility regime filter
-    avg_atr = pd.Series(atr).rolling(window=50, min_periods=50).mean().shift(1).values
-    atr_ratio = atr / np.where(avg_atr > 0, avg_atr, np.nan)  # Avoid division by zero
+    # Calculate average volume for confirmation (20-period)
+    avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback_dc, n):  # Start after sufficient data
+    for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr_ratio[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper, close > 1d EMA34, sufficient volatility
-            if (high[i] > highest_high[i] and 
+            # LONG: Price breaks above R3, close > 1d EMA34, volume spike
+            if (high[i] > R3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
-                atr_ratio[i] > 0.8):
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian lower, close < 1d EMA34, sufficient volatility
-            elif (low[i] < lowest_low[i] and 
+            # SHORT: Price breaks below S3, close < 1d EMA34, volume spike
+            elif (low[i] < S3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
-                  atr_ratio[i] > 0.8):
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian lower OR volatility drops
-            if (low[i] < lowest_low[i] or 
-                atr_ratio[i] < 0.5):
+            # EXIT LONG: Price breaks below S3 OR volume drops below average
+            if (low[i] < S3_aligned[i] or 
+                volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian upper OR volatility drops
-            if (high[i] > highest_high[i] or 
-                atr_ratio[i] < 0.5):
+            # EXIT SHORT: Price breaks above R3 OR volume drops below average
+            if (high[i] > R3_aligned[i] or 
+                volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
