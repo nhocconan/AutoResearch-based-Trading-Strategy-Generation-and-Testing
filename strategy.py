@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Williams_Vix_Fix_Long_Only
-Hypothesis: Williams Vix Fix identifies market fear/spikes in volatility, signaling potential reversal points. Combined with 1d trend filter and volume confirmation, it captures mean-reversion bounces in oversold conditions during both bull and bear markets. Long-only bias reduces whipsaw in strong trends, focusing on high-probability bounce setups.
+1d_Equity_Curve_Momentum
+Hypothesis: Daily equity curve momentum (price above 20-day EMA) combined with volume surge and weekly trend alignment captures institutional participation. Works in bull via trend-following and in bear via mean-reversion off weekly extremes when equity curve turns up from oversold.
 """
 
-name = "12h_Williams_Vix_Fix_Long_Only"
-timeframe = "12h"
+name = "1d_Equity_Curve_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,44 +22,52 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Williams Vix Fix calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Daily EMA20 for equity curve
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 50-period EMA on 1d close for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly trend: EMA50 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Williams Vix Fix: measures market fear, higher = more fear
-    # WVF = ((Highest Close in Period - Low) / Highest Close in Period) * 100
-    # We use 22-period lookback (approx 1 month of trading days)
-    highest_close = pd.Series(df_1d['close']).rolling(window=22, min_periods=22).max().values
-    wvf = ((highest_close - df_1d['low'].values) / highest_close) * 100
-    wvf_aligned = align_htf_to_ltf(prices, df_1d, wvf)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_surge = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         if position == 0:
-            # LONG: High fear (WVF > 80) + volume spike + above 1d EMA50 (uptrend filter)
-            if (wvf_aligned[i] > 80 and 
-                volume_spike[i] and 
-                close[i] > trend_1d_aligned[i]):
+            # LONG: price above daily EMA20, volume surge, and above weekly EMA50 (bullish alignment)
+            if (close[i] > ema20[i] and 
+                volume_surge[i] and 
+                close[i] > trend_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
+            # SHORT: price below daily EMA20, volume surge, and below weekly EMA50 (bearish alignment)
+            elif (close[i] < ema20[i] and 
+                  volume_surge[i] and 
+                  close[i] < trend_1w_aligned[i]):
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Fear subsides (WVF < 40) or trend turns down
-            if (wvf_aligned[i] < 40 or 
-                close[i] < trend_1d_aligned[i]):
+            # EXIT LONG: price drops below daily EMA20 or weekly trend turns down
+            if (close[i] < ema20[i] or 
+                close[i] < trend_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: price rises above daily EMA20 or weekly trend turns up
+            if (close[i] > ema20[i] or 
+                close[i] > trend_1w_aligned[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
