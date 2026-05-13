@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
-# 4h_KAMA_Direction_1dTrend_ChopFilter
-# Hypothesis: KAMA adapts to market noise, reducing whipsaw in chop. Combined with 1d EMA trend filter and
-# Choppiness Index regime filter, it captures trends while avoiding false signals in sideways markets.
-# Works in bull (trend-following) and bear (trend-following short) by using 1d EMA for direction.
-# Target: 20-30 trades/year per symbol.
+# 1d_Engulfing_1wTrend
+# Hypothesis: Engulfing patterns on daily chart combined with weekly trend filter
+# to capture high-probability reversals at trend extremes. Works in both bull and bear
+# by fading extreme moves when weekly trend shows exhaustion.
+# Target: 10-20 trades/year per symbol (low frequency, high quality)
 
-name = "4h_KAMA_Direction_1dTrend_ChopFilter"
-timeframe = "4h"
+name = "1d_Engulfing_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,83 +14,48 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get 1d data for trend filter and chop filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 4h close
-    def calculate_kama(close, period=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=period))
-        abs_change = np.abs(np.diff(close))
-        er = np.zeros_like(close)
-        for i in range(period, len(close)):
-            if np.sum(abs_change[i-period:i]) != 0:
-                er[i] = change[i-1] / np.sum(abs_change[i-period:i])
-            else:
-                er[i] = 0
-        # Smoothing Constant
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # KAMA
-        kama = np.zeros_like(close)
-        kama[period] = close[period]
-        for i in range(period+1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate 20-period EMA on weekly data for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
 
-    kama = calculate_kama(close, 10, 2, 30)
+    # Bullish engulfing: current candle engulfs previous bearish candle
+    bullish_engulf = (close > open_price) & (open_price < close) & \
+                     (close > open_price) & (open_price < close) & \
+                     (close > open_price) & (open_price < close)  # Placeholder, will fix below
 
-    # Get 1d EMA34 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Actually calculate properly:
+    bullish_engulf = (close > open_price) & (open_price < close) & \
+                     (close > open_price) & (open_price < close)  # Still wrong
 
-    # Calculate Choppiness Index on 1d (14-period)
-    def calculate_chop(high, low, close, period=14):
-        atr = np.zeros_like(close)
-        for i in range(1, len(close)):
-            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-            atr[i] = tr
-        # True Range sum over period
-        tr_sum = np.zeros_like(close)
-        for i in range(period, len(close)):
-            tr_sum[i] = np.sum(atr[i-period+1:i+1])
-        # Max/min close over period
-        max_high = np.zeros_like(close)
-        min_low = np.zeros_like(close)
-        for i in range(period-1, len(close)):
-            max_high[i] = np.max(high[i-period+1:i+1])
-            min_low[i] = np.min(low[i-period+1:i+1])
-        # Chop
-        chop = np.zeros_like(close)
-        for i in range(period-1, len(close)):
-            if max_high[i] != min_low[i]:
-                chop[i] = 100 * np.log10(tr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
-            else:
-                chop[i] = 50
-        return chop
-
-    chop = calculate_chop(high_1d, low_1d, close_1d, 14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Correct calculation:
+    prev_close = np.roll(close, 1)
+    prev_open = np.roll(open_price, 1)
+    bullish_engulf = (close > open_price) & (prev_close < prev_open) & \
+                     (close >= prev_open) & (open_price <= prev_close)
+    bearish_engulf = (close < open_price) & (prev_close > prev_open) & \
+                     (close <= prev_open) & (open_price >= prev_close)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        # Skip if data is not ready
-        if (np.isnan(kama[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(chop_aligned[i])):
+    for i in range(1, n):
+        # Skip if weekly EMA not ready
+        if np.isnan(ema_20_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -100,26 +64,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above KAMA, 1d EMA uptrend, and chop < 61.8 (trending)
-            if close[i] > kama[i] and close[i] > ema_1d_aligned[i] and chop_aligned[i] < 61.8:
+            # LONG: bullish engulfing at weekly support (price below weekly EMA = potential bounce)
+            if bullish_engulf[i] and close[i] < ema_20_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA, 1d EMA downtrend, and chop < 61.8 (trending)
-            elif close[i] < kama[i] and close[i] < ema_1d_aligned[i] and chop_aligned[i] < 61.8:
+            # SHORT: bearish engulfing at weekly resistance (price above weekly EMA = potential rejection)
+            elif bearish_engulf[i] and close[i] > ema_20_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price below KAMA OR chop > 61.8 (choppy)
-            if close[i] < kama[i] or chop_aligned[i] > 61.8:
+            # EXIT LONG: bearish engulfing or price crosses above weekly EMA (trend resumption)
+            if bearish_engulf[i] or close[i] > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above KAMA OR chop > 61.8 (choppy)
-            if close[i] > kama[i] or chop_aligned[i] > 61.8:
+            # EXIT SHORT: bullish engulfing or price crosses below weekly EMA (trend resumption)
+            if bullish_engulf[i] or close[i] < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
