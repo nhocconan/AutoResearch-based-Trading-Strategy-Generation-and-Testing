@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R with 1d EMA200 trend filter and volume confirmation.
-# Williams %R measures overbought/oversold conditions. Long when %R crosses above -80 from below with rising volume and price > 1d EMA200.
-# Short when %R crosses below -20 from above with rising volume and price < 1d EMA200.
-# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 6h timeframe.
-# Designed to work in both bull (buy oversold dips in uptrend) and bear (sell overbought rallies in downtrend) markets.
+# Hypothesis: 12h Williams Alligator with 1w EMA trend filter and volume confirmation.
+# Williams Alligator uses three SMAs (jaw=13, teeth=8, lips=5) to identify trend and non-trend markets.
+# Long when lips > teeth > jaw (bullish alignment) with volume > 1.5x 20-bar average and price above 1w EMA50.
+# Short when lips < teeth < jaw (bearish alignment) with volume > 1.5x 20-bar average and price below 1w EMA50.
+# Exit when Alligator lines cross (trend weakening) or volume drops below 0.8x average.
+# Designed to capture strong trends in both bull and bear markets while avoiding choppy regimes.
+# Discrete sizing 0.25 targets 12-37 trades/year on 12h timeframe.
 
-name = "6h_WilliamsR_1dEMA200_Trend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wEMA50_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,68 +25,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    lookback = 14  # Williams %R period
+    lookback = 20  # for volume average
     
-    # Calculate Williams %R
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Calculate Williams Alligator SMAs on 12h timeframe
+    # Jaw: SMA(13), Teeth: SMA(8), Lips: SMA(5)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
     
-    # Get 1d data for EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(200) on 1d close
-    if len(close_1d) < 200:
-        ema_200_1d = np.full(len(close_1d), np.nan)
+    # Calculate EMA(50) on 1w close
+    if len(close_1w) < 50:
+        ema_50_1w = np.full(len(close_1w), np.nan)
     else:
-        ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+        ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA200 to 6h timeframe (wait for 1d bar to close)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Align 1w EMA to 12h timeframe (wait for 1w bar to close)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate average volume for confirmation (20-period)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R crosses above -80 from below with volume spike and bullish 1d trend
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
-                close[i] > ema_200_1d_aligned[i] and 
+            # LONG: Lips > Teeth > Jaw (bullish alignment) with volume spike and price above 1w EMA50
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R crosses below -20 from above with volume spike and bearish 1d trend
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
-                  close[i] < ema_200_1d_aligned[i] and 
+            # SHORT: Lips < Teeth < Jaw (bearish alignment) with volume spike and price below 1w EMA50
+            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R rises above -20 (overbought) OR volume drops below average
-            if williams_r[i] >= -20 or volume[i] < 0.7 * avg_volume[i]:
+            # EXIT LONG: Alligator lines cross (lips <= teeth) OR volume drops below 0.8x average
+            if lips[i] <= teeth[i] or volume[i] < 0.8 * avg_volume[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R falls below -80 (oversold) OR volume drops below average
-            if williams_r[i] <= -80 or volume[i] < 0.7 * avg_volume[i]:
+            # EXIT SHORT: Alligator lines cross (lips >= teeth) OR volume drops below 0.8x average
+            if lips[i] >= teeth[i] or volume[i] < 0.8 * avg_volume[i]:
                 signals[i] = 0.0
                 position = 0
             else:
