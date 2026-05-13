@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeS
-Hypothesis: 1h breakouts at Camarilla R1/S1 with 4h trend confirmation and volume spikes capture momentum with controlled frequency. Uses 4h for direction (trend) and 1h for precise entry timing, targeting 60-150 trades over 4 years. Works in bull/bear by following 4h trend only.
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla pivot levels from daily data provide robust support/resistance.
+Breakouts above R3 or below S3 with volume confirmation and aligned daily trend
+capture institutional moves while minimizing false breakouts. Designed for low
+trade frequency (target: 12-37 trades/year) to minimize fee drift. Works in both
+bull and bear regimes by following the daily trend direction only.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeS"
-timeframe = "1h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,62 +26,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter and Camarilla levels (once before loop)
-    df_4h = get_htf_data(prices, '4h')
+    # Get daily data for Camarilla levels and trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels for each 4h bar
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    hl_range = df_4h['high'] - df_4h['low']
-    r1 = df_4h['close'] + hl_range * 1.1 / 12
-    s1 = df_4h['close'] - hl_range * 1.1 / 12
+    # Calculate Camarilla levels for each day
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    hl_range = df_1d['high'] - df_1d['low']
+    r3 = df_1d['close'] + hl_range * 1.1 / 4
+    s3 = df_1d['close'] - hl_range * 1.1 / 4
     
-    # Align Camarilla levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_4h, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_4h, s1.values)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     
-    # Calculate 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: current volume > 1.8x 24-period average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Volume confirmation: current volume > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         if position == 0:
-            # LONG: break above R1 with volume spike and above 4h EMA50 (uptrend)
-            if (close[i] > r1_aligned[i] and 
+            # LONG: break above R3 with volume spike and above daily EMA34 (uptrend)
+            if (close[i] > r3_aligned[i] and 
                 volume_spike[i] and 
-                close[i] > trend_4h_aligned[i]):
-                signals[i] = 0.20
+                close[i] > trend_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1 with volume spike and below 4h EMA50 (downtrend)
-            elif (close[i] < s1_aligned[i] and 
+            # SHORT: break below S3 with volume spike and below daily EMA34 (downtrend)
+            elif (close[i] < s3_aligned[i] and 
                   volume_spike[i] and 
-                  close[i] < trend_4h_aligned[i]):
-                signals[i] = -0.20
+                  close[i] < trend_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price drops below S1 or trend turns down
-            if (close[i] < s1_aligned[i] or 
-                close[i] < trend_4h_aligned[i]):
+            # EXIT LONG: price drops below S3 or trend turns down
+            if (close[i] < s3_aligned[i] or 
+                close[i] < trend_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price rises above R1 or trend turns up
-            if (close[i] > r1_aligned[i] or 
-                close[i] > trend_4h_aligned[i]):
+            # EXIT SHORT: price rises above R3 or trend turns up
+            if (close[i] > r3_aligned[i] or 
+                close[i] > trend_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
