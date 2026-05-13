@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation (>1.8x 20-bar avg volume).
-# Long when Williams %R < -80 (oversold) and price > 1d EMA50, short when > -20 (overbought) and price < 1d EMA50.
-# Uses discrete position sizing (0.25) to minimize fee drag. Targets 12-37 trades/year on 6h timeframe.
-# Williams %R identifies exhaustion points; EMA50 ensures alignment with 1d trend; volume confirms conviction.
-# Designed to work in both bull (buy oversold dips) and bear (sell overbought rallies) markets.
+# Hypothesis: 12h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation.
+# Uses Williams %R(14) for extreme readings (< -80 long, > -20 short) aligned with 1d EMA50 trend
+# and volume spike (>1.5x 20-bar avg) to capture reversals in both bull and bear markets.
+# Designed for low trade frequency (<150 total 12h trades) to minimize fee drag while capturing
+# mean reversion moves during ranging periods and trend exhaustion.
 
-name = "6h_WilliamsR_MeanReversion_1dEMA50_Volume_Confirm_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_MeanReversion_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -30,11 +30,13 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R (14-period) on 6h data
-    lookback_willr = 14
-    highest_high = pd.Series(high).rolling(window=lookback_willr, min_periods=lookback_willr).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_willr, min_periods=lookback_willr).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Williams %R(14) on 12h data
+    lookback_wr = 14
+    highest_high = pd.Series(high).rolling(window=lookback_wr, min_periods=lookback_wr).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_wr, min_periods=lookback_wr).min().values
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    wr = np.where((highest_high - lowest_low) == 0, -50, wr)
     
     # Calculate average volume for confirmation (20-period)
     lookback_vol = 20
@@ -43,40 +45,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(lookback_willr, lookback_vol, 1), n):
+    for i in range(max(lookback_wr, lookback_vol, 1), n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(avg_volume[i]) or
-            (highest_high[i] == lowest_low[i])):  # Avoid division by zero
+            np.isnan(wr[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R oversold (< -80) and price > 1d EMA50 and volume spike (>1.8x avg)
-            if (williams_r[i] < -80 and 
+            # LONG: Williams %R < -80 (oversold), close > 1d EMA50, volume spike (>1.5x avg)
+            if (wr[i] < -80 and 
                 close[i] > ema_50_1d_aligned[i] and 
-                volume[i] > 1.8 * avg_volume[i]):
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R overbought (> -20) and price < 1d EMA50 and volume spike (>1.8x avg)
-            elif (williams_r[i] > -20 and 
+            # SHORT: Williams %R > -20 (overbought), close < 1d EMA50, volume spike (>1.5x avg)
+            elif (wr[i] > -20 and 
                   close[i] < ema_50_1d_aligned[i] and 
-                  volume[i] > 1.8 * avg_volume[i]):
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R returns to neutral (> -50) or volume drops
-            if williams_r[i] > -50 or volume[i] < 0.6 * avg_volume[i]:
+            # EXIT LONG: Williams %R > -50 (exit oversold) or volume drops
+            if (wr[i] > -50) or (volume[i] < 0.5 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # EXIT SHORT: Williams %R returns to neutral (< -50) or volume drops
-            if williams_r[i] < -50 or volume[i] < 0.6 * avg_volume[i]:
+            # EXIT SHORT: Williams %R < -50 (exit overbought) or volume drops
+            if (wr[i] < -50) or (volume[i] < 0.5 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
