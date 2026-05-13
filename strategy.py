@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 level, 1d EMA34 is rising, and volume > 1.5x 20-period average.
-# Short when price breaks below Camarilla S3 level, 1d EMA34 is falling, and volume > 1.5x 20-period average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 level, 12h EMA50 is rising, and volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S3 level, 12h EMA50 is falling, and volume > 1.5x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -45,15 +45,19 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 4
     camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate EMA(34) on 1d data for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Align 1d EMA34 to 12h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA(50) on 12h data
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 12h EMA50 to 4h timeframe (wait for 12h bar to close)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,18 +71,18 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Camarilla R3 AND 1d EMA34 rising (trending up) AND volume confirmation
-            if close[i] > camarilla_r3_aligned[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]:
+            # LONG: Price > Camarilla R3 AND 12h EMA50 rising (trending up) AND volume confirmation
+            if close[i] > camarilla_r3_aligned[i] and ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Camarilla S3 AND 1d EMA34 falling (trending down) AND volume confirmation
-            elif close[i] < camarilla_s3_aligned[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Price < Camarilla S3 AND 12h EMA50 falling (trending down) AND volume confirmation
+            elif close[i] < camarilla_s3_aligned[i] and ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
