@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 1D_ChaikinMoneyFlow_1wTrend_WeeklyTrend
-# Hypothesis: Chaikin Money Flow (CMF) measures buying/selling pressure. 
-# Weekly trend (1w EMA20) filters trades to avoid counter-trend moves.
-# Entry when CMF crosses above/below zero with weekly trend alignment.
-# Target: 8-15 trades/year (32-60 total over 4 years) to minimize fee drag.
-# Works in bull via CMF>0 + uptrend, bear via CMF<0 + downtrend.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) from 1d act as support/resistance. Breakouts with volume confirmation and 1d EMA50 trend filter capture momentum in both bull and bear markets. Uses 1d EMA50 for trend filter to avoid counter-trend trades. Target: 20-40 trades/year.
 
-name = "1D_ChaikinMoneyFlow_1wTrend_WeeklyTrend"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,34 +20,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Chaikin Money Flow (CMF) calculation
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    # CMF = 20-period sum of Money Flow Volume / 20-period sum of Volume
-    hl_range = high - low
-    # Avoid division by zero
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    mf_multiplier = ((close - low) - (high - close)) / hl_range
-    mf_volume = mf_multiplier * volume
+    # Get 1d data for Camarilla pivot levels and EMA50
+    df_1d = get_htf_data(prices, '1d')
     
-    # 20-period sums for CMF
-    mf_volume_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
-    volume_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = mf_volume_sum / volume_sum
-    # Replace inf/NaN from zero volume with 0
-    cmf = np.where(np.isnan(cmf) | np.isinf(cmf), 0, cmf)
-
-    # Get weekly data for EMA20 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate Camarilla pivot levels: based on previous day's OHLC
+    # R1 = close + (high - low) * 1.1 / 12
+    # S1 = close - (high - low) * 1.1 / 12
+    # We use the previous day's values, so we shift by 1
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate R1 and S1
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align to 4h timeframe (wait for 1d bar to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume filter: >1.5x 30-period average
+    vol_avg_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(40, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if np.isnan(cmf[i]) or np.isnan(ema20_1w_aligned[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,26 +61,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: CMF > 0 (buying pressure) + weekly uptrend (price > EMA20)
-            if cmf[i] > 0 and close[i] > ema20_1w_aligned[i]:
+            # LONG: Break above R1 with volume and above 1d EMA50 (uptrend)
+            if (close[i] > r1_aligned[i] and 
+                volume[i] > vol_avg_30[i] * 1.5 and
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: CMF < 0 (selling pressure) + weekly downtrend (price < EMA20)
-            elif cmf[i] < 0 and close[i] < ema20_1w_aligned[i]:
+            # SHORT: Break below S1 with volume and below 1d EMA50 (downtrend)
+            elif (close[i] < s1_aligned[i] and 
+                  volume[i] > vol_avg_30[i] * 1.5 and
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: CMF turns negative or weekly trend breaks down
-            if cmf[i] < 0 or close[i] < ema20_1w_aligned[i]:
+            # EXIT LONG: Price re-enters below S1 or trend changes (below EMA50)
+            if (close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: CMF turns positive or weekly trend breaks up
-            if cmf[i] > 0 or close[i] > ema20_1w_aligned[i]:
+            # EXIT SHORT: Price re-enters above R1 or trend changes (above EMA50)
+            if (close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
