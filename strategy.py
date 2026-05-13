@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_4H_Camarilla_R1_S1_Breakout_1D_Trend_Force_v2"
-timeframe = "4h"
+name = "6h_KeltnerChannel_Breakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,87 +9,82 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Load 1D data ONCE for Camarilla pivot levels
+    # Load 1D data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_prev = np.concatenate([[np.nan], df_1d['high'][:-1]].values)
-    low_prev = np.concatenate([[np.nan], df_1d['low'][:-1]].values)
-    close_prev = np.concatenate([[np.nan], df_1d['close'][:-1]].values)
-    
-    pivot = (high_prev + low_prev + close_prev) / 3
-    range_val = high_prev - low_prev
-    
-    # Camarilla levels
-    R1 = pivot + (range_val * 1.1 / 12)
-    S1 = pivot - (range_val * 1.1 / 12)
-    
-    # Align to 4H timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Load 1D data for trend filter (EMA34)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 1D
+    # Calculate EMA(50) on 1D for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: 4H volume > 1.5x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, np.nan)
+    # Align 1D EMA to 6H timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate ATR(20) on 6H for Keltner Channels
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr = np.full_like(tr, np.nan)
+    if len(tr) >= 20:
+        atr[19] = np.nanmean(tr[1:20])
+        for i in range(20, len(tr)):
+            atr[i] = (atr[i-1] * 19 + tr[i]) / 20
+    
+    # Calculate EMA(20) on 6H for Keltner center line
+    close_series = pd.Series(close)
+    ema20_6h = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Channel parameters
+    kc_mult = 2.0
+    upper_keltner = ema20_6h + kc_mult * atr
+    lower_keltner = ema20_6h - kc_mult * atr
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after sufficient data
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+    for i in range(50, n):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(upper_keltner[i]) or 
+            np.isnan(lower_keltner[i]) or np.isnan(ema20_6h[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA34
-        price_above_ema = close[i] > ema34_1d_aligned[i]
-        price_below_ema = close[i] < ema34_1d_aligned[i]
-        
-        # Volume confirmation
-        vol_confirmed = vol_ratio[i] > 1.5
+        # Trend filter: Price above/below 1D EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 0:
-            # LONG: Price breaks above R1 + uptrend + volume
-            if close[i] > R1_aligned[i] and price_above_ema and vol_confirmed:
+            # LONG: Uptrend + break above upper Keltner channel
+            if uptrend and close[i] > upper_keltner[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + downtrend + volume
-            elif close[i] < S1_aligned[i] and price_below_ema and vol_confirmed:
+            # SHORT: Downtrend + break below lower Keltner channel
+            elif downtrend and close[i] < lower_keltner[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or trend reverses
-            if close[i] < S1_aligned[i] or not price_above_ema:
+            # EXIT LONG: Price crosses below center line or trend reverses
+            if close[i] < ema20_6h[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or trend reverses
-            if close[i] > R1_aligned[i] or not price_below_ema:
+            # EXIT SHORT: Price crosses above center line or trend reverses
+            if close[i] > ema20_6h[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
