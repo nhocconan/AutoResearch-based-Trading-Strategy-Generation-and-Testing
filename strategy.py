@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_OBV_Divergence_Trend
-Hypothesis: On 4h timeframe, On-Balance Volume (OBV) divergence with price, confirmed by 1d trend,
-provides high-probability reversal signals in both bull and bear markets. 
-OBV divergence indicates weakening momentum before price reverses.
-Target: 20-40 trades/year per symbol.
+1d_WeeklyKeltnerChannel_Breakout_Trend
+Hypothesis: On 1d timeframe, price breaking above/below weekly Keltner Channel (ATR-based volatility band),
+confirmed by weekly trend (price above/below weekly EMA50) and volume surge, captures trend continuation
+in both bull and bear markets. Keltner Channels adapt to volatility, providing dynamic support/resistance.
+Target: 10-25 trades/year per symbol.
 """
 
-name = "4h_1d_OBV_Divergence_Trend"
-timeframe = "4h"
+name = "1d_WeeklyKeltnerChannel_Breakout_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,78 +21,82 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate OBV
-    obv = np.zeros(n)
-    obv[0] = volume[0]
-    for i in range(1, n):
-        if close[i] > close[i-1]:
-            obv[i] = obv[i-1] + volume[i]
-        elif close[i] < close[i-1]:
-            obv[i] = obv[i-1] - volume[i]
-        else:
-            obv[i] = obv[i-1]
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend and Keltner Channel
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    weekly_close = df_weekly['close'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
     
-    # 1d trend: 50 EMA
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = close_1d > ema_50_1d
-    downtrend_1d = close_1d < ema_50_1d
+    # Weekly trend: EMA50
+    ema50_weekly = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_uptrend = weekly_close > ema50_weekly
+    weekly_downtrend = weekly_close < ema50_weekly
     
-    # Align 1d trend to 4h
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    # Weekly ATR for Keltner Channel (20-period)
+    tr = np.maximum(
+        weekly_high[1:] - weekly_low[1:],
+        np.maximum(
+            np.abs(weekly_high[1:] - weekly_close[:-1]),
+            np.abs(weekly_low[1:] - weekly_close[:-1])
+        )
+    )
+    tr = np.concatenate([[np.nan], tr])  # align length
+    atr20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate 4h OBV slope (5-period) and price slope (5-period)
-    obv_slope = np.zeros(n)
-    price_slope = np.zeros(n)
+    # Weekly Keltner Channel: EMA20 ± 2*ATR
+    ema20_weekly = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = ema20_weekly + 2 * atr20
+    kc_lower = ema20_weekly - 2 * atr20
     
-    for i in range(5, n):
-        obv_slope[i] = obv[i] - obv[i-5]
-        price_slope[i] = close[i] - close[i-5]
+    # Align weekly indicators to daily
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_weekly, weekly_uptrend)
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_weekly, weekly_downtrend)
+    kc_upper_aligned = align_htf_to_ltf(prices, df_weekly, kc_upper)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_weekly, kc_lower)
     
-    # Detect divergences
-    # Bearish divergence: price makes higher high, OBV makes lower high
-    bullish_divergence = (price_slope > 0) & (obv_slope < 0)
-    # Bullish divergence: price makes lower low, OBV makes higher low
-    bearish_divergence = (price_slope < 0) & (obv_slope > 0)
+    # Volume confirmation: today's volume > 1.5x 20-day average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_surge = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Get aligned values
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
+        # Get aligned weekly values
+        weekly_uptrend = weekly_uptrend_aligned[i]
+        weekly_downtrend = weekly_downtrend_aligned[i]
+        kc_upper = kc_upper_aligned[i]
+        kc_lower = kc_lower_aligned[i]
+        vol_surge = volume_surge[i]
         
         if position == 0:
-            # LONG: 1d uptrend + bullish OBV divergence
-            if uptrend and bullish_divergence[i]:
+            # LONG: weekly uptrend + price breaks above KC upper + volume surge
+            if weekly_uptrend and close[i] > kc_upper and vol_surge:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1d downtrend + bearish OBV divergence
-            elif downtrend and bearish_divergence[i]:
+            # SHORT: weekly downtrend + price breaks below KC lower + volume surge
+            elif weekly_downtrend and close[i] < kc_lower and vol_surge:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 1d trend turns down or bearish divergence appears
-            if not uptrend or bearish_divergence[i]:
+            # EXIT LONG: price closes below KC middle (EMA20) or trend reversal
+            if close[i] < ema20_weekly[i] or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 1d trend turns up or bullish divergence appears
-            if not downtrend or bullish_divergence[i]:
+            # EXIT SHORT: price closes above KC middle or trend reversal
+            if close[i] > ema20_weekly[i] or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
