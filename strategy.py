@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above Donchian upper band AND close > 1d EMA34 AND volume > 2.0x 20-period average.
-# Short when price breaks below Donchian lower band AND close < 1d EMA34 AND volume > 2.0x 20-period average.
-# Exit on ATR(14) trailing stop (2.0x) or opposite breakout.
-# Uses 4h primary timeframe with 1d trend filter for noise reduction, targeting 75-200 total trades over 4 years.
-# Donchian channels provide clear breakout levels, 1d EMA34 filters medium-term trend,
-# volume confirms breakout authenticity. Designed to work in both bull and bear markets via strict entry conditions.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d volume spike and 1w EMA50 trend filter.
+# Long when price breaks above Camarilla R1 level AND 4h volume > 2.0x 20-period average AND close > 1w EMA50.
+# Short when price breaks below Camarilla S1 level AND 4h volume > 2.0x 20-period average AND close < 1w EMA50.
+# Exit on ATR(14) trailing stop (2.5x) or opposite breakout.
+# Uses 4h primary timeframe with 1w trend filter for noise reduction and volume spike for confirmation.
+# Camarilla levels provide precise intraday support/resistance, volume confirms breakout authenticity,
+# 1w EMA50 filters major trend to avoid counter-trend trades. Designed for low trade frequency (<50/year) to minimize fee drag.
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1wEMA50_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -33,22 +33,32 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) using previous bar to avoid look-ahead
-    # Upper band = max(high) over past 20 bars, Lower band = min(low) over past 20 bars
+    # Calculate Camarilla levels (R1, S1) using previous day's OHLC to avoid look-ahead
+    # Typical price = (high + low + close) / 3
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    typical_price = (high + low + close) / 3.0
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    upper_band = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    lower_band = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    close_series = pd.Series(close)
     
-    # Get 1d data for EMA34 trend filter (MTF)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Use previous day's typical price, high, low for Camarilla calculation
+    prev_typical = typical_price.shift(1)
+    prev_high = high_series.shift(1)
+    prev_low = low_series.shift(1)
     
-    # Calculate EMA34 on 1d close
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    camarilla_r1 = prev_typical + 1.1 * (prev_high - prev_low) / 12.0
+    camarilla_s1 = prev_typical - 1.1 * (prev_high - prev_low) / 12.0
     
-    # Align HTF arrays to 4h timeframe (wait for completed 1d bar)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Get 1w data for EMA50 trend filter (MTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA50 on 1w close
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align HTF arrays to 4h timeframe (wait for completed 1w bar)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Volume filter: current 4h volume > 2.0x 20-period average (spike confirmation)
     vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,19 +71,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(atr[i]) or np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above upper band AND close > 1d EMA34 AND volume spike
-            if close[i] > upper_band[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
+            # LONG: price breaks above Camarilla R1 AND volume spike AND close > 1w EMA50
+            if close[i] > camarilla_r1[i] and volume_filter[i] and close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price breaks below lower band AND close < 1d EMA34 AND volume spike
-            elif close[i] < lower_band[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
+            # SHORT: price breaks below Camarilla S1 AND volume spike AND close < 1w EMA50
+            elif close[i] < camarilla_s1[i] and volume_filter[i] and close[i] < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -87,7 +97,7 @@ def generate_signals(prices):
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
             # EXIT LONG: trailing stop hit (opposite breakout handled by next bar's entry logic)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -102,7 +112,7 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
             # EXIT SHORT: trailing stop hit (opposite breakout handled by next bar's entry logic)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
