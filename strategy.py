@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams Alligator + 1d Elder Ray (Bull/Bear Power) combination.
-# Uses 6h Alligator (Jaw/Teeth/Lips) for trend direction and 1d Elder Ray for momentum confirmation.
-# Long when price > Alligator Lips and Bull Power > 0; Short when price < Alligator Lips and Bear Power < 0.
-# Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by requiring alignment between 6h trend and 1d momentum.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses 1d EMA34 for trend alignment, 12h Donchian(20) for breakout entry, and volume spike (>2.0x 20-bar avg) for confirmation.
+# Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee drag and improve test generalization.
+# Works in both bull and bear markets by following the 1d trend direction and requiring strong volume confirmation to avoid false breakouts.
 
-name = "6h_WilliamsAlligator_1dElderRay_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,66 +20,61 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 6h Williams Alligator (Jaw, Teeth, Lips) - HTF
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 13:
-        return np.zeros(n)
-    close_6h = df_6h['close'].values
-    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
-    jaw = pd.Series(close_6h).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close_6h).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close_6h).rolling(window=5, min_periods=5).mean().values
-    lips_6h_aligned = align_htf_to_ltf(prices, df_6h, lips)
-    
-    # Calculate 1d Elder Ray (Bull Power, Bear Power) - HTF
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # EMA13 of close
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d  # Bull Power = High - EMA13
-    bear_power = low_1d - ema13_1d   # Bear Power = Low - EMA13
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Donchian channels from prior 20 bars (primary TF)
+    lookback = 20
+    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    
+    # Calculate average volume for confirmation (20-period LTF)
+    avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(13, n):  # Warmup for Alligator and Elder Ray
+    for i in range(max(lookback, 1), n):
         # Skip if any required data is NaN
-        if (np.isnan(lips_6h_aligned[i]) or 
-            np.isnan(bull_power_1d_aligned[i]) or 
-            np.isnan(bear_power_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Alligator Lips AND Bull Power > 0
-            if (close[i] > lips_6h_aligned[i] and 
-                bull_power_1d_aligned[i] > 0):
+            # LONG: Price breaks above Donchian upper, close > 1d EMA34, volume spike (>2.0x avg)
+            if (high[i] > upper[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price < Alligator Lips AND Bear Power < 0
-            elif (close[i] < lips_6h_aligned[i] and 
-                  bear_power_1d_aligned[i] < 0):
+            # SHORT: Price breaks below Donchian lower, close < 1d EMA34, volume spike (>2.0x avg)
+            elif (low[i] < lower[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below Alligator Lips OR Bull Power <= 0
-            if (close[i] < lips_6h_aligned[i]) or (bull_power_1d_aligned[i] <= 0):
+            # EXIT LONG: Close position if price breaks below Donchian lower or volume drops significantly
+            if (low[i] < lower[i]) or (volume[i] < 0.4 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above Alligator Lips OR Bear Power >= 0
-            if (close[i] > lips_6h_aligned[i]) or (bear_power_1d_aligned[i] >= 0):
+            # EXIT SHORT: Close position if price breaks above Donchian upper or volume drops significantly
+            if (high[i] > upper[i]) or (volume[i] < 0.4 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
