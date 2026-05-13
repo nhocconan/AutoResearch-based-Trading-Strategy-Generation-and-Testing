@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# 4h_RSI_Stretch_Back_to_VWAP_With_Trend
-# Hypothesis: Price reverts to VWAP after strong RSI moves, but only in direction of higher timeframe trend.
-# Long when RSI(14) > 70 and price closes below VWAP with 1d uptrend (EMA50).
-# Short when RSI(14) < 30 and price closes above VWAP with 1d downtrend.
-# VWAP acts as dynamic support/resistance; RSI extremes signal exhaustion.
-# Trend filter avoids counter-trend trades in strong moves.
-# Target: 20-40 trades/year to minimize fee drag.
+# 6h_ParabolicSAR_Trend_Filter_12h
+# Hypothesis: Parabolic SAR on 6h with 12h EMA trend filter. Go long when SAR flips below price and 12h EMA is rising; short when SAR flips above price and 12h EMA is falling. This captures trend reversals with trend alignment to reduce whipsaws. Works in bull markets (catching uptrends) and bear markets (catching downtrends). Target: 15-35 trades/year per symbol.
 
-name = "4h_RSI_Stretch_Back_to_VWAP_With_Trend"
-timeframe = "4h"
+name = "6h_ParabolicSAR_Trend_Filter_12h"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,35 +18,84 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Calculate VWAP (typical price * volume) cumulative
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    vwap = vwap_numerator / vwap_denominator
+    # Parabolic SAR parameters
+    af_start = 0.02
+    af_step = 0.02
+    af_max = 0.2
 
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Initialize SAR arrays
+    sar = np.full(n, np.nan)
+    trend = np.full(n, 0)  # 1 for uptrend, -1 for downtrend
+    af = np.full(n, af_start)
+    ep = np.full(n, 0.0)   # extreme point
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Set initial values
+    if high[1] > high[0]:
+        trend[0] = 1
+        sar[0] = low[0]
+        ep[0] = high[1]
+    else:
+        trend[0] = -1
+        sar[0] = high[0]
+        ep[0] = low[1]
+
+    # Calculate SAR
+    for i in range(1, n):
+        if trend[i-1] == 1:  # uptrend
+            sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+            # SAR cannot be above the lowest low of the past two periods
+            sar[i] = min(sar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
+            if low[i] < sar[i]:  # trend reversal
+                trend[i] = -1
+                sar[i] = ep[i-1]
+                ep[i] = low[i]
+                af[i] = af_start
+            else:
+                trend[i] = 1
+                if high[i] > ep[i-1]:
+                    ep[i] = high[i]
+                    af[i] = min(af[i-1] + af_step, af_max)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+        else:  # downtrend
+            sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+            # SAR cannot be below the highest high of the past two periods
+            sar[i] = max(sar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
+            if high[i] > sar[i]:  # trend reversal
+                trend[i] = 1
+                sar[i] = ep[i-1]
+                ep[i] = high[i]
+                af[i] = af_start
+            else:
+                trend[i] = -1
+                if low[i] < ep[i-1]:
+                    ep[i] = low[i]
+                    af[i] = min(af[i-1] + af_step, af_max)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema12_12h = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema12_12h_prev = np.roll(ema12_12h, 1)
+    ema12_12h_prev[0] = ema12_12h[0]
+    ema12_rising = ema12_12h > ema12_12h_prev
+    ema12_falling = ema12_12h < ema12_12h_prev
+
+    # Align 12h indicators to 6h timeframe
+    ema12_rising_aligned = align_htf_to_ltf(prices, df_12h, ema12_rising)
+    ema12_falling_aligned = align_htf_to_ltf(prices, df_12h, ema12_falling)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
-        # Skip if any required value is NaN
-        if np.isnan(rsi[i]) or np.isnan(vwap[i]) or np.isnan(ema50_1d_aligned[i]):
+    for i in range(1, n):
+        # Skip if SAR or trend is not yet valid
+        if np.isnan(sar[i]) or trend[i] == 0:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,26 +104,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI > 70 (overbought) and price < VWAP and 1d uptrend
-            if rsi[i] > 70 and close[i] < vwap[i] and close[i] > ema50_1d_aligned[i]:
+            # LONG: SAR flips below price (bullish) + 12h EMA rising
+            if trend[i] == 1 and sar[i] < close[i] and ema12_rising_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI < 30 (oversold) and price > VWAP and 1d downtrend
-            elif rsi[i] < 30 and close[i] > vwap[i] and close[i] < ema50_1d_aligned[i]:
+            # SHORT: SAR flips above price (bearish) + 12h EMA falling
+            elif trend[i] == -1 and sar[i] > close[i] and ema12_falling_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI < 50 (neutral) or price > VWAP (mean reversion complete)
-            if rsi[i] < 50 or close[i] > vwap[i]:
+            # EXIT LONG: SAR flips above price (bearish reversal)
+            if trend[i] == -1 and sar[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI > 50 (neutral) or price < VWAP (mean reversion complete)
-            if rsi[i] > 50 or close[i] < vwap[i]:
+            # EXIT SHORT: SAR flips below price (bullish reversal)
+            if trend[i] == 1 and sar[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
