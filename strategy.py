@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_Trend_Follow_With_Volume
-Hypothesis: Trend following on 1h using 4h and 1d moving averages for direction,
-with volume confirmation on 1h for entry timing. Designed to work in both bull and bear markets
-by filtering trades with strong trend alignment and volume confirmation, targeting low trade frequency.
+6h_Weekly_Pivot_Breakout_With_Volume_Filter
+Hypothesis: Weekly pivot levels act as strong support/resistance. Price tends to 
+mean revert from extreme levels (R4/S4) but continues when breaking R3/S3. 
+Volume confirmation filters false signals. Designed for low trade frequency 
+(15-25/year) to work in both bull and bear markets by capturing reversals 
+at extremes and breakouts in strong trends.
 """
 
-name = "1h_4h1d_Trend_Follow_With_Volume"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Breakout_With_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points: P, R1-R4, S1-S4"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,56 +39,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # Calculate 4h EMA21 for trend
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Get weekly data for pivot points (using daily as proxy for weekly calculation)
+    df_weekly = get_htf_data(prices, '1d')
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Get 1d data for higher timeframe trend
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # Calculate 1d EMA50 for trend
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly pivot points
+    pivot, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivot_points(
+        weekly_high, weekly_low, weekly_close
+    )
     
-    # Volume confirmation: > 1.3x 20-period average on 1h
+    # Align weekly pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_weekly, pivot)
+    r3_6h = align_htf_to_ltf(prices, df_weekly, r3)
+    r4_6h = align_htf_to_ltf(prices, df_weekly, r4)
+    s3_6h = align_htf_to_ltf(prices, df_weekly, s3)
+    s4_6h = align_htf_to_ltf(prices, df_weekly, s4)
+    
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Determine trend direction from 4h and 1d EMAs
-        long_trend = ema_4h_aligned[i] > ema_4h_aligned[i-1] and ema_1d_aligned[i] > ema_1d_aligned[i-1]
-        short_trend = ema_4h_aligned[i] < ema_4h_aligned[i-1] and ema_1d_aligned[i] < ema_1d_aligned[i-1]
-        
         if position == 0:
-            # LONG: Uptrend on both 4h and 1d with volume confirmation
-            if long_trend and volume_confirm[i]:
-                signals[i] = 0.20
+            # MEAN REVERSION LONG: Price at S4 with volume confirmation
+            if close[i] <= s4_6h[i] and volume_confirm[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend on both 4h and 1d with volume confirmation
-            elif short_trend and volume_confirm[i]:
-                signals[i] = -0.20
+            # MEAN REVERSION SHORT: Price at R4 with volume confirmation
+            elif close[i] >= r4_6h[i] and volume_confirm[i]:
+                signals[i] = -0.25
+                position = -1
+            # BREAKOUT LONG: Price breaks above R3 with volume confirmation
+            elif close[i] > r3_6h[i] and close[i-1] <= r3_6h[i-1] and volume_confirm[i]:
+                signals[i] = 0.25
+                position = 1
+            # BREAKOUT SHORT: Price breaks below S3 with volume confirmation
+            elif close[i] < s3_6h[i] and close[i-1] >= s3_6h[i-1] and volume_confirm[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend breaks down on either 4h or 1d
-            if not (ema_4h_aligned[i] > ema_4h_aligned[i-1] and ema_1d_aligned[i] > ema_1d_aligned[i-1]):
+            # EXIT LONG: Price reaches R3 (take profit) or breaks below S3 (stop)
+            if close[i] >= r3_6h[i] or close[i] < s3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend breaks up on either 4h or 1d
-            if not (ema_4h_aligned[i] < ema_4h_aligned[i-1] and ema_1d_aligned[i] < ema_1d_aligned[i-1]):
+            # EXIT SHORT: Price reaches S3 (take profit) or breaks above R3 (stop)
+            if close[i] <= s3_6h[i] or close[i] > r3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
