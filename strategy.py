@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R1/S1 breakout with daily trend filter and volume confirmation.
-# Uses daily EMA50 to determine trend direction, then enters long when price breaks above R1 in uptrend,
-# or short when breaks below S1 in downtrend. Volume > 20-period average confirms breakout strength.
-# Exits when price returns to pivot point (daily PP). Designed for 20-35 trades/year to minimize fee drag.
-# Camarilla levels provide precise intraday support/resistance, proven effective in both bull/bear markets.
+# Hypothesis: 1-day Bollinger Band width contraction (volatility squeeze) followed by expansion with price breaking above/below upper/lower band, confirmed by weekly trend via 50-week SMA and volume spike. Designed for low trade frequency (<25/year) to capture explosive moves after consolidation in both bull and bear markets.
 
-name = "4h_Camarilla_R1_S1_Breakout_1D_Trend_Force_v2"
-timeframe = "4h"
+name = "1d_BollingerSqueeze_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,44 +19,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Bollinger Bands (20, 2)
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
+    
+    # Bollinger Width Squeeze: width < 50th percentile of past 50 days
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).quantile(0.5).values
+    squeeze = bb_width < bb_width_percentile
+    
+    # Weekly trend filter: 50-week SMA
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
+    weekly_close = df_1w['close'].values
+    sma50_1w = pd.Series(weekly_close).rolling(window=50, min_periods=50).mean().values
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    
-    # Previous day's values (shifted by 1 to avoid look-ahead)
-    phigh = np.roll(high_1d, 1)
-    plow = np.roll(low_1d, 1)
-    pclose = np.roll(close_1d_arr, 1)
-    phigh[0] = np.nan
-    plow[0] = np.nan
-    pclose[0] = np.nan
-    
-    # Camarilla calculations
-    range_1d = phigh - plow
-    # R1 = pclose + range_1d * 1.1/12
-    # S1 = pclose - range_1d * 1.1/12
-    # PP = (phigh + plow + pclose) / 3
-    r1 = pclose + range_1d * 1.1 / 12
-    s1 = pclose - range_1d * 1.1 / 12
-    pp = (phigh + plow + pclose) / 3
-    
-    # Align daily levels to 4h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    
-    # Volume filter: current volume > 20-period average
+    # Volume filter: current volume > 20-day average
     volume_series = pd.Series(volume)
     vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_ok = volume > vol_ma20
@@ -68,33 +48,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient data for EMA50
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(vol_ma20[i])):
+    for i in range(50, n):  # Start after sufficient data
+        if np.isnan(bb_middle[i]) or np.isnan(bb_upper[i]) or np.isnan(sma50_1w_aligned[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 in uptrend (price > EMA50) with volume
-            if close[i] > r1_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_ok[i]:
+            # LONG: Bollinger squeeze breakout above upper band with weekly uptrend and volume
+            if squeeze[i-1] and close[i] > bb_upper[i] and close[i] > sma50_1w_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 in downtrend (price < EMA50) with volume
-            elif close[i] < s1_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_ok[i]:
+            # SHORT: Bollinger squeeze breakout below lower band with weekly downtrend and volume
+            elif squeeze[i-1] and close[i] < bb_lower[i] and close[i] < sma50_1w_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to or below pivot point
-            if close[i] <= pp_aligned[i]:
+            # EXIT LONG: Price closes back below middle band
+            if close[i] < bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to or above pivot point
-            if close[i] >= pp_aligned[i]:
+            # EXIT SHORT: Price closes back above middle band
+            if close[i] > bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
