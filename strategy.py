@@ -1,27 +1,18 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 6h_WMA_Cross_1dATR_Volume_Regime
-# Hypothesis: Weighted Moving Average crossovers on 6h chart filtered by 1-day ATR volatility regime and volume confirmation.
-# Uses WMA(9)/WMA(21) cross for trend changes, with entry only when ATR(14) is in normal range (not too high/low volatility).
-# Works in bull markets (trend following on golden crosses) and bear markets (trend following on death crosses).
-# Target: 15-30 trades/year to minimize fee drag on 6h timeframe.
+# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts above R1 or below S1 on 12h chart with 1d EMA trend filter and volume confirmation.
+# Uses the previous 12h bar's range to calculate R1/S1 to avoid look-ahead.
+# Target: 15-30 trades/year to minimize fee drag on 12h timeframe.
+# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
 
-name = "6h_WMA_Cross_1dATR_Volume_Regime"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def wma(values, window):
-    """Calculate Weighted Moving Average"""
-    if len(values) < window:
-        return np.full_like(values, np.nan)
-    weights = np.arange(1, window + 1)
-    wma_values = np.full_like(values, np.nan)
-    for i in range(window - 1, len(values)):
-        wma_values[i] = np.dot(values[i - window + 1:i + 1], weights) / weights.sum()
-    return wma_values
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,99 +24,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate WMA(9) and WMA(21) for crossover signals
-    wma_9 = wma(close, 9)
-    wma_21 = wma(close, 21)
-    
-    # Calculate 1-day ATR(14) for volatility regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 12h data for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # True Range calculation for 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels for each 12h bar (based on previous bar's range)
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # Use the PREVIOUS completed bar's range to avoid look-ahead
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
+    prev_close = df_12h['close'].shift(1).values
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = np.nan  # First value has no previous close
-    tr2[0] = np.nan
-    tr3[0] = np.nan
+    # Avoid NaN from shift
+    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
+    camarilla_r1 = np.full_like(prev_close, np.nan)
+    camarilla_s1 = np.full_like(prev_close, np.nan)
     
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = np.full_like(tr, np.nan)
-    for i in range(13, len(tr)):
-        if i == 13:
-            atr_14[i] = np.nanmean(tr[0:14])
-        else:
-            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
+    # Calculate where we have valid data
+    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     
-    # Align ATR to 6h timeframe
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Align Camarilla levels to 12h timeframe (already on 12h bars)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
     
-    # Calculate ATR percentile over 50 periods to define normal volatility regime
-    atr_percentile = np.full_like(atr_14_aligned, np.nan)
-    for i in range(49, len(atr_14_aligned)):
-        if not np.isnan(atr_14_aligned[i]):
-            window_data = atr_14_aligned[i-49:i+1]
-            valid_data = window_data[~np.isnan(window_data)]
-            if len(valid_data) > 0:
-                percentile_rank = (np.sum(valid_data <= atr_14_aligned[i]) / len(valid_data)) * 100
-                atr_percentile[i] = percentile_rank
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 1.3x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_ma[i] = np.mean(volume[i-19:i+1])
-    volume_confirmed = volume > (1.3 * vol_ma)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after warmup
-        # Skip if ATR percentile not calculated (volatility regime unclear)
-        if np.isnan(atr_percentile[i]):
-            signals[i] = 0.0
-            continue
-            
-        # Define normal volatility regime: ATR between 20th and 80th percentile
-        normal_volatility = (atr_percentile[i] >= 20) and (atr_percentile[i] <= 80)
-        
         if position == 0:
-            # LONG: WMA(9) crosses above WMA(21) with normal volatility and volume confirmation
-            if (not np.isnan(wma_9[i-1]) and not np.isnan(wma_21[i-1]) and
-                not np.isnan(wma_9[i]) and not np.isnan(wma_21[i]) and
-                wma_9[i-1] <= wma_21[i-1] and wma_9[i] > wma_21[i] and
-                normal_volatility and volume_confirmed[i]):
+            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: WMA(9) crosses below WMA(21) with normal volatility and volume confirmation
-            elif (not np.isnan(wma_9[i-1]) and not np.isnan(wma_21[i-1]) and
-                  not np.isnan(wma_9[i]) and not np.isnan(wma_21[i]) and
-                  wma_9[i-1] >= wma_21[i-1] and wma_9[i] < wma_21[i] and
-                  normal_volatility and volume_confirmed[i]):
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34)
+            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: WMA(9) crosses below WMA(21) or volatility becomes extreme
-            if (not np.isnan(wma_9[i-1]) and not np.isnan(wma_21[i-1]) and
-                not np.isnan(wma_9[i]) and not np.isnan(wma_21[i]) and
-                wma_9[i-1] >= wma_21[i-1] and wma_9[i] < wma_21[i]) or \
-               (atr_percentile[i] < 20) or (atr_percentile[i] > 80):
+            # EXIT LONG: Price crosses back below R1 or trend weakens (price < EMA34)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: WMA(9) crosses above WMA(21) or volatility becomes extreme
-            if (not np.isnan(wma_9[i-1]) and not np.isnan(wma_21[i-1]) and
-                not np.isnan(wma_9[i]) and not np.isnan(wma_21[i]) and
-                wma_9[i-1] <= wma_21[i-1] and wma_9[i] > wma_21[i]) or \
-               (atr_percentile[i] < 20) or (atr_percentile[i] > 80):
+            # EXIT SHORT: Price crosses back above S1 or trend weakens (price > EMA34)
+            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+               high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
