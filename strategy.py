@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1d_KAMA_WeeklyTrend_Volume
-# Hypothesis: Use Kaufman's Adaptive Moving Average (KAMA) on daily timeframe to determine trend, with weekly trend filter and volume confirmation for entries.
-# Long when KAMA turns upward (bullish) with weekly trend confirmation and volume spike, short when KAMA turns downward (bearish) with weekly trend confirmation and volume spike.
-# Exit when KAMA reverses direction.
-# Combines adaptive trend following with weekly confirmation to reduce whipsaws in both bull and bear markets.
+# 6h_WilliamsVixFix_MeanReversion
+# Hypothesis: The Williams Vix Fix (WVF) indicator identifies oversold/overbought conditions
+# by measuring volatility compression and expansion. In mean-reverting markets, extreme WVF
+# readings (>0.8) signal potential reversals. Combined with Bollinger Band mean reversion
+# (price outside 2.5 SD bands) and 1d trend filter (EMA50), this creates high-probability
+# mean reversion trades. Works in both bull and bear markets as it fades extremes rather
+# than following trends. Target: 50-150 total trades over 4 years with disciplined exits.
 
-name = "1d_KAMA_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsVixFix_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,45 +25,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Williams Vix Fix (WVF)
+    # WVF = ((Highest High in period - Low) / Highest High in period) * 100
+    # High values indicate fear/volatility spikes
+    lookback = 22
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    wvf = ((highest_high - low) / highest_high) * 100
+    wvf = np.where(highest_high == 0, 0, wvf)  # Avoid division by zero
 
-    # Calculate KAMA on daily close
-    # KAMA parameters: ER (Efficiency Ratio) period=10, Fast=2, Slow=30
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    er = np.zeros_like(change)
-    for i in range(1, len(change)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    # Smooth ER over 10 periods
-    er_smooth = pd.Series(er).ewm(alpha=2/(10+1), adjust=False).fillna(0).values
-    # Smoothing constants
-    fast_sc = 2/(2+1)
-    slow_sc = 2/(30+1)
-    sc = (er_smooth * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Bollinger Bands (20, 2.5) for mean reversion signals
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (std_20 * 2.5)
+    lower_bb = sma_20 - (std_20 * 2.5)
 
-    # Volume filter: >1.5x 20-period average
+    # Get daily data for EMA trend filter (to avoid trading against strong trend)
+    df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+
+    # Volume filter: avoid low-volume false signals
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after KAMA warmup
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(kama[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(wvf[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,30 +62,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: KAMA turning up (current > previous) + price above weekly EMA50 (uptrend) + volume spike
-            if (kama[i] > kama[i-1] and 
-                close[i] > ema_50_1w_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: WVF > 0.8 (extreme fear) + price below lower BB + above 1d EMA50 (avoid strong downtrend) + volume filter
+            if (wvf[i] > 80 and 
+                close[i] < lower_bb[i] and
+                close[i] > ema_50_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.2):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA turning down (current < previous) + price below weekly EMA50 (downtrend) + volume spike
-            elif (kama[i] < kama[i-1] and 
-                  close[i] < ema_50_1w_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: WVF > 0.8 (extreme fear) + price above upper BB + below 1d EMA50 (avoid strong uptrend) + volume filter
+            elif (wvf[i] > 80 and 
+                  close[i] > upper_bb[i] and
+                  close[i] < ema_50_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.2):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA turns down
-            if kama[i] < kama[i-1]:
+            # EXIT LONG: Price returns to mean (SMA20) or WVF normalizes (< 30)
+            if (close[i] >= sma_20[i] or wvf[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA turns up
-            if kama[i] > kama[i-1]:
+            # EXIT SHORT: Price returns to mean (SMA20) or WVF normalizes (< 30)
+            if (close[i] <= sma_20[i] or wvf[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
