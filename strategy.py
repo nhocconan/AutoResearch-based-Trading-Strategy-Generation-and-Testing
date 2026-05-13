@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h momentum strategy with 4h trend filter and volume confirmation.
-# Uses 4h EMA50 for trend direction, enters on 1h momentum bursts (price > 1h EMA20 + volume spike)
-# only during active sessions (08-20 UTC) to avoid low-volume noise.
-# Designed for moderate trade frequency (~20-40/year) to balance opportunity and fee cost.
+"""
+6h_VolumeSpike_Reversal_1wTrend
+Hypothesis: In the direction of the weekly trend (EMA200), enter on volume spikes (>2x 20-period average)
+after a price pullback to the 50-period EMA. Exit when price crosses the 50 EMA in the opposite direction.
+Designed for low trade frequency (~10-20/year) to minimize fee drag. Volume spikes indicate
+institutional participation, and buying pullbacks in an uptrend (or selling rallies in a downtrend)
+is a proven edge. Weekly trend filter ensures we only trade with the dominant multi-week momentum.
+"""
 
-name = "1h_Momentum_4hTrend_Volume_Session"
-timeframe = "1h"
+name = "6h_VolumeSpike_Reversal_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,63 +26,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly data for trend filter (EMA200)
+    df_1w = get_htf_data(prices, '1w')
+    ema200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Calculate 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # 50 EMA for pullback entries (6h timeframe)
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1h EMA20 for momentum filter
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume filter: current volume > 30-period average
+    # Volume spike filter: >2x 20-period average
     volume_series = pd.Series(volume)
-    vol_ma30 = volume_series.rolling(window=30, min_periods=30).mean().values
-    volume_ok = volume > vol_ma30
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour  # Already datetime64[ms], .hour works
-    session_ok = (hours >= 8) & (hours <= 20)
+    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient data
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(ema20[i]) or np.isnan(vol_ma30[i]):
+    for i in range(50, n):
+        if np.isnan(ema50[i]) or np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price above 1h EMA20, 4h uptrend, volume spike, active session
-            if (close[i] > ema20[i] and 
-                close[i] > ema50_4h_aligned[i] and 
-                volume_ok[i] and 
-                session_ok[i]):
-                signals[i] = 0.20
+            # LONG: Uptrend (price > weekly EMA200), price at 50 EMA (pullback), volume spike
+            if (close[i] > ema200_1w_aligned[i] and  # Weekly uptrend
+                abs(close[i] - ema50[i]) / ema50[i] < 0.005 and  # Within 0.5% of 50 EMA (pullback)
+                volume_spike[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price below 1h EMA20, 4h downtrend, volume spike, active session
-            elif (close[i] < ema20[i] and 
-                  close[i] < ema50_4h_aligned[i] and 
-                  volume_ok[i] and 
-                  session_ok[i]):
-                signals[i] = -0.20
+            # SHORT: Downtrend (price < weekly EMA200), price at 50 EMA (pullback), volume spike
+            elif (close[i] < ema200_1w_aligned[i] and  # Weekly downtrend
+                  abs(close[i] - ema50[i]) / ema50[i] < 0.005 and  # Within 0.5% of 50 EMA (pullback)
+                  volume_spike[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below 1h EMA20 or 4h trend turns down
-            if close[i] < ema20[i] or close[i] < ema50_4h_aligned[i]:
+            # EXIT LONG: Price closes below 50 EMA (trend invalidation)
+            if close[i] < ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above 1h EMA20 or 4h trend turns up
-            if close[i] > ema20[i] or close[i] > ema50_4h_aligned[i]:
+            # EXIT SHORT: Price closes above 50 EMA (trend invalidation)
+            if close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
