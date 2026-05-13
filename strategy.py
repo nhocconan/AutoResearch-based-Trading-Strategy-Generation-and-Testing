@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R1_S1_Breakout_12hTrend_Volume
-# Hypothesis: Camarilla pivot R1/S1 breakout on 4h, filtered by 12h trend and volume spikes.
-# Uses tight entries (Camarilla levels act as strong support/resistance) with trend alignment
-# to capture breakouts in trending markets while avoiding false signals in ranges.
-# Works in bull/bear by following 12h trend direction; volume confirms institutional interest.
-# Target: 20-50 trades/year per symbol to minimize fee drag.
+# 1H_Stochastic_Pullback_4hTrend_Volume
+# Hypothesis: 1h stochastic pullback in 4h trend direction with volume confirmation.
+# Uses mean-reversion entries within established 4h trends, filtered by volume spikes.
+# Works in bull/bear by following 4h trend direction; volume confirms institutional interest.
+# Target: 15-37 trades/year per symbol (60-150 total over 4 years) to minimize fee drag.
 
-name = "4H_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1H_Stochastic_Pullback_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,26 +23,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
 
-    # Calculate Camarilla pivot levels for 4h (based on previous 4h bar)
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We need previous bar's high/low/close
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]  # fill first value
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Stochastic(14,3) on 1h
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
 
-    rang = prev_high - prev_low
-    r1 = prev_close + rang * 1.1 / 12
-    s1 = prev_close - rang * 1.1 / 12
-
-    # Trend filter: 12h EMA50
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Trend filter: 4h EMA50
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
 
     # Volume confirmation: current volume > 2.0 x 20-period average (strong spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,9 +45,9 @@ def generate_signals(prices):
 
     for i in range(20, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(r1[i]) or 
-            np.isnan(s1[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or 
+        if (np.isnan(k_percent[i]) or 
+            np.isnan(d_percent[i]) or 
+            np.isnan(ema50_4h_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,33 +57,35 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above R1 in uptrend with volume spike
-            if (close[i] > r1[i] and 
-                close[i] > ema50_12h_aligned[i] and 
+            # LONG: Pullback to support in uptrend with volume spike
+            if (k_percent[i] < 20 and 
+                d_percent[i] < 20 and 
+                close[i] > ema50_4h_aligned[i] and 
                 volume_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Break below S1 in downtrend with volume spike
-            elif (close[i] < s1[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
+            # SHORT: Pullback to resistance in downtrend with volume spike
+            elif (k_percent[i] > 80 and 
+                  d_percent[i] > 80 and 
+                  close[i] < ema50_4h_aligned[i] and 
                   volume_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or trend turns down
-            if close[i] < s1[i] or close[i] < ema50_12h_aligned[i]:
+            # EXIT LONG: Stochastic overbought or trend turns down
+            if k_percent[i] > 80 or close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or trend turns up
-            if close[i] > r1[i] or close[i] > ema50_12h_aligned[i]:
+            # EXIT SHORT: Stochastic oversold or trend turns up
+            if k_percent[i] < 20 or close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
