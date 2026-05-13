@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_Camarilla_Breakout_Volume
-Hypothesis: Camarilla pivot breakouts with 4h/1d trend alignment and volume confirmation work in both bull and bear markets.
-Breakout above R3 with 4h/1d uptrend and volume spike = long.
-Breakdown below S3 with 4h/1d downtrend and volume spike = short.
-Exit on opposite pivot level (R2/S2) or trend reversal. Uses 4h for signal direction, 1h for entry timing.
-Target: 15-30 trades/year per symbol (60-120 total over 4 years).
+6h_WickReversal_Volume_Filter
+Hypothesis: Long wicks (rejection candles) with volume confirmation at key levels 
+work in both bull and bear markets. Long lower wick + volume spike = long signal 
+(rejection of lower prices). Long upper wick + volume spike = short signal 
+(rejection of higher prices). Uses 1w trend filter for higher timeframe bias.
+Target: 20-50 trades/year per symbol.
 """
 
-name = "1h_4h1d_Camarilla_Breakout_Volume"
-timeframe = "1h"
+name = "6h_WickReversal_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,117 +18,78 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h OHLC for Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
+    # Wick calculations
+    body_size = np.abs(close - open_) if 'open' in prices.columns else np.abs(close - close)  # fallback
+    # Actually calculate body size properly
+    open_ = prices['open'].values
+    body_size = np.abs(close - open_)
+    upper_wick = high - np.maximum(close, open_)
+    lower_wick = np.minimum(close, open_) - low
     
-    # Calculate Camarilla levels using previous 4h bar's H/L/C
-    # R4 = C + ((H-L) * 1.5), R3 = C + ((H-L) * 1.25), R2 = C + ((H-L) * 1.166)
-    # S2 = C - ((H-L) * 1.166), S3 = C - ((H-L) * 1.25), S4 = C - ((H-L) * 1.5)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Long wick condition: wick > 2 * body size
+    long_upper_wick = upper_wick > 2 * body_size
+    long_lower_wick = lower_wick > 2 * body_size
     
-    # Shift by 1 to use previous bar's data (no look-ahead)
-    h1 = high_4h[:-1]
-    l1 = low_4h[:-1]
-    c1 = close_4h[:-1]
-    
-    # Calculate levels
-    r4 = c1 + (h1 - l1) * 1.5
-    r3 = c1 + (h1 - l1) * 1.25
-    r2 = c1 + (h1 - l1) * 1.166
-    s2 = c1 - (h1 - l1) * 1.166
-    s3 = c1 - (h1 - l1) * 1.25
-    s4 = c1 - (h1 - l1) * 1.5
-    
-    # Align levels to 1h timeframe (already shifted by 1 in calculation)
-    r4_1h = align_htf_to_ltf(prices, df_4h, r4)
-    r3_1h = align_htf_to_ltf(prices, df_4h, r3)
-    r2_1h = align_htf_to_ltf(prices, df_4h, r2)
-    s2_1h = align_htf_to_ltf(prices, df_4h, s2)
-    s3_1h = align_htf_to_ltf(prices, df_4h, s3)
-    s4_1h = align_htf_to_ltf(prices, df_4h, s4)
-    
-    # 4h trend: EMA50 on 4h close
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_4h = close_4h > ema_50_4h
-    downtrend_4h = close_4h < ema_50_4h
-    uptrend_4h_aligned = align_htf_to_ltf(prices, df_4h, uptrend_4h)
-    downtrend_4h_aligned = align_htf_to_ltf(prices, df_4h, downtrend_4h)
-    
-    # 1d trend filter: EMA50 on 1d close
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 2.0 * vol_ma
+    volume_conf = volume > 1.5 * vol_ma
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # 1w trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    # Simple trend: price above/below 20-period EMA
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    uptrend_1w = df_1w['close'].values > ema_20_1w
+    downtrend_1w = df_1w['close'].values < ema_20_1w
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-            
+    for i in range(30, n):
         # Get values
-        r3 = r3_1h[i]
-        s3 = s3_1h[i]
-        r2 = r2_1h[i]
-        s2 = s2_1h[i]
-        uptrend_4h = uptrend_4h_aligned[i]
-        downtrend_4h = downtrend_4h_aligned[i]
-        uptrend_1d = uptrend_1d_aligned[i]
-        downtrend_1d = downtrend_1d_aligned[i]
+        luw = long_upper_wick[i]
+        llw = long_lower_wick[i]
         vol_conf = volume_conf[i]
+        uptrend_htf = uptrend_1w_aligned[i]
+        downtrend_htf = downtrend_1w_aligned[i]
         
         if position == 0:
-            # LONG: break above R3, 4h/1d uptrend, volume confirmation
-            if close[i] > r3 and uptrend_4h and uptrend_1d and vol_conf:
-                signals[i] = 0.20
+            # LONG: long lower wick + volume confirmation + 1w uptrend filter
+            if llw and vol_conf and uptrend_htf:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: break below S3, 4h/1d downtrend, volume confirmation
-            elif close[i] < s3 and downtrend_4h and downtrend_1d and vol_conf:
-                signals[i] = -0.20
+            # SHORT: long upper wick + volume confirmation + 1w downtrend filter
+            elif luw and vol_conf and downtrend_htf:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch R2 or 4h/1d trend turns down
-            if close[i] >= r2 or not (uptrend_4h and uptrend_1d):
+            # EXIT LONG: long upper wick appears (rejection of higher prices) or opposite signal
+            if luw and vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch S2 or 4h/1d trend turns up
-            if close[i] <= s2 or not (downtrend_4h and downtrend_1d):
+            # EXIT SHORT: long lower wick appears (rejection of lower prices) or opposite signal
+            if llw and vol_conf:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
