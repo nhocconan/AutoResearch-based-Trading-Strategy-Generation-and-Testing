@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume spike confirmation.
-# Long when price breaks above Camarilla R3 level, 1d EMA34 is rising, and volume > 2.0x 20-period average.
-# Short when price breaks below Camarilla S3 level, 1d EMA34 is falling, and volume > 2.0x 20-period average.
+# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volume confirmation.
+# Long when price > Alligator Jaw (13-period smoothed median) AND Jaw > Teeth > Lips (bullish alignment) AND volume > 1.5x 20-period average.
+# Short when price < Alligator Jaw AND Jaw < Teeth < Lips (bearish alignment) AND volume > 1.5x 20-period average.
 # Uses ATR(14) trailing stop (2.5x) for risk control.
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year) on 6h.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
 
-name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,33 +32,38 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels (based on previous day's OHLC)
+    # Get 1d data for Williams Alligator and EMA34
     df_1d = get_htf_data(prices, '1d')
-    open_1d = df_1d['open'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: R3, S3 (more significant than R1/S1 for breakouts)
-    # R3 = close + 1.1*(high-low)/4
-    # S3 = close - 1.1*(high-low)/4
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 4
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    # Calculate Williams Alligator (13,8,5) smoothed medians
+    # Jaw: 13-period SMMA of median price, smoothed 8 bars
+    median_price_1d = (high_1d + low_1d) / 2
+    jaw_raw = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().values
+    jaw = pd.Series(jaw_raw).rolling(window=8, min_periods=8).mean().values  # Additional smoothing
     
-    # Align Camarilla levels to 6h timeframe (wait for 1d bar to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Teeth: 8-period SMMA of median price, smoothed 5 bars
+    teeth_raw = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().values
+    teeth = pd.Series(teeth_raw).rolling(window=5, min_periods=5).mean().values  # Additional smoothing
     
-    # Get 1d data for EMA34 trend filter
-    close_1d = df_1d['close'].values
+    # Lips: 5-period SMMA of median price, smoothed 3 bars
+    lips_raw = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().values
+    lips = pd.Series(lips_raw).rolling(window=3, min_periods=3).mean().values  # Additional smoothing
+    
+    # Calculate 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h timeframe (wait for 1d bar to close)
+    # Align Alligator components and EMA34 to 12h timeframe (wait for 1d bar to close)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate volume confirmation: volume > 2.0x 20-period average (stricter for fewer trades)
+    # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,19 +72,28 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Camarilla R3 AND 1d EMA34 rising (trending up) AND volume confirmation
-            if close[i] > camarilla_r3_aligned[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]:
+            # LONG: Price > Jaw AND Jaw > Teeth > Lips (bullish alignment) AND EMA34 rising AND volume confirmation
+            if (close[i] > jaw_aligned[i] and 
+                jaw_aligned[i] > teeth_aligned[i] and 
+                teeth_aligned[i] > lips_aligned[i] and
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Camarilla S3 AND 1d EMA34 falling (trending down) AND volume confirmation
-            elif close[i] < camarilla_s3_aligned[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Price < Jaw AND Jaw < Teeth < Lips (bearish alignment) AND EMA34 falling AND volume confirmation
+            elif (close[i] < jaw_aligned[i] and 
+                  jaw_aligned[i] < teeth_aligned[i] and 
+                  teeth_aligned[i] < lips_aligned[i] and
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
