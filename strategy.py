@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
-Hypothesis: Camarilla pivot points (R1/S1) on 1h chart act as intraday support/resistance.
-Breakouts above R1 or below S1 with 4h trend alignment and 1d volume confirmation capture momentum.
-Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes via trend filter).
-Uses 4h for trend direction, 1d for volume filter, 1h for precise entry timing to target 15-30 trades/year.
+6h_Weekly_Pivot_Breakout_Trend_Volume
+Hypothesis: Weekly pivot points (R1/S1) derived from weekly high/low/close act as strong support/resistance.
+Breakouts above weekly R1 or below S1 with volume confirmation and daily trend alignment capture momentum moves.
+Exit on reversion to weekly pivot point (PP) or trend reversal. Position size 0.25 targets ~15-25 trades/year to minimize fee drag.
+Works in both bull (breakouts with trend) and bear (mean reversion at extremes) markets via trend filter.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Breakout_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,64 +25,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    # Calculate 4h EMA34 for trend
-    ema34_4h = pd.Series(df_4h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Get 1d data for volume filter
+    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    h_1w = df_1w['high'].values
+    l_1w = df_1w['low'].values
+    c_1w = df_1w['close'].values
+    
+    weekly_pp = (h_1w + l_1w + c_1w) / 3.0
+    weekly_r1 = c_1w + (h_1w - l_1w) * 1.1 / 12.0
+    weekly_s1 = c_1w - (h_1w - l_1w) * 1.1 / 12.0
+    
+    # Align weekly pivots to 6h chart (wait for weekly close)
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # Daily trend filter: EMA50 (using daily close)
     df_1d = get_htf_data(prices, '1d')
-    # Calculate 1d volume moving average (20-period)
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla pivot points on 1h chart
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = close + (high - low) * 1.1 / 12.0
-    camarilla_s1 = close - (high - low) * 1.1 / 12.0
-    camarilla_pp = (high + low + close) / 3.0  # Pivot point for exit
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
+    for i in range(50, n):  # Start after warmup
         if position == 0:
-            # LONG: Breakout above Camarilla R1 with 4h uptrend and 1d volume confirmation
-            if (close[i] > camarilla_r1[i] and 
-                close[i] > ema34_4h_aligned[i] and 
-                volume[i] > 1.5 * vol_ma_1d_aligned[i]):
-                signals[i] = 0.20
+            # LONG: Breakout above weekly R1 with volume confirmation and uptrend
+            if (close[i] > weekly_r1_aligned[i] and 
+                volume_filter[i] and 
+                close[i] > ema50_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below Camarilla S1 with 4h downtrend and 1d volume confirmation
-            elif (close[i] < camarilla_s1[i] and 
-                  close[i] < ema34_4h_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma_1d_aligned[i]):
-                signals[i] = -0.20
+            # SHORT: Breakdown below weekly S1 with volume confirmation and downtrend
+            elif (close[i] < weekly_s1_aligned[i] and 
+                  volume_filter[i] and 
+                  close[i] < ema50_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to Camarilla pivot point or 4h trend reverses
-            if (close[i] < camarilla_pp[i]) or \
-               (close[i] < ema34_4h_aligned[i]):
+            # EXIT LONG: Price returns to weekly pivot or trend reverses
+            if (close[i] < weekly_pp_aligned[i]) or \
+               (close[i] < ema50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to Camarilla pivot point or 4h trend reverses
-            if (close[i] > camarilla_pp[i]) or \
-               (close[i] > ema34_4h_aligned[i]):
+            # EXIT SHORT: Price returns to weekly pivot or trend reverses
+            if (close[i] > weekly_pp_aligned[i]) or \
+               (close[i] > ema50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
