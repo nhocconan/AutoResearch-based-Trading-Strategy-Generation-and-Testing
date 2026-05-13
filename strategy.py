@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
-# 1d_Camarilla_R1_S1_Breakout_1wTrend
-# Hypothesis: On the daily timeframe, enter long when price breaks above Camarilla R1 level with weekly uptrend and volume spike, enter short when price breaks below S1 level with weekly downtrend and volume spike.
-# Camarilla levels provide precise intraday support/resistance derived from previous day's price action.
-# Weekly trend filter ensures alignment with higher timeframe momentum, reducing false breakouts in choppy markets.
-# Volume spike confirms institutional participation in the breakout.
-# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
-# Low frequency due to requirement of daily Camarilla breakout + weekly trend alignment + volume confirmation.
+# 6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Fade at Camarilla R3/S3 levels (strong intraday support/resistance) with volume confirmation,
+# but only in the direction of the 1d EMA34 trend to avoid counter-trend trades.
+# In strong trends (ADX>25), breakout continuation at R4/S4 with volume spike.
+# Works in bull (buy R3 bounce, sell R4 breakout) and bear (sell S3 bounce, buy S4 breakdown).
+# Low frequency due to specific price levels and volume confirmation requirement.
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,43 +23,84 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Daily high, low, close for Camarilla calculation
-    high_1d = high
-    low_1d = low
-    close_1d = close
+    # Calculate daily Camarilla levels from previous day
+    # Using prior day's OHLC to avoid look-ahead
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate previous day's Camarilla levels
-    # Using rolling window of 1 day shifted by 1 to get previous day's values
-    prev_high = pd.Series(high_1d).shift(1)
-    prev_low = pd.Series(low_1d).shift(1)
-    prev_close = pd.Series(close_1d).shift(1)
+    # Camarilla levels
+    range_ = prev_high - prev_low
+    R3 = prev_close + range_ * 1.1 / 2
+    S3 = prev_close - range_ * 1.1 / 2
+    R4 = prev_close + range_ * 1.1
+    S4 = prev_close - range_ * 1.1
     
-    # Camarilla calculation
-    R1 = prev_close + (prev_high - prev_low) * 1.0 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.0 / 12
+    # Daily trend: EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Weekly trend: EMA50 on weekly close
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # ADX for trend strength (using daily data)
+    # Calculate +DM, -DM, TR
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly EMA50 to daily timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(np.abs(high_1d[1:] - close_1d[:-1]), np.abs(low_1d[1:] - close_1d[:-1]))
+    )
     
-    # Volume spike: volume > 2.0 * 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilders_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    period = 14
+    if len(plus_dm) >= period:
+        plus_di = 100 * wilders_smooth(plus_dm, period) / wilders_smooth(tr[1:], period)
+        minus_di = 100 * wilders_smooth(minus_dm, period) / wilders_smooth(tr[1:], period)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = wilders_smooth(dx[~np.isnan(dx)], period) if len(dx[~np.isnan(dx)]) >= period else np.full_like(dx, np.nan)
+        # Prepend NaN for the first element
+        adx_full = np.full(len(high_1d), np.nan)
+        adx_full[1:] = adx
+        adx_1d = adx_full
+    else:
+        adx_1d = np.full_like(high_1d, np.nan)
+    
+    # Align daily indicators to 6h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Volume spike: volume > 2.0 * 4-period average (1 day worth at 6h)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_spike = volume > 2.0 * vol_ma_4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(R1[i]) or 
-            np.isnan(S1[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or 
+            np.isnan(R4_aligned[i]) or 
+            np.isnan(S4_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,29 +109,64 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R1 + weekly uptrend + volume spike
-            if close[i] > R1[i] and close[i] > ema50_1w_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Close < S1 + weekly downtrend + volume spike
-            elif close[i] < S1[i] and close[i] < ema50_1w_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
-                position = -1
+            # Determine market regime
+            is_trending = adx_1d_aligned[i] > 25
+            
+            if is_trending:
+                # In trending market: breakout continuation at R4/S4
+                # LONG: Close > R4 + uptrend + volume spike
+                if close[i] > R4_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # SHORT: Close < S4 + downtrend + volume spike
+                elif close[i] < S4_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                # In ranging market: fade at R3/S3
+                # LONG: Close > R3 (bounce off support) + uptrend + volume spike
+                if close[i] > R3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # SHORT: Close < S3 (bounce off resistance) + downtrend + volume spike
+                elif close[i] < S3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S1 or trend reversal
-            if close[i] < S1[i] or close[i] < ema50_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # EXIT LONG: Close below EMA34 OR reached opposite Camarilla level
+            if is_trending := (adx_1d_aligned[i] > 25):
+                # In trend: exit on trend reversal
+                if close[i] < ema34_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                # In range: exit at opposite S3 level or EMA34
+                if close[i] < S3_aligned[i] or close[i] < ema34_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R1 or trend reversal
-            if close[i] > R1[i] or close[i] > ema50_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # EXIT SHORT: Close above EMA34 OR reached opposite Camarilla level
+            if is_trending := (adx_1d_aligned[i] > 25):
+                # In trend: exit on trend reversal
+                if close[i] > ema34_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                # In range: exit at opposite R3 level or EMA34
+                if close[i] > R3_aligned[i] or close[i] > ema34_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
 
     return signals
