@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Weekly_Pivot_R3_S3_Breakout_1dTrend_Volume
+# 1d_Weekly_Camarilla_R3_S3_Breakout_Trend_Volume
 # Hypothesis: Breakout above weekly Camarilla R3 or below S3 in the direction of daily trend, confirmed by volume spike.
 # Weekly pivot levels provide strong support/resistance; breakouts indicate momentum. Daily trend filter ensures alignment with higher timeframe momentum.
 # Volume spike confirms institutional participation. Works in bull (breakouts above R3 in uptrend) and bear (breakdowns below S3 in downtrend).
 # Low frequency due to reliance on weekly pivots and strict volume confirmation.
+# Target: 1d timeframe, 1w HTF, 7-25 trades/year.
 
-name = "12h_Weekly_Pivot_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_Weekly_Camarilla_R3_S3_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -27,7 +28,6 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate weekly Camarilla levels
-    # Using weekly high, low, close
     weekly_high = df_1w['high'].values
     weekly_low = df_1w['low'].values
     weekly_close = df_1w['close'].values
@@ -38,9 +38,10 @@ def generate_signals(prices):
     R3 = weekly_close + (weekly_high - weekly_low) * 1.1 / 2
     S3 = weekly_close - (weekly_high - weekly_low) * 1.1 / 2
     
-    # Align weekly levels to 12h timeframe
+    # Align weekly levels to 1d timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -49,9 +50,9 @@ def generate_signals(prices):
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume spike: volume > 2.0 * 24-period average (2 days worth at 12h)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > 2.0 * vol_ma_24
+    # Volume spike: volume > 2.0 * 14-period average (approx 2 weeks worth at 1d)
+    vol_ma_14 = pd.Series(volume).rolling(window=14, min_periods=14).mean().values
+    volume_spike = volume > 2.0 * vol_ma_14
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,7 +61,8 @@ def generate_signals(prices):
         # Skip if any required value is NaN
         if (np.isnan(R3_aligned[i]) or 
             np.isnan(S3_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+            np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(pivot_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,7 +83,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # EXIT LONG: Close below weekly pivot OR trend reversal
-            pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
             if close[i] < pivot_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -89,7 +90,6 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Close above weekly pivot OR trend reversal
-            pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
             if close[i] > pivot_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
