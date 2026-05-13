@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_RVOL_Breakout_1wTrend"
-timeframe = "1d"
+name = "6h_PriceChannel_Breakout_Volume_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,77 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Load 1D data ONCE for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA(50) for long-term trend
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    close_1d = df_1d['close'].values
     
-    # Daily 20-period moving average and standard deviation for RVOL
-    close_series = pd.Series(close)
-    volume_series = pd.Series(volume)
+    # Calculate EMA20 on 1D for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    ma20 = close_series.rolling(window=20, min_periods=20).mean().values
-    std20 = close_series.rolling(window=20, min_periods=20).std().values
+    # Align 1D EMA20 to 6H timeframe
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # 20-day average volume
-    avg_vol20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate 6H Donchian channel (20-period)
+    high_max = np.full(n, np.nan)
+    low_min = np.full(n, np.nan)
     
-    # Bollinger Bands (20, 2)
-    upper_band = ma20 + 2 * std20
-    lower_band = ma20 - 2 * std20
+    for i in range(n):
+        start_idx = max(0, i - 19)
+        if i >= 19:
+            high_max[i] = np.max(high[start_idx:i+1])
+            low_min[i] = np.min(low[start_idx:i+1])
+    
+    # Calculate volume ratio (current vs 20-period average)
+    volume_ma = np.full(n, np.nan)
+    for i in range(n):
+        if i >= 19:
+            volume_ma[i] = np.mean(volume[i-19:i+1])
+    
+    volume_ratio = np.full(n, np.nan)
+    volume_ratio = volume / np.where(volume_ma == 0, np.nan, volume_ma)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient data
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(ma20[i]) or 
-            np.isnan(std20[i]) or np.isnan(avg_vol20[i]) or 
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i])):
+    for i in range(20, n):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter: price above/below weekly EMA50
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+        # Trend filter: price above/below 1D EMA20
+        price_above_1d_ema = close[i] > ema20_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema20_1d_aligned[i]
         
-        # Relative volume (current volume / 20-day average volume)
-        rvol = volume[i] / avg_vol20[i] if avg_vol20[i] > 0 else 0
-        vol_surge = rvol > 2.0  # Volume at least 2x average
+        # Volume filter: above average volume
+        volume_filter = volume_ratio[i] > 1.5
         
-        # Bollinger Band breakout
-        breakout_up = close[i] > upper_band[i]
-        breakout_down = close[i] < lower_band[i]
-        
-        if position == 0:
-            # LONG: Weekly uptrend + volume surge + breakout above upper band
-            if weekly_uptrend and vol_surge and breakout_up:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Weekly downtrend + volume surge + breakout below lower band
-            elif weekly_downtrend and vol_surge and breakout_down:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # EXIT LONG: Weekly trend weakens or price returns below middle band
-            if not weekly_uptrend or close[i] < ma20[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # EXIT SHORT: Weekly trend weakens or price returns above middle band
-            if not weekly_downtrend or close[i] > ma20[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        # Long signal: break above Donchian high + uptrend + volume
+        if (close[i] > high_max[i] and price_above_1d_ema and volume_filter):
+            signals[i] = 0.25
+        # Short signal: break below Donchian low + downtrend + volume
+        elif (close[i] < low_min[i] and price_below_1d_ema and volume_filter):
+            signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
