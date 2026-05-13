@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_Filter_v1
-Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) on 12h to capture trend direction, filtered by 1d RSI to avoid extremes and volume confirmation. KAMA adapts to market noise, reducing whipsaws in sideways markets while capturing trends. Works in bull markets by riding trends and in bear markets by avoiding false signals during low volatility. Target: 20-50 trades/year on 12h timeframe to minimize fee drag.
+1d_Choppiness_Index_Regime_MeanReversion
+Hypothesis: Use Choppiness Index (14) to detect ranging markets (CHOP > 61.8) and mean-revert at Bollinger Bands (20,2). In trending markets (CHOP < 38.2), follow the trend using EMA(50). Works in both bull and bear markets by adapting to regime. Designed for 1d timeframe to limit trades (<25/year) and avoid fee drag.
 """
 
-name = "12h_KAMA_Trend_Filter_v1"
-timeframe = "12h"
+name = "1d_Choppiness_Index_Regime_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,128 +17,109 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 12h data (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # Get 1d data for RSI filter
+    # Get daily data for Choppiness Index and Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate KAMA on 12h close
-    # Efficiency Ratio (ER) = |change| / volatility
-    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
-    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)  # placeholder, will compute properly below
+    # Calculate True Range and ATR(14)
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Proper ER calculation over 10-period window
-    def calculate_kama(close_array, er_period=10, fast_sc=2, slow_sc=30):
-        n_len = len(close_array)
-        kama = np.zeros(n_len)
-        kama[0] = close_array[0]
-        
-        # Calculate Efficiency Ratio
-        change = np.abs(np.diff(close_array, prepend=close_array[0]))
-        vol = np.abs(np.diff(close_array))
-        
-        er = np.zeros(n_len)
-        er[0] = 0
-        for i in range(1, n_len):
-            if i < er_period:
-                er[i] = np.sum(change[1:i+1]) / np.sum(vol[1:i+1]) if np.sum(vol[1:i+1]) > 0 else 0
-            else:
-                er[i] = np.sum(change[i-er_period+1:i+1]) / np.sum(vol[i-er_period+1:i+1]) if np.sum(vol[i-er_period+1:i+1]) > 0 else 0
-        
-        # Smoothing constants
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        
-        # Calculate KAMA
-        for i in range(1, n_len):
-            kama[i] = kama[i-1] + sc[i] * (close_array[i] - kama[i-1])
-        
-        return kama
+    # Calculate +DM and -DM
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    kama_12h = calculate_kama(close_12h, er_period=10, fast_sc=2, slow_sc=30)
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    # Calculate +DI and -DI
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
     
-    # Calculate RSI on 1d close
-    def calculate_rsi(close_array, period=14):
-        n_len = len(close_array)
-        delta = np.diff(close_array, prepend=close_array[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros(n_len)
-        avg_loss = np.zeros(n_len)
-        
-        # Initial average
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        # Wilder smoothing
-        for i in range(period+1, n_len):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Calculate DX and ADX(14)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    rsi_1d = calculate_rsi(close_1d, period=14)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate Choppiness Index (14)
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
     
-    # Calculate volume average on 1d for spike detection
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Calculate Bollinger Bands (20,2)
+    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    
+    # Align indicators to lower timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    sma_20_aligned = align_htf_to_ltf(prices, df_1d, sma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(sma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current 1d volume > 1.5x 20-day average
-        # Need to get current 1d volume aligned to 12h
-        vol_1d_current = volume_1d[np.searchsorted(df_1d.index.values[:len(df_1d)], 
-                                                   pd.Timestamp(prices['open_time'].iloc[i]), 
-                                                   side='right') - 1] if i > 0 else volume_1d[0]
-        vol_spike = vol_1d_current > 1.5 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
+        chop_val = chop_aligned[i]
+        adx_val = adx_aligned[i]
         
         if position == 0:
-            # LONG: Price above KAMA + RSI not overbought ( < 70) + volume spike
-            if close[i] > kama_12h_aligned[i] and rsi_1d_aligned[i] < 70 and vol_spike:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Price below KAMA + RSI not oversold ( > 30) + volume spike
-            elif close[i] < kama_12h_aligned[i] and rsi_1d_aligned[i] > 30 and vol_spike:
-                signals[i] = -0.25
-                position = -1
+            # Ranging market: CHOP > 61.8 -> mean revert at Bollinger Bands
+            if chop_val > 61.8:
+                if close[i] <= lower_bb_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] >= upper_bb_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
+            # Trending market: CHOP < 38.2 and ADX > 25 -> follow EMA trend
+            elif chop_val < 38.2 and adx_val > 25:
+                if close[i] > sma_20_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < sma_20_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA or RSI overbought
-            if close[i] < kama_12h_aligned[i] or rsi_1d_aligned[i] >= 70:
+            # EXIT LONG: CHOP drops below 38.2 (trend start) or price crosses above SMA20 in range
+            if chop_aligned[i] < 38.2 or close[i] >= sma_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA or RSI oversold
-            if close[i] > kama_12h_aligned[i] or rsi_1d_aligned[i] <= 30:
+            # EXIT SHORT: CHOP drops below 38.2 (trend start) or price crosses below SMA20 in range
+            if chop_aligned[i] < 38.2 or close[i] <= sma_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
