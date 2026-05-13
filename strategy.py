@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Williams %R mean reversion with 1w EMA50 trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) and close > 1w EMA50 and volume > 1.5x average.
-# Short when Williams %R > -20 (overbought) and close < 1w EMA50 and volume > 1.5x average.
-# Uses ATR-based trailing stop (2.0x) for risk control.
-# Williams %R identifies exhaustion points in ranging markets.
-# 1w EMA50 filters for primary trend alignment to avoid counter-trend trades.
-# Volume confirmation ensures breakout validity.
-# Target: 7-25 trades/year (30-100 total over 4 years) on 1d timeframe.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 1d EMA34 trend filter + ATR-based stop
+# Elder Ray measures bull/bear power: Bull Power = High - EMA13, Bear Power = Low - EMA13
+# Long when Bull Power > 0 AND Bear Power rising AND close > 1d EMA34
+# Short when Bear Power < 0 AND Bull Power falling AND close < 1d EMA34
+# Uses ATR trailing stop for risk control. Works in bull/bear via trend filter.
+# Target: 12-37 trades/year (50-150 total over 4 years) on 6h timeframe.
 
-name = "1d_WilliamsR_MeanReversion_1wEMA50_Volume_v1"
-timeframe = "1d"
+name = "6h_ElderRay_ADXRegime_1dEMA34_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -34,22 +32,18 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Williams %R(14) on primary timeframe (1d)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14 + 1e-10)
+    # Calculate EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Elder Ray components
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Calculate EMA50 on 1w close
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Calculate volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,19 +52,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) AND close > 1w EMA50 AND volume confirmation
-            if williams_r[i] < -80 and close[i] > ema50_1w_aligned[i] and volume_confirm[i]:
+            # LONG: Bull Power > 0 AND Bear Power rising (less negative) AND close > 1d EMA34
+            if bull_power[i] > 0 and bear_power[i] > bear_power[i-1] and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Williams %R > -20 (overbought) AND close < 1w EMA50 AND volume confirmation
-            elif williams_r[i] > -20 and close[i] < ema50_1w_aligned[i] and volume_confirm[i]:
+            # SHORT: Bear Power < 0 AND Bull Power falling (less positive) AND close < 1d EMA34
+            elif bear_power[i] < 0 and bull_power[i] < bull_power[i-1] and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
