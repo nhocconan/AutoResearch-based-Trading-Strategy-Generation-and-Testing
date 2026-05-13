@@ -1,16 +1,16 @@
-#!/usr/bin/env python3
+# !/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) from daily data provide strong intraday support/resistance. 
-Breakout above R1 with daily uptrend and volume spike = long.
-Breakdown below S1 with daily downtrend and volume spike = short.
-Exit on opposite level touch or daily trend reversal. Uses 1w trend filter for higher timeframe bias.
-Target: 12-37 trades/year per symbol (50-150 total over 4 years).
-Works in both bull and bear markets by following daily trend and requiring volume confirmation.
+6h_Alligator_AllLines_ElderRay_Trend
+Hypothesis: Combining Williams Alligator (JAWS/TEETH/LIPS) with Elder Ray (Bull/Bear Power) on 6h timeframe
+provides robust trend detection with momentum confirmation, working in both bull and bear markets.
+Alligator lines define trend direction (bullish when LIPS>TEETH>JAWS, bearish when LIPS<TEETH<JAWS).
+Elder Ray confirms trend strength (Bull Power > 0 and rising for longs, Bear Power < 0 and falling for shorts).
+Trades only when both indicators agree, reducing false signals and whipsaws.
+Target: 15-35 trades/year per symbol.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_Alligator_AllLines_ElderRay_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,95 +25,59 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Daily high, low, close for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Williams Alligator: SMAs of median price (HL/2)
+    median_price = (high + low) / 2.0
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We use the previous day's data to avoid look-ahead
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Shift by 1 to use previous day's data
-    prev_daily_high = np.concatenate([[daily_high[0]], daily_high[:-1]])
-    prev_daily_low = np.concatenate([[daily_low[0]], daily_low[:-1]])
-    prev_daily_close = np.concatenate([[daily_close[0]], daily_close[:-1]])
+    # Smooth Elder Ray for trend confirmation (3-period EMA)
+    bull_power_smooth = pd.Series(bull_power).ewm(span=3, adjust=False, min_periods=3).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=3, adjust=False, min_periods=3).mean().values
     
-    # Calculate Camarilla levels
-    camarilla_width = (prev_daily_high - prev_daily_low) * 1.1 / 12
-    r1 = prev_daily_close + camarilla_width
-    s1 = prev_daily_close - camarilla_width
+    # Alligator trend conditions
+    bullish_alligator = (lips > teeth) & (teeth > jaw)
+    bearish_alligator = (lips < teeth) & (teeth < jaw)
     
-    # Align daily levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Elder Ray trend conditions (require positive/negative and rising/falling)
+    bullish_elder = (bull_power_smooth > 0) & (bull_power_smooth > np.roll(bull_power_smooth, 1))
+    bearish_elder = (bear_power_smooth < 0) & (bear_power_smooth < np.roll(bear_power_smooth, 1))
     
-    # Daily trend filter: EMA50
-    ema_50_1d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = daily_close > ema_50_1d
-    downtrend_1d = daily_close < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    
-    # Weekly trend filter (for higher timeframe bias)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        # If not enough weekly data, just use daily trend
-        uptrend_1w_aligned = np.ones(n, dtype=bool)
-        downtrend_1w_aligned = np.zeros(n, dtype=bool)
-    else:
-        weekly_close = df_1w['close'].values
-        ema_50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-        uptrend_1w = weekly_close > ema_50_1w
-        downtrend_1w = weekly_close < ema_50_1w
-        uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-        downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = np.zeros(n)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.5 * vol_ma
+    # Combine signals: both indicators must agree
+    bullish = bullish_alligator & bullish_elder
+    bearish = bearish_alligator & bearish_elder
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Get values
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        uptrend_daily = uptrend_1d_aligned[i]
-        downtrend_daily = downtrend_1d_aligned[i]
-        uptrend_weekly = uptrend_1w_aligned[i]
-        downtrend_weekly = downtrend_1w_aligned[i]
-        vol_conf = volume_conf[i]
-        
         if position == 0:
-            # LONG: break above R1, daily uptrend, weekly uptrend filter, volume confirmation
-            if close[i] > r1_level and uptrend_daily and uptrend_weekly and vol_conf:
+            # LONG: bullish alignment from both indicators
+            if bullish[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1, daily downtrend, weekly downtrend filter, volume confirmation
-            elif close[i] < s1_level and downtrend_daily and downtrend_weekly and vol_conf:
+            # SHORT: bearish alignment from both indicators
+            elif bearish[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch S1 or daily trend turns down
-            if close[i] < s1_level or not uptrend_daily:
+            # EXIT LONG: either indicator turns bearish
+            if not (bullish_alligator[i] and bullish_elder[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch R1 or daily trend turns up
-            if close[i] > r1_level or not downtrend_daily:
+            # EXIT SHORT: either indicator turns bullish
+            if not (bearish_alligator[i] and bearish_elder[i]):
                 signals[i] = 0.0
                 position = 0
             else:
