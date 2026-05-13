@@ -1,18 +1,45 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Camarilla R4/S4 breakout with 1w EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R4 with 1w EMA34 uptrend and volume > 2x average.
-# Short when price breaks below S4 with 1w EMA34 downtrend and volume > 2x average.
-# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# R4/S4 levels are stronger reversal points than R3/S3; weekly EMA34 filters for higher-timeframe trend.
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d HMA21 trend filter and volume confirmation.
+# Long when price breaks above R3 with 1d HMA21 uptrend and volume > 1.5x average.
+# Short when price breaks below S3 with 1d HMA21 downtrend and volume > 1.5x average.
+# Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# R3/S3 levels provide strong reversal points; daily HMA21 filters for higher-timeframe trend.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
-name = "1d_Camarilla_R4S4_Breakout_1wEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dHMA21_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_hma(arr, period):
+    """Calculate Hull Moving Average."""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA for half period
+    weights_half = np.arange(1, half_period + 1)
+    wma_half = np.convolve(arr, weights_half, mode='full')[-len(arr):] / weights_half.sum()
+    wma_half[:half_period-1] = np.nan
+    
+    # WMA for full period
+    weights_full = np.arange(1, period + 1)
+    wma_full = np.convolve(arr, weights_full, mode='full')[-len(arr):] / weights_full.sum()
+    wma_full[:period-1] = np.nan
+    
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    
+    # WMA of raw HMA with sqrt(period)
+    weights_sqrt = np.arange(1, sqrt_period + 1)
+    hma = np.convolve(raw_hma, weights_sqrt, mode='full')[-len(arr):] / weights_sqrt.sum()
+    hma[:sqrt_period-1] = np.nan
+    
+    return hma
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,26 +62,26 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Camarilla levels from previous week (using weekly data)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Camarilla levels from previous day (using daily data)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels: R4/S4 = C ± (H-L)*1.1/2
-    camarilla_range = (high_1w - low_1w) * 1.1 / 2
-    r4 = close_1w + camarilla_range
-    s4 = close_1w - camarilla_range
+    # Camarilla levels: R3/S3 = C ± (H-L)*1.1/4
+    camarilla_range = (high_1d - low_1d) * 1.1 / 4
+    r3 = close_1d + camarilla_range
+    s3 = close_1d - camarilla_range
     
-    # Align Camarilla levels to 1d timeframe (wait for weekly bar to close)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Align Camarilla levels to 4h timeframe (wait for daily bar to close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Get weekly data for EMA34 trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get daily data for HMA21 trend filter
+    hma21_1d = calculate_hma(close_1d, 21)
     
-    # Align 1w EMA34 to 1d timeframe (wait for weekly bar to close)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align 1d HMA21 to 4h timeframe (wait for daily bar to close)
+    hma21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma21_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,24 +90,24 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(hma21_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R4 AND 1w EMA34 uptrend AND volume > 2x average
-            if (close[i] > r4_aligned[i] and 
-                close[i] > ema34_1w_aligned[i] and  # Price above EMA34 confirms uptrend
-                volume[i] > 2.0 * avg_volume[i]):
+            # LONG: Price breaks above R3 AND 1d HMA21 uptrend AND volume > 1.5x average
+            if (close[i] > r3_aligned[i] and 
+                close[i] > hma21_1d_aligned[i] and  # Price above HMA21 confirms uptrend
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below S4 AND 1w EMA34 downtrend AND volume > 2x average
-            elif (close[i] < s4_aligned[i] and 
-                  close[i] < ema34_1w_aligned[i] and  # Price below EMA34 confirms downtrend
-                  volume[i] > 2.0 * avg_volume[i]):
+            # SHORT: Price breaks below S3 AND 1d HMA21 downtrend AND volume > 1.5x average
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < hma21_1d_aligned[i] and  # Price below HMA21 confirms downtrend
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -93,8 +120,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -108,8 +135,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
