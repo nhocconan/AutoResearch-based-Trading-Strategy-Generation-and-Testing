@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
-# Short when price breaks below S3 AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
-# Uses ATR(14) trailing stop (2.0x) for risk control.
-# Uses discrete position sizing (0.25) to minimize fee churn.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation + ATR(14) trailing stop (2.0x).
+# Long when price breaks above upper Donchian(20) AND 1d EMA34 is rising AND volume > 1.5x 20-period average.
+# Short when price breaks below lower Donchian(20) AND 1d EMA34 is falling AND volume > 1.5x 20-period average.
+# Uses ATR(14) trailing stop for risk control.
+# Discrete position sizing (0.25) to minimize fee churn.
 # Target: 75-200 total trades over 4 years (19-50/year) on 4h.
-# This strategy focuses on tight entries with confluence of price structure (Camarilla),
-# trend (1d EMA34), and volume confirmation to avoid overtrading and capture sustained moves.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeConfirm_v1"
+name = "4h_Donchian20_1dEMA34_VolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,17 +32,9 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla pivot levels from previous day
-    # R3 = close + 1.0*(high-low), S3 = close - 1.0*(high-low)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]  # First bar: use current values as fallback
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    camarilla_r3 = prev_close + 1.0 * (prev_high - prev_low)
-    camarilla_s3 = prev_close - 1.0 * (prev_high - prev_low)
+    # Calculate Donchian(20) channels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -56,9 +46,9 @@ def generate_signals(prices):
     # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,19 +57,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND 1d EMA34 rising AND volume spike
-            if (close[i] > camarilla_r3[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]):
+            # LONG: Price breaks above upper Donchian AND 1d EMA34 rising AND volume spike
+            if (close[i] > highest_20[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below S3 AND 1d EMA34 falling AND volume spike
-            elif (close[i] < camarilla_s3[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]):
+            # SHORT: Price breaks below lower Donchian AND 1d EMA34 falling AND volume spike
+            elif (close[i] < lowest_20[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
