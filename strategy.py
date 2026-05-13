@@ -1,32 +1,20 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator breakout with 1d trend filter (EMA50), volume confirmation (1.5x MA20), and ATR(14) volatility filter.
-# Enters long when price breaks above Alligator's Jaw (SMMA13) with 1d bullish trend (close > EMA50), volume > 1.5x MA20, and ATR(14) > 0.3 * ATR(50).
-# Enters short when price breaks below Alligator's Jaw (SMMA13) with 1d bearish trend (close < EMA50), volume > 1.5x MA20, and ATR(14) > 0.3 * ATR(50).
-# Exits when price crosses the Alligator's Teeth (SMMA8) or ATR-based stoploss (2 * ATR(14) from entry).
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter, volume confirmation (1.5x MA20), and ATR(14) volatility filter.
+# Enters long when price breaks above Donchian upper channel with 12h bullish trend (close > EMA50), volume > 1.5x MA20, and ATR(14) > 0.3 * ATR(50).
+# Enters short when price breaks below Donchian lower channel with 12h bearish trend (close < EMA50), volume > 1.5x MA20, and ATR(14) > 0.3 * ATR(50).
+# Exits when price crosses the Donchian midline (average of upper/lower) or ATR-based stoploss (2 * ATR(14) from entry).
 # Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
-# Designed for low trade frequency (~12-37/year) by requiring strict confluence: price breakout + HTF trend + volume spike + volatility filter.
-# Williams Alligator uses smoothed moving averages (SMMA) that reduce whipsaw in ranging markets, effective in both bull and bear regimes.
-# The 1d trend filter ensures alignment with higher timeframe direction, while volatility filter avoids low volatility false breakouts.
+# Designed for low trade frequency (~19-50/year) by requiring strict confluence: price breakout + HTF trend + volume spike + volatility filter.
+# Donchian channels provide clear trend-following structure with defined support/resistance levels.
+# The 12h trend filter ensures alignment with higher timeframe direction, while volatility filter avoids low volatility false breakouts.
 
-name = "12h_WilliamsAlligator_Breakout_1dTrend_Volume_Volatility_v1"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_12hTrend_Volume_Volatility_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def smma(values, period):
-    """Smoothed Moving Average (SMMA) - also called Wilder's Moving Average"""
-    if len(values) < period:
-        return np.full(len(values), np.nan)
-    result = np.full(len(values), np.nan)
-    # First value is simple SMA
-    result[period-1] = np.mean(values[:period])
-    # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
-    for i in range(period, len(values)):
-        result[i] = (result[i-1] * (period-1) + values[i]) / period
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,18 +26,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # Calculate EMA(50) on 1d close
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Get 12h data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # Calculate EMA(50) on 12h close
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Williams Alligator on 12h data: Jaw (SMMA13), Teeth (SMMA8), Lips (SMMA5)
-    # Using smoothed moving averages (Wilder's smoothing)
-    jaw = smma(close, 13)   # Alligator's Jaw (slowest)
-    teeth = smma(close, 8)  # Alligator's Teeth (middle)
-    lips = smma(close, 5)   # Alligator's Lips (fastest)
+    # Donchian Channel on 4h: upper(20), lower(20), midline
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donch_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donch_mid = (donch_upper + donch_lower) / 2
     
     # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
@@ -71,28 +60,28 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
-           np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20[i]) or \
+        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(donch_mid[i]) or \
+           np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i]) or \
            np.isnan(atr14[i]) or np.isnan(atr50[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Alligator's Jaw with 1d bullish trend, volume spike, and sufficient volatility
-            if close[i] > jaw[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i] and volatility_filter[i]:
+            # LONG: Price breaks above Donchian upper with 12h bullish trend, volume spike, and sufficient volatility
+            if close[i] > donch_upper[i] and close[i] > ema50_12h_aligned[i] and volume_spike[i] and volatility_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
-            # SHORT: Price breaks below Alligator's Jaw with 1d bearish trend, volume spike, and sufficient volatility
-            elif close[i] < jaw[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i] and volatility_filter[i]:
+            # SHORT: Price breaks below Donchian lower with 12h bearish trend, volume spike, and sufficient volatility
+            elif close[i] < donch_lower[i] and close[i] < ema50_12h_aligned[i] and volume_spike[i] and volatility_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below Alligator's Teeth (mean reversion) OR ATR stoploss hit
-            if close[i] < teeth[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
+            # EXIT LONG: Price crosses below Donchian midline (mean reversion) OR ATR stoploss hit
+            if close[i] < donch_mid[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
@@ -100,8 +89,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 entry_price[i] = entry_price[i-1]  # carry forward entry price
         elif position == -1:
-            # EXIT SHORT: Price crosses above Alligator's Teeth (mean reversion) OR ATR stoploss hit
-            if close[i] > teeth[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
+            # EXIT SHORT: Price crosses above Donchian midline (mean reversion) OR ATR stoploss hit
+            if close[i] > donch_mid[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
