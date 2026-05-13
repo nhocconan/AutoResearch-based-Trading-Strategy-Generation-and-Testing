@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
-name = "12h_PivotBreakout_VolumeTrend"
-timeframe = "12h"
+# Hypothesis: 4h Camarilla R1/S1 breakout with volume confirmation and 1d EMA34 trend filter.
+# Uses pivot-based support/resistance from daily timeframe for structure, 
+# volume to confirm breakout strength, and EMA trend filter to avoid counter-trend trades.
+# Designed to work in both bull and bear markets by following the higher timeframe trend.
+# Target: 20-40 trades per year to avoid fee drag.
+
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +25,7 @@ def generate_signals(prices):
     
     # Load 1D data ONCE for pivot calculation and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -31,14 +37,14 @@ def generate_signals(prices):
     r1 = 2 * pivot - low_1d
     s1 = 2 * pivot - high_1d
     
-    # Align pivot levels to 12H timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # 1-day EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align pivot levels and EMA to 4H timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 12H EMA50 for trend filter
-    close_s = pd.Series(close)
-    ema50_12h = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume filter: current volume > 20-period average
     volume_s = pd.Series(volume)
@@ -49,14 +55,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after sufficient data
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema50_12h[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to EMA50
-        price_above_ema = close[i] > ema50_12h[i]
-        price_below_ema = close[i] < ema50_12h[i]
+        # Trend filter: price relative to EMA34
+        price_above_ema = close[i] > ema34_1d_aligned[i]
+        price_below_ema = close[i] < ema34_1d_aligned[i]
         
         if position == 0:
             # LONG: Break above R1 with volume and uptrend
@@ -70,15 +76,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls back below pivot or volume drops
-            if (close[i] < pivot_aligned[i]) or not volume_ok[i]:
+            # EXIT LONG: Price falls back below S1 or trend changes
+            if (close[i] < s1_aligned[i]) or not price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises back above pivot or volume drops
-            if (close[i] > pivot_aligned[i]) or not volume_ok[i]:
+            # EXIT SHORT: Price rises back above R1 or trend changes
+            if (close[i] > r1_aligned[i]) or not price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
