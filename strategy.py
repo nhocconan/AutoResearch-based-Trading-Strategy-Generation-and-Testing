@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) and close > 1d EMA34 and volume > 1.5x average.
-# Short when Williams %R > -20 (overbought) and close < 1d EMA34 and volume > 1.5x average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 and close > 1d EMA34 and volume > 1.5x average.
+# Short when price breaks below Camarilla S3 and close < 1d EMA34 and volume > 1.5x average.
 # Uses ATR-based trailing stop (2.0x) for risk control.
-# Williams %R identifies exhaustion points in ranging markets.
+# Camarilla levels provide high-probability reversal points from prior day's range.
 # 1d EMA34 filters for primary trend alignment to avoid counter-trend trades.
 # Volume confirmation ensures breakout validity.
-# Target: 12-37 trades/year (50-150 total over 4 years) on 12h timeframe.
+# Target: 19-50 trades/year (75-200 total over 4 years) on 4h timeframe.
 
-name = "12h_WilliamsR_MeanReversion_1dEMA34_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,16 +34,21 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Williams %R(14) on primary timeframe
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14 + 1e-10)
-    
-    # Get 1d data for EMA34 trend filter
+    # Calculate Camarilla levels from prior day (using 1d data)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 1d close
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe (wait for prior day to complete)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Get 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
@@ -58,19 +63,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) AND close > 1d EMA34 AND volume confirmation
-            if williams_r[i] < -80 and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
+            # LONG: Price breaks above Camarilla R3 AND close > 1d EMA34 AND volume confirmation
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Williams %R > -20 (overbought) AND close < 1d EMA34 AND volume confirmation
-            elif williams_r[i] > -20 and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
+            # SHORT: Price breaks below Camarilla S3 AND close < 1d EMA34 AND volume confirmation
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
