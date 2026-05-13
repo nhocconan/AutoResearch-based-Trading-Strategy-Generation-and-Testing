@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation
-# Long when price > Alligator Jaw (13-period SMMA shifted 8) with 1d EMA50 uptrend and volume > 1.5x average
-# Short when price < Alligator Lips (8-period SMMA shifted 5) with 1d EMA50 downtrend and volume > 1.5x average
-# Exit when price crosses the Alligator Teeth (8-period SMMA)
-# Uses discrete position sizing 0.25. Target: 50-150 total trades over 4 years on 12h timeframe.
-# Williams Alligator identifies trend absence/presence; 1d EMA50 filters for higher-timeframe trend alignment.
-# Volume confirmation ensures breakouts have conviction. Designed to work in both bull (trend following) and bear (mean reversion during rallies) markets.
+# Hypothesis: 4h Donchian(20) breakout with 12h Supertrend filter and volume confirmation.
+# Long when price closes above Donchian upper band with 12h Supertrend uptrend and volume > 1.5x 20-bar average.
+# Short when price closes below Donchian lower band with 12h Supertrend downtrend and volume > 1.5x average.
+# Exit when price reverses and closes below/above the opposite Donchian band.
+# Uses discrete position sizing 0.25. Target: 75-200 total trades over 4 years on 4h timeframe.
+# 12h Supertrend ensures we only trade in the direction of the intermediate trend, reducing false breakouts in ranging markets.
+# Volume confirmation ensures breakouts are supported by participation, increasing reliability.
 
-name = "12h_WilliamsAlligator_1dEMA50_Trend_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_12hSupertrend_Trend_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,86 +25,114 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator components (SMMA = Smoothed Moving Average)
-    def smma(arr, period):
-        """Smoothed Moving Average: similar to EMA but with alpha = 1/period"""
-        if len(arr) < period:
-            return np.full_like(arr, np.nan, dtype=float)
-        result = np.full_like(arr, np.nan, dtype=float)
-        # First value is simple SMA
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA(i) = (SMMA(i-1) * (period-1) + arr[i]) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate Donchian channels (20-period)
+    lookback = 20
+    if n < lookback + 1:
+        return np.zeros(n)
     
-    # Alligator Jaw: 13-period SMMA of median price, shifted 8 bars
-    median_price = (high + low) / 2
-    jaw_raw = smma(median_price, 13)
-    jaw = np.roll(jaw_raw, 8)  # shift right by 8 (future values become NaN)
-    jaw[:8] = np.nan  # first 8 values invalid after shift
-    
-    # Alligator Teeth: 8-period SMMA of median price, shifted 5 bars
-    teeth_raw = smma(median_price, 8)
-    teeth = np.roll(teeth_raw, 5)  # shift right by 5
-    teeth[:5] = np.nan
-    
-    # Alligator Lips: 5-period SMMA of median price, shifted 3 bars
-    lips_raw = smma(median_price, 5)
-    lips = np.roll(lips_raw, 3)  # shift right by 3
-    lips[:3] = np.nan
+    upper_band = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    lower_band = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for Supertrend calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA50 on 1d data
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    if len(close_12h) < 10:
+        return np.zeros(n)
     
-    # Align 1d EMA50 to 12h timeframe (wait for 1d bar to close)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate ATR(10) for 12h Supertrend
+    tr1 = pd.Series(high_12h).diff().abs()
+    tr2 = (pd.Series(high_12h) - pd.Series(close_12h).shift(1)).abs()
+    tr3 = (pd.Series(low_12h) - pd.Series(close_12h).shift(1)).abs()
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h = tr_12h.ewm(span=10, min_periods=10, adjust=False).mean().values
+    
+    # Calculate Supertrend (10, 3.0) on 12h data
+    hl2_12h = (high_12h + low_12h) / 2
+    upper_band_12h = hl2_12h + 3.0 * atr_12h
+    lower_band_12h = hl2_12h - 3.0 * atr_12h
+    
+    # Initialize Supertrend arrays
+    supertrend_12h = np.zeros_like(close_12h)
+    direction_12h = np.ones_like(close_12h)  # 1 for uptrend, -1 for downtrend
+    
+    # Set first valid value
+    supertrend_12h[0] = hl2_12h[0]
+    direction_12h[0] = 1
+    
+    # Calculate Supertrend iteratively
+    for i in range(1, len(close_12h)):
+        # Upper band
+        if upper_band_12h[i] < supertrend_12h[i-1] or close_12h[i-1] > supertrend_12h[i-1]:
+            upper_band_12h[i] = upper_band_12h[i]
+        else:
+            upper_band_12h[i] = supertrend_12h[i-1]
+        
+        # Lower band
+        if lower_band_12h[i] > supertrend_12h[i-1] or close_12h[i-1] < supertrend_12h[i-1]:
+            lower_band_12h[i] = lower_band_12h[i]
+        else:
+            lower_band_12h[i] = supertrend_12h[i-1]
+        
+        # Supertrend and direction
+        if direction_12h[i-1] == 1:
+            if close_12h[i] <= lower_band_12h[i]:
+                direction_12h[i] = -1
+                supertrend_12h[i] = upper_band_12h[i]
+            else:
+                direction_12h[i] = 1
+                supertrend_12h[i] = lower_band_12h[i]
+        else:
+            if close_12h[i] >= upper_band_12h[i]:
+                direction_12h[i] = 1
+                supertrend_12h[i] = lower_band_12h[i]
+            else:
+                direction_12h[i] = -1
+                supertrend_12h[i] = upper_band_12h[i]
+    
+    # Align 12h Supertrend direction to 4h timeframe (wait for 12h bar to close)
+    direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after sufficient data for all indicators
-    start_idx = max(20, 13+8, 8+5, 5+3)  # volume + Alligator shifts
-    
-    for i in range(start_idx, n):
+    for i in range(lookback + 20, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(direction_12h_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Jaw with 1d EMA50 uptrend and volume > 1.5x average
-            if (close[i] > jaw[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # LONG: Price closes above upper band with 12h Supertrend uptrend and volume > 1.5x average
+            if (close[i] > upper_band[i] and 
+                direction_12h_aligned[i] == 1 and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price < Lips with 1d EMA50 downtrend and volume > 1.5x average
-            elif (close[i] < lips[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # SHORT: Price closes below lower band with 12h Supertrend downtrend and volume > 1.5x average
+            elif (close[i] < lower_band[i] and 
+                  direction_12h_aligned[i] == -1 and 
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below Teeth (trend weakness)
-            if close[i] < teeth[i]:
+            # EXIT LONG: Price closes below lower band (reversal signal)
+            if close[i] < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above Teeth (trend weakness)
-            if close[i] > teeth[i]:
+            # EXIT SHORT: Price closes above upper band (reversal signal)
+            if close[i] > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
