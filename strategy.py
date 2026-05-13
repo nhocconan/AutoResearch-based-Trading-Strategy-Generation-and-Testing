@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_BollingerReversal_1dTrend_Volume
-# Hypothesis: Combine Keltner channel breakouts with Bollinger band reversals on the 4h timeframe, filtered by 1d EMA trend and volume confirmation.
-# Keltner channels (ATR-based) capture volatility breakouts, while Bollinger bands identify overbought/oversold conditions.
-# In bull markets, we take long breakouts above Keltner upper band when price is near Bollinger lower band (pullback in uptrend).
-# In bear markets, we take short breakouts below Keltner lower band when price is near Bollinger upper band (bounce in downtrend).
-# The 1d EMA50 filter ensures alignment with the daily trend, reducing false signals.
-# Volume confirmation adds conviction to breakout moves.
-# Target: 50-150 total trades over 4 years = 12-37/year.
+# 1d_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Use weekly trend via 200-period EMA (aligned to daily) as primary filter, then take Camarilla R1/S1 breakouts on the daily chart with volume confirmation. Weekly EMA200 ensures we only trade in the direction of the long-term trend, reducing false signals in ranging markets. Camarilla levels provide precise intraday support/resistance, and volume confirms breakout strength. Designed to work in both bull and bear markets by aligning with the weekly trend, with tight entry conditions to limit trades and minimize fee drag.
 
-name = "4h_Keltner_Breakout_BollingerReversal_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -26,32 +20,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 200-period EMA on weekly close for trend filter
+    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
 
-    # Calculate Keltner Channel (20, 2.0) on 4h
-    atr_period = 20
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # Calculate Camarilla levels for the current day using previous day's OHLC
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We shift by 1 to use previous day's data
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    # Set first value to NaN since no prior day
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    keltner_upper = ema_20 + 2.0 * atr
-    keltner_lower = ema_20 - 2.0 * atr
+    rang = prev_high - prev_low
+    camarilla_r1 = prev_close + rang * 1.1 / 12
+    camarilla_s1 = prev_close - rang * 1.1 / 12
 
-    # Calculate Bollinger Bands (20, 2.0) on 4h
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bollinger_upper = sma_20 + 2.0 * std_20
-    bollinger_lower = sma_20 - 2.0 * std_20
-
-    # Volume filter: >1.5x 20-period average on 4h
+    # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
@@ -59,8 +50,8 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
-            np.isnan(bollinger_upper[i]) or np.isnan(bollinger_lower[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,32 +60,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above Keltner upper band + price near Bollinger lower band (oversold pullback) + price above 1d EMA50 (bullish trend) + volume spike
-            if (close[i] > keltner_upper[i] and 
-                close[i] < bollinger_lower[i] * 1.02 and  # within 2% of Bollinger lower band
-                close[i] > ema_50_1d_aligned[i] and
+            # LONG: price breaks above Camarilla R1 + price above weekly EMA200 (uptrend) + volume spike
+            if (close[i] > camarilla_r1[i] and 
+                close[i] > ema_200_1w_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below Keltner lower band + price near Bollinger upper band (overbought bounce) + price below 1d EMA50 (bearish trend) + volume spike
-            elif (close[i] < keltner_lower[i] and 
-                  close[i] > bollinger_upper[i] * 0.98 and  # within 2% of Bollinger upper band
-                  close[i] < ema_50_1d_aligned[i] and
+            # SHORT: price breaks below Camarilla S1 + price below weekly EMA200 (downtrend) + volume spike
+            elif (close[i] < camarilla_s1[i] and 
+                  close[i] < ema_200_1w_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below Keltner lower band or price below 1d EMA50
-            if (close[i] < keltner_lower[i] or close[i] < ema_50_1d_aligned[i]):
+            # EXIT LONG: price breaks below Camarilla S1 or price below weekly EMA200
+            if (close[i] < camarilla_s1[i] or close[i] < ema_200_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above Keltner upper band or price above 1d EMA50
-            if (close[i] > keltner_upper[i] or close[i] > ema_50_1d_aligned[i]):
+            # EXIT SHORT: price breaks above Camarilla R1 or price above weekly EMA200
+            if (close[i] > camarilla_r1[i] or close[i] > ema_200_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
