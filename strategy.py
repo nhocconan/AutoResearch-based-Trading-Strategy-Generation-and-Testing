@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions; EMA34 provides trend alignment on 1d.
-# Volume spike (>1.5x 20-bar avg) confirms momentum. Designed for low trade frequency
-# (<100 total 4h trades over 4 years) to minimize fee drag while capturing reversals
-# in both bull and bear markets by fading extremes in the direction of the 1d trend.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation.
+# Uses 1w EMA34 for trend alignment, 1d Camarilla R3/S3 for breakout entry, and volume spike (>1.8x 20-bar avg) for confirmation.
+# Designed for low trade frequency (target 30-100 total over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by following the 1w trend direction and requiring volume confirmation to avoid false breakouts.
 
-name = "4h_WilliamsR_1dEMA34_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA34_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,59 +22,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 1w EMA34 for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Williams %R (14-period) from prior bars (primary TF)
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Calculate Camarilla levels from prior day (primary TF)
+    lookback = 1
+    # Camarilla R3, S3 based on prior day's high, low, close
+    R3 = ((high[-lookback] - low[-lookback]) * 1.1 / 4) + close[-lookback]
+    S3 = close[-lookback] - ((high[-lookback] - low[-lookback]) * 1.1 / 4)
+    # Shift to align with current bar
+    R3_series = pd.Series([R3] * n).values
+    S3_series = pd.Series([S3] * n).values
     
-    # Calculate average volume for confirmation (20-period LTF)
+    # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(lookback, 20), n):
+    for i in range(20, n):  # start after volume lookback
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(R3_series[i]) or 
+            np.isnan(S3_series[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R oversold (< -80), price above 1d EMA34, volume spike (>1.5x avg)
-            if (williams_r[i] < -80 and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Price breaks above Camarilla R3, close > 1w EMA34, volume spike (>1.8x avg)
+            if (high[i] > R3_series[i] and 
+                close[i] > ema_34_1w_aligned[i] and 
+                volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R overbought (> -20), price below 1d EMA34, volume spike (>1.5x avg)
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Price breaks below Camarilla S3, close < 1w EMA34, volume spike (>1.8x avg)
+            elif (low[i] < S3_series[i] and 
+                  close[i] < ema_34_1w_aligned[i] and 
+                  volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R rises above -50 (exit oversold) or volume drops
-            if (williams_r[i] > -50) or (volume[i] < 0.5 * avg_volume[i]):
+            # EXIT LONG: Close position if price breaks below Camarilla S3 or volume drops
+            if (low[i] < S3_series[i]) or (volume[i] < 0.5 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R falls below -50 (exit overbought) or volume drops
-            if (williams_r[i] < -50) or (volume[i] < 0.5 * avg_volume[i]):
+            # EXIT SHORT: Close position if price breaks above Camarilla R3 or volume drops
+            if (high[i] > R3_series[i]) or (volume[i] < 0.5 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
