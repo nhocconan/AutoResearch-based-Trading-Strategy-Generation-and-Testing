@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_Trend_Filter_Volume_Spike
-Hypothesis: Donchian channel breakouts from 12h data, filtered by weekly trend and daily volume spikes, capture strong directional moves with low trade frequency. Designed to work in both bull and bear markets by following the weekly trend direction only, reducing false breakouts during ranging periods.
+4h_TRIX_Signal_ZeroCross_12hTrend_Volume
+Hypothesis: TRIX (Triple Exponential Moving Average) zero-cross signals capture momentum shifts.
+When combined with 12h EMA trend filter and volume confirmation, this creates a robust
+trend-following strategy that works in both bull and bear markets by only taking trades
+in the direction of the higher timeframe trend. Target: 20-40 trades/year to minimize
+fee drag while maintaining edge.
 """
 
-name = "12h_Donchian_Breakout_Trend_Filter_Volume_Spike"
-timeframe = "12h"
+name = "4h_TRIX_Signal_ZeroCross_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,60 +26,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate TRIX on 4h close (15-period standard)
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = pd.Series(ema3).pct_change() * 100  # Percentage change
     
-    # Get daily data for volume confirmation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate 1-day average volume for spike detection
-    vol_avg_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
-    
-    # Calculate 12h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high = high_roll
-    donchian_low = low_roll
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Volume spike: current volume > 2.0x daily average volume
-        volume_spike = volume[i] > (2.0 * vol_avg_1d_aligned[i])
-        
         if position == 0:
-            # LONG: break above Donchian high with volume spike and above weekly EMA50 (uptrend)
-            if (close[i] > donchian_high[i] and 
-                volume_spike and 
-                close[i] > trend_1w_aligned[i]):
+            # LONG: TRIX crosses above zero with volume and 12h uptrend
+            if (trix[i] > 0 and trix[i-1] <= 0 and 
+                volume_confirm[i] and 
+                close[i] > trend_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below Donchian low with volume spike and below weekly EMA50 (downtrend)
-            elif (close[i] < donchian_low[i] and 
-                  volume_spike and 
-                  close[i] < trend_1w_aligned[i]):
+            # SHORT: TRIX crosses below zero with volume and 12h downtrend
+            elif (trix[i] < 0 and trix[i-1] >= 0 and 
+                  volume_confirm[i] and 
+                  close[i] < trend_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price drops below Donchian low or trend turns down
-            if (close[i] < donchian_low[i] or 
-                close[i] < trend_1w_aligned[i]):
+            # EXIT LONG: TRIX crosses below zero or trend turns down
+            if (trix[i] < 0 and trix[i-1] >= 0) or \
+               (close[i] < trend_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price rises above Donchian high or trend turns up
-            if (close[i] > donchian_high[i] or 
-                close[i] > trend_1w_aligned[i]):
+            # EXIT SHORT: TRIX crosses above zero or trend turns up
+            if (trix[i] > 0 and trix[i-1] <= 0) or \
+               (close[i] > trend_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
