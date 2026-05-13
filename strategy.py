@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Donchian(20) breakout with 12h EMA50 > EMA200 trend filter and volume confirmation (>1.8x avg volume).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 > EMA89 trend filter and volume confirmation (>1.8x avg volume).
 # Uses ATR(20) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 # EMA trend filter ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Donchian breakouts capture strong momentum moves. Volume spike confirmation ensures institutional participation.
+# Donchian breakouts provide clear structure; volume confirmation adds conviction.
 # Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
 
-name = "6h_Donchian20_12hEMATrend_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMATrend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,28 +35,22 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 12h data for Donchian channels and EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Donchian channels (20-period) from 12h data
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA34 and EMA89 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89_1d = close_1d_series.ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Align Donchian levels to 6h timeframe (wait for 12h bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Align 1d EMAs to 4h timeframe (wait for daily bar to close)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
     
-    # Calculate 12h EMA50 and EMA200 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_12h = close_12h_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align 12h EMAs to 6h timeframe (wait for 12h bar to close)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
+    # Calculate Donchian channels (20-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,23 +59,23 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema200_12h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(ema89_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(avg_volume[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high AND 12h EMA50 > EMA200 AND volume > 1.8x average
-            if (close[i] > donchian_high_aligned[i] and 
-                ema50_12h_aligned[i] > ema200_12h_aligned[i] and 
+            # LONG: Price breaks above Donchian upper band AND 1d EMA34 > EMA89 AND volume > 1.8x average
+            if (close[i] > highest_high[i] and 
+                ema34_1d_aligned[i] > ema89_1d_aligned[i] and 
                 volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian low AND 12h EMA50 < EMA200 AND volume > 1.8x average
-            elif (close[i] < donchian_low_aligned[i] and 
-                  ema50_12h_aligned[i] < ema200_12h_aligned[i] and 
+            # SHORT: Price breaks below Donchian lower band AND 1d EMA34 < EMA89 AND volume > 1.8x average
+            elif (close[i] < lowest_low[i] and 
+                  ema34_1d_aligned[i] < ema89_1d_aligned[i] and 
                   volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
