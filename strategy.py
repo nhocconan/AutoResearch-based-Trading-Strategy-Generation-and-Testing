@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_1d_KAMA_Direction_RSI_Trend_Filter
-Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a reliable trend signal.
-In trending markets (ADX > 25), KAMA direction filters noise; in ranging markets (ADX < 20), RSI extremes (30/70) provide mean-reversion entries.
-Combined with 1d trend filter and volume confirmation, this adapts to both bull and bear regimes.
-Target: 15-35 trades/year per symbol.
+1d_1w_KAMA_Direction_RSI_Trend_Filter
+Hypothesis: KAMA adapts to market noise, providing a robust trend filter.
+Long when KAMA trends up, RSI > 50 (bullish momentum), and weekly trend confirms.
+Short when KAMA trends down, RSI < 50 (bearish momentum), and weekly trend confirms.
+This strategy avoids whipsaws in sideways markets by requiring alignment between
+daily momentum (RSI), adaptive trend (KAMA), and weekly trend filter.
+Target: 10-25 trades/year per symbol.
 """
 
-name = "12h_1d_KAMA_Direction_RSI_Trend_Filter"
-timeframe = "12h"
+name = "1d_1w_KAMA_Direction_RSI_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,115 +27,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # 1d trend: 50 EMA (slow, reliable)
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = close_1d > ema_50_1d
-    downtrend_1d = close_1d < ema_50_1d
+    # Calculate KAMA (adaptive moving average)
+    # ER = |close - close[10]| / sum(|close - close[1]| over 10 periods)
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.zeros(n)
+    for i in range(10, n):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-9:i+1], n=1)))  # sum |close[t] - close[t-1]| over 10
     
-    # Align 1d trend to 12h
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    er = np.zeros(n)
+    er[10:] = change[10:] / np.where(volatility[10:] == 0, 1, volatility[10:])  # avoid div by zero
     
-    # KAMA (Kaufman Adaptive Moving Average) - 10-period ER, 2/30 SC
-    def kama(close, er_len=10, fast_sc=2, slow_sc=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0) if False else None  # placeholder
-        # Proper volatility: sum of absolute changes over er_len period
-        volatility = np.zeros_like(close)
-        for i in range(er_len, len(close)):
-            volatility[i] = np.sum(np.abs(np.diff(close[i-er_len:i+1])))
-        # Avoid division by zero
-        er = np.where(volatility != 0, change / volatility, 0)
-        # Smooth ER
-        sc = np.power(er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1), 2)
-        kama_out = np.zeros_like(close)
-        kama_out[0] = close[0]
-        for i in range(1, len(close)):
-            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
-        return kama_out
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    kama_val = kama(close, 10, 2, 30)
-    kama_dir = kama_val > np.roll(kama_val, 1)  # rising
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # RSI (14)
-    def rsi(close, length=14):
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
-        avg_loss = pd.Series(loss).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_out = 100 - (100 / (1 + rs))
-        return rsi_out
+    # KAMA direction: slope > 0 for uptrend, < 0 for downtrend
+    kama_slope = np.zeros(n)
+    for i in range(1, n):
+        kama_slope[i] = kama[i] - kama[i-1]
+    kama_up = kama_slope > 0
+    kama_down = kama_slope < 0
     
-    rsi_val = rsi(close, 14)
+    # RSI(14) for momentum confirmation
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation: volume > 1.3 * 20-period average
-    vol_ma = np.zeros(n)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.3 * vol_ma
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # ADX (14) for regime filter
-    def adx(high, low, close, length=14):
-        plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        tr = np.maximum(high - low, 
-                        np.maximum(np.abs(high - np.roll(close, 1)), 
-                                   np.abs(low - np.roll(close, 1))))
-        plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values / \
-                  pd.Series(tr).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
-        minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values / \
-                   pd.Series(tr).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
-        dx = np.where((plus_di + minus_di) != 0, 
-                      100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        adx_out = pd.Series(dx).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
-        return adx_out
+    rs = np.zeros(n)
+    rsi = np.zeros(n)
+    for i in range(14, n):
+        if avg_loss[i] == 0:
+            rs[i] = 100
+        else:
+            rs[i] = avg_gain[i] / avg_loss[i]
+        rsi[i] = 100 - (100 / (1 + rs[i]))
     
-    adx_val = adx(high, low, close, 14)
+    rsi_bull = rsi > 50
+    rsi_bear = rsi < 50
+    
+    # Weekly trend: 34 EMA
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    uptrend_1w = close_1w > ema_34_1w
+    downtrend_1w = close_1w < ema_34_1w
+    
+    # Align weekly trend to daily
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(35, n):  # Start after warmup for KAMA/RSI
         # Get aligned values for current bar
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
-        vol_conf = volume_conf[i]
-        adx = adx_val[i]
-        kama_up = kama_dir[i]
-        rsi = rsi_val[i]
+        kama_up_i = kama_up[i]
+        kama_down_i = kama_down[i]
+        rsi_bull_i = rsi_bull[i]
+        rsi_bear_i = rsi_bear[i]
+        uptrend_1w_i = uptrend_1w_aligned[i]
+        downtrend_1w_i = downtrend_1w_aligned[i]
         
         if position == 0:
-            # LONG: KAMA up AND (trending: ADX>25) OR (ranging: RSI<30) AND volume confirmation AND 1d uptrend
-            if kama_up and ((adx > 25) or (rsi < 30)) and vol_conf and uptrend:
+            # LONG: KAMA up, RSI bullish, weekly uptrend
+            if kama_up_i and rsi_bull_i and uptrend_1w_i:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA down AND (trending: ADX>25) OR (ranging: RSI>70) AND volume confirmation AND 1d downtrend
-            elif not kama_up and ((adx > 25) or (rsi > 70)) and vol_conf and downtrend:
+            # SHORT: KAMA down, RSI bearish, weekly downtrend
+            elif kama_down_i and rsi_bear_i and downtrend_1w_i:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA down OR 1d trend turns down
-            if not kama_up or not uptrend:
+            # EXIT LONG: KAMA turns down or RSI turns bearish
+            if not kama_up_i or not rsi_bull_i:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA up OR 1d trend turns up
-            if kama_up or not downtrend:
+            # EXIT SHORT: KAMA turns up or RSI turns bullish
+            if not kama_down_i or not rsi_bear_i:
                 signals[i] = 0.0
                 position = 0
             else:
