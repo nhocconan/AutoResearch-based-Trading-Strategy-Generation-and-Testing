@@ -1,32 +1,20 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter (HMA21), volume confirmation (1.5x MA20), and ATR(14) stoploss.
-# Enters long when price breaks above Donchian upper channel (20-period high) with 1w bullish trend (close > HMA21), volume > 1.5x MA20.
-# Enters short when price breaks below Donchian lower channel (20-period low) with 1w bearish trend (close < HMA21), volume > 1.5x MA20.
-# Exits via ATR-based stoploss (2 * ATR(14) from entry) or opposite Donchian breakout.
+# Hypothesis: 6h Elder Ray Power (Bull/Bear) with 12h trend filter (EMA34), volume confirmation (2x MA20), and Bollinger Band squeeze release.
+# Elder Ray measures bull/bear power via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Enters long when Bull Power > 0 AND 12h bullish trend (close > EMA34) AND volume > 2x MA20 AND BBWidth < 0.05 (squeeze) AND BBWidth increasing (breakout).
+# Enters short when Bear Power < 0 AND 12h bearish trend (close < EMA34) AND volume > 2x MA20 AND BBWidth < 0.05 (squeeze) AND BBWidth increasing (breakout).
+# Exits when Elder Ray power reverses (Bull Power < 0 for long, Bear Power > 0 for short) OR price reaches opposite Bollinger Band (mean reversion).
 # Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
-# Designed for low trade frequency (~7-25/year) by requiring strict confluence: price breakout + HTF trend + volume spike.
-# Donchian channels provide clear structural breakouts, HMA reduces lag while smoothing noise, volume confirms conviction.
-# The 1w trend filter ensures alignment with higher timeframe direction, avoiding counter-trend entries in choppy markets.
+# Designed for low trade frequency (~12-37/year) by requiring confluence: Elder Ray alignment + HTF trend + volume spike + volatility expansion from squeeze.
+# Works in bull markets (captures strong trends via Elder Ray) and bear markets (avoids false signals via 12h trend filter and squeeze condition).
 
-name = "1d_Donchian20_Breakout_1wTrend_Volume_v1"
-timeframe = "1d"
+name = "6h_ElderRay_Power_12hTrend_Volume_SqueezeBreakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def hma(values, period):
-    """Hull Moving Average - reduces lag while maintaining smoothness"""
-    if len(values) < period:
-        return np.full(len(values), np.nan)
-    half = period // 2
-    sqrt = int(np.sqrt(period))
-    wma2 = pd.Series(values).ewm(span=half, adjust=False, min_periods=half).mean().values
-    wma1 = pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
-    raw_hma = 2 * wma2 - wma1
-    hma_values = pd.Series(raw_hma).ewm(span=sqrt, adjust=False, min_periods=sqrt).mean().values
-    return hma_values
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,57 +26,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (HMA21)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Calculate HMA(21) on 1w close
-    hma21_1w = hma(close_1w, 21)
-    hma21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma21_1w)
+    # Calculate EMA13 for Elder Ray Power
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
     
-    # Donchian Channel (20) on 1d
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 12h data for trend filter (EMA34)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 2x 20-period average
     volume_series = pd.Series(volume)
     vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 1.5)
+    volume_spike = volume > (vol_ma20 * 2.0)
     
-    # ATR(14) for stoploss
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # first bar
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Bollinger Bands (20, 2) for squeeze detection
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma20 + (2 * std20)
+    lower_band = sma20 - (2 * std20)
+    bb_width = (upper_band - lower_band) / sma20  # Normalized BB width
+    bb_width_prev = np.roll(bb_width, 1)
+    bb_width_prev[0] = bb_width[0]  # first bar
+    bb_width_expanding = bb_width > bb_width_prev  # BB width increasing (squeeze release)
+    bb_squeeze = bb_width < 0.05  # Squeeze condition (low volatility)
     
-    # Track entry price for ATR-based stoploss
+    # Track entry price for mean reversion exit
     entry_price = np.full(n, np.nan)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or \
-           np.isnan(hma21_1w_aligned[i]) or np.isnan(vol_ma20[i]) or \
-           np.isnan(atr14[i]):
+        if np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or \
+           np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma20[i]) or \
+           np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(bb_width[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper channel with 1w bullish trend and volume spike
-            if close[i] > highest_20[i] and close[i] > hma21_1w_aligned[i] and volume_spike[i]:
+            # LONG: Bull Power > 0 AND 12h bullish trend AND volume spike AND BB squeeze release
+            if bull_power[i] > 0 and close[i] > ema34_12h_aligned[i] and volume_spike[i] and bb_squeeze[i] and bb_width_expanding[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
-            # SHORT: Price breaks below Donchian lower channel with 1w bearish trend and volume spike
-            elif close[i] < lowest_20[i] and close[i] < hma21_1w_aligned[i] and volume_spike[i]:
+            # SHORT: Bear Power < 0 AND 12h bearish trend AND volume spike AND BB squeeze release
+            elif bear_power[i] < 0 and close[i] < ema34_12h_aligned[i] and volume_spike[i] and bb_squeeze[i] and bb_width_expanding[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: ATR stoploss hit OR price breaks below Donchian lower channel (contrarian exit)
-            if close[i] < entry_price[i-1] - 2.0 * atr14[i] or close[i] < lowest_20[i]:
+            # EXIT LONG: Elder Ray power reverses (Bull Power < 0) OR price reaches lower Bollinger Band (mean reversion)
+            if bull_power[i] < 0 or close[i] < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
@@ -96,8 +88,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 entry_price[i] = entry_price[i-1]  # carry forward entry price
         elif position == -1:
-            # EXIT SHORT: ATR stoploss hit OR price breaks above Donchian upper channel (contrarian exit)
-            if close[i] > entry_price[i-1] + 2.0 * atr14[i] or close[i] > highest_20[i]:
+            # EXIT SHORT: Elder Ray power reverses (Bear Power > 0) OR price reaches upper Bollinger Band (mean reversion)
+            if bear_power[i] > 0 or close[i] > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
