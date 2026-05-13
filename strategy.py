@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume spike.
-# Long when price breaks above R3 with volume > 1.5x 20-period average AND price > 4h EMA50.
-# Short when price breaks below S3 with volume > 1.5x 20-period average AND price < 4h EMA50.
-# Exit on opposite Camarilla level (R3/S3) or trend reversal (price crosses 4h EMA50).
-# Uses discrete position sizing (0.20) to minimize fee churn. Target: 15-37 trades/year.
-# Camarilla pivots work well in ranging markets (mean reversion at S1/R1, breakout at S3/R3).
-# 4h EMA50 filters for trend alignment to avoid counter-trend breakouts.
-# Volume spike confirms institutional participation in breakouts.
-# 1h timeframe allows precise entry timing while 4h/1d HTF controls trade frequency.
+# Hypothesis: 6h Williams %R + 1d ADX trend filter + volume confirmation.
+# Long when Williams %R(14) crosses above -80 from below, price > 1d ADX(14) indicates trend, and volume > 1.5x average.
+# Short when Williams %R(14) crosses below -20 from above, price < 1d ADX(14) indicates trend, and volume > 1.5x average.
+# Exit on opposite Williams %R level (-20 for long, -80 for short) or ADX trend weakening (ADX < 20).
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year.
+# Williams %R captures momentum reversals; ADX filters for trending markets to avoid whipsaws in ranging conditions.
+# Volume confirmation ensures breakout validity. Works in bull markets via momentum continuation and in bear markets via faded rallies at extremes.
 
-name = "1h_Camarilla_R3S3_Breakout_4hTrend_Volume_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_1dADX_Trend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -27,76 +25,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1h data for Camarilla pivot calculation (using typical price)
-    typical_price = (high + low + close) / 3.0
+    # Get 6h data for Williams %R calculation
+    df_6h = get_htf_data(prices, '6h')
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Calculate Camarilla levels for 1h: based on previous bar's typical price
-    # R3 = typical_price + 1.1 * (high - low)
-    # S3 = typical_price - 1.1 * (high - low)
-    typical_series = pd.Series(typical_price)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
+    # Calculate Williams %R(14) on 6h: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close_6h) / (highest_high - lowest_low)) * -100
+    williams_r_aligned = align_htf_to_ltf(prices, df_6h, williams_r)
     
-    # Shift by 1 to use previous bar's data (no look-ahead)
-    prev_typical = typical_series.shift(1).values
-    prev_high = high_series.shift(1).values
-    prev_low = low_series.shift(1).values
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla R3 and S3 levels
-    camarilla_r3 = prev_typical + 1.1 * (prev_high - prev_low)
-    camarilla_s3 = prev_typical - 1.1 * (prev_high - prev_low)
+    # Calculate ADX(14) on 1d
+    # True Range
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d)
+    tr2 = pd.Series(high_1d) - pd.Series(close_1d).shift(1)
+    tr3 = pd.Series(low_1d) - pd.Series(close_1d).shift(1)
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate EMA(50) on 4h close for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
-    # Session filter: 08:00 to 20:00 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma[i]) or
-            not session_filter[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above R3 with volume confirmation AND price > 4h EMA50
-            if close[i] > camarilla_r3[i] and volume_filter[i] and close[i] > ema50_4h_aligned[i]:
-                signals[i] = 0.20
+            # LONG: Williams %R crosses above -80 from below, ADX > 20 (trending), volume confirmation
+            if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and
+                adx_aligned[i] > 20 and volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S3 with volume confirmation AND price < 4h EMA50
-            elif close[i] < camarilla_s3[i] and volume_filter[i] and close[i] < ema50_4h_aligned[i]:
-                signals[i] = -0.20
+            # SHORT: Williams %R crosses below -20 from above, ADX > 20 (trending), volume confirmation
+            elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and
+                  adx_aligned[i] > 20 and volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below S3 OR trend reversal (price < 4h EMA50)
-            if close[i] < camarilla_s3[i] or close[i] < ema50_4h_aligned[i]:
+            # EXIT LONG: Williams %R rises above -20 OR ADX < 20 (trend weakening)
+            if williams_r_aligned[i] >= -20 or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above R3 OR trend reversal (price > 4h EMA50)
-            if close[i] > camarilla_r3[i] or close[i] > ema50_4h_aligned[i]:
+            # EXIT SHORT: Williams %R falls below -80 OR ADX < 20 (trend weakening)
+            if williams_r_aligned[i] <= -80 or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
