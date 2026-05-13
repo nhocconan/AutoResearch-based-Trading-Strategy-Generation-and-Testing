@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Use 12h timeframe with 1d Camarilla pivot levels (R1/S1) as support/resistance.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
+# Hypothesis: Use 1d Camarilla pivot levels (R1/S1) as support/resistance.
 # Enter long when price breaks above R1 with volume spike and 1d EMA34 uptrend.
 # Enter short when price breaks below S1 with volume spike and 1d EMA34 downtrend.
 # Exit when price returns to the previous day's close (C level).
+# Uses 4h timeframe with 1d trend filter to balance trade frequency and win rate.
 # Designed to work in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
-# Target: 12-37 trades/year per symbol.
+# Target: 20-40 trades/year per symbol.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -45,7 +46,7 @@ def generate_signals(prices):
     S1 = close_1d - (rng * 1.1 / 12)
     R1 = close_1d + (rng * 1.1 / 12)
 
-    # Align pivot levels to 12h timeframe (use previous day's levels)
+    # Align pivot levels to 4h timeframe (use previous day's levels)
     s1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     r1_aligned = align_htf_to_ltf(prices, df_1d, R1)
 
