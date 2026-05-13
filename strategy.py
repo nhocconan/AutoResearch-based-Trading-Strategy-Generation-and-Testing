@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Three_Sigma_Mean_Reversion_12hTrend
-# Hypothesis: Price reverts to mean after extreme deviations (>3σ) from 12h VWAP, 
-# but only in the direction of the 12h trend (EMA50). Volume spike confirms conviction.
-# Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
-# Low frequency due to strict 3σ threshold and volume confirmation.
+# 6h_Weekly_Pivot_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Price breaks above weekly R3 (resistance 3) or below weekly S3 (support 3) 
+# with daily trend alignment (EMA50) and volume confirmation. 
+# Weekly pivots define strong support/resistance; breaks indicate momentum continuation.
+# Works in bull (buy R3 breaks in uptrend) and bear (sell S3 breaks in downtrend) markets.
+# Low frequency due to strict weekly pivot levels and volume confirmation.
 
-name = "4h_Three_Sigma_Mean_Reversion_12hTrend"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,39 +24,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for VWAP and trend
-    df_12h = get_htf_data(prices, '12h')
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Typical price for VWAP calculation
-    typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
-    # VWAP: cumulative TP * volume / cumulative volume
-    vwap = (typical_price * df_12h['volume']).cumsum() / df_12h['volume'].cumsum()
-    vwap_vals = vwap.values
+    # Calculate weekly pivot points: (H + L + C) / 3
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
     
-    # Standard deviation of typical price from VWAP (20-period rolling)
-    price_dev = typical_price - vwap
-    std_dev = price_dev.rolling(window=20, min_periods=20).std().values
+    # Calculate R3 and S3 levels
+    # R3 = High + 2*(Pivot - Low)
+    # S3 = Low - 2*(High - Pivot)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
-    # 12h trend filter: EMA50
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
     
-    # Align all 12h indicators to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_12h, vwap_vals)
-    std_dev_aligned = align_htf_to_ltf(prices, df_12h, std_dev)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Daily EMA50 for trend
+    ema50_daily = pd.Series(df_daily['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume spike: volume > 2.0 * 30-period average (high threshold for low frequency)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > 2.0 * vol_ma_30
+    # Align all indicators to 6h timeframe
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s3)
+    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
+    
+    # Volume spike: volume > 2.0 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(vwap_aligned[i]) or 
-            np.isnan(std_dev_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(weekly_r3_aligned[i]) or 
+            np.isnan(weekly_s3_aligned[i]) or 
+            np.isnan(ema50_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,40 +69,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Deviation from VWAP in standard deviation units
-        if std_dev_aligned[i] > 0:
-            z_score = (close[i] - vwap_aligned[i]) / std_dev_aligned[i]
-        else:
-            z_score = 0
-        
         # Trend conditions
-        uptrend = close[i] > ema50_12h_aligned[i]
-        downtrend = close[i] < ema50_12h_aligned[i]
+        uptrend = close[i] > ema50_daily_aligned[i]
+        downtrend = close[i] < ema50_daily_aligned[i]
         
         # Volume confirmation
         vol_spike = volume_spike[i]
 
         if position == 0:
-            # LONG: Price < VWAP - 3σ (oversold) + uptrend + volume spike
-            if z_score < -3.0 and uptrend and vol_spike:
+            # LONG: Price breaks above weekly R3 + uptrend + volume spike
+            if close[i] > weekly_r3_aligned[i] and uptrend and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price > VWAP + 3σ (overbought) + downtrend + volume spike
-            elif z_score > 3.0 and downtrend and vol_spike:
+            # SHORT: Price breaks below weekly S3 + downtrend + volume spike
+            elif close[i] < weekly_s3_aligned[i] and downtrend and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above VWAP OR trend reversal
-            if close[i] >= vwap_aligned[i] or not uptrend:
+            # EXIT LONG: Price falls back below weekly pivot OR trend reversal
+            if close[i] < weekly_pivot[-1] if len(weekly_pivot) > 0 else False or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below VWAP OR trend reversal
-            if close[i] <= vwap_aligned[i] or not downtrend:
+            # EXIT SHORT: Price rises back above weekly pivot OR trend reversal
+            if close[i] > weekly_pivot[-1] if len(weekly_pivot) > 0 else False or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
