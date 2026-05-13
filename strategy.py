@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) with 12h EMA34 trend filter and volume confirmation (>1.3x 20-bar avg volume). Elder Ray measures bull/bear strength relative to EMA13. Long when Bull Power > 0 and Bear Power < 0 (bulls in control) with uptrend filter. Short when Bear Power > 0 and Bull Power < 0 (bears in control) with downtrend filter. Uses 6h timeframe to target 50-150 total trades over 4 years. Discrete position sizing (0.25) minimizes fee churn. Works in bull/bear via trend filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (>1.5x 20-bar avg volume), and daily choppiness regime filter (CHOP > 61.8 = range -> avoid entries, CHOP < 38.2 = trend -> allow breakout entries). This strategy targets the proven winning pattern: tight price channel breakout + volume + regime filter. Uses 4h timeframe to target 75-200 total trades over 4 years. Daily trend and regime filters reduce false signals in bear markets like 2022 and 2025+. Discrete position sizing (0.25) minimizes fee churn.
 
-name = "6h_ElderRay_BullBearPower_12hEMA34_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,20 +19,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA34 for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Calculate 1d EMA34 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA13 for Elder Ray (using LTF close)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate daily Choppiness Index (CHOP) on 14-period for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    true_range_sum = pd.Series(true_range).rolling(window=14, min_periods=14).sum().values
+    chop_1d = 100 * np.log10(atr_sum / true_range_sum) / np.log10(14)
+    chop_1d = np.where(true_range_sum == 0, 50, chop_1d)  # avoid div by zero
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Calculate Camarilla pivot levels from daily OHLC
+    # R3 = close + (high - low) * 1.1 / 2
+    # S3 = close - (high - low) * 1.1 / 2
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    
+    # Align Camarilla levels to LTF (4h)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -42,42 +64,43 @@ def generate_signals(prices):
     
     for i in range(20, n):  # start after lookback
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Bull Power > 0 (strong bulls) AND Bear Power < 0 (weak bears) AND price > 12h EMA34 (uptrend) AND volume spike (>1.3x avg)
-            if (bull_power[i] > 0 and 
-                bear_power[i] < 0 and 
-                close[i] > ema_34_12h_aligned[i] and 
-                volume[i] > 1.3 * avg_volume[i]):
+            # LONG: Close breaks above R3, price > 1d EMA34, volume spike (>1.5x avg), trending regime (CHOP < 38.2)
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > 1.5 * avg_volume[i] and 
+                chop_1d_aligned[i] < 38.2):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power > 0 (strong bears) AND Bull Power < 0 (weak bulls) AND price < 12h EMA34 (downtrend) AND volume spike (>1.3x avg)
-            elif (bear_power[i] > 0 and 
-                  bull_power[i] < 0 and 
-                  close[i] < ema_34_12h_aligned[i] and 
-                  volume[i] > 1.3 * avg_volume[i]):
+            # SHORT: Close breaks below S3, price < 1d EMA34, volume spike (>1.5x avg), trending regime (CHOP < 38.2)
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > 1.5 * avg_volume[i] and 
+                  chop_1d_aligned[i] < 38.2):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Either Bear Power becomes positive (bears take over) OR price crosses below 12h EMA34 (trend break)
-            if (bear_power[i] > 0 or 
-                close[i] < ema_34_12h_aligned[i]):
+            # EXIT LONG: Close position if price drops below S3 (reversal) OR chop becomes too high (choppy market)
+            if (close[i] < camarilla_s3_aligned[i] or 
+                chop_1d_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Either Bull Power becomes positive (bulls take over) OR price crosses above 12h EMA34 (trend break)
-            if (bull_power[i] > 0 or 
-                close[i] > ema_34_12h_aligned[i]):
+            # EXIT SHORT: Close position if price rises above R3 (reversal) OR chop becomes too high (choppy market)
+            if (close[i] > camarilla_r3_aligned[i] or 
+                chop_1d_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
