@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1D_Trend
-Hypothesis: Use daily Camarilla pivot levels (R1, S1) as support/resistance levels with breakout entries. Go long when price breaks above R1 with volume confirmation, short when breaks below S1 with volume confirmation. Filter by daily EMA34 trend: only long when price > EMA34, only short when price < EMA34. Camarilla levels work well in ranging and trending markets, and EMA34 filter avoids counter-trend trades. Designed for 4h timeframe to target 20-50 trades/year with strong edge in both bull and bear markets.
+1d_KAMA_Trend_Filter_Volume_Confirmation
+Hypothesis: Use daily Kaufman Adaptive Moving Average (KAMA) to capture trend direction, confirmed by volume spikes (volume > 1.5x 20-day average). KAMA adapts to market noise, reducing false signals in choppy markets while capturing true trends. Long when price crosses above KAMA with volume confirmation, short when price crosses below KAMA with volume confirmation. Designed for 1d timeframe to limit trades (<25/year) and avoid fee drag, effective in both bull (trend following) and bear (mean reversion during trend exhaustion) markets.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_1D_Trend"
-timeframe = "4h"
+name = "1d_KAMA_Trend_Filter_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,74 +17,80 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for KAMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla pivot formula
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    # R1 = close + (range * 1.1 / 12)
-    # S1 = close - (range * 1.1 / 12)
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    s1 = close_1d - (range_1d * 1.1 / 12)
+    # Calculate Kaufman Adaptive Moving Average (KAMA)
+    # Parameters: fast=2, slow=30 (standard)
+    fast_sc = 2 / (2 + 1)      # smoothing constant for fastest EMA
+    slow_sc = 2 / (30 + 1)     # smoothing constant for slowest EMA
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate efficiency ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    volatility_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
     
-    # Get daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Avoid division by zero
+    er = np.where(volatility_sum != 0, change / volatility_sum, 0)
     
-    # Calculate volume average (20-period) for volume spike filter
+    # Calculate smoothing constant
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    # Align KAMA to daily timeframe (no extra delay needed)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    
+    # Calculate volume average (20-day) for volume spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(kama_aligned[i-1]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-period average
+        # Volume spike condition: current volume > 1.5x 20-day average
         vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Price breaks above R1 with volume confirmation and price > EMA34
-            if high[i] > r1_aligned[i] and vol_spike and close[i] > ema_34_1d_aligned[i]:
+            # LONG: Price crosses above KAMA with volume confirmation
+            if close[i-1] <= kama_aligned[i-1] and close[i] > kama_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with volume confirmation and price < EMA34
-            elif low[i] < s1_aligned[i] and vol_spike and close[i] < ema_34_1d_aligned[i]:
+            # SHORT: Price crosses below KAMA with volume confirmation
+            elif close[i-1] >= kama_aligned[i-1] and close[i] < kama_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or EMA34
-            if low[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: Price crosses below KAMA
+            if close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or EMA34
-            if high[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: Price crosses above KAMA
+            if close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
