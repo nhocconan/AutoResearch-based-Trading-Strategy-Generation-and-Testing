@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_Volume_Confirmation
-Hypothesis: KAMA adapts to market noise, providing a smooth trend line. Price above KAMA indicates uptrend, below indicates downtrend. Volume confirms the strength of the move. Weekly trend filter ensures alignment with higher timeframe momentum. Designed to work in both bull and bear markets by following the trend with volume confirmation, reducing whipsaws in choppy conditions. Target: 15-35 trades/year per symbol.
+1d_KAMA_RSI_Chop
+Hypothesis: KAMA identifies adaptive trend direction, RSI measures momentum strength, and Choppiness Index filters range vs trend. 
+Long when KAMA trending up, RSI > 50, and CHOP > 61.8 (range). Short when KAMA trending down, RSI < 50, and CHOP > 61.8.
+Mean reversion in ranging markets (CHOP high) with trend filter (KAMA) and momentum confirmation (RSI).
+Works in sideways markets (2025-2026) and avoids strong trends via CHOP filter.
+Target: 10-25 trades/year per symbol.
 """
 
-name = "12h_KAMA_Trend_Volume_Confirmation"
-timeframe = "12h"
+name = "1d_KAMA_RSI_Chop"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,36 +24,36 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # KAMA: Kaufman Adaptive Moving Average
-    # Efficiency Ratio (ER) = |net change| / sum of absolute changes
-    change = np.abs(np.diff(close, prepend=close[0]))
-    abs_change = np.abs(np.diff(close, prepend=close[0]))
-    er = np.zeros_like(change)
-    for i in range(1, len(change)):
-        if np.sum(abs_change[i-9:i+1]) > 0:
-            er[i] = np.abs(change[i] - change[i-10]) / np.sum(abs_change[i-9:i+1]) if i >= 10 else 0
-        else:
-            er[i] = 0
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
+    # Kaufman Adaptive Moving Average (KAMA)
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(10))
+    volatility = close_s.diff().abs().rolling(window=10).sum()
+    er = change / volatility.replace(0, 1e-10)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = [close[0]]
     for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        kama.append(kama[-1] + sc[i] * (close[i] - kama[-1]))
+    kama = np.array(kama)
     
-    # Volume average (20-period)
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if np.sum(volume[max(0, i-19):i+1]) > 0 else 0
-        else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Weekly trend filter: EMA50 on 1w data
+    # Choppiness Index (CHOP) - 14 period
+    atr = pd.Series(np.sqrt((high - low)**2)).rolling(window=14, min_periods=14).mean()
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr.sum() / (max_high - min_low)) / np.log10(14)
+    chop = chop.fillna(50).values
+    
+    # Weekly trend filter: EMA50
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -62,31 +66,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
-        # Volume confirmation: current volume > 1.5 * 20-period MA
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+    for i in range(50, n):
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        chop_val = chop[i]
+        uptrend_htf = uptrend_1w_aligned[i]
+        downtrend_htf = downtrend_1w_aligned[i]
         
         if position == 0:
-            # LONG: price > KAMA, volume confirmation, weekly uptrend
-            if close[i] > kama[i] and vol_confirm and uptrend_1w_aligned[i]:
+            # LONG: KAMA up, RSI > 50, CHOP > 61.8 (range), 1w uptrend
+            if close[i] > kama_val and rsi_val > 50 and chop_val > 61.8 and uptrend_htf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price < KAMA, volume confirmation, weekly downtrend
-            elif close[i] < kama[i] and vol_confirm and downtrend_1w_aligned[i]:
+            # SHORT: KAMA down, RSI < 50, CHOP > 61.8 (range), 1w downtrend
+            elif close[i] < kama_val and rsi_val < 50 and chop_val > 61.8 and downtrend_htf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price < KAMA
-            if close[i] < kama[i]:
+            # EXIT LONG: KAMA down or RSI <= 50
+            if close[i] < kama_val or rsi_val <= 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price > KAMA
-            if close[i] > kama[i]:
+            # EXIT SHORT: KAMA up or RSI >= 50
+            if close[i] > kama_val or rsi_val >= 50:
                 signals[i] = 0.0
                 position = 0
             else:
