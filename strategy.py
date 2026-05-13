@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume
-# Hypothesis: Price breaking above/below Camarilla R1/S1 levels with 12h EMA50 trend filter and volume confirmation captures momentum with controlled trade frequency.
-# Works in bull markets via breakouts above R1 and in bear markets via breakdowns below S1.
-# Uses 12h EMA50 to filter trend direction and volume spike for confirmation, reducing false signals.
-# Target: 20-50 trades per year per symbol to minimize fee drag.
+# 4h_Vortex_Volume_Trend_Filter
+# Hypothesis: Vortex indicator (VI+ and VI-) identifies trend direction while volume confirms momentum.
+# In bull markets: VI+ > VI- with volume surge = long. In bear markets: VI- > VI+ with volume surge = short.
+# Uses 1d trend filter (EMA50) to avoid counter-trend trades. Target: 20-50 trades/year to minimize fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
+name = "4h_Vortex_Volume_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -23,50 +22,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # ATR for context (not used in signal)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-
-    # Get 12h data for EMA50 trend
-    df_12h = get_htf_data(prices, '12h')
+    # Vortex Indicator (VI) - 14 period
+    tr = np.maximum(
+        high - low,
+        np.maximum(
+            np.abs(high - np.roll(close, 1)),
+            np.abs(low - np.roll(close, 1))
+        )
+    )
+    tr[0] = 0
+    vm = np.abs(high - np.roll(low, 1))  # +VM
+    vm[0] = 0
+    vp = np.abs(low - np.roll(high, 1))   # -VM
+    vp[0] = 0
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm14 = pd.Series(vm).rolling(window=14, min_periods=14).sum().values
+    vp14 = pd.Series(vp).rolling(window=14, min_periods=14).sum().values
+    
+    vi_plus = vm14 / tr14
+    vi_minus = vp14 / tr14
 
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels from previous day
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C, H, L are from previous day
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align to 4h timeframe (available after previous day close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume filter: >1.8x 20-period average
+    # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,30 +68,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above R1 + 12h EMA50 uptrend + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema50_12h_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.8):
+            # LONG: VI+ > VI- (bullish) + above 1d EMA50 + volume surge
+            if (vi_plus[i] > vi_minus[i] and 
+                close[i] > ema50_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below S1 + 12h EMA50 downtrend + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema50_12h_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.8):
+            # SHORT: VI- > VI+ (bearish) + below 1d EMA50 + volume surge
+            elif (vi_minus[i] > vi_plus[i] and 
+                  close[i] < ema50_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S1 or volatility drop
-            if close[i] < s1_aligned[i] or volume[i] < vol_avg_20[i] * 1.1:
+            # EXIT LONG: VI- > VI+ (trend change) or volume drop
+            if vi_minus[i] > vi_plus[i] or volume[i] < vol_avg_20[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R1 or volatility drop
-            if close[i] > r1_aligned[i] or volume[i] < vol_avg_20[i] * 1.1:
+            # EXIT SHORT: VI+ > VI- (trend change) or volume drop
+            if vi_plus[i] > vi_minus[i] or volume[i] < vol_avg_20[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
