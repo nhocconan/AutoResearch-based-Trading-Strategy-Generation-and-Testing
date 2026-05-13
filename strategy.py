@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter and volume spike confirmation.
-# Camarilla pivot levels calculated from 1d OHLC: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-# Long when price breaks above R3 with volume > 2x 20-period average AND price > 1d EMA50
-# Short when price breaks below S3 with volume > 2x 20-period average AND price < 1d EMA50
-# Exit when price returns to 1d VWAP (mean reversion to daily fair value) OR opposite Camarilla level touched
-# Uses 6h timeframe for lower frequency, Camarilla for structure, 1d EMA for trend, volume spike for conviction.
-# Target: 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, bear via faded rallies to VWAP.
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation.
+# Donchian breakout captures momentum; 1d EMA34 ensures alignment with higher timeframe trend;
+# volume > 1.5x average confirms institutional participation.
+# Exit on opposite Donchian breakout or trend reversal.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Works in bull via trend-following breakouts; in bear via faded rallies and short breakdowns.
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,69 +24,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
+    # Get 12h data for Donchian calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
+    
+    # Calculate Donchian channels (20-period) on 12h
+    highest_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: current 12h volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_filter_12h = volume_12h > (1.5 * vol_ma_20)
+    
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla R3 and S3 levels from 1d OHLC
-    # R3 = close + 1.1*(high-low)/2
-    # S3 = close - 1.1*(high-low)/2
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
-    
-    # Align Camarilla levels to 6h timeframe (wait for completed 1d bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Calculate 1d VWAP for exit (mean reversion target)
-    # VWAP = sum(price * volume) / sum(volume) for the day
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    vwap_1d = (np.cumsum(typical_price_1d * df_1d['volume'].values) / 
-               np.cumsum(df_1d['volume'].values))
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    
-    # Volume filter: current 6h volume > 2x 20-period average
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter_6h = volume > (2.0 * vol_ma_6h)
+    # Calculate EMA(34) on 1d close for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after sufficient data for all indicators
+    for i in range(20, n):  # Start after sufficient data for Donchian
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or
-            np.isnan(vol_ma_6h[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 with volume spike AND above 1d EMA50 (uptrend)
-            if close[i] > camarilla_r3_aligned[i] and volume_filter_6h[i] and close[i] > ema50_1d_aligned[i]:
+            # LONG: Price breaks above upper Donchian AND price > 1d EMA34 AND volume confirmation
+            if close[i] > highest_20[i] and close[i] > ema34_1d_aligned[i] and volume_filter_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with volume spike AND below 1d EMA50 (downtrend)
-            elif close[i] < camarilla_s3_aligned[i] and volume_filter_6h[i] and close[i] < ema50_1d_aligned[i]:
+            # SHORT: Price breaks below lower Donchian AND price < 1d EMA34 AND volume confirmation
+            elif close[i] < lowest_20[i] and close[i] < ema34_1d_aligned[i] and volume_filter_12h[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to 1d VWAP (mean reversion) OR touches S3 (contrarian level)
-            if close[i] <= vwap_1d_aligned[i] or close[i] < camarilla_s3_aligned[i]:
+            # EXIT LONG: Price breaks below lower Donchian OR trend reversal (price < 1d EMA34)
+            if close[i] < lowest_20[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to 1d VWAP (mean reversion) OR touches R3 (contrarian level)
-            if close[i] >= vwap_1d_aligned[i] or close[i] > camarilla_r3_aligned[i]:
+            # EXIT SHORT: Price breaks above upper Donchian OR trend reversal (price > 1d EMA34)
+            if close[i] > highest_20[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
