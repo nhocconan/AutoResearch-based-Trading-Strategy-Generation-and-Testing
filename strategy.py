@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R with 12h ADX trend filter and volume confirmation.
-# Williams %R(14) identifies overbought/oversold conditions. ADX(14) > 25 filters for trending markets.
-# Long when %R crosses above -80 from below AND ADX > 25 AND volume > 1.5x average.
-# Short when %R crosses below -20 from above AND ADX > 25 AND volume > 1.5x average.
-# Exit when %R crosses -50 in opposite direction OR ADX < 20 (trend weakening).
-# Uses 6h timeframe for lower frequency, Williams %R for mean reversion in trends, 12h ADX for trend strength, volume for confirmation.
-# Target: 50-150 total trades over 4 years (12-37/year). Works in bull via trend continuation pullsbacks, bear via faded rallies in downtrends.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d volume spike and ADX trend filter.
+# Long when price breaks above Camarilla R1 (1d) AND volume > 2.0x 20-period average AND ADX(14) > 25 (trending)
+# Short when price breaks below Camarilla S1 (1d) AND volume > 2.0x 20-period average AND ADX(14) > 25
+# Exit when price reverts to Camarilla pivot point (PP) or ADX < 20 (range)
+# Uses Camarilla pivot levels from 1d for structure, volume spike for confirmation, ADX for regime filter.
+# Target: 75-150 total trades over 4 years (19-37/year). Works in bull via breakout continuation, bear via faded rallies.
 
-name = "6h_WilliamsR_12hADX_Trend_Volume_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dVolume_ADX_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,110 +24,124 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Williams %R calculation
-    df_6h = get_htf_data(prices, '6h')
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    volume_6h = df_6h['volume'].values
+    # Get 1d data for Camarilla pivot levels, volume, and ADX
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Williams %R(14) on 6h
-    highest_high_6h = pd.Series(high_6h).rolling(window=14, min_periods=14).max().values
-    lowest_low_6h = pd.Series(low_6h).rolling(window=14, min_periods=14).min().values
-    williams_r_6h = -100 * (highest_high_6h - close_6h) / (highest_high_6h - lowest_low_6h)
-    # Handle division by zero (when high == low)
-    williams_r_6h = np.where((highest_high_6h - lowest_low_6h) == 0, -50, williams_r_6h)
+    # Calculate Camarilla pivot levels for 1d
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Volume filter: current 6h volume > 1.5x 20-period average
-    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    volume_filter_6h = volume_6h > (1.5 * vol_ma_6h)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Get 12h data for ADX trend filter
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Volume filter: current 1d volume > 2.0x 20-period average
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_filter_1d = volume_1d > (2.0 * vol_ma_1d)
+    volume_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
-    # Calculate ADX(14) on 12h
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
+    # ADX calculation for trend strength
+    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
+    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
+    # TR = max(high - low, abs(high - prev_close), abs(low - prev_close))
+    # +DM_smooth = smoothed +DM (Wilder's smoothing)
+    # -DM_smooth = smoothed -DM
+    # TR_smooth = smoothed TR
+    # +DI = 100 * +DM_smooth / TR_smooth
+    # -DI = 100 * -DM_smooth / TR_smooth
+    # DX = 100 * abs(+DI - -DI) / (+DI + -DI)
+    # ADX = smoothed DX
+    
+    # Calculate +DM, -DM, TR
+    high_shift = np.roll(high_1d, 1)
+    low_shift = np.roll(low_1d, 1)
+    close_shift = np.roll(close_1d, 1)
+    high_shift[0] = np.nan
+    low_shift[0] = np.nan
+    close_shift[0] = np.nan
+    
+    plus_dm = np.where((high_1d - high_shift) > (low_shift - low_1d), np.maximum(high_1d - high_shift, 0), 0)
+    minus_dm = np.where((low_shift - low_1d) > (high_1d - high_shift), np.maximum(low_shift - low_1d, 0), 0)
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - close_shift)
+    tr3 = np.abs(low_1d - close_shift)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Directional Movement
-    dm_plus = np.where((high_12h - np.roll(high_12h, 1)) > (np.roll(low_12h, 1) - low_12h), 
-                       np.maximum(high_12h - np.roll(high_12h, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_12h, 1) - low_12h) > (high_12h - np.roll(high_12h, 1)), 
-                        np.maximum(np.roll(low_12h, 1) - low_12h, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        smoothed = np.zeros_like(values)
-        smoothed[period-1] = np.nansum(values[:period])  # First value is simple average
-        for i in range(period, len(values)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
-        return smoothed
+    # Initialize smoothed values
+    plus_dm_smooth = np.zeros_like(plus_dm)
+    minus_dm_smooth = np.zeros_like(minus_dm)
+    tr_smooth = np.zeros_like(tr)
     
-    tr_14 = wilders_smoothing(tr, 14)
-    dm_plus_14 = wilders_smoothing(dm_plus, 14)
-    dm_minus_14 = wilders_smoothing(dm_minus, 14)
+    # First value is simple average
+    plus_dm_smooth[period-1] = np.nansum(plus_dm[:period])
+    minus_dm_smooth[period-1] = np.nansum(minus_dm[:period])
+    tr_smooth[period-1] = np.nansum(tr[:period])
     
-    # Directional Indicators
-    di_plus = 100 * dm_plus_14 / tr_14
-    di_minus = 100 * dm_minus_14 / tr_14
-    # Handle division by zero
-    di_plus = np.where(tr_14 == 0, 0, di_plus)
-    di_minus = np.where(tr_14 == 0, 0, di_minus)
+    # Subsequent values: smoothed = previous_smooth - (previous_smooth / period) + current_value
+    for i in range(period, len(plus_dm)):
+        plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
+        minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
+        tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / period) + tr[i]
     
-    # ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx = wilders_smoothing(dx, 14)
+    # Calculate +DI, -DI, DX, ADX
+    plus_di = 100.0 * plus_dm_smooth / tr_smooth
+    minus_di = 100.0 * minus_dm_smooth / tr_smooth
+    dx = 100.0 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     
-    # Align HTF indicators to LTF
-    williams_r_6h_aligned = align_htf_to_ltf(prices, df_6h, williams_r_6h)
-    volume_filter_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_filter_6h.astype(float))
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # ADX is smoothed DX
+    adx = np.zeros_like(dx)
+    adx[2*period-1] = np.nansum(dx[period:2*period])  # First ADX value
+    for i in range(2*period, len(dx)):
+        adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_6h_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(volume_filter_6h_aligned[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(pp_1d_aligned[i]) or np.isnan(volume_filter_1d_aligned[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R crosses above -80 from below AND ADX > 25 AND volume confirmation
-            if (williams_r_6h_aligned[i] > -80 and williams_r_6h_aligned[i-1] <= -80 and 
-                adx_aligned[i] > 25 and volume_filter_6h_aligned[i] > 0.5):
+            # LONG: Price breaks above R1 AND volume confirmation AND ADX > 25 (trending)
+            if close[i] > r1_1d_aligned[i] and volume_filter_1d_aligned[i] and adx_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R crosses below -20 from above AND ADX > 25 AND volume confirmation
-            elif (williams_r_6h_aligned[i] < -20 and williams_r_6h_aligned[i-1] >= -20 and 
-                  adx_aligned[i] > 25 and volume_filter_6h_aligned[i] > 0.5):
+            # SHORT: Price breaks below S1 AND volume confirmation AND ADX > 25 (trending)
+            elif close[i] < s1_1d_aligned[i] and volume_filter_1d_aligned[i] and adx_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R crosses below -50 OR ADX < 20 (trend weakening)
-            if williams_r_6h_aligned[i] < -50 or adx_aligned[i] < 20:
+            # EXIT LONG: Price reverts to PP OR ADX < 20 (range)
+            if close[i] <= pp_1d_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R crosses above -50 OR ADX < 20 (trend weakening)
-            if williams_r_6h_aligned[i] > -50 or adx_aligned[i] < 20:
+            # EXIT SHORT: Price reverts to PP OR ADX < 20 (range)
+            if close[i] >= pp_1d_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
