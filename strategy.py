@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""
-12h_Donchian_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: Donchian breakouts on 12h timeframe with daily trend filter and volume confirmation
-capture significant trend moves while avoiding whipsaw. Daily trend ensures alignment with
-higher-timeframe momentum, reducing false signals. Volume confirms breakout strength.
-Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
-"""
+# 4h_Donchian_Breakout_1dTrend_VolumeConfirmation
+# Hypothesis: Donchian breakouts on 4h with daily trend filter and volume confirmation
+# capture significant trend moves while avoiding whipsaw. Daily trend ensures alignment with
+# higher-timeframe momentum, reducing false signals. Volume confirms breakout strength.
+# Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
 
-name = "12h_Donchian_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -36,7 +34,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Calculate Donchian channels (20-period) on 12h data
+    # Calculate Donchian channels (20-period) on 4h data
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
     for i in range(20, n):
