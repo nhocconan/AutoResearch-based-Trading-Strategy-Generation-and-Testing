@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dEMA50_Trend_Volume
-# Hypothesis: Use daily Camarilla R3/S3 levels for breakout entries with 1d EMA50 trend filter and volume confirmation.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Use daily Camarilla R3/S3 levels for breakout entries with 1d EMA50 trend filter and volume confirmation on 12h chart.
 # Long when price breaks above daily R3 in uptrend with volume spike, short when price breaks below daily S3 in downtrend with volume spike.
 # Exit when price returns to daily pivot point or trend changes.
 # Daily Camarilla levels provide strong support/resistance; EMA50 filters trend direction; volume confirms breakout strength.
-# Designed for low-moderate trade frequency (20-60 total trades over 4 years) with clear entry/exit rules to avoid overtrading.
+# Designed for low-moderate trade frequency (50-150 total trades over 4 years) with clear entry/exit rules to avoid overtrading.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA50_Trend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -46,7 +46,7 @@ def generate_signals(prices):
     s3_1d = close_1d - ((high_1d - low_1d) * 1.2500)
     pp_1d = (high_1d + low_1d + close_1d) / 3
     
-    # Align daily Camarilla levels to 4h timeframe
+    # Align daily Camarilla levels to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d.values)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d.values)
     pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d.values)
