@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Kijun_Sen_Bounce_Trend_Filter
-Hypothesis: In 6h timeframe, price bouncing off Kijun-sen (26-period) with Tenkan-sen/Kijun-sen cross alignment and 1d trend filter provides institutional-grade support/resistance. Works in bull/bear as Ichimoku adapts to volatility. Target: 15-35 trades/year.
+12h_1d_Camarilla_R1S1_Breakout_Trend_Volume
+Hypothesis: 12h breakouts of Camarilla R1/S1 levels with 1d trend filter and volume confirmation work in both bull and bear markets.
+Breakout above R1 with 1d uptrend and volume spike = long.
+Breakdown below S1 with 1d downtrend and volume spike = short.
+Exit on opposite level touch or trend reversal. Uses 1w trend filter for higher timeframe bias.
+Target: 12-37 trades/year per symbol.
 """
 
-name = "6h_Ichimoku_Kijun_Sen_Bounce_Trend_Filter"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1S1_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,142 +24,83 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period9_high = np.zeros(n)
-    period9_low = np.zeros(n)
-    for i in range(n):
-        if i < 8:
-            period9_high[i] = np.nan
-            period9_low[i] = np.nan
-        else:
-            period9_high[i] = np.max(high[i-8:i+1])
-            period9_low[i] = np.min(low[i-8:i+1])
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period26_high = np.zeros(n)
-    period26_low = np.zeros(n)
-    for i in range(n):
-        if i < 25:
-            period26_high[i] = np.nan
-            period26_low[i] = np.nan
-        else:
-            period26_high[i] = np.max(high[i-25:i+1])
-            period26_low[i] = np.min(low[i-25:i+1])
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period52_high = np.zeros(n)
-    period52_low = np.zeros(n)
-    for i in range(n):
-        if i < 51:
-            period52_high[i] = np.nan
-            period52_low[i] = np.nan
-        else:
-            period52_high[i] = np.max(high[i-51:i+1])
-            period52_low[i] = np.min(low[i-51:i+1])
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Kumo (Cloud) boundaries: Senkou Span A/B shifted 26 periods ahead
-    # For cloud at time t, we need values from t-26
-    senkou_span_a_lagged = np.full(n, np.nan)
-    senkou_span_b_lagged = np.full(n, np.nan)
-    for i in range(26, n):
-        senkou_span_a_lagged[i] = senkou_span_a[i-26]
-        senkou_span_b_lagged[i] = senkou_span_b[i-26]
-    
-    # Kumo top and bottom
-    kumo_top = np.where(senkou_span_a_lagged > senkou_span_b_lagged, senkou_span_a_lagged, senkou_span_b_lagged)
-    kumo_bottom = np.where(senkou_span_a_lagged < senkou_span_b_lagged, senkou_span_a_lagged, senkou_span_b_lagged)
-    
-    # 1d trend filter (HTF)
+    # Calculate 1d Camarilla levels (based on previous 1d bar)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d Ichimoku for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Previous 1d bar high, low, close
+    ph = df_1d['high'].shift(1).values  # previous day high
+    pl = df_1d['low'].shift(1).values   # previous day low
+    pc = df_1d['close'].shift(1).values # previous day close
     
-    # 1d Tenkan-sen and Kijun-sen
-    period9_high_1d = np.zeros(len(df_1d))
-    period9_low_1d = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        if i < 8:
-            period9_high_1d[i] = np.nan
-            period9_low_1d[i] = np.nan
-        else:
-            period9_high_1d[i] = np.max(high_1d[i-8:i+1])
-            period9_low_1d[i] = np.min(low_1d[i-8:i+1])
-    tenkan_sen_1d = (period9_high_1d + period9_low_1d) / 2
+    # Camarilla R1 and S1
+    r1 = pc + (ph - pl) * 1.1 / 12
+    s1 = pc - (ph - pl) * 1.1 / 12
     
-    period26_high_1d = np.zeros(len(df_1d))
-    period26_low_1d = np.zeros(len(df_1d))
-    for i in range(len(df_1d)):
-        if i < 25:
-            period26_high_1d[i] = np.nan
-            period26_low_1d[i] = np.nan
-        else:
-            period26_high_1d[i] = np.max(high_1d[i-25:i+1])
-            period26_low_1d[i] = np.min(low_1d[i-25:i+1])
-    kijun_sen_1d = (period26_high_1d + period26_low_1d) / 2
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 1d trend: price above/below Kijun-sen
-    uptrend_1d = close_1d > kijun_sen_1d
-    downtrend_1d = close_1d < kijun_sen_1d
+    # 1d trend filter: EMA50
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
+    # 1w trend filter (additional bias)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1w = df_1w['close'].values > ema_50_1w
+    downtrend_1w = df_1w['close'].values < ema_50_1w
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    
+    # Volume confirmation: volume > 2.0 * 24-period average (24*12h = 12 days)
+    vol_ma = np.zeros(n)
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
+    volume_conf = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):
-        # Skip if any values are NaN
-        if np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]):
-            signals[i] = 0.0
-            continue
-        
-        price = close[i]
-        tenkan = tenkan_sen[i]
-        kijun = kijun_sen[i]
-        kumo_top_val = kumo_top[i]
-        kumo_bottom_val = kumo_bottom[i]
-        tk_cross = tenkan > kijun  # Tenkan above Kijun
-        price_above_kumo = price > kumo_top_val
-        price_below_kumo = price < kumo_bottom_val
-        price_in_kumo = (price >= kumo_bottom_val) and (price <= kumo_top_val)
+    for i in range(100, n):  # warmup for 24-period vol MA and EMA50
+        # Get values
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        uptrend_1d_val = uptrend_1d_aligned[i]
+        downtrend_1d_val = downtrend_1d_aligned[i]
+        uptrend_1w_val = uptrend_1w_aligned[i]
+        downtrend_1w_val = downtrend_1w_aligned[i]
+        vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: price bounces off Kijun-sen from below, TK cross bullish, 1d uptrend
-            if (abs(price - kijun) < 0.001 * price and price > kijun and  # bounce off Kijun
-                tk_cross and 
-                uptrend_1d_aligned[i]):
+            # LONG: break above R1, 1d uptrend, 1w uptrend filter, volume confirmation
+            if close[i] > r1_val and uptrend_1d_val and uptrend_1w_val and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price bounces off Kijun-sen from above, TK cross bearish, 1d downtrend
-            elif (abs(price - kijun) < 0.001 * price and price < kijun and  # bounce off Kijun
-                  not tk_cross and 
-                  downtrend_1d_aligned[i]):
+            # SHORT: break below S1, 1d downtrend, 1w downtrend filter, volume confirmation
+            elif close[i] < s1_val and downtrend_1d_val and downtrend_1w_val and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below Kijun-sen or TK cross turns bearish
-            if price < kijun or not tk_cross:
+            # EXIT LONG: touch S1 or 1d trend turns down
+            if close[i] < s1_val or not uptrend_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above Kijun-sen or TK cross turns bullish
-            if price > kijun or tk_cross:
+            # EXIT SHORT: touch R1 or 1d trend turns up
+            if close[i] > r1_val or not downtrend_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
