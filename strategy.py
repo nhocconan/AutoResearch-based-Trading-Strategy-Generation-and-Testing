@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Breakout beyond daily Camarilla R1/S1 levels with alignment to daily trend (close vs EMA34) and volume confirmation captures strong momentum moves.
-# Daily trend provides stronger filter than shorter timeframes, reducing whipsaws in chop. Volume spike confirms institutional participation.
-# Designed for low-frequency, high-quality setups suitable for 4h timeframe with controlled trade frequency.
+# 4h_4x4_Squeeze_Momentum
+# Hypothesis: Squeeze momentum with Bollinger Bands and Keltner Channel identifies low volatility breakouts.
+# Combines with 1d trend filter (EMA50) and volume confirmation for high-probability entries.
+# Designed for low-frequency, high-quality setups in both bull and bear markets.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_4x4_Squeeze_Momentum"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,40 +22,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter and Camarilla pivot calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Calculate Camarilla pivot levels for each day
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Bollinger Bands (20, 2)
+    bb_ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_ma + 2 * bb_std
+    bb_lower = bb_ma - 2 * bb_std
 
-    # Align to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Keltner Channel (20, 1.5)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    keltner_upper = bb_ma + 1.5 * atr
+    keltner_lower = bb_ma - 1.5 * atr
 
-    # Volume spike: volume > 2.0 * 20-period average (~3.3 days at 4h)
+    # Squeeze condition: BB inside KC
+    squeeze = (bb_lower > keltner_lower) & (bb_upper < keltner_upper)
+
+    # Momentum: close - BB middle
+    momentum = close - bb_ma
+
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    volume_conf = volume > 1.5 * vol_ma_20
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+            np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
+            np.isnan(momentum[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,26 +72,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Uptrend + breakout above R1 + volume spike
-            if close[i] > ema34_1d_aligned[i] and close[i] > r1_aligned[i] and volume_spike[i]:
+            # LONG: Squeeze release + bullish momentum + uptrend + volume
+            if (not squeeze[i-1] and squeeze[i]) and momentum[i] > 0 and close[i] > ema50_1d_aligned[i] and volume_conf[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend + breakdown below S1 + volume spike
-            elif close[i] < ema34_1d_aligned[i] and close[i] < s1_aligned[i] and volume_spike[i]:
+            # SHORT: Squeeze release + bearish momentum + downtrend + volume
+            elif (not squeeze[i-1] and squeeze[i]) and momentum[i] < 0 and close[i] < ema50_1d_aligned[i] and volume_conf[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or trend turns bearish
-            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Squeeze fires or momentum turns bearish
+            if squeeze[i] or momentum[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or trend turns bullish
-            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Squeeze fires or momentum turns bullish
+            if squeeze[i] or momentum[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
