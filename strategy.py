@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ADX_TrendFilter_1dADX_1dRSI_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1D_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,146 +17,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1D data ONCE for ADX and RSI
+    # Load 1D data ONCE for Camarilla pivot, volume, and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 28:  # Need enough for ADX(14) and RSI(14)
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate ADX(14) on 1D
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        
-        # Directional Movement
-        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-        dm_plus = np.concatenate([[0], dm_plus])
-        dm_minus = np.concatenate([[0], dm_minus])
-        
-        # Smoothed values
-        atr = np.full_like(tr, np.nan)
-        dm_plus_smooth = np.full_like(dm_plus, np.nan)
-        dm_minus_smooth = np.full_like(dm_minus, np.nan)
-        
-        # First values (simple average)
-        if len(tr) >= period:
-            atr[period-1] = np.nanmean(tr[1:period])
-            dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period])
-            dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period])
-            
-            # Wilder's smoothing
-            for i in range(period, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
-                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
-        
-        # Directional Indicators
-        di_plus = np.full_like(atr, np.nan)
-        di_minus = np.full_like(atr, np.nan)
-        dx = np.full_like(atr, np.nan)
-        
-        valid = ~np.isnan(atr) & (atr != 0)
-        di_plus[valid] = 100 * dm_plus_smooth[valid] / atr[valid]
-        di_minus[valid] = 100 * dm_minus_smooth[valid] / atr[valid]
-        
-        dx_valid = ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0)
-        dx[dx_valid] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
-        
-        # ADX
-        adx = np.full_like(dx, np.nan)
-        if len(dx) >= period:
-            adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
-            for i in range(2*period-1, len(dx)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Calculate previous day's Camarilla pivot levels (R1, S1)
+    # Using previous day's data to avoid look-ahead
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Calculate RSI(14) on 1D
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close)
-        delta = np.concatenate([[np.nan], delta])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full_like(close, np.nan)
-        avg_loss = np.full_like(close, np.nan)
-        
-        # First values
-        if len(gain) >= period:
-            avg_gain[period-1] = np.nanmean(gain[1:period])
-            avg_loss[period-1] = np.nanmean(loss[1:period])
-            
-            # Wilder's smoothing
-            for i in range(period, len(gain)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.full_like(close, np.nan)
-        valid = ~np.isnan(avg_loss) & (avg_loss != 0)
-        rs[valid] = avg_gain[valid] / avg_loss[valid]
-        
-        rsi = np.full_like(close, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    r1 = pivot + range_hl * 1.1 / 12
+    s1 = pivot - range_hl * 1.1 / 12
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    rsi_1d = calculate_rsi(close_1d, 14)
+    # Calculate volume spike (current volume > 2x 20-period average)
+    vol_series = pd.Series(volume_1d)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (2 * vol_ma)
     
-    # Align 1D indicators to 6H timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1D EMA50 for trend filter
+    close_series = pd.Series(close_1d)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 6H EMA20 for entry timing
-    close_s = pd.Series(close)
-    ema20_6h = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align 1D indicators to 12H timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after sufficient data
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema20_6h[i])):
+    for i in range(50, n):  # Start after sufficient data
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_spike_aligned[i]) or np.isnan(ema50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: ADX > 20 indicates trending market
-        is_trending = adx_1d_aligned[i] > 20
-        
-        # RSI filter: Avoid extreme overbought/oversold
-        rsi_ok = (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
-        
-        # Price relative to EMA
-        price_above_ema = close[i] > ema20_6h[i]
-        price_below_ema = close[i] < ema20_6h[i]
-        
         if position == 0:
-            # LONG: Uptrend + price above EMA + not overbought
-            if is_trending and price_above_ema and rsi_ok:
+            # LONG: Price breaks above R1 with volume spike and uptrend
+            if close[i] > r1_aligned[i] and volume_spike_aligned[i] and close[i] > ema50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend + price below EMA + not oversold
-            elif is_trending and price_below_ema and rsi_ok:
+            # SHORT: Price breaks below S1 with volume spike and downtrend
+            elif close[i] < s1_aligned[i] and volume_spike_aligned[i] and close[i] < ema50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend weakens or price crosses below EMA
-            if (adx_1d_aligned[i] <= 20) or price_below_ema:
+            # EXIT LONG: Price breaks below S1 or volume dries up
+            if close[i] < s1_aligned[i] or not volume_spike_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend weakens or price crosses above EMA
-            if (adx_1d_aligned[i] <= 20) or price_above_ema:
+            # EXIT SHORT: Price breaks above R1 or volume dries up
+            if close[i] > r1_aligned[i] or not volume_spike_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
