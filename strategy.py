@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation.
-# Long when Alligator jaws (13-period smoothed median) crosses above teeth (8-period smoothed median)
-# AND price > lips (5-period smoothed median) AND 1d EMA50 rising AND volume > 1.5x average.
-# Short when jaws cross below teeth AND price < lips AND 1d EMA50 falling AND volume > 1.5x average.
+# Hypothesis: 6h Williams %R extreme levels with 1d EMA34 trend filter and volume spike confirmation.
+# Long when Williams %R < -80 (oversold) AND 1d EMA34 rising AND volume > 1.8x average.
+# Short when Williams %R > -20 (overbought) AND 1d EMA34 falling AND volume > 1.8x average.
 # Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Alligator identifies trend initiation/continuation, 1d EMA50 filters primary trend, volume confirms strength.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# Williams %R identifies momentum extremes, 1d EMA34 filters primary trend, volume spike confirms reversal strength.
+# Target: 75-200 total trades over 4 years (19-50/year) on 6h.
 
-name = "12h_WilliamsAlligator_1dEMA50_Volume_ATRStop_v1"
-timeframe = "12h"
+name = "6h_WilliamsR_Extreme_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -36,39 +35,22 @@ def generate_signals(prices):
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Williams Alligator (based on median price)
+    # Calculate Williams %R(14) on primary timeframe
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    median_1d = (high_1d + low_1d) / 2.0
     
-    # Williams Alligator lines: jaws (13), teeth (8), lips (5) - all smoothed with 3-period offset
-    def smoothed_mma(series, period):
-        # Smoothed Moving Average (SMMA) - equivalent to RMA/Wilder's
-        sma = pd.Series(series).rolling(window=period, min_periods=period).mean().values
-        # Convert SMA to SMMA: first value = SMA, then recursive: SMMA = (prev*(period-1) + current) / period
-        smma = np.full_like(series, np.nan, dtype=float)
-        smma[period-1] = sma[period-1]  # First valid value
-        for i in range(period, len(series)):
-            if not np.isnan(sma[i]) and not np.isnan(smma[i-1]):
-                smma[i] = (smma[i-1] * (period-1) + sma[i]) / period
-        return smma
+    # Calculate 1d EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    jaws = smoothed_mma(median_1d, 13)  # Jaw line (13-period)
-    teeth = smoothed_mma(median_1d, 8)   # Teeth line (8-period)
-    lips = smoothed_mma(median_1d, 5)    # Lips line (5-period)
-    
-    # Align 1d Alligator lines to 12h timeframe (wait for 1d bar to close)
-    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Get 1d data for EMA50 trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d EMA50 to 12h timeframe (wait for 1d bar to close)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1d EMA34 to 6h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,26 +59,23 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Jaws cross above teeth AND price > lips AND 1d EMA50 rising AND volume > 1.5x average
-            if (jaws_aligned[i] > teeth_aligned[i] and jaws_aligned[i-1] <= teeth_aligned[i-1] and
-                close[i] > lips_aligned[i] and 
-                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and 
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Williams %R < -80 (oversold) AND 1d EMA34 rising AND volume > 1.8x average
+            if (williams_r[i] < -80 and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+                volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Jaws cross below teeth AND price < lips AND 1d EMA50 falling AND volume > 1.5x average
-            elif (jaws_aligned[i] < teeth_aligned[i] and jaws_aligned[i-1] >= teeth_aligned[i-1] and
-                  close[i] < lips_aligned[i] and 
-                  ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and 
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Williams %R > -20 (overbought) AND 1d EMA34 falling AND volume > 1.8x average
+            elif (williams_r[i] > -20 and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+                  volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
