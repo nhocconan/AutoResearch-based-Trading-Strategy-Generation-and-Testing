@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_12hTrend_VolumeSqueeze"
-timeframe = "6h"
+name = "4h_RSI_Regime_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,77 +17,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1d EMA(34) trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Daily high, low, close for Camarilla calculation
-    ph = df_12h['high'].values
-    pl = df_12h['low'].values
-    pc = df_12h['close'].values
-    
-    # Camarilla levels: R3, R4, S3, S4
-    r3 = pc + (ph - pl) * 1.1 / 4
-    r4 = pc + (ph - pl) * 1.1 / 2
-    s3 = pc - (ph - pl) * 1.1 / 4
-    s4 = pc - (ph - pl) * 1.1 / 2
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
-    
-    # 12h trend filter: EMA(50)
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Volume squeeze: current volume < 0.5 x 20-period average (low volume breakout)
+    # Volume filter: current volume > 1.5 x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    volume_filter = volume < 0.5 * vol_ma_20
+    
+    # Choppiness regime: avoid trending markets (CHOP < 38.2)
+    atr_period = 14
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr = np.zeros(n)
+    for i in range(atr_period, n):
+        if i == atr_period:
+            atr[i] = np.mean(tr[1:atr_period+1])
+        else:
+            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    
+    sum_tr = np.zeros(n)
+    for i in range(atr_period, n):
+        sum_tr[i] = np.sum(tr[i-atr_period+1:i+1])
+    highest = np.maximum.accumulate(high)
+    lowest = np.minimum.accumulate(low)
+    range_max_min = highest - lowest
+    chop = np.where(range_max_min != 0, 100 * np.log10(sum_tr / range_max_min) / np.log10(atr_period), 50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+    for i in range(30, n):
+        if (np.isnan(rsi[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        vol_squeeze = volume_filter[i]
-        price_above_r3 = close[i] > r3_aligned[i]
-        price_above_r4 = close[i] > r4_aligned[i]
-        price_below_s3 = close[i] < s3_aligned[i]
-        price_below_s4 = close[i] < s4_aligned[i]
-        price_above_ema = close[i] > ema50_12h_aligned[i]
-        price_below_ema = close[i] < ema50_12h_aligned[i]
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        chop_filter = chop[i] > 50  # favor ranging markets
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
         if position == 0:
-            # LONG: breakout above R3 with volume squeeze and 12h uptrend
-            if price_above_r3 and vol_squeeze and price_above_ema:
+            # LONG: RSI oversold + 1d uptrend + volume + chop
+            if rsi_oversold and close[i] > ema34_1d_aligned[i] and vol_filter and chop_filter:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: breakdown below S3 with volume squeeze and 12h downtrend
-            elif price_below_s3 and vol_squeeze and price_below_ema:
+            # SHORT: RSI overbought + 1d downtrend + volume + chop
+            elif rsi_overbought and close[i] < ema34_1d_aligned[i] and vol_filter and chop_filter:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price below R4 or trend breaks
-            if price_below_r4 or price_below_ema:
+            # EXIT LONG: RSI > 50 or trend breaks
+            if rsi[i] > 50 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price above S4 or trend breaks
-            if price_above_s4 or price_above_ema:
+            # EXIT SHORT: RSI < 50 or trend breaks
+            if rsi[i] < 50 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
