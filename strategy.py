@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_Trend_Filter
-# Hypothesis: Trade Keltner Channel breakouts filtered by 1-day EMA trend and volume spikes.
-# Long when price breaks above upper Keltner (EMA20 + 2*ATR) during 1-day uptrend with volume > 1.5x average.
-# Short when price breaks below lower Keltner (EMA20 - 2*ATR) during 1-day downtrend with volume spike.
-# Exit when price crosses back below/above EMA20 or opposite breakout occurs.
-# Designed for low trade frequency (<30/year) with strong trend capture in both bull and bear markets.
+# 12h_Alligator_Turn_WeeklyTrend_Filter
+# Hypothesis: Williams Alligator signals on 12h timeframe filtered by weekly trend direction.
+# Long when Alligator lines turn bullish (jaws < teeth < lips) during weekly uptrend.
+# Short when Alligator lines turn bearish (jaws > teeth > lips) during weekly downtrend.
+# Uses 1-week trend filter to avoid counter-trend whipsaws, targeting 15-30 trades/year per symbol.
+# Designed to work in bull markets (trend-following) and bear markets (counter-trend bounces during weekly mean reversion).
 
-name = "4h_Keltner_Breakout_Trend_Filter"
-timeframe = "4h"
+name = "12h_Alligator_Turn_WeeklyTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,38 +24,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1-day data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1-day EMA50 for trend direction
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly EMA34 for trend direction
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
 
-    # Calculate ATR(20) for Keltner Channel
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Williams Alligator on 12h: SMMA(13,8), SMMA(8,5), SMMA(5,3)
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev*(period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
 
-    # Calculate EMA20 for Keltner mid-line
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    jaws = smma(close, 13)  # Blue line: 13-period SMMA shifted 8 bars
+    teeth = smma(close, 8)   # Red line: 8-period SMMA shifted 5 bars
+    lips = smma(close, 5)    # Green line: 5-period SMMA shifted 3 bars
 
-    # Keltner Channels: upper = EMA20 + 2*ATR, lower = EMA20 - 2*ATR
-    keltner_upper = ema_20 + 2 * atr_20
-    keltner_lower = ema_20 - 2 * atr_20
-
-    # Volume filter: >1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Shift the lines as per Alligator definition
+    jaws = np.roll(jaws, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    # Set shifted values to NaN
+    jaws[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr_20[i]) or 
-            np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(jaws[i]) or 
+            np.isnan(teeth[i]) or np.isnan(lips[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,28 +71,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above upper Keltner in 1-day uptrend + volume spike
-            if close[i] > keltner_upper[i] and close[i-1] <= keltner_upper[i-1]:
-                if ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and volume[i] > vol_avg_20[i] * 1.5:
-                    signals[i] = 0.25
-                    position = 1
-            # SHORT: Break below lower Keltner in 1-day downtrend + volume spike
-            elif close[i] < keltner_lower[i] and close[i-1] >= keltner_lower[i-1]:
-                if ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and volume[i] > vol_avg_20[i] * 1.5:
-                    signals[i] = -0.25
-                    position = -1
+            # LONG: Alligator lines turn bullish (jaws < teeth < lips) during weekly uptrend
+            if (jaws[i] < teeth[i] < lips[i]) and (close[i] > ema_34_1w_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Alligator lines turn bearish (jaws > teeth > lips) during weekly downtrend
+            elif (jaws[i] > teeth[i] > lips[i]) and (close[i] < ema_34_1w_aligned[i]):
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below EMA20 or breaks below lower Keltner
-            if close[i] < ema_20[i] or close[i] < keltner_lower[i]:
+            # EXIT LONG: Alligator lines turn bearish or weekly trend turns down
+            if (jaws[i] > teeth[i] > lips[i]) or (close[i] < ema_34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above EMA20 or breaks above upper Keltner
-            if close[i] > ema_20[i] or close[i] > keltner_upper[i]:
+            # EXIT SHORT: Alligator lines turn bullish or weekly trend turns up
+            if (jaws[i] < teeth[i] < lips[i]) or (close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
