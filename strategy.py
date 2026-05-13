@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams Alligator + Elder Ray + 1d trend filter. 
-# Long when: price > Alligator Jaw, Bull Power > 0, and price > 1d EMA50.
-# Short when: price < Alligator Jaw, Bear Power < 0, and price < 1d EMA50.
-# Exit on close crossing Alligator Teeth (reversal signal).
-# Uses Williams Alligator (Jaw/Teeth/Lips) from Elder's system to identify trend,
-# Elder Ray to measure bull/bear power behind the move, and 1d EMA50 for higher-timeframe trend alignment.
-# Designed for 6h timeframe to capture intermediate trends with controlled trade frequency.
+# Hypothesis: 12h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 1.8x 20-period average.
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 1.8x 20-period average.
+# Exit on ATR(14) trailing stop (2.5x). Uses 12h primary timeframe and 1d HTF for trend alignment.
+# Williams %R captures short-term exhaustion in ranging markets, EMA50 filters intermediate trend,
+# volume spike confirms reversal authenticity. Designed for BTC/ETH with strict entry to avoid overtrading.
 
-name = "6h_WilliamsAlligator_ElderRay_1dEMA50_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_MeanReversion_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,23 +22,15 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator: SMAs of median price (typical price) with different periods
-    # Jaw: 13-period SMMA, Teeth: 8-period, Lips: 5-period
-    # SMMA (Smoothed Moving Average) = EMA with alpha=1/period
-    typical_price = (high + low + close) / 3.0
-    
-    # Jaw (13-period SMMA)
-    jaw = pd.Series(typical_price).ewm(alpha=1/13, adjust=False, min_periods=13).mean().values
-    # Teeth (8-period SMMA)
-    teeth = pd.Series(typical_price).ewm(alpha=1/8, adjust=False, min_periods=8).mean().values
-    # Lips (5-period SMMA)
-    lips = pd.Series(typical_price).ewm(alpha=1/5, adjust=False, min_periods=5).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Get 1d data for EMA50 trend filter (MTF)
     df_1d = get_htf_data(prices, '1d')
@@ -48,43 +39,78 @@ def generate_signals(prices):
     # Calculate EMA50 on 1d close
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF arrays to 6h timeframe (wait for completed 1d bar)
+    # Align HTF arrays to 12h timeframe (wait for completed 1d bar)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate Williams %R(14) on 12h timeframe
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Volume filter: current 12h volume > 1.8x 20-period average (spike confirmation)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.8 * vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
+    lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(50, n):  # Start after sufficient data for indicators
+    for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_12h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price > Jaw, Bull Power > 0, and price > 1d EMA50
-            if close[i] > jaw[i] and bull_power[i] > 0 and close[i] > ema50_1d_aligned[i]:
+            # LONG: Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume spike
+            if williams_r[i] < -80 and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price < Jaw, Bear Power < 0, and price < 1d EMA50
-            elif close[i] < jaw[i] and bear_power[i] < 0 and close[i] < ema50_1d_aligned[i]:
+                highest_since_entry[i] = high[i]  # Initialize tracking
+            # SHORT: Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume spike
+            elif williams_r[i] > -20 and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
+                lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
                 signals[i] = 0.0
+                # Carry forward tracking values when flat
+                if i > 0:
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:
-            # EXIT LONG: price crosses below Teeth (trend weakening)
-            if close[i] < teeth[i]:
+            # Update highest high since entry
+            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
+            # EXIT LONG: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
+                # Reset tracking when flat
+                highest_since_entry[i] = np.nan
             else:
                 signals[i] = 0.25
+                # Carry forward tracking
+                if i > 0:
+                    highest_since_entry[i] = highest_since_entry[i-1]
         elif position == -1:
-            # EXIT SHORT: price crosses above Teeth (trend weakening)
-            if close[i] > teeth[i]:
+            # Update lowest low since entry
+            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
+            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
+                # Reset tracking when flat
+                lowest_since_entry[i] = np.nan
             else:
                 signals[i] = -0.25
+                # Carry forward tracking
+                if i > 0:
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
     
     return signals
