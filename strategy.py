@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (>1.5x 20-bar avg volume), and daily choppiness regime filter (CHOP > 61.8 = range -> avoid entries, CHOP < 38.2 = trend -> allow breakout entries). This strategy targets the proven winning pattern: tight price channel breakout + volume + regime filter. Uses 4h timeframe to target 75-200 total trades over 4 years. Daily trend and regime filters reduce false signals in bear markets like 2022 and 2025+. Discrete position sizing (0.25) minimizes fee churn.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (>1.5x 20-bar avg volume), and daily choppiness regime filter (CHOP < 38.2 = trend -> allow breakout entries). This strategy targets the proven winning pattern: tight price channel breakout + volume + regime filter. Uses 12h timeframe to target 50-150 total trades over 4 years. Daily trend and regime filters reduce false signals in bear markets like 2022 and 2025+. Discrete position sizing (0.25) minimizes fee churn.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -52,7 +52,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to LTF (4h)
+    # Align Camarilla levels to LTF (12h)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
