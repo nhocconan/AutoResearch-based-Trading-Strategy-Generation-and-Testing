@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_RSI_Filter_and_Volume_Confirmation
-Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) to capture trend direction, confirmed by RSI momentum (RSI > 55 for long, RSI < 45 for short) and volume spike (volume > 1.8x 20-day average). This combination filters false signals in ranging markets while capturing sustained trends in both bull and bear markets. Designed for 1d timeframe to limit trades (<25/year) and avoid fee drag.
+6h_WeeklyPivot_DonchianBreakout_TrendFilter
+Hypothesis: Use weekly pivot point direction (based on weekly close) to set bias, then trade Donchian(20) breakouts on 6h timeframe only in the direction of the weekly trend, with volume confirmation. This combines weekly structural bias with intermediate-term breakout logic, designed to work in both bull and bear markets by aligning with the higher timeframe trend. Targets 15-35 trades/year to avoid fee drag.
 """
 
-name = "1d_KAMA_Trend_With_RSI_Filter_and_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_WeeklyPivot_DonchianBreakout_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,88 +17,74 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for pivot calculation and trend bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot points (standard floor trader method)
+    # Pivot = (H + L + C) / 3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # sum of |close[t] - close[t-1]| over 10 periods
-    # Fix: volatility needs to be calculated properly
-    volatility = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        volatility[i] = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
-    er = np.zeros_like(close_1d)
-    er[10:] = change[10:] / np.where(volatility[10:] == 0, 1, volatility[10:])
-    # Smoothing constants
-    fastest = 2 / (2 + 1)   # EMA(2)
-    slowest = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fastest - slowest) + slowest) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[9] = close_1d[9]  # Start with first value
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Weekly bias: 1 if close > pivot (bullish), -1 if close < pivot (bearish)
+    weekly_bias = np.where(weekly_close > weekly_pivot, 1, -1)
+    # Align weekly bias to 6h timeframe (wait for weekly bar to close)
+    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
     
-    # Align KAMA to daily timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Calculate Donchian channels on 6h data (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Calculate RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
-    # Calculate volume average (20-day) for volume spike filter
+    # Calculate volume average (20-period) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(lookback, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(weekly_bias_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.8x 20-day average
-        vol_spike = volume[i] > 1.8 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.3x 20-period average
+        vol_confirm = volume[i] > 1.3 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Price above KAMA + RSI > 55 (bullish momentum) + volume spike
-            if close[i] > kama_aligned[i] and rsi_aligned[i] > 55 and vol_spike:
+            # LONG: Weekly bullish bias + price breaks above Donchian high + volume confirmation
+            if weekly_bias_aligned[i] == 1 and high[i] > highest_high[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA + RSI < 45 (bearish momentum) + volume spike
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 45 and vol_spike:
+            # SHORT: Weekly bearish bias + price breaks below Donchian low + volume confirmation
+            elif weekly_bias_aligned[i] == -1 and low[i] < lowest_low[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA or RSI < 50
-            if close[i] < kama_aligned[i] or rsi_aligned[i] < 50:
+            # EXIT LONG: Price breaks below Donchian low or weekly bias turns bearish
+            if low[i] < lowest_low[i] or weekly_bias_aligned[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA or RSI > 50
-            if close[i] > kama_aligned[i] or rsi_aligned[i] > 50:
+            # EXIT SHORT: Price breaks above Donchian high or weekly bias turns bullish
+            if high[i] > highest_high[i] or weekly_bias_aligned[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
