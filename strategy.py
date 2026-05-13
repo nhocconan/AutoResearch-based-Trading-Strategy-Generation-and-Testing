@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts above daily Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34) with volume confirmation.
-# Uses 12h primary timeframe with 1d trend filter to reduce trade frequency and avoid fee drag. Designed for low trade frequency to avoid fee drag in both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Momentum
+# Hypothesis: Breakouts above daily Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34), with volume confirmation and momentum filter (ROC>0). Designed for low trade frequency to avoid fee drag in both bull and bear markets.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -39,7 +37,7 @@ def generate_signals(prices):
     camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -51,19 +49,24 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (1.5 * vol_ma)
     
+    # Momentum filter: ROC > 0 (positive momentum)
+    roc = np.zeros_like(close)
+    roc[10:] = (close[10:] - close[:-10]) / close[:-10]  # 10-period ROC
+    momentum_filter = roc > 0
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         if position == 0:
-            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34)
+            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34) and positive momentum
             if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1d_aligned[i]:
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1d_aligned[i] and momentum_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34)
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34) and negative momentum
             elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1d_aligned[i]:
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1d_aligned[i] and not momentum_filter[i]:
                 signals[i] = -0.25
                 position = -1
             else:
