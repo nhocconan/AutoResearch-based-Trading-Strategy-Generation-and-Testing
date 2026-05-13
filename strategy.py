@@ -1,69 +1,19 @@
 #!/usr/bin/env python3
-# 1h_SuperTrend_Filter_4hTrend_Volume
-# Hypothesis: Use 4h SuperTrend for trend direction and 1h SuperTrend for entry timing with volume confirmation.
-# This combines trend following with volatility-based dynamic support/resistance to capture trends
-# while avoiding whipsaws in ranging markets. Works in both bull and bear by following the trend.
-# Target: 15-37 trades/year per symbol to minimize fee drag.
+# 6h_ElderRay_BullPower_1wTrend_Volume
+# Hypothesis: Elder Ray Bull Power (bullish pressure) on 6h with 1-week trend filter (EMA50) and volume spike confirmation.
+# Bull Power = High - EMA13; Bear Power = Low - EMA13.
+# Long when Bull Power > 0 and rising, price above weekly EMA50, and volume spike.
+# Short when Bear Power < 0 and falling, price below weekly EMA50, and volume spike.
+# Designed to capture momentum in trending markets with institutional-grade filtering.
+# Target: 12-37 trades/year per symbol to minimize fee drag while maintaining edge in both bull and bear markets.
 
-name = "1h_SuperTrend_Filter_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_BullPower_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def supertrend(high, low, close, period=10, multiplier=3):
-    """Calculate SuperTrend indicator."""
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    
-    # Calculate ATR
-    atr = np.zeros_like(close)
-    atr[:period] = np.nan
-    if len(close) > period:
-        atr[period] = np.nanmean(tr[1:period+1])
-        for i in range(period+1, len(close)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    
-    # Calculate basic upper and lower bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Initialize SuperTrend
-    supertrend = np.full_like(close, np.nan)
-    direction = np.full_like(close, 1)  # 1 for uptrend, -1 for downtrend
-    
-    # Set first valid value
-    if len(close) > period:
-        supertrend[period] = upper_band[period]
-        direction[period] = 1
-    
-    for i in range(period+1, len(close)):
-        # Calculate bands
-        upper_band[i] = hl2[i] + multiplier * atr[i]
-        lower_band[i] = hl2[i] - multiplier * atr[i]
-        
-        # Apply SuperTrend logic
-        if close[i-1] > supertrend[i-1]:
-            # Previous close was above previous SuperTrend (uptrend)
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-            if supertrend[i] < supertrend[i-1]:
-                supertrend[i] = supertrend[i-1]
-            direction[i] = 1
-        else:
-            # Previous close was below previous SuperTrend (downtrend)
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-            if supertrend[i] > supertrend[i-1]:
-                supertrend[i] = supertrend[i-1]
-            direction[i] = -1
-    
-    return supertrend, direction, atr
 
 def generate_signals(prices):
     n = len(prices)
@@ -75,32 +25,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate 4h SuperTrend for trend direction
-    st_4h, dir_4h, atr_4h = supertrend(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, period=10, multiplier=3)
-    dir_4h_aligned = align_htf_to_ltf(prices, df_4h, dir_4h)
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
 
-    # Calculate 1h SuperTrend for entry timing
-    st_1h, dir_1h, atr_1h = supertrend(high, low, close, period=10, multiplier=3)
+    # Calculate EMA13 for Elder Ray (on 6h data)
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
 
-    # Volume confirmation: current volume > 1.5 x 20-period average
-    vol_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_ma[i] = np.nan
-        else:
-            vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = low - ema13   # Bear Power: Low - EMA13
+
+    # Slope of Bull/Bear Power (1-period change)
+    bull_power_slope = np.diff(bull_power, prepend=bull_power[0])
+    bear_power_slope = np.diff(bear_power, prepend=bear_power[0])
+
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+
+    # Volume confirmation: current volume > 2.0 x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after sufficient warmup
+    for i in range(13, n):  # Start after EMA13 warmup
         # Skip if any required value is NaN
-        if (np.isnan(dir_4h_aligned[i]) or 
-            np.isnan(st_1h[i]) or 
+        if (np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(bull_power_slope[i]) or 
+            np.isnan(bear_power_slope[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -110,33 +67,35 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: 4h uptrend AND price above 1h SuperTrend with volume spike
-            if (dir_4h_aligned[i] == 1 and 
-                close[i] > st_1h[i] and 
+            # LONG: Bull Power positive and rising, price above weekly EMA50, volume spike
+            if (bull_power[i] > 0 and 
+                bull_power_slope[i] > 0 and 
+                close[i] > ema50_1w_aligned[i] and 
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 4h downtrend AND price below 1h SuperTrend with volume spike
-            elif (dir_4h_aligned[i] == -1 and 
-                  close[i] < st_1h[i] and 
+            # SHORT: Bear Power negative and falling, price below weekly EMA50, volume spike
+            elif (bear_power[i] < 0 and 
+                  bear_power_slope[i] < 0 and 
+                  close[i] < ema50_1w_aligned[i] and 
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 4h trend turns down OR price falls below 1h SuperTrend
-            if dir_4h_aligned[i] == -1 or close[i] < st_1h[i]:
+            # EXIT LONG: Bull Power turns negative or price breaks below weekly EMA50
+            if bull_power[i] <= 0 or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 4h trend turns up OR price rises above 1h SuperTrend
-            if dir_4h_aligned[i] == 1 or close[i] > st_1h[i]:
+            # EXIT SHORT: Bear Power turns positive or price breaks above weekly EMA50
+            if bear_power[i] >= 0 or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
