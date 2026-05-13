@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe provide key support/resistance levels.
-# Breaking above R1 with daily uptrend and volume surge indicates strong bullish momentum.
-# Breaking below S1 with daily downtrend and volume surge indicates strong bearish momentum.
-# Exit when price reverts to the daily pivot point (mean reversion to equilibrium).
-# Uses only daily timeframe for context to avoid overtrading.
+# 4h_Donchian_Breakout_Volume_Trend
+# Hypothesis: Donchian(20) breakouts with volume confirmation and EMA50 trend filter capture strong momentum moves.
+# Uses 4h timeframe with 1d EMA34 for higher timeframe trend confirmation.
+# Entry: Long when price breaks above Donchian upper + volume spike + EMA50 up + EMA34(1d) up.
+#         Short when price breaks below Donchian lower + volume spike + EMA50 down + EMA34(1d) down.
+# Exit: Mean reversion to Donchian middle (20-period midpoint) to avoid overstaying.
+# Target: 20-35 trades/year on 4h to stay within optimal range while capturing significant moves.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_Donchian_Breakout_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,39 +25,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data once before loop
+    # Donchian Channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
+
+    # EMA50 for trend filter
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+
+    # Higher timeframe trend: 1d EMA34
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla levels from daily OHLC
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    #          R2 = close + 0.6*(high-low), R1 = close + 0.4*(high-low)
-    #          S1 = close - 0.4*(high-low), S2 = close - 0.6*(high-low)
-    #          S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    daily_range = df_1d['high'].values - df_1d['low'].values
-    camarilla_r1 = df_1d['close'].values + 0.4 * daily_range
-    camarilla_s1 = df_1d['close'].values - 0.4 * daily_range
-    camarilla_pivot = df_1d['close'].values  # Using close as pivot point
-    
-    # Align Camarilla levels to 4h timeframe (wait for daily close)
-    r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    
-    # Daily EMA34 for trend filter
     ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: volume > 2.0x 24-period average (6 hours)
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(24, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(pivot_4h[i]) or np.isnan(ema34_4h[i]) or 
-            np.isnan(vol_avg_24[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema50[i]) or np.isnan(vol_avg_20[i]) or np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,30 +56,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above R1 + daily uptrend + volume spike
-            if (close[i] > r1_4h[i] and 
-                close[i] > ema34_4h[i] and
-                volume[i] > vol_avg_24[i] * 2.0):
+            # LONG: Break above upper + volume spike + EMA50 up + EMA34(1d) up
+            if (close[i] > highest_high[i] and 
+                volume[i] > vol_avg_20[i] * 2.0 and
+                close[i] > ema50[i] and
+                ema34_1d_aligned[i] > ema34_1d_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below S1 + daily downtrend + volume spike
-            elif (close[i] < s1_4h[i] and 
-                  close[i] < ema34_4h[i] and
-                  volume[i] > vol_avg_24[i] * 2.0):
+            # SHORT: Break below lower + volume spike + EMA50 down + EMA34(1d) down
+            elif (close[i] < lowest_low[i] and 
+                  volume[i] > vol_avg_20[i] * 2.0 and
+                  close[i] < ema50[i] and
+                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Mean reversion to daily pivot
-            if close[i] < pivot_4h[i]:
+            # EXIT LONG: Mean reversion to Donchian middle
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Mean reversion to daily pivot
-            if close[i] > pivot_4h[i]:
+            # EXIT SHORT: Mean reversion to Donchian middle
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
