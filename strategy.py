@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_RSI_MeanReversion_With_Trend_Filter
-Hypothesis: RSI(14) mean reversion with 1d trend filter (EMA50) and volume confirmation works on 12h timeframe.
-Long when RSI < 30 and 1d uptrend; short when RSI > 70 and 1d downtrend. Exit at RSI 50.
-Volume filter avoids low-liquidity whipsaws. Designed for low trade frequency (<30/year) to minimize fee drag.
-Works in bull (mean reversion in uptrend) and bear (mean reversion in downtrend) markets.
+4h_Momentum_With_Volume_Trend_Filter
+Hypothesis: RSI(14) momentum with volume confirmation and 1d trend filter provides robust entries in both bull and bear markets.
+Long when RSI crosses above 50 with rising volume and 1d uptrend; short when RSI crosses below 50 with rising volume and 1d downtrend.
+Exit on opposite RSI cross or trend failure. Uses 4h EMA for trend confirmation.
+Target: 25-35 trades/year per symbol.
 """
 
-name = "12h_RSI_MeanReversion_With_Trend_Filter"
-timeframe = "12h"
+name = "4h_Momentum_With_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,69 +17,75 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
     # RSI(14)
     delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # 1d trend filter: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_conf = volume > 1.5 * vol_ma
     
+    # 4h trend: EMA20
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    uptrend_4h = close > ema_20
+    downtrend_4h = close < ema_20
+    
+    # 1d trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    uptrend_1d = df_1d['close'].values > ema_20_1d
+    downtrend_1d = df_1d['close'].values < ema_20_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
-        rsi_val = rsi[i]
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
+    for i in range(20, n):
+        rsi_now = rsi[i]
+        rsi_prev = rsi[i-1]
         vol_conf = volume_conf[i]
+        uptrend = uptrend_4h[i]
+        downtrend = downtrend_4h[i]
+        uptrend_htf = uptrend_1d_aligned[i]
+        downtrend_htf = downtrend_1d_aligned[i]
         
         if position == 0:
-            # LONG: RSI oversold + 1d uptrend + volume confirmation
-            if rsi_val < 30 and uptrend and vol_conf:
+            # LONG: RSI crosses above 50 with volume confirmation and uptrend on both timeframes
+            if rsi_prev <= 50 and rsi_now > 50 and vol_conf and uptrend and uptrend_htf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought + 1d downtrend + volume confirmation
-            elif rsi_val > 70 and downtrend and vol_conf:
+            # SHORT: RSI crosses below 50 with volume confirmation and downtrend on both timeframes
+            elif rsi_prev >= 50 and rsi_now < 50 and vol_conf and downtrend and downtrend_htf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (50)
-            if rsi_val >= 50:
+            # EXIT LONG: RSI crosses below 50 or 4h trend turns down
+            if rsi_prev >= 50 and rsi_now < 50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (50)
-            if rsi_val <= 50:
+            # EXIT SHORT: RSI crosses above 50 or 4h trend turns up
+            if rsi_prev <= 50 and rsi_now > 50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
