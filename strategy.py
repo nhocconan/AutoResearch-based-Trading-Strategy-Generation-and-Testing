@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_Breakout_1dEMA50_Trend_Volume
-Hypothesis: Donchian channel breakouts on 12h combined with 1d EMA50 trend filter and volume confirmation capture strong trending moves while avoiding whipsaws. The 12h timeframe reduces trade frequency to minimize fee drag, and the 1d EMA50 ensures alignment with the dominant trend. Volume confirmation adds conviction to breakouts. Works in both bull and bear markets by following the trend direction as defined by the higher timeframe.
-Target: 15-35 trades/year per symbol.
+4h_Camarilla_R1S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla R1/S1 levels from daily timeframe act as support/resistance in ranging markets.
+Breakout above R1 with daily uptrend and volume confirmation signals long.
+Breakdown below S1 with daily downtrend and volume confirmation signals short.
+Uses 1h volume spike to avoid false breakouts. Works in both bull/bear regimes by following daily trend.
+Target: 20-40 trades/year per symbol.
 """
 
-name = "12h_Donchian20_Breakout_1dEMA50_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,53 +26,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: volume > 1.5 * 20-period average volume
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * avg_volume)
-    
-    # 1d trend filter: EMA50
+    # Daily high/low/close for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
+    
+    # Calculate previous day's Camarilla levels
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla R1 and S1
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    
+    # Align to 4h timeframe (wait for daily close)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Daily trend: EMA34
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    uptrend_1d = df_1d['close'].values > ema_34_1d
+    downtrend_1d = df_1d['close'].values < ema_34_1d
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
+    # Volume spike: 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Breakout conditions
-        breakout_up = close[i] > donchian_high[i-1]  # Break above prior period's high
-        breakout_down = close[i] < donchian_low[i-1]  # Break below prior period's low
-        
         if position == 0:
-            # LONG: upward breakout + volume confirmation + 1d uptrend
-            if breakout_up and volume_confirm[i] and uptrend_1d_aligned[i]:
+            # LONG: break above R1, daily uptrend, volume spike
+            if close[i] > R1_aligned[i] and uptrend_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: downward breakout + volume confirmation + 1d downtrend
-            elif breakout_down and volume_confirm[i] and downtrend_1d_aligned[i]:
+            # SHORT: break below S1, daily downtrend, volume spike
+            elif close[i] < S1_aligned[i] and downtrend_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price closes below Donchian low or trend reverses
-            if close[i] < donchian_low[i] or not uptrend_1d_aligned[i]:
+            # EXIT LONG: close below S1 or loss of daily uptrend
+            if close[i] < S1_aligned[i] or not uptrend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price closes above Donchian high or trend reverses
-            if close[i] > donchian_high[i] or not downtrend_1d_aligned[i]:
+            # EXIT SHORT: close above R1 or loss of daily downtrend
+            if close[i] > R1_aligned[i] or not downtrend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
