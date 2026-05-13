@@ -1,15 +1,32 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_RSI_Chop_Reversal_v1"
-timeframe = "1d"
+name = "12h_Wilson_Trend_Reversal"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def wilson_price_oscillator(high, low, close, period):
+    """Wilson Price Oscillator: normalized momentum oscillator"""
+    wpo = np.zeros_like(close, dtype=float)
+    wpo[:] = np.nan
+    
+    for i in range(period, len(close)):
+        # Calculate smoothed high and low
+        high_max = np.max(high[i-period+1:i+1])
+        low_min = np.min(low[i-period+1:i+1])
+        
+        if high_max != low_min:
+            wpo[i] = (close[i] - low_min) / (high_max - low_min) * 100 - 50
+        else:
+            wpo[i] = 0
+    
+    return wpo
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,131 +34,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_len = 10
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=er_len))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.zeros(n)
-    for i in range(er_len, n):
-        if volatility[i] != 0:
-            er[i] = change[i - er_len + 1:i + 1].sum() / volatility[i]
-        else:
-            er[i] = 0
-    
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI
-    rsi_len = 14
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[rsi_len] = np.mean(gain[1:rsi_len+1])
-    avg_loss[rsi_len] = np.mean(loss[1:rsi_len+1])
-    for i in range(rsi_len+1, n):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_len-1) + gain[i]) / rsi_len
-        avg_loss[i] = (avg_loss[i-1] * (rsi_len-1) + loss[i]) / rsi_len
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index (weekly)
+    # Weekly EMA for trend filter (1w HTF)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
-    chop_len = 14
-    atr_1w = np.zeros(len(high_1w))
-    for i in range(1, len(high_1w)):
-        tr = max(high_1w[i] - low_1w[i], 
-                 abs(high_1w[i] - close_1w[i-1]), 
-                 abs(low_1w[i] - close_1w[i-1]))
-        atr_1w[i] = tr
+    # Daily Wilson Price Oscillator for momentum
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    sum_atr = np.zeros(len(high_1w))
-    for i in range(chop_len, len(high_1w)):
-        sum_atr[i] = np.sum(atr_1w[i-chop_len+1:i+1])
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    max_range = np.zeros(len(high_1w))
-    for i in range(chop_len, len(high_1w)):
-        max_range[i] = np.max(high_1w[i-chop_len+1:i+1]) - np.min(low_1w[i-chop_len+1:i+1])
+    wpo_14 = wilson_price_oscillator(high_1d, low_1d, close_1d, 14)
+    wpo_14_aligned = align_htf_to_ltf(prices, df_1d, wpo_14)
     
-    chop = np.zeros(len(high_1w))
-    for i in range(chop_len, len(high_1w)):
-        if max_range[i] != 0:
-            chop[i] = 100 * np.log10(sum_atr[i] / max_range[i]) / np.log10(chop_len)
-        else:
-            chop[i] = 50
+    # Volume filter: current volume > 1.8 x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    
-    # Signals
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop_aligned[i])):
+    for i in range(30, n):
+        # Skip if any required data is NaN
+        if (np.isnan(ema21_1w_aligned[i]) or 
+            np.isnan(wpo_14_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Chop regime: > 61.8 = range (mean revert), < 38.2 = trending
-        if chop_aligned[i] > 61.8:  # Range regime - mean revert
-            if position == 0:
-                if close[i] < kama[i] and rsi[i] < 30:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] > kama[i] and rsi[i] > 70:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
-                if close[i] > kama[i] or rsi[i] > 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                if close[i] < kama[i] or rsi[i] < 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-        else:  # Trending regime - follow trend
-            if position == 0:
-                if close[i] > kama[i] and rsi[i] > 50:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < kama[i] and rsi[i] < 50:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
-                if close[i] < kama[i] or rsi[i] < 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                if close[i] > kama[i] or rsi[i] > 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+        # Volume condition
+        vol_condition = volume[i] > 1.8 * vol_ma_20[i]
+        
+        if position == 0:
+            # LONG: WPO crosses above -20 with weekly uptrend and volume
+            if (wpo_14_aligned[i] > -20 and 
+                wpo_14_aligned[i-1] <= -20 and
+                close[i] > ema21_1w_aligned[i] and 
+                vol_condition):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: WPO crosses below 20 with weekly downtrend and volume
+            elif (wpo_14_aligned[i] < 20 and 
+                  wpo_14_aligned[i-1] >= 20 and
+                  close[i] < ema21_1w_aligned[i] and 
+                  vol_condition):
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # EXIT LONG: WPO crosses below 20 or weekly trend reversal
+            if (wpo_14_aligned[i] < 20 or 
+                close[i] < ema21_1w_aligned[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: WPO crosses above -20 or weekly trend reversal
+            if (wpo_14_aligned[i] > -20 or 
+                close[i] > ema21_1w_aligned[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
