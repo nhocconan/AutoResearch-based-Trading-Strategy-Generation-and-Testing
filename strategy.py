@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation (>2.0x avg volume).
-# Uses ATR(20) trailing stop (3.0x) for risk control. Discrete sizing 0.25.
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
-# EMA trend filter ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Donchian breakouts provide clear structure with proven efficacy on BTC/ETH.
-# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
-# Volume confirmation filters out low-momentum breakouts.
+# Hypothesis: 12h Williams Alligator with 1d EMA50 trend filter and volume confirmation (>1.3x avg volume). 
+# Williams Alligator uses smoothed moving averages (Jaw=13, Teeth=8, Lips=5) to identify trends.
+# Long when Lips > Teeth > Jaw and price > Lips; Short when Lips < Teeth < Jaw and price < Lips.
+# 1d EMA50 filter ensures alignment with higher timeframe trend to avoid counter-trend whipsaw.
+# Volume confirmation (>1.3x 20-period average) filters low-momentum breakouts.
+# Discrete sizing 0.25 with ATR(20) trailing stop (2.0x) for risk control.
+# Designed to work in both bull (trend-following) and bear (shorting breakdowns) markets.
 
-name = "1d_Donchian20_1wEMATrend_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "12h_Williams_Alligator_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -36,36 +36,44 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Donchian channel calculation
+    # Get 12h data for Williams Alligator calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate Williams Alligator components (SMMA = Smoothed Moving Average)
+    def smma(values, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(values, np.nan, dtype=np.float64)
+        if len(values) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(values[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(values)):
+            result[i] = (result[i-1] * (period-1) + values[i]) / period
+        return result
+    
+    jaw = smma(close_12h, 13)  # Jaw (13-period SMMA)
+    teeth = smma(close_12h, 8)  # Teeth (8-period SMMA)
+    lips = smma(close_12h, 5)   # Lips (5-period SMMA)
+    
+    # Align 12h Alligator components to primary timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channel (20-period) from previous day
-    # Upper = max(high_1d[i-20:i])
-    # Lower = min(low_1d[i-20:i])
-    donchian_upper = np.full(len(close_1d), np.nan)
-    donchian_lower = np.full(len(close_1d), np.nan)
+    # Calculate 1d EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    for i in range(20, len(close_1d)):
-        donchian_upper[i] = np.max(high_1d[i-20:i])
-        donchian_lower[i] = np.min(low_1d[i-20:i])
-    
-    # Align Donchian levels to 1d timeframe (wait for daily bar to close)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA50 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1w EMA50 to 1d timeframe (wait for weekly bar to close)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align 1d EMA50 to primary timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,23 +82,25 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND 1w EMA50 rising AND volume > 2.0x average
-            if (close[i] > donchian_upper_aligned[i] and 
-                ema50_1w_aligned[i] > ema50_1w_aligned[i-1] and 
-                volume[i] > 2.0 * avg_volume[i]):
+            # LONG: Lips > Teeth > Jaw AND price > Lips AND EMA50 > price (bullish alignment) AND volume > 1.3x average
+            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
+                close[i] > lips_aligned[i] and 
+                ema50_1d_aligned[i] > close[i] and 
+                volume[i] > 1.3 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian lower AND 1w EMA50 falling AND volume > 2.0x average
-            elif (close[i] < donchian_lower_aligned[i] and 
-                  ema50_1w_aligned[i] < ema50_1w_aligned[i-1] and 
-                  volume[i] > 2.0 * avg_volume[i]):
+            # SHORT: Lips < Teeth < Jaw AND price < Lips AND EMA50 < price (bearish alignment) AND volume > 1.3x average
+            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and 
+                  close[i] < lips_aligned[i] and 
+                  ema50_1d_aligned[i] < close[i] and 
+                  volume[i] > 1.3 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -103,8 +113,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (3.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 3.0 * atr[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -118,8 +128,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (3.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 3.0 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
