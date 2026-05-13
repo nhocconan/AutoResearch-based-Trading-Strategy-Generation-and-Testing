@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_Trend_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) from daily pivot act as strong intraday support/resistance. 
-Breakout above R1 with volume confirmation and weekly trend filter (price > weekly EMA50) signals bullish momentum.
-Breakdown below S1 with volume confirmation and weekly trend filter (price < weekly EMA50) signals bearish momentum.
-Camarilla levels are widely watched and often respected, especially in ranging markets. 
-Breakouts with volume indicate institutional participation. Weekly EMA50 filter ensures we trade with the higher timeframe trend.
-Designed for 1d timeframe to limit trades (<20/year) and avoid fee drag. Works in both bull (catching breakouts) and bear (catching breakdowns) markets.
+6h_KAMA_Trend_Regime_Adaptive
+Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) to identify trend strength and direction, combined with a regime filter based on price position relative to KAMA and Bollinger Bands to avoid whipsaws. In trending regimes (price outside Bollinger Bands), follow KAMA direction. In ranging regimes (price inside Bollinger Bands), fade extremes at Bollinger Bands. Uses 1d trend filter to avoid counter-trend trades. Designed for 6h timeframe to balance signal frequency and noise reduction, targeting 15-35 trades/year.
 """
 
-name = "1d_Camarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_KAMA_Trend_Regime_Adaptive"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,75 +22,111 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for daily timeframe
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align Camarilla levels to daily timeframe (no extra delay needed)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Calculate KAMA (6h timeframe)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close[t] - close[t-1]| over 10 periods
+    # Fix dimensions: volatility needs to be same length as change
+    volatility = np.array([np.sum(np.abs(np.diff(close[i:i+10]))) for i in range(len(change))])
+    # Pad beginning with NaN for first 9 values
+    change = np.concatenate([np.full(9, np.nan), change])
+    volatility = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # start at first valid point
+    for i in range(10, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Get weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate volume average (20-day) for volume spike filter
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Bollinger Bands (20, 2) on 6h
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(sma_20[i]) or np.isnan(std_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-day average
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Determine regime: trending if price outside Bollinger Bands
+        is_trending = close[i] > upper_bb[i] or close[i] < lower_bb[i]
         
         if position == 0:
-            # LONG: Price breaks above R1 with volume confirmation and price above weekly EMA50
-            if close[i] > r1_aligned[i] and vol_spike and close[i] > ema_50_1w_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Price breaks below S1 with volume confirmation and price below weekly EMA50
-            elif close[i] < s1_aligned[i] and vol_spike and close[i] < ema_50_1w_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+            # LONG conditions
+            if is_trending:
+                # In trending regime: follow KAMA direction (price above KAMA)
+                if close[i] > kama[i] and close[i] > ema_50_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
             else:
-                signals[i] = 0.0
+                # In ranging regime: fade at lower Bollinger Band
+                if close[i] <= lower_bb[i] and close[i] > ema_50_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # SHORT conditions
+            if is_trending:
+                # In trending regime: follow KAMA direction (price below KAMA)
+                if close[i] < kama[i] and close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            else:
+                # In ranging regime: fade at upper Bollinger Band
+                if close[i] >= upper_bb[i] and close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or weekly trend turns bearish
-            if close[i] < s1_aligned[i] or close[i] < ema_50_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # EXIT LONG: reverse conditions
+            if is_trending:
+                # Exit when price crosses below KAMA or trend fails
+                if close[i] < kama[i] or close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                # Exit when price moves back above middle or hits upper band
+                if close[i] >= sma_20[i] or close[i] >= upper_bb[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or weekly trend turns bullish
-            if close[i] > r1_aligned[i] or close[i] > ema_50_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # EXIT SHORT: reverse conditions
+            if is_trending:
+                # Exit when price crosses above KAMA or trend fails
+                if close[i] > kama[i] or close[i] > ema_50_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                # Exit when price moves back below middle or hits lower band
+                if close[i] <= sma_20[i] or close[i] <= lower_bb[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
