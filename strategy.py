@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_RSI_Chop
-Hypothesis: KAMA identifies adaptive trend direction, RSI measures momentum strength, and Choppiness Index filters range vs trend. 
-Long when KAMA trending up, RSI > 50, and CHOP > 61.8 (range). Short when KAMA trending down, RSI < 50, and CHOP > 61.8.
-Mean reversion in ranging markets (CHOP high) with trend filter (KAMA) and momentum confirmation (RSI).
-Works in sideways markets (2025-2026) and avoids strong trends via CHOP filter.
-Target: 10-25 trades/year per symbol.
+6h_Chaikin_Money_Flow_With_1d_Trend_Filter
+Hypothesis: Chaikin Money Flow (CMF) measures buying/selling pressure via volume-weighted accumulation/distribution. 
+Combined with 1d trend filter (price above/below 50-period EMA) to ensure trades align with higher timeframe direction.
+Works in both bull and bear markets by following institutional money flow. Target: 20-40 trades/year per symbol.
 """
 
-name = "1d_KAMA_RSI_Chop"
-timeframe = "1d"
+name = "6h_Chaikin_Money_Flow_With_1d_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,82 +16,68 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Kaufman Adaptive Moving Average (KAMA)
-    close_s = pd.Series(close)
-    change = abs(close_s.diff(10))
-    volatility = close_s.diff().abs().rolling(window=10).sum()
-    er = change / volatility.replace(0, 1e-10)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = [close[0]]
-    for i in range(1, len(close)):
-        kama.append(kama[-1] + sc[i] * (close[i] - kama[-1]))
-    kama = np.array(kama)
+    # Chaikin Money Flow (20-period)
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Money Flow Volume = Money Flow Multiplier * Volume
+    # CMF = 20-period sum of Money Flow Volume / 20-period sum of Volume
+    high_low = high - low
+    # Avoid division by zero
+    high_low_safe = np.where(high_low == 0, 1e-10, high_low)
+    mfm = ((close - low) - (high - close)) / high_low_safe
+    mfv = mfm * volume
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # 20-period sums
+    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
+    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    cmf = mfv_sum / vol_sum  # Range: -1 to +1
     
-    # Choppiness Index (CHOP) - 14 period
-    atr = pd.Series(np.sqrt((high - low)**2)).rolling(window=14, min_periods=14).mean()
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr.sum() / (max_high - min_low)) / np.log10(14)
-    chop = chop.fillna(50).values
-    
-    # Weekly trend filter: EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d trend filter: EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1w = df_1w['close'].values > ema_50_1w
-    downtrend_1w = df_1w['close'].values < ema_50_1w
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        kama_val = kama[i]
-        rsi_val = rsi[i]
-        chop_val = chop[i]
-        uptrend_htf = uptrend_1w_aligned[i]
-        downtrend_htf = downtrend_1w_aligned[i]
+    for i in range(20, n):
+        cmf_val = cmf[i]
+        uptrend = uptrend_1d_aligned[i]
+        downtrend = downtrend_1d_aligned[i]
         
         if position == 0:
-            # LONG: KAMA up, RSI > 50, CHOP > 61.8 (range), 1w uptrend
-            if close[i] > kama_val and rsi_val > 50 and chop_val > 61.8 and uptrend_htf:
+            # LONG: CMF > 0.05 (buying pressure) and 1d uptrend
+            if cmf_val > 0.05 and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA down, RSI < 50, CHOP > 61.8 (range), 1w downtrend
-            elif close[i] < kama_val and rsi_val < 50 and chop_val > 61.8 and downtrend_htf:
+            # SHORT: CMF < -0.05 (selling pressure) and 1d downtrend
+            elif cmf_val < -0.05 and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA down or RSI <= 50
-            if close[i] < kama_val or rsi_val <= 50:
+            # EXIT LONG: CMF < 0 (loss of buying pressure) or trend fails
+            if cmf_val < 0 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA up or RSI >= 50
-            if close[i] > kama_val or rsi_val >= 50:
+            # EXIT SHORT: CMF > 0 (loss of selling pressure) or trend fails
+            if cmf_val > 0 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
