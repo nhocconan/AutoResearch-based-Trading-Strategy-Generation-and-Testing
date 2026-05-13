@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band (20-period high) AND price > 1w EMA50 AND volume > 1.8x 20-period average.
-# Short when price breaks below Donchian lower band (20-period low) AND price < 1w EMA50 AND volume > 1.8x 20-period average.
-# Exit on ATR(14) trailing stop (2.5x). Uses 12h primary timeframe and 1w HTF for trend alignment.
-# Donchian provides clear breakout structure, 1w EMA50 filters intermediate trend, volume spike confirms authenticity.
-# Designed for BTC/ETH with strict entry (volume spike + trend filter) to avoid overtrading and target 12-37 trades/year.
+# Hypothesis: 1h strategy using 4h Donchian breakout with volume confirmation and session filter (08-20 UTC).
+# Long when price breaks above 4h Donchian upper (20) AND volume > 1.5x 20-period average AND session 08-20 UTC.
+# Short when price breaks below 4h Donchian lower (20) AND volume > 1.5x 20-period average AND session 08-20 UTC.
+# Exit on close crossing 4h Donchian middle (10-period average of upper/lower).
+# Uses 4h for signal direction (structure), 1h only for entry timing and session filter.
+# Designed for BTC/ETH with tight entries to avoid overtrading and fee drag.
 
-name = "12h_Donchian20_1wEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "1h_Donchian20_4hTrend_Volume_SessionFilter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,90 +24,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    session_filter = (hours >= 8) & (hours <= 20)
     
-    # Get 1w data for EMA50 trend filter (MTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 4h data for Donchian channels (MTF)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate EMA50 on 1w close
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h Donchian channels (20-period)
+    high_ma_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).mean().values
+    low_ma_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).mean().values
+    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    middle_20 = (upper_20 + lower_20) / 2.0  # Middle band
     
-    # Align HTF arrays to 12h timeframe (wait for completed 1w bar)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align HTF arrays to 1h timeframe (wait for completed 4h bar)
+    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
+    middle_20_aligned = align_htf_to_ltf(prices, df_4h, middle_20)
     
-    # Calculate Donchian bands (20-period) on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: current 12h volume > 1.8x 20-period average (spike confirmation)
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_12h)
+    # Volume filter: current 1h volume > 1.5x 20-period average (spike confirmation)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
-    lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_12h[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
+            np.isnan(middle_20_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price > Donchian upper band AND price > 1w EMA50 AND volume spike
-            if close[i] > highest_high[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # LONG: price > 4h Donchian upper AND volume spike AND session
+            if close[i] > upper_20_aligned[i] and volume_filter[i] and session_filter[i]:
+                signals[i] = 0.20
                 position = 1
-                highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price < Donchian lower band AND price < 1w EMA50 AND volume spike
-            elif close[i] < lowest_low[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # SHORT: price < 4h Donchian lower AND volume spike AND session
+            elif close[i] < lower_20_aligned[i] and volume_filter[i] and session_filter[i]:
+                signals[i] = -0.20
                 position = -1
-                lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
                 signals[i] = 0.0
-                # Carry forward tracking values when flat
-                if i > 0:
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:
-            # Update highest high since entry
-            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
-            if trailing_stop:
+            # EXIT LONG: price < 4h Donchian middle
+            if close[i] < middle_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                # Reset tracking when flat
-                highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.25
-                # Carry forward tracking
-                if i > 0:
-                    highest_since_entry[i] = highest_since_entry[i-1]
+                signals[i] = 0.20
         elif position == -1:
-            # Update lowest low since entry
-            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
-            if trailing_stop:
+            # EXIT SHORT: price > 4h Donchian middle
+            if close[i] > middle_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                # Reset tracking when flat
-                lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.25
-                # Carry forward tracking
-                if i > 0:
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
+                signals[i] = -0.20
     
     return signals
