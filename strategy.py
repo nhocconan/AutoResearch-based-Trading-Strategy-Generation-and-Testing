@@ -1,14 +1,12 @@
-# 6h_Camarilla_R4_S4_Breakout_1dTrend
-# Hypothesis: Use daily Camarilla pivot points to identify breakout levels R4/S4. 
-# Enter long when price breaks above R4 with volume spike and 1d EMA100 uptrend.
-# Enter short when price breaks below S4 with volume spike and 1d EMA100 downtrend.
-# Exit on mean reversion to daily pivot (PP). Camarilla levels are mathematically derived
-# and tend to hold in ranging markets while breakouts at R4/S4 indicate strong momentum.
-# Designed for low turnover (~10-25/year) on 6h timeframe to avoid fee drag.
-# Works in both bull (breakouts) and bear (mean reversion to pivot) markets.
+#!/usr/bin/env python3
+# 4h_ThreeLevelBreakout_Pattern
+# Hypothesis: Combines multiple breakout levels (Donchian, Keltner, ATR-based) with volume confirmation and trend filter.
+# Uses three confirmation layers to reduce false signals and maintain low trade frequency.
+# Designed to work in both bull and bear markets by requiring trend alignment and volume spikes.
+# Target: 20-40 trades per year per symbol with disciplined risk management.
 
-name = "6h_Camarilla_R4_S4_Breakout_1dTrend"
-timeframe = "6h"
+name = "4h_ThreeLevelBreakout_Pattern"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -25,36 +23,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Calculate daily Camarilla pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla formulas (based on previous day's range)
-    # Pivot Point (PP)
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Range
-    range_1d = high_1d - low_1d
-    # Resistance levels
-    r1 = pp + (range_1d * 1.0833)
-    r2 = pp + (range_1d * 1.1666)
-    r3 = pp + (range_1d * 1.2500)
-    r4 = pp + (range_1d * 1.5000)
-    # Support levels
-    s1 = pp - (range_1d * 1.0833)
-    s2 = pp - (range_1d * 1.1666)
-    s3 = pp - (range_1d * 1.2500)
-    s4 = pp - (range_1d * 1.5000)
-    
-    # Align Camarilla levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Calculate ATR for volatility measurement
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+
+    # Level 1: Donchian Channel (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+
+    # Level 2: Keltner Channel (20-period EMA + 2*ATR)
+    ema_mid = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kelt_upper = ema_mid + 2 * atr
+    kelt_lower = ema_mid - 2 * atr
+
+    # Level 3: ATR-based breakout levels
+    atr_upper = donch_high + 0.5 * atr
+    atr_lower = donch_low - 0.5 * atr
 
     # Volume confirmation: current volume > 2.0 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -62,17 +49,18 @@ def generate_signals(prices):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (2.0 * vol_ma)
 
-    # Get 1d EMA100 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Trend filter: 50-period EMA on price
+    ema_trend = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        # Skip if data is not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
+    for i in range(50, n):
+        # Skip if any data is not ready
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
+            np.isnan(kelt_upper[i]) or np.isnan(kelt_lower[i]) or
+            np.isnan(atr_upper[i]) or np.isnan(atr_lower[i]) or
+            np.isnan(volume_spike[i]) or np.isnan(ema_trend[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,26 +69,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: break above R4 with volume spike and 1d EMA100 uptrend
-            if close[i] > r4_aligned[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+            # LONG: Price breaks above all three levels with volume spike and uptrend
+            if (close[i] > donch_high[i] and 
+                close[i] > kelt_upper[i] and 
+                close[i] > atr_upper[i] and
+                volume_spike[i] and 
+                close[i] > ema_trend[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S4 with volume spike and 1d EMA100 downtrend
-            elif close[i] < s4_aligned[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+            # SHORT: Price breaks below all three levels with volume spike and downtrend
+            elif (close[i] < donch_low[i] and 
+                  close[i] < kelt_lower[i] and 
+                  close[i] < atr_lower[i] and
+                  volume_spike[i] and 
+                  close[i] < ema_trend[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below daily pivot (mean reversion)
-            if close[i] < pp_aligned[i]:
+            # EXIT LONG: Price closes below the middle Keltner level
+            if close[i] < ema_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above daily pivot
-            if close[i] > pp_aligned[i]:
+            # EXIT SHORT: Price closes above the middle Keltner level
+            if close[i] > ema_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
