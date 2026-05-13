@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume confirmation.
-# Long when price breaks above R1 AND 4h EMA50 rising AND volume > 1.3x average (08-20 UTC).
-# Short when price breaks below S1 AND 4h EMA50 falling AND volume > 1.3x average (08-20 UTC).
-# Uses ATR(14) trailing stop (1.5x) for risk control. Discrete sizing 0.20.
-# Camarilla levels provide precise intraday support/resistance, 4h EMA50 filters higher timeframe trend,
-# volume confirms breakout strength, session filter reduces noise. Target: 60-150 total trades over 4 years.
+# Hypothesis: 6h Williams Alligator with 1w EMA34 trend filter and volume confirmation.
+# Long when Alligator jaws < teeth < lips (bullish alignment) AND price > lips AND 1w EMA34 rising AND volume > 1.3x average.
+# Short when Alligator jaws > teeth > lips (bearish alignment) AND price < lips AND 1w EMA34 falling AND volume > 1.3x average.
+# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
+# Alligator identifies trend phases, weekly EMA filters higher-timeframe momentum, volume confirms strength.
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA50_Volume_Session_v1"
-timeframe = "1h"
+name = "6h_Williams_Alligator_1wEMA34_Volume_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -35,70 +35,61 @@ def generate_signals(prices):
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate Williams Alligator (SMMA = smoothed moving average)
+    # Jaw: SMMA(13, 8), Teeth: SMMA(8, 5), Lips: SMMA(5, 3)
+    def smma(data, period):
+        result = np.full_like(data, np.nan, dtype=np.float64)
+        if len(data) < period:
+            return result
+        # First value is simple SMA
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Get 1d data for Camarilla pivot levels (based on previous day)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # Calculate Camarilla levels for each 1d bar
-    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + (1.1 * camarilla_range) / 12
-    s1 = close_1d - (1.1 * camarilla_range) / 12
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Align 1d Camarilla levels to 1h timeframe (wait for 1d bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate EMA(34) on 1w data
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Calculate EMA(50) on 4h data
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 4h EMA50 to 1h timeframe (wait for 4h bar to close)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Align 1w EMA34 to 6h timeframe (wait for 1w bar to close)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
     lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(100, n):  # Start after sufficient data for indicators
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(avg_volume[i]) or not in_session[i]):
+    for i in range(50, n):  # Start after sufficient data for indicators
+        # Skip if any required data is NaN
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
-            # Carry forward tracking values when flat or skipped
-            if i > 0 and position == 0:
-                highest_since_entry[i] = highest_since_entry[i-1]
-                lowest_since_entry[i] = lowest_since_entry[i-1]
-            elif i > 0 and position == 1:
-                highest_since_entry[i] = highest_since_entry[i-1]
-            elif i > 0 and position == -1:
-                lowest_since_entry[i] = lowest_since_entry[i-1]
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 AND 4h EMA50 rising AND volume > 1.3x average
-            if (close[i] > r1_aligned[i] and 
-                ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1] and 
+            # LONG: Bullish Alligator alignment (jaw < teeth < lips) AND price > lips AND 1w EMA34 rising AND volume > 1.3x average
+            if (jaw[i] < teeth[i] and teeth[i] < lips[i] and 
+                close[i] > lips[i] and 
+                ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and 
                 volume[i] > 1.3 * avg_volume[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below S1 AND 4h EMA50 falling AND volume > 1.3x average
-            elif (close[i] < s1_aligned[i] and 
-                  ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1] and 
+            # SHORT: Bearish Alligator alignment (jaw > teeth > lips) AND price < lips AND 1w EMA34 falling AND volume > 1.3x average
+            elif (jaw[i] > teeth[i] and teeth[i] > lips[i] and 
+                  close[i] < lips[i] and 
+                  ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and 
                   volume[i] > 1.3 * avg_volume[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
@@ -110,30 +101,30 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (1.5x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 1.5 * atr[i])
+            # EXIT LONG: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (1.5x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 1.5 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
