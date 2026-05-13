@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_BullBearPower_1wTrend
-# Hypothesis: Use Elder Ray Bull/Bear Power (13-period EMA) on 6h with 1-week trend filter.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
-# Enter long when Bull Power > 0 and Bear Power < 0 (bullish divergence) with 1w EMA uptrend.
-# Enter short when Bear Power > 0 and Bull Power < 0 (bearish divergence) with 1w EMA downtrend.
-# Exit when Bull Power and Bear Power converge (both near zero) or trend fails.
-# Designed to work in both bull (buy bullish divergences) and bear (sell bearish divergences).
+# 12h_WeeklyPivot_R1S1_Breakout_WeekTrend_Volume
+# Hypothesis: Use weekly Camarilla pivot levels (R1/S1) as support/resistance on 12h timeframe.
+# Enter long when price breaks above weekly R1 with volume spike and weekly close above weekly open (bullish week).
+# Enter short when price breaks below weekly S1 with volume spike and weekly close below weekly open (bearish week).
+# Exit when price returns to the weekly close (C level).
+# Designed to work in bull markets (buy breakouts in bullish weeks) and bear markets (sell breakdowns in bearish weeks).
 # Target: 15-30 trades/year per symbol.
 
-name = "6h_ElderRay_BullBearPower_1wTrend"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R1S1_Breakout_WeekTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,32 +23,58 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
 
-    # Get 1w data for trend filter
+    # Get weekly data for Camarilla pivots and trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 10:
         return np.zeros(n)
 
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
 
-    # Calculate 13-period EMA for Elder Ray (6h timeframe)
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate weekly Camarilla pivot levels for previous week
+    # P = (H + L + C) / 3
+    # Range = H - L
+    # S1 = C - (Range * 1.1 / 12)
+    # R1 = C + (Range * 1.1 / 12)
+    P = (high_1w + low_1w + close_1w) / 3.0
+    rng = high_1w - low_1w
 
-    # Elder Ray components
-    bull_power = high - ema13  # High - EMA13
-    bear_power = ema13 - low   # EMA13 - Low
+    S1 = close_1w - (rng * 1.1 / 12)
+    R1 = close_1w + (rng * 1.1 / 12)
 
-    # 1-week EMA21 for trend filter
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    # Align pivot levels to 12h timeframe (use previous week's levels)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, S1)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+
+    # Volume confirmation: current volume > 1.5 x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (1.5 * vol_ma)
+
+    # Weekly trend: bullish if close > open, bearish if close < open
+    weekly_bullish = close_1w > open_1w
+    weekly_bearish = close_1w < open_1w
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+
+    # Align previous week's close (C level) for exit
+    c_prev = np.roll(close_1w, 1)
+    c_prev[0] = np.nan
+    c_aligned = align_htf_to_ltf(prices, df_1w, c_prev)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(13, n):
-        # Skip if 1w trend data not ready
-        if np.isnan(ema21_1w_aligned[i]):
+    for i in range(20, n):
+        # Skip if data is not ready
+        if (np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(weekly_bullish_aligned[i]) or
+            np.isnan(weekly_bearish_aligned[i]) or np.isnan(c_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,26 +83,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Bull Power > 0 (bullish) AND Bear Power < 0 (less bearish) with 1w uptrend
-            if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema21_1w_aligned[i]:
+            # LONG: break above weekly R1 with volume spike and bullish week
+            if close[i] > r1_aligned[i] and volume_spike[i] and weekly_bullish_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power > 0 (bearish) AND Bull Power < 0 (less bullish) with 1w downtrend
-            elif bear_power[i] > 0 and bull_power[i] < 0 and close[i] < ema21_1w_aligned[i]:
+            # SHORT: break below weekly S1 with volume spike and bearish week
+            elif close[i] < s1_aligned[i] and volume_spike[i] and weekly_bearish_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power turns negative OR trend fails
-            if bull_power[i] <= 0 or close[i] < ema21_1w_aligned[i]:
+            # EXIT LONG: price returns to previous week's close (C level)
+            if close[i] <= c_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power turns negative OR trend fails
-            if bear_power[i] <= 0 or close[i] > ema21_1w_aligned[i]:
+            # EXIT SHORT: price returns to previous week's close (C level)
+            if close[i] >= c_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
