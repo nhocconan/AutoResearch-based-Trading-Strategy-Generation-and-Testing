@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1H_Camarilla_R1_S1_Breakout_4hTrend_1dVolFilter"
-timeframe = "1h"
+name = "6H_WeeklyPivot_DailyTrend_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,102 +17,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1h period Camarilla levels (using previous 1h bar)
-    R1 = np.zeros(n)
-    S1 = np.zeros(n)
+    # Calculate 6h period weekly pivot levels (using previous weekly bar)
+    R3 = np.zeros(n)
+    S3 = np.zeros(n)
     for i in range(1, n):
         prev_high = high[i-1]
         prev_low = low[i-1]
         prev_close = close[i-1]
         range_val = prev_high - prev_low
         if range_val > 0:
-            R1[i] = prev_close + range_val * 1.1 / 4
-            S1[i] = prev_close - range_val * 1.1 / 4
+            R3[i] = prev_close + range_val * 1.1 / 2
+            S3[i] = prev_close - range_val * 1.1 / 2
         else:
-            R1[i] = prev_close
-            S1[i] = prev_close
+            R3[i] = prev_close
+            S3[i] = prev_close
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    # Calculate EMA20 on 4h close
-    ema_20_4h = np.zeros_like(close_4h)
-    ema_20_4h[:] = np.nan
-    if len(close_4h) >= 20:
-        ema_20_4h[19] = close_4h[:20].mean()
-        for i in range(20, len(close_4h)):
-            ema_20_4h[i] = (close_4h[i] * 2 + ema_20_4h[i-1] * 19) / 21
+    close_1w = df_1w['close'].values
+    # Calculate EMA34 on weekly close
+    ema_34 = np.zeros_like(close_1w)
+    ema_34[:] = np.nan
+    alpha = 2 / (34 + 1)
+    for i in range(len(close_1w)):
+        if i == 0:
+            ema_34[i] = close_1w[i]
+        elif np.isnan(ema_34[i-1]):
+            ema_34[i] = close_1w[i]
+        else:
+            ema_34[i] = alpha * close_1w[i] + (1 - alpha) * ema_34[i-1]
     
-    # Align 4h EMA20 to 1h timeframe
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Align weekly EMA34 to 6h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
     
-    # Get 1d data for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    volume_1d = df_1d['volume'].values
-    # Calculate average daily volume (20-day)
-    avg_vol_1d = np.zeros_like(volume_1d)
-    avg_vol_1d[:] = np.nan
-    if len(volume_1d) >= 20:
-        for i in range(19, len(volume_1d)):
-            avg_vol_1d[i] = volume_1d[i-19:i+1].mean()
-    
-    # Align 1d average volume to 1h timeframe
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Calculate volume average (20-period) for volume spike filter
+    vol_ma_20 = np.zeros_like(volume)
+    vol_ma_20[:] = np.nan
+    for i in range(19, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(avg_vol_1d_aligned[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Check session
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            signals[i] = 0.0
-            continue
-        
-        # Volume spike condition: current volume > 1.5x average daily volume
-        vol_spike = volume[i] > 1.5 * avg_vol_1d_aligned[i]
+        # Volume spike condition: current volume > 2.0x 20-period average
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Close > R1 + volume spike + 4h uptrend (close > EMA20)
-            if (close[i] > R1[i] and vol_spike and close[i] > ema_20_4h_aligned[i]):
-                signals[i] = 0.20
+            # LONG: Close > R3 + volume spike + weekly uptrend (close > EMA34)
+            if (close[i] > R3[i] and vol_spike and close[i] > ema_34_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S1 + volume spike + 4h downtrend (close < EMA20)
-            elif (close[i] < S1[i] and vol_spike and close[i] < ema_20_4h_aligned[i]):
-                signals[i] = -0.20
+            # SHORT: Close < S3 + volume spike + weekly downtrend (close < EMA34)
+            elif (close[i] < S3[i] and vol_spike and close[i] < ema_34_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close < S1 (reversal to opposite level)
-            if close[i] < S1[i]:
+            # EXIT LONG: Close < S3 (reversal to opposite level)
+            if close[i] < S3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close > R1 (reversal to opposite level)
-            if close[i] > R1[i]:
+            # EXIT SHORT: Close > R3 (reversal to opposite level)
+            if close[i] > R3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
