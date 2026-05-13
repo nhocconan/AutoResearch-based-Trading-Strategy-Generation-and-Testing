@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Performance_Index_Trend
-# Hypothesis: Go long when 4h price closes above 4h EMA50 and 1d RSI > 50 (bullish momentum), short when below EMA50 and 1d RSI < 50 (bearish momentum).
-# Exit when price crosses back over EMA50. Uses daily RSI for trend filter to avoid whipsaws in chop.
-# Works in bull (follows uptrend) and bear (follows downtrend). Low frequency due to EMA50 crossover + RSI filter.
-# Trend filter from higher timeframe reduces false signals. Target: ~25-40 trades/year.
+# 4h_Price_Channel_Range_Momentum
+# Hypothesis: Use 1d Donchian channel (55) for trend direction and 4h price action for mean reversion within the channel.
+# Go long when price touches 4h lower Bollinger Band (20,2) in the upper half of 1d Donchian channel.
+# Go short when price touches 4h upper Bollinger Band in the lower half of 1d Donchian channel.
+# Requires volume > 1.5x 20-period average and ADX(14) < 25 (range-bound market).
+# Exit when price reaches 4h middle Bollinger Band or Donchian midpoint.
+# Works in bull/bear: captures mean reversion in ranging markets while avoiding strong trends.
+# Low frequency due to range requirement and strict volume filter.
 
-name = "4h_Performance_Index_Trend"
+name = "4h_Price_Channel_Range_Momentum"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,33 +21,61 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get daily data for RSI
+    # Get daily data for trend context
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily RSI(14)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # 1d Donchian Channel (55-period) for trend context
+    donch_high_1d = pd.Series(df_1d['high']).rolling(window=55, min_periods=55).max().values
+    donch_low_1d = pd.Series(df_1d['low']).rolling(window=55, min_periods=55).min().values
+    donch_mid_1d = (donch_high_1d + donch_low_1d) / 2
     
-    # Align daily RSI to 4h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Align 1d Donchian levels to 4h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid_1d)
     
-    # 4h EMA50
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 4h Bollinger Bands (20, 2) for entry signals
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    middle_bb = sma20
+    
+    # 4h ADX (14) for regime filter - range when ADX < 25
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (atr_14 * 100 + 1e-10)
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (atr_14 * 100 + 1e-10)
+    dx_14 = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx_14 = pd.Series(dx_14).rolling(window=14, min_periods=14).mean().values
+    # Pad arrays to match length
+    plus_di_14 = np.concatenate([np.zeros(14), plus_di_14])
+    minus_di_14 = np.concatenate([np.zeros(14), minus_di_14])
+    adx_14 = np.concatenate([np.zeros(14), adx_14])
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(55, n):  # Wait for Donchian to be valid
         # Skip if any required value is NaN
-        if np.isnan(rsi_1d_aligned[i]) or np.isnan(ema50[i]):
+        if (np.isnan(donch_high_aligned[i]) or 
+            np.isnan(donch_low_aligned[i]) or 
+            np.isnan(donch_mid_aligned[i]) or 
+            np.isnan(upper_bb[i]) or 
+            np.isnan(lower_bb[i]) or 
+            np.isnan(middle_bb[i]) or 
+            np.isnan(adx_14[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,26 +84,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > EMA50 and daily RSI > 50
-            if close[i] > ema50[i] and rsi_1d_aligned[i] > 50:
+            # LONG: Price touches lower BB in upper half of 1d Donchian + range + volume
+            if (close[i] <= lower_bb[i] and 
+                close[i] > donch_mid_aligned[i] and 
+                adx_14[i] < 25 and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < EMA50 and daily RSI < 50
-            elif close[i] < ema50[i] and rsi_1d_aligned[i] < 50:
+            # SHORT: Price touches upper BB in lower half of 1d Donchian + range + volume
+            elif (close[i] >= upper_bb[i] and 
+                  close[i] < donch_mid_aligned[i] and 
+                  adx_14[i] < 25 and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below EMA50
-            if close[i] < ema50[i]:
+            # EXIT LONG: Price reaches middle BB or Donchian midpoint
+            if close[i] >= middle_bb[i] or close[i] >= donch_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above EMA50
-            if close[i] > ema50[i]:
+            # EXIT SHORT: Price reaches middle BB or Donchian midpoint
+            if close[i] <= middle_bb[i] or close[i] <= donch_mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
