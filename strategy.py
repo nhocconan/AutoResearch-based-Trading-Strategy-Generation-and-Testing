@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Trend_RSI_Chop_Filter
-# Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both trending and ranging markets.
-# Combined with RSI for momentum confirmation and Choppiness Index to avoid false signals in low-volatility chop.
-# Works in bull markets (KAMA up + RSI > 50) and bear markets (KAMA down + RSI < 50).
+# 6h_Ichimoku_Cloud_Trend_Filtered_Breakout
+# Hypothesis: Uses Ichimoku cloud from 1d timeframe as a trend filter and 6h price breaks above/below the cloud for entry.
+# In bull markets, price tends to stay above the cloud; breaks above cloud reinforce uptrend.
+# In bear markets, price stays below cloud; breaks below cloud reinforce downtrend.
+# The cloud acts as dynamic support/resistance, reducing false breakouts.
+# Entry: Price breaks above/below 1d Ichimoku cloud with volume confirmation.
+# Exit: Price re-enters the cloud.
 # Target: 15-35 trades/year per symbol to minimize fee drag.
 
-name = "12h_KAMA_Trend_RSI_Chop_Filter"
-timeframe = "12h"
+name = "6h_Ichimoku_Cloud_Trend_Filtered_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,72 +26,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Choppiness Index
+    # Get 1d data for Ichimoku cloud
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Choppiness Index (14-period)
-    atr_1d = []
-    tr_1d = np.maximum(np.maximum(
-        df_1d['high'][1:] - df_1d['low'][1:],
-        np.abs(df_1d['high'][1:] - df_1d['close'][:-1]),
-        np.abs(df_1d['low'][1:] - df_1d['close'][:-1])
-    ), 0)
-    tr_1d = np.concatenate([[np.nan], tr_1d])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate Ichimoku components: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (52 displacement)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    high_max_1d = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    low_min_1d = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    chop_raw = 100 * np.log10((atr_1d * 14) / (high_max_1d - low_min_1d)) / np.log10(14)
-    chop = np.where((high_max_1d - low_min_1d) == 0, 50, chop_raw)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Calculate KAMA on 12h
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # Efficiency Ratio
-    change_12h = np.abs(np.diff(close_12h, n=10))
-    change_12h = np.concatenate([[np.nan]*10, change_12h])
-    volatility_12h = np.abs(np.diff(close_12h, n=1))
-    volatility_12h = np.concatenate([[np.nan], volatility_12h])
-    vol_sum_12h = pd.Series(volatility_12h).rolling(window=10, min_periods=10).sum().values
-    er = np.where(vol_sum_12h != 0, change_12h / vol_sum_12h, 0)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
     
-    # Smoothing Constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # The cloud is between Senkou Span A and B
+    # For cloud top/bottom, we need to shift these forward by 26 periods
+    # But for simplicity in filtering, we use current Senkou Span A/B as cloud boundaries
+    # (This is a simplification; actual cloud is plotted 26 periods ahead)
+    # We'll use the current Senkou Span A and B to determine if price is above/below cloud
+    ichimoku_cloud_top = np.maximum(senkou_span_a, senkou_span_b)
+    ichimoku_cloud_bottom = np.minimum(senkou_span_a, senkou_span_b)
     
-    # KAMA calculation
-    kama_12h = np.full_like(close_12h, np.nan)
-    kama_12h[9] = close_12h[9]  # Start after 10 periods
-    for i in range(10, len(close_12h)):
-        if np.isnan(kama_12h[i-1]) or np.isnan(sc[i]):
-            kama_12h[i] = close_12h[i]
-        else:
-            kama_12h[i] = kama_12h[i-1] + sc[i] * (close_12h[i] - kama_12h[i-1])
+    # Align 1d Ichimoku cloud to 6h timeframe
+    ichimoku_cloud_top_aligned = align_htf_to_ltf(prices, df_1d, ichimoku_cloud_top)
+    ichimoku_cloud_bottom_aligned = align_htf_to_ltf(prices, df_1d, ichimoku_cloud_bottom)
     
-    # Calculate RSI on 12h
-    delta_12h = np.diff(close_12h)
-    delta_12h = np.concatenate([[np.nan], delta_12h])
-    gain_12h = np.where(delta_12h > 0, delta_12h, 0)
-    loss_12h = np.where(delta_12h < 0, -delta_12h, 0)
-    avg_gain_12h = pd.Series(gain_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss_12h = pd.Series(loss_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs_12h = np.where(avg_loss_12h != 0, avg_gain_12h / avg_loss_12h, 0)
-    rsi_12h = 100 - (100 / (1 + rs_12h))
-    
-    # Align indicators to 12h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    # Volume spike: volume > 2.0 * 20-period average (~5 days worth at 6h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(kama_12h_aligned[i]) or 
-            np.isnan(rsi_12h_aligned[i])):
+        if (np.isnan(ichimoku_cloud_top_aligned[i]) or 
+            np.isnan(ichimoku_cloud_bottom_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -97,26 +83,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: KAMA up + RSI > 50 + Chop < 61.8 (trending market)
-            if kama_12h_aligned[i] > close[i] and rsi_12h_aligned[i] > 50 and chop_aligned[i] < 61.8:
+            # LONG: Price above cloud + volume spike
+            if close[i] > ichimoku_cloud_top_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA down + RSI < 50 + Chop < 61.8 (trending market)
-            elif kama_12h_aligned[i] < close[i] and rsi_12h_aligned[i] < 50 and chop_aligned[i] < 61.8:
+            # SHORT: Price below cloud + volume spike
+            elif close[i] < ichimoku_cloud_bottom_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA down or RSI < 50 or Chop > 61.8 (choppy market)
-            if kama_12h_aligned[i] < close[i] or rsi_12h_aligned[i] < 50 or chop_aligned[i] > 61.8:
+            # EXIT LONG: Price re-enters cloud (below cloud top)
+            if close[i] < ichimoku_cloud_top_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA up or RSI > 50 or Chop > 61.8 (choppy market)
-            if kama_12h_aligned[i] > close[i] or rsi_12h_aligned[i] > 50 or chop_aligned[i] > 61.8:
+            # EXIT SHORT: Price re-enters cloud (above cloud bottom)
+            if close[i] > ichimoku_cloud_bottom_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
