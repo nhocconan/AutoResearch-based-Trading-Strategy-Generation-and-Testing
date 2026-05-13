@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirmation
-# Hypothesis: Breakouts above daily Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34), with volume confirmation (volume > 1.8x 20-period average). Uses 12h timeframe to balance trade frequency and capture momentum. Designed to work in both bull and bear markets by requiring trend alignment and avoiding whipsaw through volume confirmation. Focus on BTC/ETH with robust risk controls.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeFilter
+# Hypothesis: Use 4h trend (price > EMA50) and 1d Camarilla levels (R1/S1) for direction, with 1h price action for entry timing.
+# Breakouts above R1 in uptrend (4h close > EMA50) and breakdowns below S1 in downtrend (4h close < EMA50), with volume confirmation (volume > 1.5x 20-period average).
+# Designed for 1h timeframe to balance trade frequency (target: 15-37/year) and capture momentum in both bull and bear markets.
+# Volume filter and 4h trend filter reduce whipsaw and false breakouts.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Confirmation"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -20,10 +23,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
+    
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Calculate Camarilla levels for each 1d bar (based on previous day's range)
     prev_high = df_1d['high'].shift(1).values
@@ -37,57 +49,46 @@ def generate_signals(prices):
     camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 1h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Get 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: volume > 1.8x 20-period average (balanced to avoid overtrading)
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.8 * vol_ma)
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
     for i in range(50, n):
-        # Decrease cooldown if active
-        if cooldown > 0:
-            cooldown -= 1
-        
-        if position == 0 and cooldown == 0:
-            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34)
+        if position == 0:
+            # LONG: Price breaks above R1 with volume confirmation in uptrend (4h close > EMA50)
             if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1d_aligned[i]:
-                signals[i] = 0.25
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_50_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34)
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend (4h close < EMA50)
             elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1d_aligned[i]:
-                signals[i] = -0.25
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_50_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below R1 or trend weakens (price < EMA34)
+            # EXIT LONG: Price crosses back below R1 or trend weakens (4h close < EMA50)
             if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+               low[i] < camarilla_r1_aligned[i] or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                cooldown = 3  # 3-bar cooldown after exit
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price crosses back above S1 or trend weakens (price > EMA34)
+            # EXIT SHORT: Price crosses back above S1 or trend weakens (4h close > EMA50)
             if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-               high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+               high[i] > camarilla_s1_aligned[i] or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                cooldown = 3  # 3-bar cooldown after exit
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
