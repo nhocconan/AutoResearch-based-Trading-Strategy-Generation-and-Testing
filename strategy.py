@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_Bollinger_Bands_Breakout_1dTrend_Volume
-# Hypothesis: Price breaking out of Bollinger Bands with 1d EMA trend and volume filter captures momentum with controlled frequency. Works in bull/bear via 1d trend filter and volatility-based bands.
+# 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume
+# Hypothesis: Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume spike captures momentum with controlled frequency. Works in bull/bear via 12h trend filter and volatility-based levels.
 
-name = "4h_Bollinger_Bands_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,7 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # ATR for dynamic scaling and stop context (not used in signal, but for context)
+    # ATR for risk context (not used in signal)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -30,19 +30,24 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
 
-    # Bollinger Bands (20, 2)
-    close_s = pd.Series(close)
-    bb_mid = close_s.rolling(window=20, min_periods=20).mean()
-    bb_std = close_s.rolling(window=20, min_periods=20).std()
-    bb_upper = (bb_mid + 2 * bb_std).values
-    bb_lower = (bb_mid - 2 * bb_std).values
+    # Camarilla levels from previous day
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    # Handle first bar
+    prev_close[0] = close[0]
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    range_val = prev_high - prev_low
+    camarilla_r1 = prev_close + range_val * 1.1 / 12
+    camarilla_s1 = prev_close - range_val * 1.1 / 12
 
-    # 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
 
-    # Volume filter: >1.8x 20-period average
+    # Volume filter: >2.0x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
@@ -50,7 +55,7 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,30 +64,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above upper band + 1d EMA34 uptrend + volume spike
-            if (close[i] > bb_upper[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.8):
+            # LONG: Close above R1 + 12h EMA50 uptrend + volume spike
+            if (close[i] > camarilla_r1[i] and 
+                close[i] > ema50_12h_aligned[i] and
+                volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below lower band + 1d EMA34 downtrend + volume spike
-            elif (close[i] < bb_lower[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.8):
+            # SHORT: Close below S1 + 12h EMA50 downtrend + volume spike
+            elif (close[i] < camarilla_s1[i] and 
+                  close[i] < ema50_12h_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below middle band or volatility drop
-            if close[i] < bb_mid.iloc[i] or volume[i] < vol_avg_20[i] * 1.1:
+            # EXIT LONG: Close below S1 or volume drop
+            if close[i] < camarilla_s1[i] or volume[i] < vol_avg_20[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above middle band or volatility drop
-            if close[i] > bb_mid.iloc[i] or volume[i] < vol_avg_20[i] * 1.1:
+            # EXIT SHORT: Close above R1 or volume drop
+            if close[i] > camarilla_r1[i] or volume[i] < vol_avg_20[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
