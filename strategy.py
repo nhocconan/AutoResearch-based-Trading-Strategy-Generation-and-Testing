@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Donchian20_Breakout_VolumeTrend_1dTrendFilter
-# Hypothesis: Trade Donchian(20) breakouts with volume confirmation and 1d EMA trend filter.
-# Long when price breaks above 20-period high with volume > 1.5x 20-period average and price > 1d EMA50.
-# Short when price breaks below 20-period low with volume > 1.5x 20-period average and price < 1d EMA50.
-# Exit when price crosses 10-period EMA in opposite direction or trend flips.
-# Designed for 4h timeframe to capture medium-term trends with minimal trades (~25-40/year).
-# Works in bull markets via trend-following breakouts and in bear markets via short breakdowns.
-# Uses 1d trend filter to avoid counter-trend whipsaws, targeting 20-50 trades/year per symbol.
+# 1d_TRIX_ZeroCross_VolumeFilter
+# Hypothesis: TRIX zero-cross on daily timeframe with volume confirmation and 1-week trend filter.
+# Long when TRIX crosses above zero with rising volume and 1-week uptrend.
+# Short when TRIX crosses below zero with rising volume and 1-week downtrend.
+# Exit on opposite TRIX cross or trend reversal.
+# Designed to capture momentum shifts in both bull and bear markets with low trade frequency.
 
-name = "4h_Donchian20_Breakout_VolumeTrend_1dTrendFilter"
-timeframe = "4h"
+name = "1d_TRIX_ZeroCross_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,34 +19,39 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
+    # Get 1d data for TRIX calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA50 for trend direction
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # TRIX: triple EMA of percentage change, period=15
+    close_series = pd.Series(df_1d['close'])
+    roc = close_series.pct_change()
+    ema1 = roc.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = ema3 * 100  # scale for readability
+    trix_values = trix.values
 
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align TRIX to minute timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_values)
+
+    # 1-week EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
 
     # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
-    # 10-period EMA for exit
-    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
-
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if any required value is NaN
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_avg_20[i]) or np.isnan(ema_10[i]):
+        if (np.isnan(trix_aligned[i]) or np.isnan(trix_aligned[i-1]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,27 +59,39 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # TRIX zero-cross detection
+        trix_cross_up = trix_aligned[i-1] <= 0 and trix_aligned[i] > 0
+        trix_cross_down = trix_aligned[i-1] >= 0 and trix_aligned[i] < 0
+
         if position == 0:
-            # LONG: Break above Donchian high + volume spike + 1d uptrend
-            if high[i] > donchian_high[i-1] and volume[i] > vol_avg_20[i] * 1.5 and close[i] > ema_50_1d_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Break below Donchian low + volume spike + 1d downtrend
-            elif low[i] < donchian_low[i-1] and volume[i] > vol_avg_20[i] * 1.5 and close[i] < ema_50_1d_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+            # LONG: TRIX crosses up + volume spike + 1-week uptrend
+            if trix_cross_up and volume[i] > vol_avg_20[i] * 1.5:
+                if close[i] > ema_50_1w_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # SHORT: TRIX crosses down + volume spike + 1-week downtrend
+            elif trix_cross_down and volume[i] > vol_avg_20[i] * 1.5:
+                if close[i] < ema_50_1w_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below 10 EMA or trend turns down
-            if close[i] < ema_10[i] or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: TRIX crosses down or trend turns down
+            if trix_cross_down:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < ema_50_1w_aligned[i]:  # trend turned down
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above 10 EMA or trend turns up
-            if close[i] > ema_10[i] or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: TRIX crosses up or trend turns up
+            if trix_cross_up:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > ema_50_1w_aligned[i]:  # trend turned up
                 signals[i] = 0.0
                 position = 0
             else:
