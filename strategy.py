@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Vortex_Volume_Spike
-# Hypothesis: Vortex indicator identifies trend direction, with VI+ > VI- indicating uptrend and VI- > VI+ indicating downtrend.
-# Enter long when VI+ crosses above VI- with volume confirmation; short when VI- crosses above VI+ with volume confirmation.
-# Exit when trend reverses or volume drops below average. Uses 1d trend filter to avoid counter-trend trades.
-# Vortex works well in trending markets (both bull and bear) and avoids whipsaws in ranging markets via volume filter.
-# Target: 15-30 trades/year per symbol to minimize fee drag.
+# 4h_ThreeLineBreak_Trend_Filter
+# Hypothesis: Three Line Break (TLB) detects sustained momentum without whipsaw.
+# Long when TLB shows bullish reversal (green brick after red) + price above 4h EMA50.
+# Short when TLB shows bearish reversal (red brick after green) + price below 4h EMA50.
+# EMA50 filter ensures alignment with medium-term trend, reducing counter-trend trades.
+# Works in bull markets (captures uptrend continuation) and bear markets (captures downtrend continuation).
+# Target: 20-50 trades/year per symbol to minimize fee drag.
 
-name = "12h_Vortex_Volume_Spike"
-timeframe = "12h"
+name = "4h_ThreeLineBreak_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,76 +23,67 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0], low[0], close[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Calculate VM+ and VM-
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = 0
-    vm_minus[0] = 0
-    
-    # Calculate Vortex Indicator components (14-period)
-    period = 14
-    sum_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    sum_vm_plus = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
-    sum_vm_minus = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
-    
-    vi_plus = sum_vm_plus / sum_tr
-    vi_minus = sum_vm_minus / sum_tr
-    
-    # 1d trend filter: EMA50
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume spike: volume > 1.5 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * vol_ma_20
-    
+    # Calculate Three Line Break
+    tlb = np.zeros(n, dtype=int)  # 1 for bullish, -1 for bearish
+    line_heights = []  # track closing prices of each line
+    current_line = 1  # start with bullish
+    line_start_idx = 0
+
+    for i in range(n):
+        if i == 0:
+            line_heights.append(close[i])
+            tlb[i] = current_line
+            continue
+
+        if current_line == 1:  # bullish line
+            if close[i] > line_heights[-1]:
+                line_heights.append(close[i])
+            elif close[i] < line_heights[-3] if len(line_heights) >= 3 else False:
+                # reverse to bearish
+                current_line = -1
+                line_heights = [close[i]]
+                line_start_idx = i
+            tlb[i] = current_line
+        else:  # bearish line
+            if close[i] < line_heights[-1]:
+                line_heights.append(close[i])
+            elif close[i] > line_heights[-3] if len(line_heights) >= 3 else False:
+                # reverse to bullish
+                current_line = 1
+                line_heights = [close[i]]
+                line_start_idx = i
+            tlb[i] = current_line
+
+    # EMA50 for trend filter
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
-        # Skip if any required value is NaN
-        if (np.isnan(vi_plus[i]) or 
-            np.isnan(vi_minus[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
+    for i in range(50, n):  # start after EMA50 warmup
         if position == 0:
-            # LONG: VI+ crosses above VI- + 1d uptrend + volume spike
-            if vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: TLB bullish reversal (current bullish, previous bearish) + above EMA50
+            if tlb[i] == 1 and tlb[i-1] == -1 and close[i] > ema50[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: VI- crosses above VI+ + 1d downtrend + volume spike
-            elif vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: TLB bearish reversal (current bearish, previous bullish) + below EMA50
+            elif tlb[i] == -1 and tlb[i-1] == 1 and close[i] < ema50[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: VI- crosses above VI+ or trend reversal
-            if vi_minus[i] > vi_plus[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: TLB bearish reversal or price below EMA50
+            if tlb[i] == -1 and tlb[i-1] == 1 or close[i] < ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: VI+ crosses above VI- or trend reversal
-            if vi_plus[i] > vi_minus[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: TLB bullish reversal or price above EMA50
+            if tlb[i] == 1 and tlb[i-1] == -1 or close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
