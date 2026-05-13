@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-# 12h_DeMark_TD_Setup_1dTrend_Volume
-# Hypothesis: Sequential (TD Setup) 9-count on 12h indicates exhaustion; trade opposite direction on 12h close with 1d trend filter and volume confirmation.
-# Works in bull/bear by following 1d trend direction; TD Setup identifies exhaustion points; volume confirms institutional participation.
-# Target: 15-30 trades/year per symbol to minimize fee drag.
+# 4h_Keltner_Breakout_1dTrend_Volume
+# Hypothesis: Keltner channel breakout on 4h, filtered by 1d trend and volume spikes.
+# Uses Keltner upper/lower bands (EMA + ATR) as dynamic support/resistance.
+# Trend filter: 1d EMA50 (only trade in direction of higher timeframe trend).
+# Volume confirmation: current volume > 2.0 x 20-period average.
+# Designed to work in both bull and bear markets by following 1d trend direction.
+# Target: 20-50 trades/year per symbol to minimize fee drag.
 
-name = "12h_DeMark_TD_Setup_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Keltner_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtd_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,47 +28,33 @@ def generate_signals(prices):
     # Get 1d data for HTF trend filter
     df_1d = get_htf_data(prices, '1d')
 
-    # Calculate TD Setup (Sequential) on 12h close
-    # Buy Setup: close < low 4 bars ago (for bears)
-    # Sell Setup: close > high 4 bars ago (for bulls)
-    # We count consecutive setups up to 9
-    buy_setup = close < np.roll(low, 4)
-    sell_setup = close > np.roll(high, 4)
-    
-    # Initialize count arrays
-    buy_count = np.zeros(n, dtype=int)
-    sell_count = np.zeros(n, dtype=int)
-    
-    # Count consecutive setups
-    for i in range(4, n):
-        if buy_setup[i]:
-            buy_count[i] = buy_count[i-1] + 1 if i > 0 else 1
-            sell_count[i] = 0  # reset opposite count
-        elif sell_setup[i]:
-            sell_count[i] = sell_count[i-1] + 1 if i > 0 else 1
-            buy_count[i] = 0
-        else:
-            buy_count[i] = 0
-            sell_count[i] = 0
+    # Calculate Keltner Channels for 4h: EMA(20) +/- ATR(10) * 2
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first TR
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    keltner_upper = ema20 + 2 * atr10
+    keltner_lower = ema20 - 2 * atr10
 
-    # TD Setup signals: 9-count exhaustion
-    td_buy_setup = (buy_count == 9)  # Bearish exhaustion - potential long
-    td_sell_setup = (sell_count == 9)  # Bullish exhaustion - potential short
+    # Trend filter: 1d EMA50
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # Volume confirmation: current volume > 1.8 x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    # Volume confirmation: current volume > 2.0 x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(35, n):  # Start after sufficient warmup
+    for i in range(20, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(keltner_upper[i]) or 
+            np.isnan(keltner_lower[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -75,30 +64,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TD Sell Setup 9 (bullish exhaustion) in uptrend with volume
-            if (td_sell_setup[i] and 
-                close[i] > ema34_1d_aligned[i] and 
+            # LONG: Break above Keltner upper in uptrend with volume spike
+            if (close[i] > keltner_upper[i] and 
+                close[i] > ema50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TD Buy Setup 9 (bearish exhaustion) in downtrend with volume
-            elif (td_buy_setup[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
+            # SHORT: Break below Keltner lower in downtrend with volume spike
+            elif (close[i] < keltner_lower[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TD Buy Setup 9 or trend turns down
-            if td_buy_setup[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price breaks below Keltner lower or trend turns down
+            if close[i] < keltner_lower[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TD Sell Setup 9 or trend turns up
-            if td_sell_setup[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above Keltner upper or trend turns up
+            if close[i] > keltner_upper[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
