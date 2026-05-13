@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high, 1w EMA50 is rising, and volume > 1.5x 20-period average.
-# Short when price breaks below 20-period Donchian low, 1w EMA50 is falling, and volume > 1.5x 20-period average.
-# Uses ATR(14) trailing stop (2.0x) for risk control.
+# Hypothesis: 6h Williams %R mean reversion with 1d EMA50 trend filter and volume spike confirmation.
+# Long when Williams %R < -80 (oversold), price > 1d EMA50 (uptrend), and volume > 2.0x 20-period average.
+# Short when Williams %R > -20 (overbought), price < 1d EMA50 (downtrend), and volume > 2.0x 20-period average.
+# Uses ATR(14) trailing stop (1.5x) for risk control.
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d.
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
+# Williams %R is effective in ranging markets; EMA50 filter ensures we only take mean revert trades in the direction of the higher timeframe trend.
+# Volume spike confirms participation and reduces false signals.
 
-name = "1d_Donchian20_Breakout_1wEMA50_Trend_Volume_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_MeanReversion_1dEMA50_Trend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -32,24 +34,27 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian(20) channels (based on current period's OHLC)
-    # Upper band = 20-period high, Lower band = 20-period low
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Avoid division by zero
+    rr = highest_high - lowest_low
+    rr[rr == 0] = 1e-10
+    williams_r = -100 * (highest_high - close) / rr
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1w data
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA(50) on 1d data
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 to 1d timeframe (wait for 1w bar to close)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d EMA50 to 6h timeframe (wait for 1d bar to close)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate volume confirmation: volume > 1.5x 20-period average
+    # Calculate volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,19 +63,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Donchian high AND 1w EMA50 rising (trending up) AND volume confirmation
-            if close[i] > donchian_high[i] and ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and volume_confirm[i]:
+            # LONG: Williams %R < -80 (oversold) AND price > 1d EMA50 (uptrend) AND volume confirmation
+            if williams_r[i] < -80 and close[i] > ema_50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Donchian low AND 1w EMA50 falling (trending down) AND volume confirmation
-            elif close[i] < donchian_low[i] and ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Williams %R > -20 (overbought) AND price < 1d EMA50 (downtrend) AND volume confirmation
+            elif williams_r[i] > -20 and close[i] < ema_50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -83,8 +88,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
+            # EXIT LONG: trailing stop hit (1.5x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 1.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -98,8 +103,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
+            # EXIT SHORT: trailing stop hit (1.5x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 1.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
