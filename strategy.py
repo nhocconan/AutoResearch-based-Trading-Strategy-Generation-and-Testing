@@ -1,10 +1,11 @@
-# 4h_Camarilla_R3_S3_Breakout_Trend_Volume_12h
+#!/usr/bin/env python3
+# 4h_Camarilla_R3_S3_Breakout_Trend_Volume_12h_v2
 # Hypothesis: Daily Camarilla R3/S3 levels act as strong support/resistance on 4h chart.
 # Breakouts above R3 or below S3 with volume confirmation and 12h EMA trend filter capture momentum.
 # Uses 4h for execution and 12h EMA for trend direction. Target ~30-50 trades/year to avoid fee drag.
 # Works in bull (breakouts with trend) and bear (breakdowns against trend filtered by 12h EMA).
 
-name = "4h_Camarilla_R3_S3_Breakout_Trend_Volume_12h"
+name = "4h_Camarilla_R3_S3_Breakout_Trend_Volume_12h_v2"
 timeframe = "4h"
 leverage = 1.0
 
