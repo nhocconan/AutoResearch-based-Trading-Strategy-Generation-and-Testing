@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "1d"
+#/usr/bin/env python3
+name = "12h_PriceAction_TrendFollow_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,69 +12,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate daily Camarilla levels using previous day's range
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    range_val = prev_high - prev_low
-    R3 = prev_close + range_val * 1.1 / 4
-    S3 = prev_close - range_val * 1.1 / 4
-    
-    # 1-week trend filter: EMA34
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # --- Daily Indicators (HTF) ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Volume filter: current volume > 1.5 x 20-day average
+    # EMA(50) for daily trend
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # ATR(14) for volatility and stop
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr14_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    
+    # --- 12h Indicators ---
+    # EMA(20) for medium-term trend
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Volume filter: current volume > 1.5 x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
+    # --- Signal Generation ---
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
+            np.isnan(ema20[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_condition = volume[i] > 1.5 * vol_ma_20[i]
+        price_above_ema20 = close[i] > ema20[i]
+        price_below_ema20 = close[i] < ema20[i]
+        daily_uptrend = close[i] > ema50_1d_aligned[i]
+        daily_downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 0:
-            # LONG: Close breaks above R3 with uptrend and volume
-            if close[i] > R3[i] and close[i] > ema34_1w_aligned[i] and vol_condition:
+            # LONG: price above EMA20, daily uptrend, volume confirmation
+            if price_above_ema20 and daily_uptrend and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S3 with downtrend and volume
-            elif close[i] < S3[i] and close[i] < ema34_1w_aligned[i] and vol_condition:
+            # SHORT: price below EMA20, daily downtrend, volume confirmation
+            elif price_below_ema20 and daily_downtrend and vol_condition:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close breaks below S3 or trend reversal
-            if close[i] < S3[i] or close[i] < ema34_1w_aligned[i]:
+            # EXIT LONG: price below EMA20 or daily downtrend
+            if price_below_ema20 or daily_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close breaks above R3 or trend reversal
-            if close[i] > R3[i] or close[i] > ema34_1w_aligned[i]:
+            # EXIT SHORT: price above EMA20 or daily uptrend
+            if price_above_ema20 or daily_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
