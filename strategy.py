@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_BollingerBreakout_Pullback_1dTrend
-# Hypothesis: Bollinger Band breakout with pullback entry on 6h, filtered by 1d trend and volume confirmation.
-# This strategy aims to capture trend continuation after pullbacks in trending markets while avoiding false breakouts in ranging conditions.
-# Works in both bull and bear markets by only trading in the direction of the 1d trend.
+# 12h_KAMA_Direction_1wTrend_Volume
+# Hypothesis: KAMA direction on 12h, filtered by 1-week trend and volume confirmation.
+# KAMA adapts to market noise, providing smooth trend signals. The 1-week trend ensures alignment with higher timeframe momentum.
+# Volume confirmation filters out low-conviction moves. Works in both bull and bear markets by trading only in the direction of the 1w trend.
 
-name = "6h_BollingerBreakout_Pullback_1dTrend"
-timeframe = "6h"
+name = "12h_KAMA_Direction_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,49 +17,39 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for HTF filters
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
 
-    # Bollinger Bands (20, 2) on 6h
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_bb = sma20 + (2 * std20)
-    lower_bb = sma20 - (2 * std20)
+    # KAMA parameters
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
 
-    # Bollinger Band breakout signals (when price crosses outside bands)
-    bb_breakout_up = close > upper_bb
-    bb_breakout_down = close < lower_bb
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_length))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Fix: volatility calculation needs to be over er_length window
+    volatility = pd.Series(close).rolling(window=er_length).apply(lambda x: np.sum(np.abs(np.diff(x))), raw=True).values
+    er = np.where(volatility != 0, change / volatility, 0)
 
-    # Pullback condition: price returns inside bands after breakout
-    # We track if a breakout occurred and price has since returned inside
-    breakout_up_active = np.zeros(n, dtype=bool)
-    breakout_down_active = np.zeros(n, dtype=bool)
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
 
-    for i in range(1, n):
-        # Carry forward breakout state
-        breakout_up_active[i] = breakout_up_active[i-1]
-        breakout_down_active[i] = breakout_down_active[i-1]
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[er_length] = close[er_length]  # seed
+    for i in range(er_length + 1, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
 
-        # Activate breakout state when price breaks outside bands
-        if bb_breakout_up[i]:
-            breakout_up_active[i] = True
-        if bb_breakout_down[i]:
-            breakout_down_active[i] = True
-
-        # Deactivate breakout state when price returns inside bands
-        if breakout_up_active[i] and (lower_bb[i] <= close[i] <= upper_bb[i]):
-            breakout_up_active[i] = False
-        if breakout_down_active[i] and (lower_bb[i] <= close[i] <= upper_bb[i]):
-            breakout_down_active[i] = False
-
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 1-week EMA34 for trend filter
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
 
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,11 +58,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after sufficient warmup
+    for i in range(er_length + 1, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(upper_bb[i]) or 
-            np.isnan(lower_bb[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(kama[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or 
             np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -82,30 +71,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Bullish breakout pullback in uptrend with volume
-            if (breakout_up_active[i] and 
-                close[i] > ema34_1d_aligned[i] and 
+            # LONG: KAMA rising, above 1w EMA34, with volume confirmation
+            if (kama[i] > kama[i-1] and 
+                close[i] > ema34_1w_aligned[i] and 
                 volume_confirmed[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish breakout pullback in downtrend with volume
-            elif (breakout_down_active[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
+            # SHORT: KAMA falling, below 1w EMA34, with volume confirmation
+            elif (kama[i] < kama[i-1] and 
+                  close[i] < ema34_1w_aligned[i] and 
                   volume_confirmed[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Bollinger middle or trend turns down
-            if close[i] < sma20[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: KAMA falls or price crosses below 1w EMA34
+            if kama[i] < kama[i-1] or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Bollinger middle or trend turns up
-            if close[i] > sma20[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: KAMA rises or price crosses above 1w EMA34
+            if kama[i] > kama[i-1] or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
