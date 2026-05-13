@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Trend_Filter_Volume_Squeeze
-# Hypothesis: Use KAMA direction as a noise-resistant trend filter on daily timeframe. Enter long/short when price breaks Bollinger Bands during low volatility (squeeze) in the direction of daily KAMA trend, confirmed by volume spike. Exit on Bollinger mean reversion or trend change. Designed to work in both bull and bear by capturing volatility breakouts in trending markets while avoiding whipsaws in chop.
+# 6h_1dTrend_VWAP_MeanReversion_WithVolFilter
+# Hypothesis: Mean reversion to daily VWAP during 6h pullbacks in direction of 1d trend, confirmed by volume.
+# Long when price pulls back to daily VWAP in uptrend with volume confirmation; short when price rallies to VWAP in downtrend.
+# Uses daily VWAP as dynamic support/resistance. Trend filter ensures alignment with higher timeframe momentum.
+# Volume filter prevents whipsaws in low-volume environments. Works in both bull and bear markets.
 
-name = "12h_KAMA_Trend_Filter_Volume_Squeeze"
-timeframe = "12h"
+name = "6h_1dTrend_VWAP_MeanReversion_WithVolFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,62 +23,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data
+    # Get daily data for VWAP and trend
     df_1d = get_htf_data(prices, '1d')
     
-    # KAMA parameters
-    er_length = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Daily VWAP calculation (typical price * volume) cumulative
+    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
+    vwap_numerator = np.cumsum(typical_price * df_1d['volume'].values)
+    vwap_denominator = np.cumsum(df_1d['volume'].values)
+    # Avoid division by zero
+    vwap = np.divide(vwap_numerator, vwap_denominator, 
+                     out=np.full_like(vwap_numerator, np.nan), 
+                     where=vwap_denominator!=0)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(df_1d['close'], prepend=df_1d['close'][0]))
-    volatility = np.abs(np.diff(df_1d['close'], prepend=df_1d['close'][0]))
-    for i in range(1, len(volatility)):
-        volatility[i] = volatility[i-1] + np.abs(df_1d['close'][i] - df_1d['close'][i-1])
+    # Daily trend: EMA50
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    er = np.where(volatility != 0, change / volatility, 0)
+    # Align daily indicators to 6h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    
-    # KAMA calculation
-    kama = np.full_like(df_1d['close'], np.nan, dtype=float)
-    kama[0] = df_1d['close'][0]
-    for i in range(1, len(kama)):
-        kama[i] = kama[i-1] + sc[i] * (df_1d['close'][i] - kama[i-1])
-    
-    # Bollinger Bands (20, 2)
-    close_1d = df_1d['close'].values
-    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper = sma20 + 2 * std20
-    lower = sma20 - 2 * std20
-    
-    # Bollinger Band Width for squeeze detection
-    bb_width = (upper - lower) / sma20
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
-    
-    # Align daily indicators to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Volume spike: volume > 2.0 * 4-period average (1 day worth at 12h)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_spike = volume > 2.0 * vol_ma_4
+    # Volume filter: volume > 1.5 * 6-period average (1.5 days worth at 6h)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    volume_filter = volume > 1.5 * vol_ma_6
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or 
-            np.isnan(squeeze_aligned[i]) or 
-            np.isnan(kama_aligned[i])):
+        if (np.isnan(vwap_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,28 +61,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > upper band + squeeze + daily KAMA uptrend + volume spike
-            if close[i] > upper_aligned[i] and squeeze_aligned[i] and close[i] > kama_aligned[i] and volume_spike[i]:
+            # LONG: Price near VWAP (within 0.5%) + daily uptrend + volume filter
+            if (abs(close[i] - vwap_aligned[i]) / vwap_aligned[i] < 0.005 and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < lower band + squeeze + daily KAMA downtrend + volume spike
-            elif close[i] < lower_aligned[i] and squeeze_aligned[i] and close[i] < kama_aligned[i] and volume_spike[i]:
+            # SHORT: Price near VWAP (within 0.5%) + daily downtrend + volume filter
+            elif (abs(close[i] - vwap_aligned[i]) / vwap_aligned[i] < 0.005 and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below middle band (SMA20) OR price below KAMA
-            sma20_aligned = align_htf_to_ltf(prices, df_1d, sma20)
-            if close[i] < sma20_aligned[i] or close[i] < kama_aligned[i]:
+            # EXIT LONG: Price moves away from VWAP (>1%) OR trend reversal
+            if (abs(close[i] - vwap_aligned[i]) / vwap_aligned[i] > 0.01 or 
+                close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above middle band (SMA20) OR price above KAMA
-            sma20_aligned = align_htf_to_ltf(prices, df_1d, sma20)
-            if close[i] > sma20_aligned[i] or close[i] > kama_aligned[i]:
+            # EXIT SHORT: Price moves away from VWAP (>1%) OR trend reversal
+            if (abs(close[i] - vwap_aligned[i]) / vwap_aligned[i] > 0.01 or 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
