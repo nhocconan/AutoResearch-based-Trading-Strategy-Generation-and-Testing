@@ -1,13 +1,13 @@
-#!/usr/bin/env python3
-# 12h_Donchian20_TrendPlus
-# Hypothesis: Use 20-bar Donchian channels on 12h timeframe with 1-day trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel, volume spikes, and 1-day EMA50 is rising.
-# Short when price breaks below lower Donchian channel, volume spikes, and 1-day EMA50 is falling.
-# Exit when price crosses the opposite Donchian band or trend reverses.
-# Designed for low turnover (~15-30/year) to avoid fee drag while capturing major trends.
+# MULTI-TIMEFRAME VWAP TREND FILTER
+# Hypothesis: Use VWAP from higher timeframe (1w/1d) as dynamic support/resistance.
+# Long when price crosses above weekly VWAP with volume spike and daily VWAP uptrend.
+# Short when price crosses below weekly VWAP with volume spike and daily VWAP downtrend.
+# Exit when price crosses back below/above daily VWAP.
+# VWAP adapts to market regime and provides institutional-grade levels.
+# Target: 15-25 trades/year per symbol to minimize fee drag.
 
-name = "12h_Donchian20_TrendPlus"
-timeframe = "12h"
+name = "6h_VWAP_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,47 +24,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 12h data for Donchian calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Calculate VWAP on weekly data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels on 12h data
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Weekly VWAP: cumulative typical price * volume / cumulative volume
+    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
+    vwap_1w = (typical_price_1w * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
+    vwap_1w_values = vwap_1w.values
     
-    # Upper band: highest high of last 20 periods
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 periods
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian bands to lower timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-
-    # Get 1d data for trend filter
+    # Calculate VWAP on daily data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 50-period EMA on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_values = vwap_1d.values
 
-    # Volume confirmation: current volume > 2.0 x 30-period average
+    # Align VWAPs to 6h timeframe
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w_values)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
+
+    # Volume confirmation: current volume > 1.8 x 30-period average
     vol_ma = np.full(n, np.nan)
     for i in range(30, n):
         vol_ma[i] = np.mean(volume[i-30:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(30, n):
         # Skip if data is not ready
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,29 +68,31 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: break above upper Donchian with volume spike and uptrend
-            if close[i] > donchian_upper_aligned[i] and volume_spike[i] and close[i] > ema_50_1d_aligned[i]:
+            # LONG: cross above weekly VWAP with volume spike and daily VWAP uptrend
+            if close[i] > vwap_1w_aligned[i] and close[i-1] <= vwap_1w_aligned[i-1] and volume_spike[i] and close[i] > vwap_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below lower Donchian with volume spike and downtrend
-            elif close[i] < donchian_lower_aligned[i] and volume_spike[i] and close[i] < ema_50_1d_aligned[i]:
+            # SHORT: cross below weekly VWAP with volume spike and daily VWAP downtrend
+            elif close[i] < vwap_1w_aligned[i] and close[i-1] >= vwap_1w_aligned[i-1] and volume_spike[i] and close[i] < vwap_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below lower Donchian or trend turns down
-            if close[i] < donchian_lower_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: price crosses below daily VWAP (mean reversion)
+            if close[i] < vwap_1d_aligned[i] and close[i-1] >= vwap_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above upper Donchian or trend turns up
-            if close[i] > donchian_upper_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: price crosses above daily VWAP
+            if close[i] > vwap_1d_aligned[i] and close[i-1] <= vwap_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
 
     return signals
+
+#!/usr/bin/env python3
