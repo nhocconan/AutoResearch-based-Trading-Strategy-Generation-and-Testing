@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper channel AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
-# Short when price breaks below Donchian lower channel AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
+# Hypothesis: 1d KAMA trend with 1w EMA34 filter and volume confirmation.
+# Long when KAMA direction is up AND 1w EMA34 is rising AND volume > 1.8x 20-period average.
+# Short when KAMA direction is down AND 1w EMA34 is falling AND volume > 1.8x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
-# Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Discrete position sizing (0.25) to minimize fee churn.
+# Target: 50-100 total trades over 4 years (12-25/year) on 1d.
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_KAMA_1wEMA34_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -29,51 +29,69 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
+    tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Donchian(20) channels
-    upper_channel = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower_channel = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # KAMA (Kaufman Adaptive Moving Average) - trend direction
+    def kama(source, period=10, fast=2, slow=30):
+        """Kaufman Adaptive Moving Average"""
+        if len(source) < period:
+            return np.full_like(source, np.nan, dtype=np.float64)
+        
+        # Efficiency Ratio
+        change = np.abs(np.diff(source, n=period))
+        volatility = np.sum(np.abs(np.diff(source)), axis=0) if len(source) > 1 else 0
+        er = np.zeros_like(source)
+        er[period:] = change[period-1:] / np.maximum(volatility[period-1:], 1e-10)
+        
+        # Smoothing Constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        # KAMA calculation
+        result = np.full_like(source, np.nan, dtype=np.float64)
+        result[period-1] = np.mean(source[:period])
+        for i in range(period, len(source)):
+            result[i] = result[i-1] + sc[i] * (source[i] - result[i-1])
+        return result
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    kama_values = kama(close, 10, 2, 30)
+    kama_up = kama_values > np.roll(kama_values, 1)
+    kama_down = kama_values < np.roll(kama_values, 1)
     
-    # Calculate EMA(34) on 1d data
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate EMA(34) on 1w data
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Align 1w EMA34 to 1d timeframe (wait for 1w bar to close)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
     lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(100, n):  # Start after sufficient data for indicators
+    for i in range(50, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(kama_values[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > upper channel AND 1d EMA34 rising AND volume spike
-            if (close[i] > upper_channel[i] and 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
-                volume_confirm[i]):
+            # LONG: KAMA up AND 1w EMA34 rising AND volume spike
+            if (kama_up[i] and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < lower channel AND 1d EMA34 falling AND volume spike
-            elif (close[i] < lower_channel[i] and 
-                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
-                  volume_confirm[i]):
+            # SHORT: KAMA down AND 1w EMA34 falling AND volume spike
+            elif (kama_down[i] and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
