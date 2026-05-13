@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Elder_Ray_Bull_Bear_Power_Trend
-Hypothesis: Use daily Elder Ray indicator (Bull Power = EMA(13) - Low, Bear Power = High - EMA(13)) to capture institutional buying/selling pressure, filtered by 200-day EMA trend and volume confirmation. Go long when Bull Power turns positive with volume spike and price above EMA200, short when Bear Power turns positive with volume spike and price below EMA200. Elder Ray works in trending markets by identifying when bulls or bears gain control, making it effective in both bull (buy the dips) and bear (sell the rallies) regimes.
+1h_LongShort_4h_1d_Trend_With_Volume_Confirmation
+Hypothesis: Use 4h EMA(21) trend direction filtered by 1d EMA(50) regime, with 1h volume confirmation (volume > 1.3x 20-period average) for entry timing. Go long when 4h EMA(21) > 4h EMA(50) and 1d EMA(50) > 1d EMA(200) and volume spike; short when 4h EMA(21) < 4h EMA(50) and 1d EMA(50) < 1d EMA(200) and volume spike. Exit when trend reverses or volume dries up. Designed for 1h timeframe with strict entry conditions to limit trades to 15-37/year and avoid fee drag. Works in bull markets via 4h trend and in bear markets via 1d regime filter preventing false signals.
 """
 
-name = "1d_Elder_Ray_Bull_Bear_Power_Trend"
-timeframe = "1d"
+name = "1h_LongShort_4h_1d_Trend_With_Volume_Confirmation"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,31 +22,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Elder Ray calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for EMA crossover signal
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h EMA21 and EMA50
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Calculate 4h EMA crossover signal: 1 = bullish, -1 = bearish, 0 = neutral
+    ema_cross_4h = np.where(ema21_4h > ema50_4h, 1, np.where(ema21_4h < ema50_4h, -1, 0))
+    
+    # Align 4h EMA crossover to 1h timeframe
+    ema_cross_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_cross_4h)
+    
+    # Get 1d data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
     
-    # Calculate EMA13 for Elder Ray
-    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Bull Power and Bear Power
-    bull_power = high_1d - ema13
-    bear_power = ema13 - low_1d
-    
-    # Align to daily timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Get daily EMA200 for trend filter
+    # Calculate 1d EMA50 and EMA200 for regime filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate volume average (20-day) for volume spike filter
+    # Calculate 1d regime: 1 = bullish (EMA50 > EMA200), -1 = bearish (EMA50 < EMA200), 0 = neutral
+    regime_1d = np.where(ema50_1d > ema200_1d, 1, np.where(ema50_1d < ema200_1d, -1, 0))
+    
+    # Align 1d regime to 1h timeframe
+    regime_1d_aligned = align_htf_to_ltf(prices, df_1d, regime_1d)
+    
+    # Calculate volume average (20-period) for volume spike filter
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -54,38 +64,38 @@ def generate_signals(prices):
     
     for i in range(200, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema200_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_cross_4h_aligned[i]) or np.isnan(regime_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-day average
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume spike condition: current volume > 1.3x 20-period average
+        vol_spike = volume[i] > 1.3 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Bull Power turns positive (bulls gaining control) + volume spike + price above EMA200
-            if bull_power_aligned[i-1] <= 0 and bull_power_aligned[i] > 0 and vol_spike and close[i] > ema200_aligned[i]:
-                signals[i] = 0.25
+            # LONG: 4h bullish crossover + 1d bullish regime + volume spike
+            if ema_cross_4h_aligned[i] == 1 and regime_1d_aligned[i] == 1 and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Bear Power turns positive (bears gaining control) + volume spike + price below EMA200
-            elif bear_power_aligned[i-1] <= 0 and bear_power_aligned[i] > 0 and vol_spike and close[i] < ema200_aligned[i]:
-                signals[i] = -0.25
+            # SHORT: 4h bearish crossover + 1d bearish regime + volume spike
+            elif ema_cross_4h_aligned[i] == -1 and regime_1d_aligned[i] == -1 and vol_spike:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power turns negative or price breaks below EMA200
-            if bull_power_aligned[i] <= 0 or close[i] < ema200_aligned[i]:
+            # EXIT LONG: 4h bearish crossover or 1d bearish regime
+            if ema_cross_4h_aligned[i] == -1 or regime_1d_aligned[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Bear Power turns negative or price breaks above EMA200
-            if bear_power_aligned[i] <= 0 or close[i] > ema200_aligned[i]:
+            # EXIT SHORT: 4h bullish crossover or 1d bullish regime
+            if ema_cross_4h_aligned[i] == 1 or regime_1d_aligned[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
