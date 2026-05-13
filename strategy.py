@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_RangeBreakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,68 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1D data ONCE
+    # Load 1D data ONCE for range detection
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Donchian(20) on 12h
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Calculate daily range (high-low)
+    daily_range = high_1d - low_1d
+    # Calculate range percentile (20-period)
+    range_series = pd.Series(daily_range)
+    range_pct = range_series.rolling(window=20, min_periods=20).apply(
+        lambda x: (x[-1] <= np.percentile(x, 30)) * 1.0, raw=True
+    ).values
     
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # Align range filter to 6H
+    range_pct_aligned = align_htf_to_ltf(prices, df_1d, range_pct)
     
-    # EMA50 on 1D for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume filter: volume > 1.5x 20-period average on 12h
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma20 * 1.5)
+    # Volume spike detection (6H)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / np.where(volume_ma > 0, volume_ma, 1)
+    volume_spike = (volume_ratio > 1.5).astype(float)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    for i in range(50, n):  # Start after sufficient data
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+    for i in range(50, n):
+        if np.isnan(range_pct_aligned[i]) or np.isnan(volume_spike[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below EMA50 on 1D
-        price_above_ema = close[i] > ema50_1d_aligned[i]
-        price_below_ema = close[i] < ema50_1d_aligned[i]
+        # Range-bound market (low volatility)
+        in_range = range_pct_aligned[i] > 0.5
+        # Volume spike indicates breakout attempt
+        vol_spike = volume_spike[i] > 0
         
         if position == 0:
-            # LONG: Breakout above Donchian high + uptrend + volume
-            if close[i] > highest_high[i] and price_above_ema and vol_filter[i]:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Breakdown below Donchian low + downtrend + volume
-            elif close[i] < lowest_low[i] and price_below_ema and vol_filter[i]:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
+            # Look for breakout with volume
+            if in_range and vol_spike:
+                if close[i] > high[i-1]:  # Break above recent high
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < low[i-1]:  # Break below recent low
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # EXIT LONG: Breakdown below Donchian low or trend change
-            if close[i] < lowest_low[i] or not price_above_ema:
+            # Exit on range expansion or reversal
+            if not in_range or close[i] < close[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Breakout above Donchian high or trend change
-            if close[i] > highest_high[i] or not price_below_ema:
+            if not in_range or close[i] > close[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
