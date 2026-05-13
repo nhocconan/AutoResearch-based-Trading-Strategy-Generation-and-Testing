@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1d_ChaikinOscillator_Trend
-Hypothesis: Chaikin Oscillator (3,10) on 1d provides institutional accumulation/distribution signals. 
-Trade in direction of 1d trend (EMA50) when Chaikin Oscillator crosses zero with confirmation from 
-increasing volume. Works in both bull/bear markets by following higher timeframe trend. 
-Target: 15-25 trades/year per symbol.
+1d_1w_RSI_Divergence_Signal
+Hypothesis: RSI divergence on daily timeframe with weekly trend filter provides high-probability reversal signals. RSI divergence signals weakening momentum before price reverses. Weekly trend filter ensures alignment with higher timeframe momentum, reducing false signals in chop. Designed for low trade frequency to minimize fee drag in both bull and bear markets.
 """
 
-name = "6h_1d_ChaikinOscillator_Trend"
-timeframe = "6h"
+name = "1d_1w_RSI_Divergence_Signal"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,87 +17,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Chaikin Oscillator and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    
+    # Calculate RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Use Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 periods
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
     
-    # Money Flow Multiplier = ((Close - Low) - (High - Close)) / (High - Low)
-    # Avoid division by zero
-    hl_range = high_1d - low_1d
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
-    mfm = ((close_1d - low_1d) - (high_1d - close_1d)) / hl_range
+    # Weekly trend: 34 EMA
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    uptrend_1w = close_1w > ema_34_1w
+    downtrend_1w = close_1w < ema_34_1w
     
-    # Money Flow Volume = MFM * Volume
-    mfv = mfm * volume_1d
+    # Align weekly trend to daily
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
-    # Chaikin Oscillator = (3-period EMA of MFV) - (10-period EMA of MFV)
-    mfv_series = pd.Series(mfv)
-    ema3 = mfv_series.ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10 = mfv_series.ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin_osc = ema3 - ema10
+    # Calculate RSI slope (5-period) and price slope (5-period)
+    rsi_slope = np.zeros(n)
+    price_slope = np.zeros(n)
     
-    # 1d trend: 50 EMA
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = close_1d > ema_50_1d
-    downtrend_1d = close_1d < ema_50_1d
+    for i in range(5, n):
+        rsi_slope[i] = rsi[i] - rsi[i-5]
+        price_slope[i] = close[i] - close[i-5]
     
-    # Align 1d indicators to 6h
-    chaikin_osc_aligned = align_htf_to_ltf(prices, df_1d, chaikin_osc)
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average volume on 6h
-    volume = prices['volume'].values
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 1.5)
-    
-    # Detect Chaikin Oscillator zero crosses
-    # Bullish cross: CO crosses above zero
-    bullish_cross = (chaikin_osc_aligned > 0) & (np.roll(chaikin_osc_aligned, 1) <= 0)
-    # Bearish cross: CO crosses below zero
-    bearish_cross = (chaikin_osc_aligned < 0) & (np.roll(chaikin_osc_aligned, 1) >= 0)
+    # Detect divergences
+    # Bearish divergence: price makes higher high, RSI makes lower high
+    bearish_divergence = (price_slope > 0) & (rsi_slope < 0)
+    # Bullish divergence: price makes lower low, RSI makes higher low
+    bullish_divergence = (price_slope < 0) & (rsi_slope > 0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Handle first element roll
-        if i == 0:
-            bullish_cross[i] = False
-            bearish_cross[i] = False
-        
         # Get aligned values
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
-        vol_spike = volume_spike[i]
+        uptrend = uptrend_1w_aligned[i]
+        downtrend = downtrend_1w_aligned[i]
         
         if position == 0:
-            # LONG: 1d uptrend + bullish Chaikin cross + volume spike
-            if uptrend and bullish_cross[i] and vol_spike:
+            # LONG: weekly uptrend + bullish RSI divergence
+            if uptrend and bullish_divergence[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1d downtrend + bearish Chaikin cross + volume spike
-            elif downtrend and bearish_cross[i] and vol_spike:
+            # SHORT: weekly downtrend + bearish RSI divergence
+            elif downtrend and bearish_divergence[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 1d trend turns down or bearish Chaikin cross
-            if not uptrend or bearish_cross[i]:
+            # EXIT LONG: weekly trend turns down or bearish divergence appears
+            if not uptrend or bearish_divergence[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 1d trend turns up or bullish Chaikin cross
-            if not downtrend or bullish_cross[i]:
+            # EXIT SHORT: weekly trend turns up or bullish divergence appears
+            if not downtrend or bullish_divergence[i]:
                 signals[i] = 0.0
                 position = 0
             else:
