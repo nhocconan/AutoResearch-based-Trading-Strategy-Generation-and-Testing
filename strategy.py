@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
-# Long when price breaks above R3 with volume > 1.5x average and close > 1d EMA34.
-# Short when price breaks below S3 with volume > 1.5x average and close < 1d EMA34.
-# Uses ATR-based trailing stop (2.0x) for risk control.
-# Camarilla R3/S3 levels from 1d provide stronger intraday support/resistance than R1/S1.
-# 1d EMA34 filters for long-term trend alignment.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike.
+# Long when price breaks above R3 with volume > 2.0x average and close > 1d EMA34.
+# Short when price breaks below S3 with volume > 2.0x average and close < 1d EMA34.
+# Uses ATR-based trailing stop (2.5x) for risk control.
+# Camarilla levels from 1d provide strong support/resistance with R3/S3 as breakout levels.
+# 1d EMA34 filters for medium-term trend alignment.
 # Volume spike confirms breakout strength.
-# Target: 20-40 trades/year (80-160 total over 4 years) on 4h timeframe.
+# Target: 12-37 trades/year (50-150 total over 4 years) on 6h timeframe.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -50,7 +50,7 @@ def generate_signals(prices):
     camarilla_r3_1d = close_1d + (range_1d * 1.1 / 4.0)
     camarilla_s3_1d = close_1d - (range_1d * 1.1 / 4.0)
     
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    # Align Camarilla levels to 6h timeframe (wait for completed 1d bar)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
@@ -58,9 +58,9 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate volume spike: volume > 1.5x 20-period average
+    # Calculate volume spike: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -94,8 +94,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
+            # EXIT LONG: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -109,8 +109,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
