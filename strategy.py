@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Positioning
-Hypothesis: Weekly pivot levels act as strong support/resistance zones. Price approaching S1/R1 with rejection (close away from level) and aligned daily trend (price > daily EMA50 for longs, < for shorts) offers high-probability mean-reversion entries. Works in both bull/bear markets by fading extremes within the weekly range. Uses 30% position size, targeting ~20-30 trades/year to minimize fee drag.
+12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeFilter
+Hypothesis: Camarilla pivot levels on 12h provide strong support/resistance. A breakout above R3 or below S3 with 1w trend alignment (close > EMA50) and volume confirmation signals trend continuation. Uses 30% position size to balance risk/return and limit trade frequency (~20-30/year) to minimize fee drag in 12-hour bars.
 """
 
-name = "6h_Weekly_Pivot_Positioning"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,61 +20,59 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1w data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P - H, R1 = 2P - L
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    pivot = (weekly_high + weekly_low + weekly_close) / 3
-    s1 = 2 * pivot - weekly_high  # Weekly support 1
-    r1 = 2 * pivot - weekly_low   # Weekly resistance 1
+    # Calculate Camarilla levels for 12h: using previous bar's range
+    # Camarilla: Close + (High-Low) * multiplier
+    # R3 = Close + (High-Low) * 1.1/2
+    # S3 = Close - (High-Low) * 1.1/2
+    # We need previous bar's high/low to calculate current levels
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # first bar uses current
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Align weekly pivot levels to 6h timeframe (wait for weekly bar to close)
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Daily trend filter: EMA(50) on daily close
-    df_daily = get_htf_data(prices, '1d')
-    ema50_daily = pd.Series(df_daily['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_daily_aligned = align_htf_to_ltf(prices, df_daily, ema50_daily)
+    # 1w trend filter: EMA(50) on close
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after EMA50 warmup
+    for i in range(1, n):  # Start from 1 to have previous bar
         if position == 0:
-            # LONG setup: price near S1, rejecting level (close > S1), daily uptrend
-            near_s1 = low[i] <= s1_aligned[i] * 1.005  # Within 0.5% of S1
-            rejecting_s1 = close[i] > s1_aligned[i]    # Closed above S1
-            daily_uptrend = close[i] > ema50_daily_aligned[i]
-            
-            if near_s1 and rejecting_s1 and daily_uptrend:
+            # LONG: Close breaks above R3, 1w uptrend, volume confirmation
+            if close[i] > R3[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.30
                 position = 1
-            # SHORT setup: price near R1, rejecting level (close < R1), daily downtrend
-            elif (high[i] >= r1_aligned[i] * 0.995 and  # Within 0.5% of R1
-                  close[i] < r1_aligned[i] and          # Closed below R1
-                  close[i] < ema50_daily_aligned[i]): # Daily downtrend
+            # SHORT: Close breaks below S3, 1w downtrend, volume confirmation
+            elif close[i] < S3[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price reaches pivot or daily trend breaks
-            if (close[i] >= pivot_aligned[i] or 
-                close[i] < ema50_daily_aligned[i]):
+            # EXIT LONG: Close crosses below S3 or volume drops
+            if close[i] < S3[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: price reaches pivot or daily trend breaks
-            if (close[i] <= pivot_aligned[i] or 
-                close[i] > ema50_daily_aligned[i]):
+            # EXIT SHORT: Close crosses above R3 or volume drops
+            if close[i] > R3[i] or not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
