@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (2.0x MA20).
-# Enters long when price breaks above Camarilla R3 level with 1d bullish trend (close > EMA34) and volume > 2.0x MA20.
-# Enters short when price breaks below Camarilla S3 level with 1d bearish trend (close < EMA34) and volume > 2.0x MA20.
-# Exits when price reverts to Camarilla pivot point (PP) or ATR-based stoploss hit (1.5 * ATR14 from entry).
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (1.5x MA20).
+# Enters long when price breaks above Camarilla R3 level with 1d bullish trend (close > EMA34) and volume > 1.5x MA20.
+# Enters short when price breaks below Camarilla S3 level with 1d bearish trend (close < EMA34) and volume > 1.5x MA20.
+# Exits when price reverts to Camarilla pivot point (PP) or ATR-based stoploss hit (2.0 * ATR14 from entry).
 # Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
-# Designed for low trade frequency (~12-37/year) by requiring strict confluence: price breakout + HTF trend + volume spike.
+# Designed for low trade frequency (~20-50/year) by requiring strict confluence: price breakout + HTF trend + volume spike.
 # Camarilla levels provide intraday support/resistance structure, while 1d EMA34 filter ensures alignment with higher timeframe momentum.
-# Volume threshold (2.0x) reduces false breakouts, improving signal quality in both bull and bear markets.
+# Volume threshold (1.5x) reduces false breakouts, improving signal quality in both bull and bear markets.
+# ATR stoploss (2.0) allows for volatility adaptation while limiting downside.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -44,15 +45,15 @@ def generate_signals(prices):
     # S3 = PP - (H - L) * 1.1 / 2
     s3_1d = pp_1d - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Volume filter: current volume > 2.0x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
     vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 2.0)
+    volume_spike = volume > (vol_ma20 * 1.5)
     
     # ATR(14) for stoploss
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
@@ -88,7 +89,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # EXIT LONG: Price reverts to Camarilla pivot point (PP) OR ATR stoploss hit
-            if close[i] < pp_aligned[i] or close[i] < entry_price[i-1] - 1.5 * atr14[i]:
+            if close[i] < pp_aligned[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
@@ -97,7 +98,7 @@ def generate_signals(prices):
                 entry_price[i] = entry_price[i-1]  # carry forward entry price
         elif position == -1:
             # EXIT SHORT: Price reverts to Camarilla pivot point (PP) OR ATR stoploss hit
-            if close[i] > pp_aligned[i] or close[i] > entry_price[i-1] + 1.5 * atr14[i]:
+            if close[i] > pp_aligned[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
