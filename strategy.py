@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_VolumeSpike_TrendFilter
-Hypothesis: Donchian(20) breakouts with volume confirmation and EMA(50) trend filter capture strong momentum in both bull and bear markets. 
-Volume > 2.0x 20-period average confirms breakout strength. EMA(50) ensures trades align with intermediate-term trend to avoid false breakouts. 
-Position size 0.25 balances risk and limits trade frequency (~20-40/year) to minimize fee drag. Works in bull markets via upward breakouts and 
-in bear markets via downward breakdowns. Uses 4h timeframe with 1d EMA for trend filter to reduce noise.
+1d_KAMA_Trend_Filter
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, making it effective in both trending and ranging conditions.
+On the daily timeframe, KAMA acts as a dynamic trend filter. Price above KAMA indicates an uptrend, below indicates a downtrend.
+Combined with weekly trend confirmation (price above/below weekly EMA34) and volume surge (current volume > 2x 20-day average),
+this strategy aims to capture strong momentum moves while avoiding whipsaws in low-volume or choppy markets.
+Position size is 0.25 to limit risk and trade frequency (~10-20 trades/year).
+Works in bull markets via uptrend continuation and in bear markets via downtrend continuation.
 """
 
-name = "4h_Donchian20_Breakout_VolumeSpike_TrendFilter"
-timeframe = "4h"
+name = "1d_KAMA_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,50 +27,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get weekly data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Calculate KAMA on daily close
+    # Efficiency Ratio (ER) = |Change| / Volatility
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+    # Correct volatility calculation: sum of absolute changes over ER period
+    er_period = 10
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.zeros_like(close)
+    for i in range(er_period, len(close)):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-er_period:i+1])))
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Align KAMA to daily timeframe (no alignment needed as already daily)
+    kama_aligned = kama  # already on daily
+    
+    # Weekly trend filter: EMA(34) on weekly close
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Volume confirmation: current volume > 2.0x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * vol_ma)
-    
-    # 1d trend filter: EMA(50) on close
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):  # Start after warmup
         if position == 0:
-            # LONG: Breakout above Donchian high with volume confirmation and uptrend
-            if (close[i] > donchian_high[i] and 
-                volume_filter[i] and 
-                close[i] > ema50_1d_aligned[i]):
+            # LONG: Price above KAMA and above weekly EMA34 with volume confirmation
+            if (close[i] > kama_aligned[i] and 
+                close[i] > ema34_1w_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below Donchian low with volume confirmation and downtrend
-            elif (close[i] < donchian_low[i] and 
-                  volume_filter[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+            # SHORT: Price below KAMA and below weekly EMA34 with volume confirmation
+            elif (close[i] < kama_aligned[i] and 
+                  close[i] < ema34_1w_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below Donchian high or trend reverses
-            if (close[i] < donchian_high[i]) or \
-               (close[i] < ema50_1d_aligned[i]):
+            # EXIT LONG: Price crosses below KAMA or weekly EMA34
+            if (close[i] < kama_aligned[i]) or \
+               (close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above Donchian low or trend reverses
-            if (close[i] > donchian_low[i]) or \
-               (close[i] > ema50_1d_aligned[i]):
+            # EXIT SHORT: Price crosses above KAMA or weekly EMA34
+            if (close[i] > kama_aligned[i]) or \
+               (close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
