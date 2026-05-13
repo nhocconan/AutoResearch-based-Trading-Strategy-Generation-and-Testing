@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d KAMA trend with RSI mean reversion and chop regime filter.
-# Long when KAMA rising (bullish trend), RSI < 30 (oversold), and choppy market (CHOP > 61.8).
-# Short when KAMA falling (bearish trend), RSI > 70 (overbought), and choppy market (CHOP > 61.8).
-# Exit on opposite RSI extreme (RSI > 70 for longs, RSI < 30 for shorts) or chop regime ends (CHOP < 38.2).
-# Uses 1d primary timeframe and 1w HTF for trend alignment via EMA34.
-# Designed for BTC/ETH with mean reversion in choppy markets, targeting 15-25 trades/year.
+# Hypothesis: 6h Elder Ray + 1d ADX regime filter. Long when Bear Power < 0 (bulls in control) AND 1d ADX > 25 (trending market) AND close > EMA20(6h). Short when Bull Power > 0 (bears in control) AND 1d ADX > 25 AND close < EMA20(6h). Uses EMA13(6h) and EMA13(1d) for power calculation. Designed to capture trending moves with regime filter to avoid whipsaws in ranging markets. Target: 12-30 trades/year.
 
-name = "1d_KAMA_RSI_Chop_Regime_v1"
-timeframe = "1d"
+name = "6h_ElderRay_ADXRegime_1dEMA13_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,97 +17,125 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate ER (Efficiency Ratio) for KAMA over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    change = np.concatenate([[np.nan] * 10, change])  # align length
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # sum of |close[t] - close[t-1]| over 10 periods
-    volatility = pd.Series(volatility).rolling(window=10, min_periods=1).sum().values
-    er = np.where(volatility > 0, change / volatility, 0)
+    # Calculate EMA13 for 6h (for Elder Ray power)
+    close_s = pd.Series(close)
+    ema13_6h = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Smoothing Constants (SC) for KAMA
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # seed at index 9 (after 10 periods)
-    for i in range(10, n):
-        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    delta = np.concatenate([[np.nan], delta])  # align length
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppiness Index (CHOP) over 14 periods
-    # True Range (TR)
+    # Calculate ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Max/Min close over 14 periods
-    max_close = pd.Series(close).rolling(window=14, min_periods=14).max().values
-    min_close = pd.Series(close).rolling(window=14, min_periods=14).min().values
-    chop = np.where(atr_sum > 0, 100 * np.log10(atr_sum / (max_close - min_close)) / np.log10(14), 50)
-    chop = np.where((max_close - min_close) == 0, 50, chop)  # avoid division by zero
+    tr[0] = tr1[0]  # First bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1w data for EMA34 trend filter (MTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for Elder Ray components and ADX
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 1w close
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA13 on 1d close (for Elder Ray power reference)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align HTF arrays to 1d timeframe (wait for completed 1w bar)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate Bull Power and Bear Power for 1d
+    bull_power_1d = high_1d - ema13_1d  # Bull Power = High - EMA13
+    bear_power_1d = low_1d - ema13_1d   # Bear Power = Low - EMA13
+    
+    # Calculate ADX(14) on 1d
+    # True Range
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d[0] = tr1_1d[0]
+    
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed TR, +DM, -DM
+    tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    plus_di_14 = 100 * plus_dm_14 / tr_14
+    minus_di_14 = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx_1d = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align HTF arrays to 6h timeframe (wait for completed 1d bar)
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate EMA20 on 6h for trend filter
+    ema20_6h = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
+    lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(ema20_6h[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: KAMA rising (bullish trend), RSI < 30 (oversold), choppy market (CHOP > 61.8)
-            if kama[i] > kama[i-1] and rsi[i] < 30 and chop[i] > 61.8:
+            # LONG: Bear Power < 0 (bulls in control) AND ADX > 25 (trending) AND close > EMA20
+            if bear_power_1d_aligned[i] < 0 and adx_1d_aligned[i] > 25 and close[i] > ema20_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA falling (bearish trend), RSI > 70 (overbought), choppy market (CHOP > 61.8)
-            elif kama[i] < kama[i-1] and rsi[i] > 70 and chop[i] > 61.8:
+                highest_since_entry[i] = high[i]  # Initialize tracking
+            # SHORT: Bull Power > 0 (bears in control) AND ADX > 25 (trending) AND close < EMA20
+            elif bull_power_1d_aligned[i] > 0 and adx_1d_aligned[i] > 25 and close[i] < ema20_6h[i]:
                 signals[i] = -0.25
                 position = -1
+                lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
                 signals[i] = 0.0
+                # Carry forward tracking values when flat
+                if i > 0:
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:
-            # EXIT LONG: RSI > 70 (overbought) OR chop regime ends (CHOP < 38.2)
-            if rsi[i] > 70 or chop[i] < 38.2:
+            # Update highest high since entry
+            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
+            # EXIT LONG: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
+                # Reset tracking when flat
+                highest_since_entry[i] = np.nan
             else:
                 signals[i] = 0.25
+                # Carry forward tracking
+                if i > 0:
+                    highest_since_entry[i] = highest_since_entry[i-1]
         elif position == -1:
-            # EXIT SHORT: RSI < 30 (oversold) OR chop regime ends (CHOP < 38.2)
-            if rsi[i] < 30 or chop[i] < 38.2:
+            # Update lowest low since entry
+            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
+            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
+                # Reset tracking when flat
+                lowest_since_entry[i] = np.nan
             else:
                 signals[i] = -0.25
+                # Carry forward tracking
+                if i > 0:
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
     
     return signals
