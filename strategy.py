@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_RSI_Trend_Filter_v1
-Hypothesis: RSI(14) on 6h timeframe with 1d trend filter and volume confirmation
-captures momentum swings while avoiding false signals in ranging markets.
-Long when RSI > 55 and above 1d EMA50 with volume spike.
-Short when RSI < 45 and below 1d EMA50 with volume spike.
-Exit when RSI returns to neutral zone (45-55).
-Designed for 15-25 trades/year to minimize fee drag in both bull and bear markets.
+4h_Momentum_Confluence_Strategy
+Hypothesis: Combining momentum (MACD), trend (ADX), and volume confirmation on 4H timeframe
+creates robust entries in both bull and bear markets. Uses ETH/BTC-proven indicators with
+strict entry conditions to limit trades (~20-35/year) and avoid fee drag. Exits on momentum
+reversal or trend exhaustion. Position size 0.25 balances risk and return.
 """
 
-name = "6h_RSI_Trend_Filter_v1"
-timeframe = "6h"
+name = "4h_Momentum_Confluence_Strategy"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,59 +20,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # MACD calculation (12,26,9)
+    close_s = pd.Series(close)
+    ema12 = close_s.ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = close_s.ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # ADX calculation (14-period)
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume confirmation: current volume > 1.8x 24-period average (6 days on 6h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (pd.Series(atr).rolling(window=14, min_periods=14).sum().values + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (pd.Series(atr).rolling(window=14, min_periods=14).sum().values + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
+    
+    # Trend filter: EMA50 on 4H
+    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(50, n):
         if position == 0:
-            # LONG: RSI > 55 with volume confirmation and uptrend
-            if (rsi[i] > 55 and 
-                volume_filter[i] and 
-                close[i] > ema50_1d_aligned[i]):
+            # LONG: MACD bullish crossover + ADX > 20 (trending) + above EMA50 + volume
+            if (macd_line[i] > signal_line[i] and 
+                macd_line[i-1] <= signal_line[i-1] and
+                adx[i] > 20 and 
+                close[i] > ema50[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI < 45 with volume confirmation and downtrend
-            elif (rsi[i] < 45 and 
-                  volume_filter[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+            # SHORT: MACD bearish crossover + ADX > 20 + below EMA50 + volume
+            elif (macd_line[i] < signal_line[i] and 
+                  macd_line[i-1] >= signal_line[i-1] and
+                  adx[i] > 20 and 
+                  close[i] < ema50[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral zone or trend reverses
-            if (rsi[i] < 45) or (close[i] < ema50_1d_aligned[i]):
+            # EXIT LONG: MACD bearish crossover or ADX weakens (<20) or price below EMA50
+            if (macd_line[i] < signal_line[i] and 
+                macd_line[i-1] >= signal_line[i-1]) or \
+               adx[i] < 20 or \
+               close[i] < ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral zone or trend reverses
-            if (rsi[i] > 55) or (close[i] > ema50_1d_aligned[i]):
+            # EXIT SHORT: MACD bullish crossover or ADX weakens or price above EMA50
+            if (macd_line[i] > signal_line[i] and 
+                macd_line[i-1] <= signal_line[i-1]) or \
+               adx[i] < 20 or \
+               close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
