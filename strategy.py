@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Camarilla pivot level R1/S1 breakouts with 1d trend filter and volume spike capture mean-reversion bounces in ranging markets and breakouts in trending markets. Works in both bull and bear by combining pivot-based mean reversion with trend alignment.
-Target: 25-40 trades/year per symbol.
+6h_WeeklyPivot_Donchian_Breakout_Trend_Volume
+Hypothesis: Weekly pivot levels (from 1w) act as strong support/resistance. 
+Donchian breakouts (20-period) in the direction of weekly pivot bias with volume confirmation 
+work in both bull and bear markets. Weekly pivot provides structural context, 
+Donchian captures breakouts, volume confirms conviction. 
+Target: 15-35 trades/year per symbol.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Donchian_Breakout_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,81 +18,83 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Donchian Channel: 20-period high/low
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Weekly pivot levels (from 1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # Calculate weekly pivot points: (H+L+C)/3
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    pivot_point = typical_price.values
+    # Support 1: 2*P - H
+    support_1 = (2 * pivot_point) - df_1w['high'].values
+    # Resistance 1: 2*P - L
+    resistance_1 = (2 * pivot_point) - df_1w['low'].values
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Weekly trend bias: price above/below pivot
+    weekly_bullish = df_1w['close'].values > pivot_point
+    weekly_bearish = df_1w['close'].values < pivot_point
     
-    # Align to 4h timeframe (levels valid for entire day)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align weekly data to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
+    support_1_aligned = align_htf_to_ltf(prices, df_1w, support_1)
+    resistance_1_aligned = align_htf_to_ltf(prices, df_1w, resistance_1)
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
     
-    # 1d trend filter: EMA50
-    ema_50_1d = pd.Series(prev_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = prev_close > ema_50_1d
-    downtrend_1d = prev_close < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    
-    # Volume confirmation: volume > 1.5 * 24-period average (6h)
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if any required data is not available
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
-            signals[i] = 0.0
-            continue
-            
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
+    for i in range(20, n):
+        # Get values
+        dh = donch_high[i]
+        dl = donch_low[i]
+        pivot = pivot_aligned[i]
+        sup1 = support_1_aligned[i]
+        res1 = resistance_1_aligned[i]
+        w_bull = weekly_bullish_aligned[i]
+        w_bear = weekly_bearish_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: break above R1 with 1d uptrend and volume confirmation
-            if close[i] > r1_val and uptrend and vol_conf:
+            # LONG: Donchian breakout above resistance with weekly bullish bias and volume
+            if close[i] > dh and w_bull and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1 with 1d downtrend and volume confirmation
-            elif close[i] < s1_val and downtrend and vol_conf:
+            # SHORT: Donchian breakdown below support with weekly bearish bias and volume
+            elif close[i] < dl and w_bear and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to S1 or 1d trend turns down
-            if close[i] < s1_val or not uptrend:
+            # EXIT LONG: price returns to pivot or weekly bias turns bearish
+            if close[i] <= pivot or not w_bull:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to R1 or 1d trend turns up
-            if close[i] > r1_val or not downtrend:
+            # EXIT SHORT: price returns to pivot or weekly bias turns bullish
+            if close[i] >= pivot or not w_bear:
                 signals[i] = 0.0
                 position = 0
             else:
