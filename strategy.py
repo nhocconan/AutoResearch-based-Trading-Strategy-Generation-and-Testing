@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4H_CAMARILLA_R1_S1_BREAKOUT_1D_EMA34_VOLUME_SPIKE
-# Hypothesis: Enter long when price breaks above R1 Camarilla pivot with daily EMA34 uptrend and volume spike; short when breaks below S1 with daily downtrend and volume spike.
-# Camarilla levels from daily timeframe provide institutional support/resistance. Breakouts with volume confirm institutional participation.
-# EMA34 trend filter ensures alignment with higher timeframe momentum. Works in bull (breakouts above R1 in uptrend) and bear (breakdowns below S1 in downtrend).
-# Low frequency due to strict breakout + volume + trend requirements.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Price breaks above/below Camarilla R1/S1 levels from the previous day in the direction of 1d EMA34 trend, confirmed by volume spike.
+# Camarilla levels provide precise intraday support/resistance derived from prior day's range.
+# Trend filter ensures alignment with higher timeframe momentum, reducing false breakouts in choppy markets.
+# Volume spike confirms institutional participation. Works in bull (breaks above R1 in uptrend) and bear (breaks below S1 in downtrend).
+# Low frequency due to requirement of Camarilla level touch + volume spike + trend alignment.
 
-name = "4H_CAMARILLA_R1_S1_BREAKOUT_1D_EMA34_VOLUME_SPIKE"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,34 +24,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivots and trend
+    # Get daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily OHLC for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Camarilla pivot levels (R1, S1) from previous day
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R1 = C + Range * 1.1 / 12
-    # S1 = C - Range * 1.1 / 12
-    # We use previous day's values to avoid look-ahead
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan  # First day has no previous
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    rang = prev_high - prev_low
-    r1 = prev_close + rang * 1.1 / 12
-    s1 = prev_close - rang * 1.1 / 12
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
     # Daily trend: EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Align daily indicators to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
@@ -88,14 +75,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S1 OR trend reversal
+            # EXIT LONG: Close below S1 or trend reversal
             if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R1 OR trend reversal
+            # EXIT SHORT: Close above R1 or trend reversal
             if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
