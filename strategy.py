@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 1h_4H_1D_RSI_Reversal_v1
-# Hypothesis: Use 4h RSI for momentum direction and 1d RSI for overbought/oversold extremes.
-# Enter long when 4h RSI > 50 (bullish momentum) and 1d RSI < 30 (oversold) with price near 1h VWAP.
-# Enter short when 4h RSI < 50 (bearish momentum) and 1d RSI > 70 (overbought) with price near 1h VWAP.
-# Exit on opposite 1d RSI extreme or momentum reversal.
-# Designed for low-frequency, high-conviction trades in ranging and trending markets.
-# Uses 1h only for entry timing via VWAP proximity, reducing false signals.
+# 12h_1d_Camarilla_R3S3_Breakout_Trend
+# Hypothesis: Use Camarilla R3/S3 levels from daily candles as breakout levels with daily trend filter and volume confirmation.
+# Long when price breaks above R3 with daily uptrend and volume spike.
+# Short when price breaks below S3 with daily downtrend and volume spike.
+# Exit on opposite Camarilla level or trend reversal.
+# Designed to capture trends with controlled frequency to avoid fee drag.
 
-name = "1h_4H_1D_RSI_Reversal_v1"
-timeframe = "1h"
+name = "12h_1d_Camarilla_R3S3_Breakout_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,50 +24,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate 1h VWAP for entry timing
-    vwap_num = (high + low + close) / 3 * volume
-    vwap_den = volume
-    vwap = np.nancumsum(vwap_num) / np.nancumsum(vwap_den)
-    # For first bar, avoid division by zero
-    vwap[0] = (high[0] + low[0] + close[0]) / 3
-
-    # Get 4h data for momentum RSI
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # RSI(14) on 4h
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs))
-    # RSI > 50 = bullish momentum, < 50 = bearish
-
-    # Get 1d data for extreme RSI
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Camarilla levels (R3, S3) from previous day
+    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.125*(high-low)
+    #          S3 = close - 1.125*(high-low), S4 = close - 1.5*(high-low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # RSI(14) on 1d
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
-    avg_gain_1d = pd.Series(gain_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_1d = pd.Series(loss_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_1d = avg_gain_1d / (avg_loss_1d + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    # RSI < 30 = oversold, > 70 = overbought
-
-    # Align 4h and 1d indicators to 1h
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-
+    
+    # Shift by 1 to use previous day's levels (no look-ahead)
+    high_1d_prev = np.roll(high_1d, 1)
+    low_1d_prev = np.roll(low_1d, 1)
+    close_1d_prev = np.roll(close_1d, 1)
+    high_1d_prev[0] = np.nan
+    low_1d_prev[0] = np.nan
+    close_1d_prev[0] = np.nan
+    
+    # Calculate Camarilla levels for previous day
+    range_1d = high_1d_prev - low_1d_prev
+    R3 = close_1d_prev + 1.125 * range_1d
+    S3 = close_1d_prev - 1.125 * range_1d
+    
+    # 1d trend filter: EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume spike: volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.5 * vol_ma_20
+    
+    # Align 1d indicators to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vwap[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,39 +73,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Price near VWAP (within 0.5%)
-        price_near_vwap = abs(close[i] - vwap[i]) / vwap[i] < 0.005
-
-        # Momentum and extreme conditions
-        rsi_4h_bullish = rsi_4h_aligned[i] > 50
-        rsi_4h_bearish = rsi_4h_aligned[i] < 50
-        rsi_1d_oversold = rsi_1d_aligned[i] < 30
-        rsi_1d_overbought = rsi_1d_aligned[i] > 70
+        # Breakout conditions
+        price_above_R3 = close[i] > R3_aligned[i]
+        price_below_S3 = close[i] < S3_aligned[i]
+        
+        # Trend conditions
+        uptrend = close[i] > ema34_1d_aligned[i]
+        downtrend = close[i] < ema34_1d_aligned[i]
+        
+        # Volume confirmation
+        vol_spike = volume_spike[i]
 
         if position == 0:
-            # LONG: 4h bullish momentum + 1d oversold + price near VWAP
-            if rsi_4h_bullish and rsi_1d_oversold and price_near_vwap:
-                signals[i] = 0.20
+            # LONG: Price breaks above R3 + uptrend + volume spike
+            if price_above_R3 and uptrend and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 4h bearish momentum + 1d overbought + price near VWAP
-            elif rsi_4h_bearish and rsi_1d_overbought and price_near_vwap:
-                signals[i] = -0.20
+            # SHORT: Price breaks below S3 + downtrend + volume spike
+            elif price_below_S3 and downtrend and vol_spike:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 1d RSI > 70 (overbought) or 4h momentum turns bearish
-            if rsi_1d_aligned[i] > 70 or not rsi_4h_bullish:
+            # EXIT LONG: Price breaks below S3 OR trend reversal
+            if price_below_S3 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 1d RSI < 30 (oversold) or 4h momentum turns bullish
-            if rsi_1d_aligned[i] < 30 or not rsi_4h_bearish:
+            # EXIT SHORT: Price breaks above R3 OR trend reversal
+            if price_above_R3 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
