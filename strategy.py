@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 1d_Keltner_Breakout_1wTrend
-# Hypothesis: Keltner Channel breakout with weekly trend filter captures strong trends
-# while avoiding whipsaws. Enter long when price closes above upper KC with weekly
-# uptrend (price > weekly EMA50). Enter short when price closes below lower KC with
-# weekly downtrend. Exit on opposite KC touch. Designed for low-frequency, high-conviction
-# trades on daily timeframe to minimize fee drag and work in both bull and bear markets.
-# Target: 10-25 trades/year per symbol.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Camarilla pivot R3/S3 breakouts provide high-probability breakouts with clear levels.
+# Combine with 1d EMA34 trend filter and volume spike to avoid false breakouts.
+# Works in bull markets (long R3 breaks) and bear markets (short S3 breaks).
+# Target: 20-40 trades/year per symbol.
 
-name = "1d_Keltner_Breakout_1wTrend"
-timeframe = "1d"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,50 +21,54 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
 
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Keltner Channel (20, 2.0) on daily data
-    atr_period = 20
-    kc_multiplier = 2.0
-    ema_period = 20
+    # Calculate Camarilla levels from previous day
+    # Using previous day's high, low, close (shifted by 1)
+    ph = np.roll(high_1d, 1)  # previous day high
+    pl = np.roll(low_1d, 1)   # previous day low
+    pc = np.roll(close_1d, 1) # previous day close
+    ph[0] = high_1d[0]  # First day uses current day
+    pl[0] = low_1d[0]
+    pc[0] = close_1d[0]
 
-    # True Range
-    tr0 = np.abs(high - low)
-    tr1 = np.abs(high - np.roll(close, 1))
-    tr2 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr0, np.maximum(tr1, tr2))
-    tr[0] = tr0[0]
+    pivot = (ph + pl + pc) / 3
+    range_ = ph - pl
 
-    # ATR
-    atr = np.zeros(n)
-    for i in range(atr_period, n):
-        atr[i] = np.mean(tr[i-atr_period:i])
+    # Camarilla levels
+    r3 = pivot + (range_ * 1.1 / 2)
+    s3 = pivot - (range_ * 1.1 / 2)
 
-    # EMA (middle line)
-    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
 
-    # Upper and Lower KC
-    kc_upper = ema + kc_multiplier * atr
-    kc_lower = ema - kc_multiplier * atr
+    # 1d EMA34 for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Weekly EMA50 for trend filter
-    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Volume confirmation: current volume > 1.8 x 24-period average (more selective)
+    vol_ma = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
+    volume_spike = volume > (1.8 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(max(atr_period, ema_period) + 1, n):
-        # Skip if data not ready
-        if np.isnan(atr[i]) or np.isnan(ema[i]) or np.isnan(ema_1w_aligned[i]):
+    for i in range(24, n):
+        # Skip if data is not ready
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,26 +77,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above upper KC with weekly uptrend
-            if close[i] > kc_upper[i] and close[i] > ema_1w_aligned[i]:
+            # LONG: Close breaks above R3 with volume spike and 1d EMA uptrend
+            if close[i] > r3_aligned[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below lower KC with weekly downtrend
-            elif close[i] < kc_lower[i] and close[i] < ema_1w_aligned[i]:
+            # SHORT: Close breaks below S3 with volume spike and 1d EMA downtrend
+            elif close[i] < s3_aligned[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Touch or cross below lower KC
-            if close[i] < kc_lower[i]:
+            # EXIT LONG: Close below S3 (reversal signal)
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Touch or cross above upper KC
-            if close[i] > kc_upper[i]:
+            # EXIT SHORT: Close above R3 (reversal signal)
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
