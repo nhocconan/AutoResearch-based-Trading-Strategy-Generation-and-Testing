@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
-Hypothesis: Hourly Camarilla R1/S1 breakouts with 4h trend (EMA50) and 1d volume confirmation capture intraday momentum.
-Works in bull (breakouts with trend) and bear (mean reversion at extremes via trend filter) by using 4h trend filter.
-1h timeframe with 4h/1d filters reduces noise; target 15-35 trades/year to avoid fee drag.
+6h_Weekly_High_Low_Pullback_Trend
+Hypothesis: In trending markets, price pulls back to weekly highs/lows before continuing the trend.
+Buy near weekly low in uptrend, sell near weekly high in downtrend. Uses weekly structure for support/resistance
+and 6 EMA for trend filter. Works in bull (buy pullbacks) and bear (sell rallies) markets.
+Target: 20-40 trades/year with strict pullback conditions to avoid overtrading.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_Weekly_High_Low_Pullback_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,72 +25,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h trend: EMA50
-    df_4h = get_htf_data(prices, '4h')
-    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Get weekly data for high/low
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d volume filter: current volume > 1.8x 20-day average
-    df_1d = get_htf_data(prices, '1d')
-    vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_filter = volume > (1.8 * vol_ma_1d_aligned)
+    # Weekly high and low
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # Hourly Camarilla levels from previous hour
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Use previous hour's OHLC to avoid look-ahead
-    hourly_high = np.roll(high, 1)
-    hourly_low = np.roll(low, 1)
-    hourly_close = np.roll(close, 1)
-    hourly_high[0] = high[0]
-    hourly_low[0] = low[0]
-    hourly_close[0] = close[0]
+    # Align weekly high/low to 6h chart (wait for weekly close)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    camarilla_r1 = hourly_close + (hourly_high - hourly_low) * 1.1 / 12.0
-    camarilla_s1 = hourly_close - (hourly_high - hourly_low) * 1.1 / 12.0
+    # Trend filter: 6-period EMA on close
+    ema6 = pd.Series(close).ewm(span=6, adjust=False, min_periods=6).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Pullback definition: price within 0.5% of weekly level
+    pullback_threshold = 0.005
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-            
+    for i in range(50, n):  # Start after warmup
         if position == 0:
-            # LONG: Break above R1 with 4h uptrend and volume confirmation
-            if (close[i] > camarilla_r1[i] and 
-                close[i] > ema50_4h_aligned[i] and 
-                volume_filter[i]):
-                signals[i] = 0.20
+            # LONG: Pullback to weekly low in uptrend (price above EMA6)
+            if (close[i] >= weekly_low_aligned[i] * (1 - pullback_threshold) and
+                close[i] <= weekly_low_aligned[i] * (1 + pullback_threshold) and
+                close[i] > ema6[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 with 4h downtrend and volume confirmation
-            elif (close[i] < camarilla_s1[i] and 
-                  close[i] < ema50_4h_aligned[i] and 
-                  volume_filter[i]):
-                signals[i] = -0.20
+            # SHORT: Pullback to weekly high in downtrend (price below EMA6)
+            elif (close[i] <= weekly_high_aligned[i] * (1 + pullback_threshold) and
+                  close[i] >= weekly_high_aligned[i] * (1 - pullback_threshold) and
+                  close[i] < ema6[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to Camarilla pivot or 4h trend breaks
-            camarilla_pivot = (hourly_high[i] + hourly_low[i] + hourly_close[i]) / 3.0
-            if (close[i] < camarilla_pivot) or (close[i] < ema50_4h_aligned[i]):
+            # EXIT LONG: Trend reversal (price crosses below EMA6) or reached weekly high
+            if (close[i] < ema6[i]) or (close[i] >= weekly_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to Camarilla pivot or 4h trend breaks
-            camarilla_pivot = (hourly_high[i] + hourly_low[i] + hourly_close[i]) / 3.0
-            if (close[i] > camarilla_pivot) or (close[i] > ema50_4h_aligned[i]):
+            # EXIT SHORT: Trend reversal (price crosses above EMA6) or reached weekly low
+            if (close[i] > ema6[i]) or (close[i] <= weekly_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
