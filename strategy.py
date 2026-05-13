@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_Williams_Alligator_Jaw_Teeth_Lips_Trend
-Hypothesis: Williams Alligator (Jaw=13, Teeth=8, Lips=5 SMAs on smoothed median price) identifies trend direction. 
-Go long when Lips > Teeth > Jaw (bullish alignment) + price above Teeth + volume > 1.5x 20-day average.
-Go short when Lips < Teeth < Jaw (bearish alignment) + price below Teeth + volume > 1.5x 20-day average.
-Exit when alignment breaks or price crosses Teeth. Williams Alligator works in both bull (trend following) 
-and bear (catching reversals) markets by filtering noise. Designed for 1d timeframe to limit trades (<25/year) 
-and avoid fee drag. Uses weekly timeframe for trend confirmation to reduce whipsaw.
+6h_Ichimoku_Cloud_Breakout_1dTrend
+Hypothesis: Use Ichimoku cloud from 1d timeframe to determine trend direction, with 6h Tenkan/Kijun cross for entry timing. 
+Long when price above 1d cloud + 6h Tenkan crosses above Kijun. Short when price below 1d cloud + 6h Tenkan crosses below Kijun.
+Exit when price crosses opposite cloud boundary or Tenkan/Kijun reverse. 
+Ichimoku works in both bull (trend following) and bear (counter-trend reversals) markets by capturing momentum shifts.
+Designed for 6h timeframe to limit trades (target: 50-150 total over 4 years) and avoid fee drag.
 """
 
-name = "1d_Williams_Alligator_Jaw_Teeth_Lips_Trend"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Breakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,99 +24,70 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Williams Alligator calculation
+    # Get daily data for Ichimoku cloud calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Williams Alligator uses smoothed median price: (high + low) / 2
-    median_price = (df_1d['high'].values + df_1d['low'].values) / 2
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate SMAs with smoothing (using previous value as in Williams Alligator)
-    # Jaw: 13-period SMMA of median price
-    jaw = np.full_like(median_price, np.nan)
-    teeth = np.full_like(median_price, np.nan)
-    lips = np.full_like(median_price, np.nan)
+    # Calculate Ichimoku components (standard periods: 9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                     pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                    pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_span_a_1d = ((tenkan_sen_1d + kijun_sen_1d) / 2).shift(26)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b_1d = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
+                         pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2).shift(26)
     
-    # Smoothed Moving Average (SMMA) calculation
-    # SMMA today = (SMMA yesterday * (period-1) + price today) / period
-    for i in range(len(median_price)):
-        if i == 0:
-            jaw[i] = median_price[i]
-            teeth[i] = median_price[i]
-            lips[i] = median_price[i]
-        else:
-            if i >= 13:
-                jaw[i] = (jaw[i-1] * 12 + median_price[i]) / 13
-            else:
-                jaw[i] = np.nan
-                
-            if i >= 8:
-                teeth[i] = (teeth[i-1] * 7 + median_price[i]) / 8
-            else:
-                teeth[i] = np.nan
-                
-            if i >= 5:
-                lips[i] = (lips[i-1] * 4 + median_price[i]) / 5
-            else:
-                lips[i] = np.nan
-    
-    # Align Alligator lines to lower timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    
-    # Get weekly trend confirmation (price above/below weekly 50 EMA)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate volume average (20-day) for volume spike filter
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_1d.values)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_1d.values)
+    span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_1d.values)
+    span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_1d.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(52, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
+            np.isnan(span_a_aligned[i]) or np.isnan(span_b_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-day average
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Determine cloud boundaries (Senkou Span A and B)
+        top_cloud = max(span_a_aligned[i], span_b_aligned[i])
+        bottom_cloud = min(span_a_aligned[i], span_b_aligned[i])
         
         if position == 0:
-            # LONG: Bullish alignment (Lips > Teeth > Jaw) + price above Teeth + volume spike + price above weekly EMA50
-            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and 
-                close[i] > teeth_aligned[i] and vol_spike and 
-                close[i] > ema_50_1w_aligned[i]):
+            # LONG: Price above cloud + Tenkan crosses above Kijun
+            if close[i] > top_cloud and tenkan_aligned[i-1] <= kijun_aligned[i-1] and tenkan_aligned[i] > kijun_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish alignment (Lips < Teeth < Jaw) + price below Teeth + volume spike + price below weekly EMA50
-            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and 
-                  close[i] < teeth_aligned[i] and vol_spike and 
-                  close[i] < ema_50_1w_aligned[i]):
+            # SHORT: Price below cloud + Tenkan crosses below Kijun
+            elif close[i] < bottom_cloud and tenkan_aligned[i-1] >= kijun_aligned[i-1] and tenkan_aligned[i] < kijun_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alignment breaks or price crosses below Teeth
-            if not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]) or close[i] < teeth_aligned[i]:
+            # EXIT LONG: Price below cloud OR Tenkan crosses below Kijun
+            if close[i] < bottom_cloud or (tenkan_aligned[i-1] >= kijun_aligned[i-1] and tenkan_aligned[i] < kijun_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alignment breaks or price crosses above Teeth
-            if not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i]) or close[i] > teeth_aligned[i]:
+            # EXIT SHORT: Price above cloud OR Tenkan crosses above Kijun
+            if close[i] > top_cloud or (tenkan_aligned[i-1] <= kijun_aligned[i-1] and tenkan_aligned[i] > kijun_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
