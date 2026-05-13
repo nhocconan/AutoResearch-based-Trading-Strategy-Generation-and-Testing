@@ -1,92 +1,89 @@
 #!/usr/bin/env python3
 """
-12h_WilliamsFractal_Breakout_1dTrend_Volume
-Hypothesis: Daily Williams Fractals identify key support/resistance levels.
-Breakouts above bearish fractals or below bullish fractals with volume confirmation
-and daily trend alignment capture momentum moves. Exit on trend reversal or
-fractal roll. Designed for 12h timeframe to limit trades (~15-25/year) and
-perform in both bull and bear markets via trend filter and volatility-adjusted stops.
+1d_1w_KAMA_Trend_Filter
+Hypothesis: On daily chart, KAMA adapts to market noise - in trending markets it tracks price closely,
+in ranging markets it lags. Combined with 1-week trend filter (EMA50) and volume confirmation,
+this captures strong trends while avoiding whipsaws in ranging markets. Weekly trend filter
+reduces trades in counter-trend periods, improving win rate in both bull and bear markets.
+Position size 0.25 targets 10-25 trades/year to minimize fee drag.
 """
 
-name = "12h_WilliamsFractal_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_1w_KAMA_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams Fractals and trend
-    df_1d = get_htf_data(prices, '1d')
+    # KAUFMAN ADAPTIVE MOVING AVERAGE (KAMA)
+    # Efficiency Ratio = |net change| / sum of absolute changes
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.zeros_like(change)
+    # Avoid division by zero
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
     
-    # Calculate Williams Fractals on daily data
-    bearish_fractal, bullish_fractal = compute_williams_fractals(
-        df_1d['high'].values,
-        df_1d['low'].values
-    )
-    # Williams Fractals require 2 extra daily bars for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bearish_fractal, additional_delay_bars=2
-    )
-    bullish_fractal_aligned = align_htf_to_ltf(
-        prices, df_1d, bullish_fractal, additional_delay_bars=2
-    )
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(
-        span=34, adjust=False, min_periods=34
-    ).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume confirmation: current volume > 1.5x 24-period average (12 days on 12h)
-    vol_ma = pd.Series(volume).rolling(
-        window=24, min_periods=24
-    ).mean().values
+    # Get 1-week data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         if position == 0:
-            # LONG: Breakout above bearish fractal with volume and uptrend
-            if (bearish_fractal_aligned[i] > 0 and  # valid fractal
-                close[i] > bearish_fractal_aligned[i] and
-                volume_filter[i] and
-                close[i] > ema34_1d_aligned[i]):
+            # LONG: Price above KAMA with volume confirmation and weekly uptrend
+            if (close[i] > kama[i] and 
+                volume_filter[i] and 
+                close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below bullish fractal with volume and downtrend
-            elif (bullish_fractal_aligned[i] > 0 and  # valid fractal
-                  close[i] < bullish_fractal_aligned[i] and
-                  volume_filter[i] and
-                  close[i] < ema34_1d_aligned[i]):
+            # SHORT: Price below KAMA with volume confirmation and weekly downtrend
+            elif (close[i] < kama[i] and 
+                  volume_filter[i] and 
+                  close[i] < ema50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal or price below bullish fractal (support)
-            if (close[i] < ema34_1d_aligned[i]) or \
-               (bullish_fractal_aligned[i] > 0 and close[i] < bullish_fractal_aligned[i]):
+            # EXIT LONG: Price crosses below KAMA or weekly trend turns down
+            if (close[i] < kama[i]) or \
+               (close[i] < ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal or price above bearish fractal (resistance)
-            if (close[i] > ema34_1d_aligned[i]) or \
-               (bearish_fractal_aligned[i] > 0 and close[i] > bearish_fractal_aligned[i]):
+            # EXIT SHORT: Price crosses above KAMA or weekly trend turns up
+            if (close[i] > kama[i]) or \
+               (close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
