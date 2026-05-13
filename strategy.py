@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h HMA21 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 and close > 4h HMA21 with volume > 2.0x 20-bar average.
-# Short when price breaks below Camarilla S3 and close < 4h HMA21 with volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.20 to target 60-150 total trades over 4 years on 1h timeframe.
-# Uses 4h for signal direction (trend and Camarilla levels), 1h only for entry timing.
-# Session filter (08-20 UTC) to reduce noise trades.
-# Camarilla R3/S3 are stronger intraday levels than R1/S1, reducing false breakouts.
-# 4h HMA21 ensures higher timeframe trend alignment; volume spike confirms momentum.
-# This variant targets fewer, higher-quality trades to avoid fee drag while maintaining edge in both bull and bear markets.
+# Hypothesis: 6h Donchian(20) breakout with 1w EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above 6h Donchian upper channel and close > 1w EMA50 with volume > 2.0x 20-bar average.
+# Short when price breaks below 6h Donchian lower channel and close < 1w EMA50 with volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 6h timeframe.
+# 1w EMA50 provides strong higher timeframe trend alignment; volume spike confirms momentum.
+# This strategy aims for fewer, higher-quality trades to avoid fee drag while maintaining edge in both bull and bear markets.
 
-name = "1h_Camarilla_R3_S3_Breakout_4hHMA21_Trend_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_Donchian20_1wEMA50_Trend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -27,90 +24,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC) to avoid per-bar datetime operations
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    
-    # Calculate 4h HMA21 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    hma_21_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_21_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_21_4h)
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla levels from previous 4h day (using 4h data)
-    # Camarilla R3 = close_prev + (high_prev - low_prev) * 1.1/4
-    # Camarilla S3 = close_prev - (high_prev - low_prev) * 1.1/4
-    close_prev = df_4h['close'].shift(1).values
-    high_prev = df_4h['high'].shift(1).values
-    low_prev = df_4h['low'].shift(1).values
-    camarilla_r3 = close_prev + (high_prev - low_prev) * 1.1 / 4
-    camarilla_s3 = close_prev - (high_prev - low_prev) * 1.1 / 4
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    # Calculate 6h Donchian channels (20-period)
+    lookback = 20
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    donchian_lower = low_series.rolling(window=lookback, min_periods=lookback).min().shift(1).values
     
     # Calculate average volume for confirmation (20-period)
-    lookback = 20
     avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(lookback, n):  # Start after sufficient data
-        # Session filter: only trade between 08:00 and 20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(hma_21_4h_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R3, close > 4h HMA21, volume spike
-            if (high[i] > camarilla_r3_aligned[i] and 
-                close[i] > hma_21_4h_aligned[i] and 
+            # LONG: Price breaks above Donchian upper, close > 1w EMA50, volume spike
+            if (high[i] > donchian_upper[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S3, close < 4h HMA21, volume spike
-            elif (low[i] < camarilla_s3_aligned[i] and 
-                  close[i] < hma_21_4h_aligned[i] and 
+            # SHORT: Price breaks below Donchian lower, close < 1w EMA50, volume spike
+            elif (low[i] < donchian_lower[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S3 OR volume drops below average
-            if (low[i] < camarilla_s3_aligned[i] or 
+            # EXIT LONG: Price breaks below Donchian lower OR volume drops below average
+            if (low[i] < donchian_lower[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R3 OR volume drops below average
-            if (high[i] > camarilla_r3_aligned[i] or 
+            # EXIT SHORT: Price breaks above Donchian upper OR volume drops below average
+            if (high[i] > donchian_upper[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    if len(close) < period:
-        return np.full_like(close, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    wma_half = pd.Series(close).ewm(span=half_period, adjust=False).mean()
-    wma_full = pd.Series(close).ewm(span=period, adjust=False).mean()
-    raw_hma = 2 * wma_half - wma_full
-    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
-    return hma.values
