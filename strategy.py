@@ -1,9 +1,10 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 12h_Camarilla_R3S3_Breakout_1wTrend_Volume
-# Hypothesis: Use weekly R3/S3 breakout with 1w EMA trend filter and volume confirmation on 12h chart. Targets 15-25 trades/year to minimize fee drift. Weekly trend avoids 2022 whipsaw; R3/S3 reduce false breaks. Volume >2x 20-period average confirms momentum.
+# 4h_VolumeSpike_InsideBar_Breakout
+# Hypothesis: Breakout of inside bar (IB) with volume spike (>2x 20-bar avg) and price > 200-period SMA (trend filter). Works in bull/bear by requiring trend alignment. Inside bar provides low-risk entry, volume confirms breakout strength. Target ~25 trades/year on 4h to minimize fee drag.
 
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_VolumeSpike_InsideBar_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 210:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,36 +21,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend and pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 200-period SMA for trend filter (using close)
+    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
 
-    # Weekly R3/S3 from prior weekly candle
-    pp = (high_1w + low_1w + close_1w) / 3.0
-    r3 = close_1w + (high_1w - low_1w) * 1.1 / 4.0
-    s3 = close_1w - (high_1w - low_1w) * 1.1 / 4.0
+    # Inside bar detection: current high <= previous high AND current low >= previous low
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    inside_bar = (high <= prev_high) & (low >= prev_low)
+    inside_bar[0] = False  # first bar has no previous
 
-    # Align to 12h
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3)
-
-    # Weekly EMA50 trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-
-    # Volume confirmation: >2x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+    for i in range(200, n):
+        # Skip if any required value is NaN
+        if np.isnan(sma200[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,30 +47,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above weekly R3 + above weekly EMA50 + volume spike
-            if (close[i] > r3_1w_aligned[i] and
-                close[i] > ema50_1w_aligned[i] and
-                volume[i] > vol_avg_20[i] * 2.0):
+            # LONG: Inside bar breakout up + volume spike + price > SMA200
+            if (inside_bar[i] and 
+                high[i] > prev_high[i] and  # break above inside bar high
+                volume[i] > vol_avg_20[i] * 2.0 and
+                close[i] > sma200[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below weekly S3 + below weekly EMA50 + volume spike
-            elif (close[i] < s3_1w_aligned[i] and
-                  close[i] < ema50_1w_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 2.0):
+            # SHORT: Inside bar breakout down + volume spike + price < SMA200
+            elif (inside_bar[i] and 
+                  low[i] < prev_low[i] and  # break below inside bar low
+                  volume[i] > vol_avg_20[i] * 2.0 and
+                  close[i] < sma200[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below weekly EMA50
-            if close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Close crosses below inside bar low (trailing stop)
+            if close[i] < prev_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above weekly EMA50
-            if close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Close crosses above inside bar high
+            if close[i] > prev_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
