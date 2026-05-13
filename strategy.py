@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 > EMA89 trend filter and volume confirmation (>1.5x avg volume). 
-# Uses ATR(20) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
-# EMA trend filter ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Camarilla R1/S1 levels provide institutional breakout/breakdown points with proven efficacy on BTC/ETH.
-# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
+# Hypothesis: 6h Williams Alligator + 1d EMA50 trend filter + volume confirmation (>1.3x avg volume). 
+# The Alligator (jaw/teeth/lips) identifies trend absence/presence via SMAs with offsets.
+# Long when lips > teeth > jaw (bullish alignment) + price > lips + 1d EMA50 up + volume spike.
+# Short when lips < teeth < jaw (bearish alignment) + price < lips + 1d EMA50 down + volume spike.
+# Uses ATR(20) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+# Alligator filters choppy markets; EMA50 ensures higher timeframe trend alignment.
+# Works in bull markets via trend-following entries and in bear markets via shorting with trend filter.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMATrend_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_1dEMA50_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -35,39 +37,27 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Camarilla pivot calculation and EMA trend filter
+    # Williams Alligator: jaw(13,8), teeth(8,5), lips(5,3) - all SMAs with forward shift
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)  # shift forward by 8 bars
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)  # shift forward by 5 bars
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)  # shift forward by 3 bars
+    
+    jaw = jaw.values
+    teeth = teeth.values
+    lips = lips.values
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # R1 = close + ((high - low) * 1.1 / 12)
-    # S1 = close - ((high - low) * 1.1 / 12)
-    camarilla_r1 = np.full(len(close_1d), np.nan)
-    camarilla_s1 = np.full(len(close_1d), np.nan)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    for i in range(1, len(close_1d)):
-        # Use previous day's data to calculate today's levels
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        
-        camarilla_r1[i] = prev_close + ((prev_high - prev_low) * 1.1 / 12)
-        camarilla_s1[i] = prev_close - ((prev_high - prev_low) * 1.1 / 12)
-    
-    # Align Camarilla levels to 4h timeframe (wait for daily bar to close)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Calculate 1d EMA34 and EMA89 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_1d = close_1d_series.ewm(span=89, adjust=False, min_periods=89).mean().values
-    
-    # Align 1d EMAs to 4h timeframe (wait for daily bar to close)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    ema89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
+    # Align 1d EMA50 to 6h timeframe (wait for daily bar to close)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,24 +66,25 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema89_1d_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 AND 1d EMA34 > EMA89 AND volume > 1.5x average
-            if (close[i] > camarilla_r1_aligned[i] and 
-                ema34_1d_aligned[i] > ema89_1d_aligned[i] and 
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Lips > Teeth > Jaw (bullish alignment) AND price > lips AND 1d EMA50 up AND volume > 1.3x average
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
+                close[i] > lips[i] and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and 
+                volume[i] > 1.3 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Camarilla S1 AND 1d EMA34 < EMA89 AND volume > 1.5x average
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  ema34_1d_aligned[i] < ema89_1d_aligned[i] and 
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Lips < Teeth < Jaw (bearish alignment) AND price < lips AND 1d EMA50 down AND volume > 1.3x average
+            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
+                  close[i] < lips[i] and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and 
+                  volume[i] > 1.3 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -106,8 +97,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -121,8 +112,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
