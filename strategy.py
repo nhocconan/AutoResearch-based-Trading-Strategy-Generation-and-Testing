@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 and close > 1d EMA34 with volume > 1.5x 20-bar average.
-# Short when price breaks below S3 and close < 1d EMA34 with volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 12h timeframe.
-# Designed to capture strong trending moves while filtering choppy markets via 1d EMA trend and volume spike confirmation.
-# Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA34 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel and close > 12h EMA34 with volume > 1.5x 20-bar average.
+# Short when price breaks below lower Donchian channel and close < 12h EMA34 with volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to target 75-200 total trades over 4 years on 4h timeframe.
+# Designed to capture strong trending moves while filtering choppy markets via 12h EMA trend and volume spike confirmation.
+# Works in both bull and bear markets by following the 12h trend direction.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Donchian20_12hEMA34_Trend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,39 +23,28 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    lookback = 20  # for volume average and Camarilla calculation
+    lookback = 20  # for Donchian and volume average
     
-    # Calculate Camarilla levels (based on previous bar's OHLC)
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Calculate Donchian channels (20-period) - use shift(1) to avoid look-ahead
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
     
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + camarilla_range * 1.1 / 4
-    s3 = prev_close - camarilla_range * 1.1 / 4
-    
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA(34) on 1d close
-    if len(close_1d) < 34:
-        ema_34_1d = np.full(len(close_1d), np.nan)
+    # Calculate EMA(34) on 12h close
+    if len(close_12h) < 34:
+        ema_34_12h = np.full(len(close_12h), np.nan)
     else:
-        ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+        ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 12h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 12h EMA to 4h timeframe (wait for 12h bar to close)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
@@ -65,37 +54,37 @@ def generate_signals(prices):
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3, close > 1d EMA34, volume spike
-            if (high[i] > r3[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # LONG: Price breaks above upper Donchian, close > 12h EMA34, volume spike
+            if (high[i] > highest_high[i] and 
+                close[i] > ema_34_12h_aligned[i] and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3, close < 1d EMA34, volume spike
-            elif (low[i] < s3[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # SHORT: Price breaks below lower Donchian, close < 12h EMA34, volume spike
+            elif (low[i] < lowest_low[i] and 
+                  close[i] < ema_34_12h_aligned[i] and 
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 OR volume dries up (< 0.8x average)
-            if (low[i] < s3[i] or 
+            # EXIT LONG: Price breaks below lower Donchian OR volume dries up (< 0.8x average)
+            if (low[i] < lowest_low[i] or 
                 volume[i] < 0.8 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 OR volume dries up (< 0.8x average)
-            if (high[i] > r3[i] or 
+            # EXIT SHORT: Price breaks above upper Donchian OR volume dries up (< 0.8x average)
+            if (high[i] > highest_high[i] or 
                 volume[i] < 0.8 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
