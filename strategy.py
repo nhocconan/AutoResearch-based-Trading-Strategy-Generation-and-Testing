@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h KAMA trend + RSI mean reversion + volume confirmation + chop regime filter.
-# Uses 1d EMA50/EMA200 for trend alignment and ATR(20) trailing stop (2.0x) for risk control.
-# Discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
-# KAMA adapts to market noise, reducing whipsaw in choppy markets. RSI(14) < 30/ > 70 provides
-# mean reversion entries within the trend. Volume confirmation (>1.5x) ensures participation.
-# Chop regime filter (CHOP > 61.8) avoids trending markets where mean reversion fails.
-# Works in bull markets via trend-aligned mean reversion longs and in bear markets via shorts.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 > EMA200 trend filter and volume confirmation (>1.6x avg volume).
+# Uses ATR(20) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# Target: 80-180 total trades over 4 years (20-45/year) on 4h timeframe.
+# EMA trend filter on 12h ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
+# Camarilla R3/S3 levels provide stronger breakout/breakdown points than R1/S1, reducing false signals.
+# Volume confirmation (>1.6x) ensures breakouts have institutional participation.
+# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
 
-name = "12h_KAMA_RSI_VolumeChop_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hEMATrend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -30,51 +30,49 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate KAMA(10,2,30) - ER = 10, Fast = 2, Slow = 30
-    close_s = pd.Series(close)
-    change = np.abs(close_s.diff(10).values)
-    volatility = np.abs(close_s.diff(1)).rolling(window=10, min_periods=10).sum().values
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate RSI(14)
-    delta = close_s.diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 12h EMA50 and EMA200 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_12h = close_12h_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate Choppiness Index(14)
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr14 / (hh - ll)) / np.log10(14)
-    chop = np.where((hh - ll) != 0, chop, 50)  # Avoid division by zero
+    # Align 12h EMAs to 4h timeframe (wait for 12h bar to close)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 and EMA200 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # R3 = close + ((high - low) * 1.1 / 4)
+    # S3 = close - ((high - low) * 1.1 / 4)
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
     
-    # Align 1d EMAs to 12h timeframe (wait for 1d bar to close)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    for i in range(1, len(close_1d)):
+        # Use previous 1d bar's data to calculate current levels
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        
+        camarilla_r3[i] = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+        camarilla_s3[i] = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,28 +81,24 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema200_12h_aligned[i]) or 
             np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > KAMA AND RSI < 30 (oversold) AND EMA50 > EMA200 AND CHOP > 61.8 (choppy) AND volume > 1.5x average
-            if (close[i] > kama[i] and 
-                rsi[i] < 30 and 
-                ema50_1d_aligned[i] > ema200_1d_aligned[i] and 
-                chop[i] > 61.8 and 
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Price breaks above Camarilla R3 AND 12h EMA50 > EMA200 AND volume > 1.6x average
+            if (close[i] > camarilla_r3_aligned[i] and 
+                ema50_12h_aligned[i] > ema200_12h_aligned[i] and 
+                volume[i] > 1.6 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < KAMA AND RSI > 70 (overbought) AND EMA50 < EMA200 AND CHOP > 61.8 (choppy) AND volume > 1.5x average
-            elif (close[i] < kama[i] and 
-                  rsi[i] > 70 and 
-                  ema50_1d_aligned[i] < ema200_1d_aligned[i] and 
-                  chop[i] > 61.8 and 
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Price breaks below Camarilla S3 AND 12h EMA50 < EMA200 AND volume > 1.6x average
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  ema50_12h_aligned[i] < ema200_12h_aligned[i] and 
+                  volume[i] > 1.6 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
