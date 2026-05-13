@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Ichimoku_TK_Cross_WeeklyTrend
-Hypothesis: Ichimoku Tenkan-Kijun cross on daily with weekly trend filter (price above/below weekly Kumo) captures major trend changes while avoiding whipsaws. Works in bull/bear via trend filter and avoids chop via Kumo twist. Designed for low trade frequency (<25/year) to minimize fee drag on 1d timeframe.
+6h_ADX_Alligator_BullBear_Power
+Hypothesis: Combines ADX for trend strength, Williams Alligator for directional bias, and Elder Ray's Bull/Bear Power for momentum confirmation. Works in both bull and bear markets by using Alligator jaws-teeth-lips alignment to determine trend direction, ADX to filter weak trends, and Bull/Bear Power to confirm momentum behind the move. Designed for low trade frequency (~20-40/year) to minimize fee drag.
 """
 
-name = "1d_Ichimoku_TK_Cross_WeeklyTrend"
-timeframe = "1d"
+name = "6h_ADX_Alligator_BullBear_Power"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,83 +14,146 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:  # Need at least 52 days for weekly calculations
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1d data for Alligator and ADX (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Ichimoku components on daily data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Williams Alligator on 1d: Jaw (13), Teeth (8), Lips (5) SMMA
+    # SMMA (Smoothed Moving Average) approximation using EMA with alpha = 1/period
+    close_1d = df_1d['close'].values
+    jaw_period, teeth_period, lips_period = 13, 8, 5
+    alpha_jaw = 1.0 / jaw_period
+    alpha_teeth = 1.0 / teeth_period
+    alpha_lips = 1.0 / lips_period
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    # Initialize SMMA arrays
+    jaw = np.full_like(close_1d, np.nan)
+    teeth = np.full_like(close_1d, np.nan)
+    lips = np.full_like(close_1d, np.nan)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # First value is simple average
+    jaw[jaw_period-1] = np.mean(close_1d[:jaw_period])
+    teeth[teeth_period-1] = np.mean(close_1d[:teeth_period])
+    lips[lips_period-1] = np.mean(close_1d[:lips_period])
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
+    # Subsequent values: SMMA = (prev_smma * (period-1) + close) / period
+    for i in range(jaw_period, len(close_1d)):
+        jaw[i] = (jaw[i-1] * (jaw_period-1) + close_1d[i]) / jaw_period
+    for i in range(teeth_period, len(close_1d)):
+        teeth[i] = (teeth[i-1] * (teeth_period-1) + close_1d[i]) / teeth_period
+    for i in range(lips_period, len(close_1d)):
+        lips[i] = (lips[i-1] * (lips_period-1) + close_1d[i]) / lips_period
     
-    # Kumo (Cloud) top and bottom
-    kumotop = np.maximum(senkou_a, senkou_b)
-    kumobottom = np.minimum(senkou_a, senkou_b)
+    # Alligator alignment: Bullish when Lips > Teeth > Jaw, Bearish when Lips < Teeth < Jaw
+    alligator_bullish = (lips > teeth) & (teeth > jaw)
+    alligator_bearish = (lips < teeth) & (teeth < jaw)
     
-    # Align weekly Kumo to daily (need to shift forward 26 periods for lookahead avoidance)
-    # Senkou Span A and B are plotted 26 periods ahead
-    senkou_a_weekly = pd.Series(df_weekly['high']).rolling(window=52, min_periods=52).max().values
-    senkou_a_weekly = (senkou_a_weekly + pd.Series(df_weekly['low']).rolling(window=52, min_periods=52).min().values) / 2
-    senkou_b_weekly = pd.Series(df_weekly['high']).rolling(window=26, min_periods=26).max().values
-    senkou_b_weekly = (senkou_b_weekly + pd.Series(df_weekly['low']).rolling(window=26, min_periods=26).min().values) / 2
+    # ADX on 1d to measure trend strength
+    # Calculate True Range
+    tr1 = df_1d['high'][1:].values - df_1d['low'][1:].values
+    tr2 = np.abs(df_1d['high'][1:].values - df_1d['close'][:-1].values)
+    tr3 = np.abs(df_1d['low'][1:].values - df_1d['close'][:-1].values)
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Weekly Kumo components (already forward-shifted by Ichimoku calculation)
-    wk_kumotop = np.maximum(senkou_a_weekly, senkou_b_weekly)
-    wk_kumobottom = np.minimum(senkou_a_weekly, senkou_b_weekly)
+    # Directional Movement
+    up_move = df_1d['high'][1:].values - df_1d['high'][:-1].values
+    down_move = df_1d['low'][:-1].values - df_1d['low'][1:].values
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Align weekly Kumo to daily
-    wk_kumotop_aligned = align_htf_to_ltf(prices, df_weekly, wk_kumotop)
-    wk_kumobottom_aligned = align_htf_to_ltf(prices, df_weekly, wk_kumobottom)
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    adx_period = 14
+    alpha_adx = 1.0 / adx_period
     
+    atr = np.full_like(tr, np.nan)
+    plus_di = np.full_like(tr, np.nan)
+    minus_di = np.full_like(tr, np.nan)
+    
+    # First ATR is average of first 'adx_period' TR values
+    atr[adx_period] = np.nanmean(tr[1:adx_period+1])
+    plus_dm_smooth = np.full_like(plus_dm, np.nan)
+    minus_dm_smooth = np.full_like(minus_dm, np.nan)
+    plus_dm_smooth[adx_period] = np.nansum(plus_dm[1:adx_period+1])
+    minus_dm_smooth[adx_period] = np.nansum(minus_dm[1:adx_period+1])
+    
+    # Subsequent values using Wilder's smoothing
+    for i in range(adx_period+1, len(tr)):
+        atr[i] = (atr[i-1] * (adx_period-1) + tr[i]) / adx_period
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (adx_period-1) + plus_dm[i]) / adx_period
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (adx_period-1) + minus_dm[i]) / adx_period
+    
+    # Avoid division by zero
+    atr_safe = np.where(atr == 0, 1e-10, atr)
+    plus_di = 100 * plus_dm_smooth / atr_safe
+    minus_di = 100 * minus_dm_smooth / atr_safe
+    
+    # DX and ADX
+    dx = np.full_like(tr, np.nan)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    
+    adx = np.full_like(tr, np.nan)
+    # First ADX is average of first 'adx_period' DX values
+    adx[2*adx_period-1] = np.nanmean(dx[adx_period:2*adx_period])
+    for i in range(2*adx_period, len(dx)):
+        adx[i] = (adx[i-1] * (adx_period-1) + dx[i]) / adx_period
+    
+    # Align Alligator and ADX to 6t timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, alligator_bullish.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, alligator_bearish.astype(float))
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Elder Ray Bull/Bear Power on 6t data
+    # Calculate EMA(13) for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA
+    bear_power = low - ema13   # Bear Power = Low - EMA
+    
+    # Generate signals
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after Ichimoku warmup
+    for i in range(30, n):  # Warmup period for indicators
         if position == 0:
-            # LONG: Tenkan crosses above Kijun AND price above weekly Kumo
-            if (tenkan[i-1] <= kijun[i-1] and tenkan[i] > kijun[i] and 
-                close[i] > wk_kumotop_aligned[i]):
+            # LONG: Alligator bullish, ADX > 25 (strong trend), Bull Power > 0 and rising
+            if (bullish_aligned[i] and 
+                adx_aligned[i] > 25 and 
+                bull_power[i] > 0 and 
+                (i == 30 or bull_power[i] > bull_power[i-1])):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Tenkan crosses below Kijun AND price below weekly Kumo
-            elif (tenkan[i-1] >= kijun[i-1] and tenkan[i] < kijun[i] and 
-                  close[i] < wk_kumobottom_aligned[i]):
+            # SHORT: Alligator bearish, ADX > 25 (strong trend), Bear Power < 0 and falling
+            elif (bearish_aligned[i] and 
+                  adx_aligned[i] > 25 and 
+                  bear_power[i] < 0 and 
+                  (i == 30 or bear_power[i] < bear_power[i-1])):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Tenkan crosses below Kijun OR price closes below weekly Kumo bottom
-            if (tenkan[i-1] > kijun[i-1] and tenkan[i] <= kijun[i]) or \
-               close[i] < wk_kumobottom_aligned[i]:
+            # EXIT LONG: Alligator turns bearish OR ADX weakens (< 20) OR Bull Power turns negative
+            if (not bullish_aligned[i] or 
+                adx_aligned[i] < 20 or 
+                bull_power[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Tenkan crosses above Kijun OR price closes above weekly Kumo top
-            if (tenkan[i-1] < kijun[i-1] and tenkan[i] >= kijun[i]) or \
-               close[i] > wk_kumotop_aligned[i]:
+            # EXIT SHORT: Alligator turns bullish OR ADX weakens (< 20) OR Bear Power turns positive
+            if (not bearish_aligned[i] or 
+                adx_aligned[i] < 20 or 
+                bear_power[i] >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
