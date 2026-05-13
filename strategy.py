@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_Williams_Alligator_Volume_Trend
-Hypothesis: Use Williams Alligator (Jaw/Teeth/Lips) to identify trend direction and filter for trend alignment. Enter long when price > Teeth > Jaw and Teeth slope > 0, short when price < Teeth < Jaw and Teeth slope < 0, with volume confirmation (volume > 1.5x 20-day average). Exit when price crosses Teeth or slope changes. Designed for 1d timeframe to limit trades (<20/year) and avoid fee drag. Works in both bull (captures trends) and bear (avoids false signals via slope filter).
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Price breaking above Camarilla R1 or below S1 on 12h timeframe, 
+confirmed by daily trend (EMA50) and volume spike (>1.5x 20-period average).
+Camarilla levels provide precise support/resistance, EMA50 filters direction,
+and volume confirms momentum. Designed for 12h to limit trades (12-37/year).
+Works in bull markets (breakouts with trend) and bear (breakdowns against trend).
 """
 
-name = "1d_Williams_Alligator_Volume_Trend"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,35 +26,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Alligator calculation
+    # Get daily data for Camarilla calculation and EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    median_price = (df_1d['high'].values + df_1d['low'].values) / 2
+    # Calculate Camarilla levels from previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C, H, L are from previous daily bar
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Williams Alligator: Jaw (13-period, 8-bar shift), Teeth (8-period, 5-bar shift), Lips (5-period, 3-bar shift)
-    jaw_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
-    jaw = np.roll(jaw_raw.values, 8)  # shift 8 bars forward
-    jaw[:8] = np.nan  # fill shifted values with NaN
+    # Shift by 1 to use previous day's OHLC
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = np.nan  # First day has no previous
     
-    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
-    teeth = np.roll(teeth_raw.values, 5)  # shift 5 bars forward
-    teeth[:5] = np.nan
+    # Calculate Camarilla R1 and S1
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
-    lips = np.roll(lips_raw.values, 3)  # shift 3 bars forward
-    lips[:3] = np.nan
+    # Align to 12h timeframe (no extra delay needed for daily levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Align Alligator lines to lower timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Teeth slope for trend strength (3-period change)
-    teeth_slope = np.diff(teeth_aligned, prepend=np.nan)
-    
-    # Calculate volume average (20-day) for volume spike filter
+    # Volume spike filter: >1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -58,35 +64,35 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(teeth_slope[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-day average
+        # Volume spike condition
         vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Price > Teeth > Jaw AND Teeth slope > 0 (bullish alignment) + volume spike
-            if close[i] > teeth_aligned[i] > jaw_aligned[i] and teeth_slope[i] > 0 and vol_spike:
+            # LONG: Price breaks above R1 + above EMA50 + volume spike
+            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_50_1d_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price < Teeth < Jaw AND Teeth slope < 0 (bearish alignment) + volume spike
-            elif close[i] < teeth_aligned[i] < jaw_aligned[i] and teeth_slope[i] < 0 and vol_spike:
+            # SHORT: Price breaks below S1 + below EMA50 + volume spike
+            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_50_1d_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below Teeth OR Teeth slope turns negative
-            if close[i] < teeth_aligned[i] or teeth_slope[i] < 0:
+            # EXIT LONG: Price breaks below S1 or below EMA50
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above Teeth OR Teeth slope turns positive
-            if close[i] > teeth_aligned[i] or teeth_slope[i] > 0:
+            # EXIT SHORT: Price breaks above R1 or above EMA50
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
