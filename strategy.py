@@ -1,12 +1,11 @@
-# 1/19/2025
-# Strategy: 6h_Keltner_Channel_Breakout_With_Volume_Spike
-# Hypothesis: Keltner Channel breakouts with volume confirmation and ATR filter capture momentum bursts.
-# Uses 1d trend filter (close > EMA50) to align with higher timeframe direction.
-# Designed for low trade frequency (~15-30/year) to minimize fee drag in 6-hour bars.
-# Works in both bull and bear markets by filtering breakouts with trend and volume.
+#/usr/bin/env python3
+"""
+4h_RSI_Trend_Filter_With_Volume_Spike
+Hypothesis: RSI(14) crossing above 55 with volume confirmation and aligned 1d trend (close > EMA50) signals bullish continuation. RSI crossing below 45 with volume confirmation and aligned 1d trend (close < EMA50) signals bearish continuation. Uses 25% position size to limit trade frequency (~25-40/year) and minimize fee drag in 4-hour bars.
+"""
 
-name = "6h_Keltner_Channel_Breakout_With_Volume_Spike"
-timeframe = "6h"
+name = "4h_RSI_Trend_Filter_With_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,48 +18,42 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
     # Get 1d data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate ATR(20) for Keltner Channel
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # EMA(20) for Keltner Channel middle line
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channel bounds
-    kc_upper = ema20 + (2.0 * atr)
-    kc_lower = ema20 - (2.0 * atr)
+    # Calculate RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values  # neutral before warmup
     
     # 1d trend filter: EMA(50) on close
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(25, n):  # Start after ATR/EMA warmup
+    for i in range(14, n):  # Start after RSI warmup
         if position == 0:
-            # LONG: Price breaks above KC upper, volume confirmation, price above 1d EMA50 (uptrend)
-            if (close[i] > kc_upper[i] and 
+            # LONG: RSI crosses above 55, volume confirmation, price above 1d EMA50 (uptrend)
+            if (rsi_values[i] > 55 and rsi_values[i-1] <= 55 and 
                 volume_filter[i] and 
                 close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below KC lower, volume confirmation, price below 1d EMA50 (downtrend)
-            elif (close[i] < kc_lower[i] and 
+            # SHORT: RSI crosses below 45, volume confirmation, price below 1d EMA50 (downtrend)
+            elif (rsi_values[i] < 45 and rsi_values[i-1] >= 45 and 
                   volume_filter[i] and 
                   close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
@@ -68,16 +61,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below KC middle OR volume drops
-            if (close[i] < ema20[i]) or \
+            # EXIT LONG: RSI crosses below 45 OR volume drops
+            if (rsi_values[i] < 45 and rsi_values[i-1] >= 45) or \
                not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above KC middle OR volume drops
-            if (close[i] > ema20[i]) or \
+            # EXIT SHORT: RSI crosses above 55 OR volume drops
+            if (rsi_values[i] > 55 and rsi_values[i-1] <= 55) or \
                not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
