@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe act as strong support/resistance.
-Breakouts above R1 or below S1 with volume confirmation and aligned 1d trend (close > EMA34) signal continuation.
-Uses 25% position size to limit trade frequency (~15-30/year) and minimize fee drag in 12-hour bars.
-Works in both bull and bear markets by requiring trend alignment and volume confirmation.
+4h_Acceleration_Bounce
+Hypothesis: In volatile crypto markets, sharp momentum reversals after extreme moves often precede mean-reverting bounces. 
+This strategy identifies overextended moves using 4-hour RSI divergence from price extremes, confirmed by volume spikes 
+and aligned with the 1-day trend (price > EMA50 for longs, < EMA50 for shorts). 
+Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets by combining 
+contrarian entry with trend filter to avoid counter-trend traps. 
+Low frequency (~20-40 trades/year) minimizes fee drag.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Acceleration_Bounce"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,62 +27,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter (once before loop)
+    # RSI(14) - momentum oscillator
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values  # neutral fill for warmup
+    
+    # 1-day trend filter: EMA(50) on close
     df_1d = get_htf_data(prices, '1d')
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla levels (R1, S1) from previous day
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C, H, L are from previous completed day
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Volume confirmation: current volume > 2.0x 20-period average (avoid noise)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe (wait for previous day's close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 1d trend filter: EMA(34) on close
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: current volume > 1.8x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
+    # Price extremes: recent 10-bar high/low for overextension check
+    highest_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    lowest_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         if position == 0:
-            # LONG: Close crosses above R1, volume confirmation, price above 1d EMA34 (uptrend)
-            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1] and 
-                volume_filter[i] and 
-                close[i] > ema34_1d_aligned[i]):
+            # LONG: RSI oversold (<30) + price near recent low + volume spike + uptrend (price > EMA50)
+            if (rsi_values[i] < 30 and 
+                close[i] <= lowest_10[i] * 1.005 and  # within 0.5% of recent low
+                volume_spike[i] and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close crosses below S1, volume confirmation, price below 1d EMA34 (downtrend)
-            elif (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1] and 
-                  volume_filter[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+            # SHORT: RSI overbought (>70) + price near recent high + volume spike + downtrend (price < EMA50)
+            elif (rsi_values[i] > 70 and 
+                  close[i] >= highest_10[i] * 0.995 and  # within 0.5% of recent high
+                  volume_spike[i] and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below S1 (opposite level) OR volume drops
-            if (close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]) or \
-               not volume_filter[i]:
+            # EXIT LONG: RSI overbought (>70) OR trend breaks (price < EMA50)
+            if rsi_values[i] > 70 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses above R1 (opposite level) OR volume drops
-            if (close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]) or \
-               not volume_filter[i]:
+            # EXIT SHORT: RSI oversold (<30) OR trend breaks (price > EMA50)
+            if rsi_values[i] < 30 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
