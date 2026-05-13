@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R mean reversion with 1d EMA34 trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold), price > 1d EMA34, and volume > 1.5x average.
-# Short when Williams %R > -20 (overbought), price < 1d EMA34, and volume > 1.5x average.
-# Uses ATR-based trailing stop (2.5x) for risk control. Designed to capture mean reversion
-# in ranging markets while respecting the daily trend, with volume confirmation to avoid false signals.
-# Target: 12-37 trades/year (50-150 total over 4 years) on 6h timeframe.
+# Hypothesis: 12h KAMA trend with 1d RSI mean reversion and volume confirmation.
+# Long when KAMA turns up, RSI < 30 (oversold), and volume > 1.5x average.
+# Short when KAMA turns down, RSI > 70 (overbought), and volume > 1.5x average.
+# Uses ATR trailing stop (2.5x) for risk control. Designed to catch trend reversals
+# from extreme RSI levels with volume confirmation, effective in both bull and bear markets.
+# Target: 15-30 trades/year (60-120 total over 4 years) on 12h timeframe.
 
-name = "6h_WilliamsR_MeanReversion_1dEMA34_Volume_v1"
-timeframe = "6h"
+name = "12h_KAMA_RSI_VolumeMeanRev_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -29,21 +29,48 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
+    tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    # Get 12h data for KAMA trend
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Calculate KAMA on 12h close
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_12h, n=10))
+    volatility = np.sum(np.abs(np.diff(close_12h, n=1)), axis=1)
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.full_like(close_12h, np.nan)
+    kama[9] = close_12h[9]  # Start after 10 periods
+    for i in range(10, len(close_12h)):
+        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    kama_12h = kama
+    
+    # Align KAMA to 12h timeframe (wait for completed 12h bar)
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    
+    # Get 1d data for RSI
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA34 on 1d close
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate RSI(14) on 1d close
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    # Prepend NaN for first value
+    rsi = np.concatenate([[np.nan], rsi])
+    rsi_1d = rsi
+    
+    # Align RSI to 12h timeframe (wait for completed 1d bar)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Calculate volume spike: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,61 +78,58 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
-    lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
+    highest_since_entry = np.full(n, np.nan)
+    lowest_since_entry = np.full(n, np.nan)
     
-    for i in range(100, n):  # Start after sufficient data for indicators
+    for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(kama_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume spike
-            if williams_r[i] < -80 and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+            # LONG: KAMA turning up, RSI < 30 (oversold), volume spike
+            if (i > 0 and kama_12h_aligned[i] > kama_12h_aligned[i-1] and 
+                rsi_1d_aligned[i] < 30 and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume spike
-            elif williams_r[i] > -20 and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+                highest_since_entry[i] = high[i]
+            # SHORT: KAMA turning down, RSI > 70 (overbought), volume spike
+            elif (i > 0 and kama_12h_aligned[i] < kama_12h_aligned[i-1] and 
+                  rsi_1d_aligned[i] > 70 and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry[i] = low[i]  # Initialize tracking
+                lowest_since_entry[i] = low[i]
             else:
                 signals[i] = 0.0
-                # Carry forward tracking values when flat
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
                     lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:
-            # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
+            # EXIT LONG: trailing stop (2.5x ATR) or RSI > 50 (exit overextended long)
             trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
-            if trailing_stop:
+            rsi_exit = rsi_1d_aligned[i] > 50
+            if trailing_stop or rsi_exit:
                 signals[i] = 0.0
                 position = 0
-                # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
                 signals[i] = 0.25
-                # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
         elif position == -1:
-            # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            # EXIT SHORT: trailing stop (2.5x ATR) or RSI < 50 (exit overextended short)
             trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
-            if trailing_stop:
+            rsi_exit = rsi_1d_aligned[i] < 50
+            if trailing_stop or rsi_exit:
                 signals[i] = 0.0
                 position = 0
-                # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
                 signals[i] = -0.25
-                # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
     
