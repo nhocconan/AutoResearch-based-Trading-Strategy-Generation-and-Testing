@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-day high AND price > 1w EMA50 AND volume > 2.0x 20-day average volume.
-# Short when price breaks below 20-day low AND price < 1w EMA50 AND volume > 2.0x 20-day average volume.
-# Exit on ATR(14) trailing stop (2.0x). Uses 1d primary timeframe and 1w HTF for trend alignment.
-# Donchian channels provide robust trend-following structure, EMA50 filters intermediate trend on weekly timeframe,
-# volume spike confirms breakout authenticity. Designed for BTC/ETH with strict entry to avoid overtrading.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h trend filter and volume confirmation.
+# Bull Power = High - EMA13(close); Bear Power = EMA13(close) - Low
+# Long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND price > 12h EMA50 (uptrend) AND volume > 1.5x 20-period average.
+# Short when Bear Power > 0 AND Bull Power < 0 (bearish momentum) AND price < 12h EMA50 (downtrend) AND volume > 1.5x 20-period average.
+# Exit on ATR(14) trailing stop (2.0x). Uses 6h primary timeframe and 12h HTF for trend alignment.
+# Elder Ray measures bull/bear power relative to EMA, providing clear momentum signals. 
+# Combined with 12h EMA50 trend filter and volume confirmation, it avoids whipsaws in ranging markets.
+# Designed for BTC/ETH with strict entry to avoid overtrading (target: 12-37 trades/year).
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_12hEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -32,23 +34,26 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1w data for EMA50 trend filter (MTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate EMA13 for Elder Ray (on 6h close)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate EMA50 on 1w close
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
-    # Align HTF arrays to 1d timeframe (wait for completed 1w bar)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Get 12h data for EMA50 trend filter (MTF)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate Donchian(20) from previous 20-day period
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA50 on 12h close
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume filter: current 1d volume > 2.0x 20-day average volume (spike confirmation)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    # Align HTF arrays to 6h timeframe (wait for completed 12h bar)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Volume filter: current 6h volume > 1.5x 20-period average (spike confirmation)
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,19 +62,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_ma_20[i]) or 
-            np.isnan(low_ma_20[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price > 20-day high AND price > 1w EMA50 AND volume spike
-            if close[i] > high_ma_20[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
+            # LONG: Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND price > 12h EMA50 AND volume spike
+            if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price < 20-day low AND price < 1w EMA50 AND volume spike
-            elif close[i] < low_ma_20[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
+            # SHORT: Bear Power > 0 AND Bull Power < 0 (bearish momentum) AND price < 12h EMA50 AND volume spike
+            elif bear_power[i] > 0 and bull_power[i] < 0 and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
