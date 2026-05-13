@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# 1h_4H1D_Trend_With_Volume_Confirmation
-# Hypothesis: Use 4h trend direction (EMA50) and 1d momentum (RSI > 50) for signal direction,
-# Enter on 1h pullbacks to EMA21 with volume spike (>1.5x 20-bar average) during 08-20 UTC.
-# Exit on opposite 4h EMA50 cross. Designed for low turnover (15-35/year) to avoid fee drag.
+# 6h_WeeklyPivot_Breakout_1dTrend
+# Hypothesis: Use weekly pivot points from Monday's session to identify key support/resistance.
+# Long when price breaks above weekly R1 with volume spike and 1d EMA50 uptrend.
+# Short when price breaks below weekly S1 with volume spike and 1d EMA50 downtrend.
+# Exit on mean reversion to weekly pivot (PP). Weekly pivots reset every Monday, providing
+# fresh levels that adapt to market regime. Designed for low turnover (~15-25/year) to avoid fee drag.
+# For 6h timeframe, we adapt to capture longer-term weekly structure.
 
-name = "1h_4H1D_Trend_With_Volume_Confirmation"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -22,31 +25,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-
-    # Get 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-
-    # Get 1d data for momentum filter (RSI(14) > 50)
+    # Calculate weekly pivot points using Monday's OHLC
+    # We'll compute weekly high/low/close from Friday's close to next Friday's close
+    # But simpler: use 5-day (1 week) rolling window ending on Friday
+    # Since we don't have day-of-week easily, approximate with 5-period (1 week) rolling on daily data
+    # Instead: calculate pivots from prior week's daily OHLC
+    # Get 1d data first
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 10:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate weekly high, low, close from prior 5 trading days (approx 1 week)
+    # Use rolling window of 5 on daily data
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
+    
+    # Weekly pivot points
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    
+    # Align weekly pivots to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
 
     # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -54,16 +61,18 @@ def generate_signals(prices):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (1.5 * vol_ma)
 
-    # 1h EMA21 for entry timing
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Get 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(ema_21[i])):
+    for i in range(20, n):
+        # Skip if data is not ready
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,37 +81,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: 4h uptrend (price > EMA50), 1d bullish (RSI > 50), volume spike, pullback to EMA21
-            if (close[i] > ema_4h_aligned[i] and 
-                rsi_1d_aligned[i] > 50 and 
-                volume_spike[i] and 
-                close[i] <= ema_21[i] * 1.005 and  # Allow small buffer above EMA21
-                in_session[i]):
-                signals[i] = 0.20
+            # LONG: break above weekly R1 with volume spike and 1d EMA50 uptrend
+            if close[i] > r1_aligned[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 4h downtrend (price < EMA50), 1d bearish (RSI < 50), volume spike, pullback to EMA21
-            elif (close[i] < ema_4h_aligned[i] and 
-                  rsi_1d_aligned[i] < 50 and 
-                  volume_spike[i] and 
-                  close[i] >= ema_21[i] * 0.995 and  # Allow small buffer below EMA21
-                  in_session[i]):
-                signals[i] = -0.20
+            # SHORT: break below weekly S1 with volume spike and 1d EMA50 downtrend
+            elif close[i] < s1_aligned[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 4h trend turns down (price < EMA50)
-            if close[i] < ema_4h_aligned[i]:
+            # EXIT LONG: price crosses below weekly pivot (mean reversion to center)
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 4h trend turns up (price > EMA50)
-            if close[i] > ema_4h_aligned[i]:
+            # EXIT SHORT: price crosses above weekly pivot
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
