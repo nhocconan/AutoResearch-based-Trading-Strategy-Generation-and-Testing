@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R3 AND 1d EMA34 rising AND volume > 1.8x average.
-# Short when price breaks below S3 AND 1d EMA34 falling AND volume > 1.8x average.
-# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 AND 1d EMA34 rising AND volume > 2.0x average.
+# Short when price breaks below S3 AND 1d EMA34 falling AND volume > 2.0x average.
+# Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# Uses 1d HTF for trend filter to reduce noise and avoid overtrading.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -46,14 +47,14 @@ def generate_signals(prices):
     r3 = close_1d + 1.1 * camarilla_range
     s3 = close_1d - 1.1 * camarilla_range
     
-    # Align 1d Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Align 1d Camarilla levels to 4h timeframe (wait for 1d bar to close)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA34 trend filter (HTF = 1d as specified)
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 12h timeframe (wait for 1d bar to close)
+    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
@@ -70,17 +71,17 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND 1d EMA34 rising AND volume > 1.8x average
+            # LONG: Price breaks above R3 AND 1d EMA34 rising AND volume > 2.0x average
             if (close[i] > r3_aligned[i] and 
                 ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
-                volume[i] > 1.8 * avg_volume[i]):
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below S3 AND 1d EMA34 falling AND volume > 1.8x average
+            # SHORT: Price breaks below S3 AND 1d EMA34 falling AND volume > 2.0x average
             elif (close[i] < s3_aligned[i] and 
                   ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
-                  volume[i] > 1.8 * avg_volume[i]):
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -93,8 +94,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -108,8 +109,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
