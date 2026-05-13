@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_PriceAction_Verification
-Hypothesis: Weekly pivot levels (calculated from prior week's OHLC) act as strong support/resistance.
-In trending markets, price pulls back to weekly pivot levels (R1/S1, R2/S2) before continuing.
-In ranging markets, price respects weekly pivot levels as boundaries.
-Entry: Limit orders at weekly pivot levels with rejection candlestick patterns (pin bar, engulfing).
-Exit: Opposite pivot level or trend reversal.
-Uses volume confirmation to avoid false breakouts.
-Designed for 6H timeframe to reduce noise and capture multi-day swings.
-Target: 15-35 trades/year per symbol.
+6h_Ichimoku_Cloud_Breakout_1dTrend
+Hypothesis: Ichimoku cloud (TK cross + price above/below cloud) with 1d trend filter and volume confirmation works in both bull and bear markets.
+Long when TK cross bullish, price above cloud, 1d uptrend, volume spike. Short when TK cross bearish, price below cloud, 1d downtrend, volume spike.
+Exit on opposite TK cross or trend reversal. Uses 12h trend for additional confirmation.
+Target: 50-150 total trades over 4 years = 12-37/year.
 """
 
-name = "6h_WeeklyPivot_PriceAction_Verification"
+name = "6h_Ichimoku_Cloud_Breakout_1dTrend"
 timeframe = "6h"
 leverage = 1.0
 
@@ -21,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,116 +25,116 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly pivot points from prior week's OHLC
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Ichimoku components (9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    # But for cloud calculation, we need current values
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
+    
+    # Cloud boundaries (use current Senkou spans)
+    upper_cloud = np.maximum(senkou_a, senkou_b)
+    lower_cloud = np.minimum(senkou_a, senkou_b)
+    
+    # TK Cross signals
+    tk_bullish = tenkan > kijun
+    tk_bearish = tenkan < kijun
+    
+    # Price relative to cloud
+    price_above_cloud = close > upper_cloud
+    price_below_cloud = close < lower_cloud
+    
+    # 12h trend filter (MTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 26:
         return np.zeros(n)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly pivot: PP = (H + L + C) / 3
-    # R1 = 2*PP - L, S1 = 2*PP - H
-    # R2 = PP + (H - L), S2 = PP - (H - L)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # 12h Tenkan and Kijun for trend
+    high_9_12h = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
+    low_9_12h = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
+    tenkan_12h = (high_9_12h + low_9_12h) / 2
     
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
+    high_26_12h = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
+    low_26_12h = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
+    kijun_12h = (high_26_12h + low_26_12h) / 2
     
-    # Align weekly pivot levels to 6H timeframe (already delayed by weekly close)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    tk_bullish_12h = tenkan_12h > kijun_12h
+    tk_bearish_12h = tenkan_12h < kijun_12h
     
-    # Trend filter: 24-period EMA (~4 days on 6H)
-    ema_24 = pd.Series(close).ewm(span=24, adjust=False, min_periods=24).mean().values
-    uptrend = close > ema_24
-    downtrend = close < ema_24
+    tk_bullish_12h_aligned = align_htf_to_ltf(prices, df_12h, tk_bullish_12h)
+    tk_bearish_12h_aligned = align_htf_to_ltf(prices, df_12h, tk_bearish_12h)
     
-    # Volume confirmation: volume > 1.5 * 24-period average
+    # 1d trend filter (additional HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 26:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    high_26_1d = pd.Series(close_1d).rolling(window=26, min_periods=26).max().values
+    low_26_1d = pd.Series(close_1d).rolling(window=26, min_periods=26).min().values
+    # Using price vs 26-period high/low as trend proxy
+    uptrend_1d = close_1d > (high_26_1d + low_26_1d) / 2
+    downtrend_1d = close_1d < (high_26_1d + low_26_1d) / 2
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     volume_conf = volume > 1.5 * vol_ma
-    
-    # Candlestick patterns for rejection/continuation
-    # Bullish engulfing: current green candle fully engulfs previous red candle
-    bullish_engulf = (close > open_) & (open_ < close) & \
-                     (close[:-1] < open_[:-1]) & (open_[:-1] > close[:-1]) & \
-                     (close >= open_[:-1]) & (open_ <= close[:-1])
-    # Shift to align with current candle
-    bullish_engulf = np.concatenate([[False], bullish_engulf[:-1]])
-    
-    # Bearish engulfing: current red candle fully engulfs previous green candle
-    bearish_engulf = (close < open_) & (open_ > close) & \
-                     (close[:-1] > open_[:-1]) & (open_[:-1] < close[:-1]) & \
-                     (close <= open_[:-1]) & (open_ >= close[:-1])
-    bearish_engulf = np.concatenate([[False], bearish_engulf[:-1]])
-    
-    # Pin bar patterns
-    # Bullish pin: long lower wick, small body, close near high
-    body_size = np.abs(close - open_)
-    upper_wick = high - np.maximum(close, open_)
-    lower_wick = np.minimum(close, open_) - low
-    bullish_pin = (lower_wick > 2 * body_size) & (upper_wick < 0.5 * body_size)
-    # Bearish pin: long upper wick
-    bearish_pin = (upper_wick > 2 * body_size) & (lower_wick < 0.5 * body_size)
-    
-    # Combine rejection signals
-    bullish_reject = bullish_engulf | bullish_pin
-    bearish_reject = bearish_engulf | bearish_pin
-    
-    # Align open prices for candle calculations
-    open_ = prices['open'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
-        # Skip if no weekly data yet
-        if np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
-            signals[i] = 0.0
-            continue
-            
-        pp_val = pp_aligned[i]
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        r2_val = r2_aligned[i]
-        s2_val = s2_aligned[i]
+    for i in range(52, n):  # Start after 52 for full Ichimoku
+        # Get values
+        tk_bull = tk_bullish[i]
+        tk_bear = tk_bearish[i]
+        price_above = price_above_cloud[i]
+        price_below = price_below_cloud[i]
+        vol_conf = volume_conf[i]
+        tk_bull_12h = tk_bullish_12h_aligned[i]
+        tk_bear_12h = tk_bearish_12h_aligned[i]
+        uptrend_1d = uptrend_1d_aligned[i]
+        downtrend_1d = downtrend_1d_aligned[i]
         
         if position == 0:
-            # LONG: price near support with bullish rejection
-            near_s1 = abs(low[i] - s1_val) / s1_val < 0.005  # within 0.5%
-            near_s2 = abs(low[i] - s2_val) / s2_val < 0.005
-            
-            if ((near_s1 or near_s2) and bullish_reject[i] and uptrend[i] and volume_conf[i]):
+            # LONG: TK bullish, price above cloud, 12h bullish, 1d uptrend, volume confirmation
+            if tk_bull and price_above and tk_bull_12h and uptrend_1d and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price near resistance with bearish rejection
-            elif ((abs(high[i] - r1_val) / r1_val < 0.005 or abs(high[i] - r2_val) / r2_val < 0.005) and 
-                  bearish_reject[i] and downtrend[i] and volume_conf[i]):
+            # SHORT: TK bearish, price below cloud, 12h bearish, 1d downtrend, volume confirmation
+            elif tk_bear and price_below and tk_bear_12h and downtrend_1d and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price reaches resistance or trend turns down
-            if (abs(high[i] - r1_val) / r1_val < 0.005 or 
-                abs(high[i] - r2_val) / r2_val < 0.005 or 
-                not uptrend[i]):
+            # EXIT LONG: TK bearish or price below cloud or 1d trend turns down
+            if tk_bear or not price_above or not uptrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price reaches support or trend turns up
-            if (abs(low[i] - s1_val) / s1_val < 0.005 or 
-                abs(low[i] - s2_val) / s2_val < 0.005 or 
-                not downtrend[i]):
+            # EXIT SHORT: TK bullish or price above cloud or 1d trend turns up
+            if tk_bull or not price_below or not downtrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
