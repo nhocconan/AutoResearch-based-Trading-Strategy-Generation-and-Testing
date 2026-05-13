@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_BullBearPower_Trend_Reversal
-# Hypothesis: Elder Ray Index (Bull Power = High - EMA13, Bear Power = EMA13 - Low) identifies
-# trend exhaustion when power weakens while price makes new highs/lows (divergence).
-# Long when Bull Power turns up from negative while price > EMA13 (bullish reversal).
-# Short when Bear Power turns up from negative while price < EMA13 (bearish reversal).
-# Uses 1-day ADX > 20 to confirm trending environment and avoid whipsaws in ranging markets.
-# Target: 15-30 trades/year (~60-120 total over 4 years) with controlled risk.
+# 12h_Camarilla_R1_S1_Breakout_1wTrend_1dVolume
+# Hypothesis: Camarilla R1/S1 breakout on 12h with 1w trend filter (price above/below 50-period EMA) and 1d volume spike.
+# Works in bull (breakouts above R1 in uptrend) and bear (breakdowns below S1 in downtrend).
+# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
 
-name = "6h_ElderRay_BullBearPower_Trend_Reversal"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_1dVolume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,90 +22,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # EMA13 for Elder Ray calculation
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla levels from previous day
+    def camarilla_levels(h, l, c):
+        # Previous day's range
+        rng = h - l
+        # Camarilla levels
+        R4 = c + rng * 1.1 / 2
+        R3 = c + rng * 1.1 / 4
+        R2 = c + rng * 1.1 / 6
+        R1 = c + rng * 1.1 / 12
+        S1 = c - rng * 1.1 / 12
+        S2 = c - rng * 1.1 / 6
+        S3 = c - rng * 1.1 / 4
+        S4 = c - rng * 1.1 / 2
+        return R1, S1
 
-    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high - ema13
-    bear_power = ema13 - low
+    # Need previous day's OHLC for Camarilla
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
 
-    # Previous values for crossover detection
-    bull_power_prev = np.roll(bull_power, 1)
-    bear_power_prev = np.roll(bear_power, 1)
-    bull_power_prev[0] = np.nan
-    bear_power_prev[0] = np.nan
+    R1, S1 = camarilla_levels(prev_high, prev_low, prev_close)
 
-    # Get 1-day data for ADX trend filter
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-
-    # ADX calculation (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr1[0] = np.nan
-        tr2[0] = np.nan
-        tr3[0] = np.nan
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-
-        # Directional Movement
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        up_move[0] = np.nan
-        down_move[0] = np.nan
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-
-        # Smoothed values using Wilder's smoothing (alpha = 1/period)
-        def WilderSmoothing(arr, period):
-            result = np.full_like(arr, np.nan, dtype=float)
-            if len(arr) < period:
-                return result
-            # First value: simple average
-            result[period-1] = np.nansum(arr[:period]) / period
-            # Subsequent values: Wilder smoothing
-            for i in range(period, len(arr)):
-                if np.isnan(result[i-1]):
-                    result[i] = np.nan
-                else:
-                    result[i] = result[i-1] - (result[i-1] / period) + arr[i] / period
-            return result
-
-        atr = WilderSmoothing(tr, period)
-        plus_di = 100 * WilderSmoothing(plus_dm, period) / atr
-        minus_di = 100 * WilderSmoothing(minus_dm, period) / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = WilderSmoothing(dx, period)
-        return adx
-
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-
-    # Volume confirmation: above 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(bull_power_prev[i]) or np.isnan(bear_power_prev[i]) or
-            np.isnan(ema13[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Trend filter: only trade when 1d ADX > 20 (trending market)
-        if adx_1d_aligned[i] <= 20:
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(vol_avg_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -117,32 +72,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Bull Power turning up from negative AND price > EMA13
-            if (bull_power[i] > bull_power_prev[i] and 
-                bull_power[i] < 0 and  # still negative but improving
-                close[i] > ema13[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Break above R1 + price above 1w EMA50 + volume spike
+            if (close[i] > R1[i] and 
+                close[i] > ema50_1w_aligned[i] and
+                volume[i] > vol_avg_20_aligned[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power turning up from negative AND price < EMA13
-            elif (bear_power[i] > bear_power_prev[i] and 
-                  bear_power[i] < 0 and  # still negative but improving
-                  close[i] < ema13[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Break below S1 + price below 1w EMA50 + volume spike
+            elif (close[i] < S1[i] and 
+                  close[i] < ema50_1w_aligned[i] and
+                  volume[i] > vol_avg_20_aligned[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power turns down OR price crosses below EMA13
-            if (bull_power[i] < bull_power_prev[i] or close[i] < ema13[i]):
+            # EXIT LONG: Price re-enters below R1 or trend changes
+            if (close[i] < R1[i] or close[i] < ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power turns down OR price crosses above EMA13
-            if (bear_power[i] < bear_power_prev[i] or close[i] > ema13[i]):
+            # EXIT SHORT: Price re-enters above S1 or trend changes
+            if (close[i] > S1[i] or close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
