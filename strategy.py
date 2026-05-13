@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot points (R1/S1) from daily high/low/close act as strong support/resistance.
-Breakouts above daily R1 or below S1 with volume confirmation and 1-day trend alignment capture momentum moves.
-Exit on reversion to daily pivot point (PP) or trend reversal. Position size 0.25 targets ~20-40 trades/year to minimize fee drag.
-Works in both bull (breakouts with trend) and bear (mean reversion at extremes) markets via trend filter.
+1d_Weekly_Pivot_Reversal_Capture
+Hypothesis: Weekly pivot points (PP) act as institutional support/resistance. Price often reverses from weekly PP with volume and trend alignment. This mean-reversion strategy works in both bull (pullbacks in uptrend) and bear (bounces in downtrend) by capturing reversals at the weekly pivot with volume confirmation and trend filter. Position size 0.25 targets ~10-20 trades/year to minimize fee drag.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_Reversal_Capture"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,28 +22,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily Camarilla pivot points: PP = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = (2*PP) - L, S1 = (2*PP) - H
+    h_1w = df_1w['high'].values
+    l_1w = df_1w['low'].values
+    c_1w = df_1w['close'].values
     
-    daily_pp = (h_1d + l_1d + c_1d) / 3.0
-    daily_r1 = c_1d + (h_1d - l_1d) * 1.1 / 12.0
-    daily_s1 = c_1d - (h_1d - l_1d) * 1.1 / 12.0
+    weekly_pp = (h_1w + l_1w + c_1w) / 3.0
+    weekly_r1 = 2 * weekly_pp - l_1w
+    weekly_s1 = 2 * weekly_pp - h_1w
     
-    # Align daily pivots to 4h chart (wait for daily close)
-    daily_pp_aligned = align_htf_to_ltf(prices, df_1d, daily_pp)
-    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
+    # Align weekly pivots to daily chart (wait for weekly close)
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    # 1-day trend filter: EMA50
-    ema50_1d = pd.Series(c_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Daily trend filter: EMA50
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
@@ -55,32 +51,32 @@ def generate_signals(prices):
     
     for i in range(50, n):  # Start after warmup
         if position == 0:
-            # LONG: Breakout above daily R1 with volume confirmation and uptrend
-            if (close[i] > daily_r1_aligned[i] and 
+            # LONG: Price near weekly S1 with volume confirmation and uptrend
+            if (close[i] <= weekly_s1_aligned[i] * 1.02 and  # within 2% of S1
                 volume_filter[i] and 
-                close[i] > ema50_1d_aligned[i]):
+                close[i] > ema50[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below daily S1 with volume confirmation and downtrend
-            elif (close[i] < daily_s1_aligned[i] and 
+            # SHORT: Price near weekly R1 with volume confirmation and downtrend
+            elif (close[i] >= weekly_r1_aligned[i] * 0.98 and  # within 2% of R1
                   volume_filter[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+                  close[i] < ema50[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to daily pivot or trend reverses
-            if (close[i] < daily_pp_aligned[i]) or \
-               (close[i] < ema50_1d_aligned[i]):
+            # EXIT LONG: Price reaches weekly PP or trend reverses
+            if (close[i] >= weekly_pp_aligned[i] * 0.99) or \
+               (close[i] < ema50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to daily pivot or trend reverses
-            if (close[i] > daily_pp_aligned[i]) or \
-               (close[i] > ema50_1d_aligned[i]):
+            # EXIT SHORT: Price reaches weekly PP or trend reverses
+            if (close[i] <= weekly_pp_aligned[i] * 1.01) or \
+               (close[i] > ema50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
