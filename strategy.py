@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 1d_KeltnerChannel_Breakout_VolumeSpike_1wTrend
-# Hypothesis: Breakouts from 1D Keltner Channel (EMA20 +/- 2*ATR10) confirmed by volume spike and 1W EMA50 trend.
-# Keltner channels adapt to volatility, capturing breakouts in both trending and ranging markets.
-# Volume surge confirms institutional participation; weekly trend filter avoids counter-trend trades.
-# Designed for 15-25 trades/year on 1D timeframe to minimize fee drag.
-# Works in bull/bear: long when price breaks above upper KC with volume and above weekly EMA;
-# short when breaks below lower KC with volume and below weekly EMA.
+# 6h_ElderRay_BullBearPower_12hTrend_Volume
+# Hypothesis: Elder Ray (Bull Power/Bear Power) measures bull/bear strength relative to EMA.
+# Combined with 12h EMA trend filter and volume spikes, it captures strong momentum moves.
+# Bull Power > 0 and rising indicates bullish strength; Bear Power < 0 and falling indicates bearish strength.
+# Volume confirms institutional participation. Designed for 15-30 trades/year on 6h to minimize fee drag.
+# Works in bull/bear: long when Bull Power > 0 and rising with volume and above 12h EMA;
+# short when Bear Power < 0 and falling with volume and below 12h EMA.
 
-name = "1d_KeltnerChannel_Breakout_VolumeSpike_1wTrend"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,43 +25,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-
-    # Calculate EMA20 and ATR10 for Keltner Channel (daily)
-    close_s = pd.Series(close)
-    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # True Range and ATR
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Keltner Channel bands
-    upper_kc = ema20 + 2 * atr10
-    lower_kc = ema20 - 2 * atr10
+    # Calculate 12h EMA34 trend filter
+    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
 
-    # Weekly EMA50 trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate EMA13 for Elder Ray (using high/low prices)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    ema13_high = high_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_low = low_series.ewm(span=13, adjust=False, min_periods=13).mean().values
 
-    # Volume confirmation: current volume > 2.5 x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.5 * vol_ma)
+    # Elder Ray components
+    bull_power = high - ema13_high  # Bull Power = High - EMA13
+    bear_power = low - ema13_low    # Bear Power = Low - EMA13
+
+    # Slope of Bull Power and Bear Power (3-period change)
+    bull_power_slope = np.diff(bull_power, prepend=bull_power[0])
+    bear_power_slope = np.diff(bear_power, prepend=bear_power[0])
+
+    # Volume confirmation: current volume > 1.8 x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after sufficient warmup
+    for i in range(34, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(upper_kc[i]) or 
-            np.isnan(lower_kc[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or 
+        if (np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or 
+            np.isnan(bull_power_slope[i]) or 
+            np.isnan(bear_power_slope[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -71,30 +69,36 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above upper KC with volume spike and above weekly EMA50
-            if (close[i] > upper_kc[i] and 
+            # LONG: Bull Power > 0 and rising, with volume spike and above 12h EMA
+            if (bull_power[i] > 0 and 
+                bull_power_slope[i] > 0 and 
                 volume_spike[i] and 
-                close[i] > ema50_1w_aligned[i]):
+                close[i] > ema34_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower KC with volume spike and below weekly EMA50
-            elif (close[i] < lower_kc[i] and 
+            # SHORT: Bear Power < 0 and falling, with volume spike and below 12h EMA
+            elif (bear_power[i] < 0 and 
+                  bear_power_slope[i] < 0 and 
                   volume_spike[i] and 
-                  close[i] < ema50_1w_aligned[i]):
+                  close[i] < ema34_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below EMA20 or weekly EMA50 turns down
-            if close[i] < ema20[i] or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Bull Power <= 0 or stops rising or below 12h EMA
+            if (bull_power[i] <= 0 or 
+                bull_power_slope[i] <= 0 or 
+                close[i] < ema34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above EMA20 or weekly EMA50 turns up
-            if close[i] > ema20[i] or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Bear Power >= 0 or stops falling or above 12h EMA
+            if (bear_power[i] >= 0 or 
+                bear_power_slope[i] >= 0 or 
+                close[i] > ema34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
