@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation (>2.0x 20-bar avg volume).
-# Uses Camarilla pivot levels for institutional price structure, 12h EMA50 for smooth trend alignment, and high volume threshold to reduce false signals.
-# Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee drag while capturing strong momentum moves in both bull and bear markets.
-# Exit on reverse Camarilla touch or volume drop below 50% of average.
+# Hypothesis: 1h mean reversion strategy using 4h Bollinger Band squeeze + 1d trend filter for BTC/ETH.
+# In low volatility (BB width < 20th percentile of last 50 4h bars), price tends to revert to 1d EMA50.
+# Long when price touches lower BB and close > 1d EMA50; short when price touches upper BB and close < 1d EMA50.
+# Uses session filter (08-20 UTC) to reduce noise. Target 15-30 trades/year to minimize fee drag.
+# Works in both bull/bear: mean reversion in ranging markets, trend filter avoids counter-trend in strong moves.
 
-name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_VolumeConfirm_v2"
-timeframe = "4h"
+name = "1h_BB_Squeeze_MeanRev_4hVol_1dTrend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -14,82 +15,108 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Pre-compute session hours (08-20 UTC) - prices.index is DatetimeIndex
+    session_hours = prices.index.hour
+    in_session = (session_hours >= 8) & (session_hours <= 20)
+    
+    # 4h Bollinger Bands (20, 2.0)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Calculate Camarilla levels (R3, S3) from prior day's range
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # Using prior 1d bar (approximated via 4h: 6 bars = ~1d) for lookback
-    lookback_1d = 6  # 6 * 4h = ~24h
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
+    # BB middle = 20 SMA
+    sma_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    # BB std = 20 period std dev
+    std_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    bb_upper_4h = sma_20_4h + 2.0 * std_20_4h
+    bb_lower_4h = sma_20_4h - 2.0 * std_20_4h
+    bb_width_4h = (bb_upper_4h - bb_lower_4h) / sma_20_4h  # normalized width
     
-    # Prior day's high, low, close (shifted by 1 to avoid look-ahead)
-    prev_high = high_series.rolling(window=lookback_1d, min_periods=lookback_1d).max().shift(1).values
-    prev_low = low_series.rolling(window=lookback_1d, min_periods=lookback_1d).min().shift(1).values
-    prev_close = close_series.rolling(window=lookback_1d, min_periods=lookback_1d).mean().shift(1).values
+    # Align BB to 1h
+    bb_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, bb_upper_4h)
+    bb_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, bb_lower_4h)
+    bb_width_4h_aligned = align_htf_to_ltf(prices, df_4h, bb_width_4h)
     
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # BB squeeze condition: width < 20th percentile of last 50 bars
+    bb_width_series = pd.Series(bb_width_4h_aligned)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=30).quantile(0.20).values
+    bb_squeeze = bb_width_4h_aligned < bb_width_percentile
     
-    # Calculate average volume for confirmation (20-period)
-    lookback_vol = 20
-    avg_volume = pd.Series(volume).rolling(window=lookback_vol, min_periods=lookback_vol).mean().shift(1).values
+    # 1d EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 1h Bollinger Bands for entry timing (20, 2.0)
+    sma_20_1h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20_1h = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper_1h = sma_20_1h + 2.0 * std_20_1h
+    bb_lower_1h = sma_20_1h - 2.0 * std_20_1h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(lookback_1d, lookback_vol, 1), n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(camarilla_r3[i]) or 
-            np.isnan(camarilla_s3[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(bb_upper_1h[i]) or 
+            np.isnan(bb_lower_1h[i]) or 
+            np.isnan(bb_squeeze[i]) or
+            np.isnan(bb_width_percentile[i])):
             signals[i] = 0.0
             continue
         
+        # Session filter: only trade 08-20 UTC
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0  # close position outside session
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # LONG: Price breaks above Camarilla R3, close > 12h EMA50, volume spike (>2.0x avg)
-            if (high[i] > camarilla_r3[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = 0.25
+            # LONG: Price touches lower 1h BB, in BB squeeze, and close > 1d EMA50 (bullish bias)
+            if (low[i] <= bb_lower_1h[i] and 
+                bb_squeeze[i] and 
+                close[i] > ema_50_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below Camarilla S3, close < 12h EMA50, volume spike (>2.0x avg)
-            elif (low[i] < camarilla_s3[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = -0.25
+            # SHORT: Price touches upper 1h BB, in BB squeeze, and close < 1d EMA50 (bearish bias)
+            elif (high[i] >= bb_upper_1h[i] and 
+                  bb_squeeze[i] and 
+                  close[i] < ema_50_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close position if price breaks below Camarilla S3 or volume drops
-            if (low[i] < camarilla_s3[i]) or (volume[i] < 0.5 * avg_volume[i]):
+            # EXIT LONG: Price touches upper 1h BB or loses squeeze (vol expansion)
+            if (high[i] >= bb_upper_1h[i]) or (not bb_squeeze[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Close position if price breaks above Camarilla R3 or volume drops
-            if (high[i] > camarilla_r3[i]) or (volume[i] < 0.5 * avg_volume[i]):
+            # EXIT SHORT: Price touches lower 1h BB or loses squeeze (vol expansion)
+            if (low[i] <= bb_lower_1h[i]) or (not bb_squeeze[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
