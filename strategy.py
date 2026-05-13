@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation (>1.3x avg volume). Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
-# EMA trend filter on 1d ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Camarilla R3/S3 levels provide stronger support/resistance from prior 1h range. Volume confirmation ensures institutional participation.
-# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
+# Hypothesis: 4h Williams %R mean reversion with 1d EMA trend filter and volume confirmation (>1.5x avg volume). Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.30.
+# Target: 100-180 total trades over 4 years (25-45/year) on 4h timeframe.
+# Williams %R identifies overbought/oversold conditions (below -80 for long, above -20 for short).
+# 1d EMA50 ensures we trade with the higher timeframe trend, reducing counter-trend whipsaw in bear markets.
+# Volume confirmation filters weak breakouts. ATR trailing stop lets winners run while controlling risk.
+# Works in bull markets via buying dips in uptrends and in bear markets via selling rallies in downtrends.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA50_VolumeConfirm_ATRStop_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_MeanReversion_1dEMA50_VolumeConfirm_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,6 +35,12 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Calculate Williams %R (14-period)
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
+    
     # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
@@ -42,23 +49,8 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 12h timeframe (wait for 1d bar to close)
+    # Align 1d EMA50 to 4h timeframe (wait for 1d bar to close)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Get 1h data for Camarilla pivot levels
-    df_1h = get_htf_data(prices, '1h')
-    close_1h = df_1h['close'].values
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
-    
-    # Calculate Camarilla pivot levels from prior 1h bar
-    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_upper = close_1h + (high_1h - low_1h) * 1.1 / 4
-    camarilla_lower = close_1h - (high_1h - low_1h) * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe (wait for 1h bar to close)
-    camarilla_upper_aligned = align_htf_to_ltf(prices, df_1h, camarilla_upper)
-    camarilla_lower_aligned = align_htf_to_ltf(prices, df_1h, camarilla_lower)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,24 +59,24 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_upper_aligned[i]) or np.isnan(camarilla_lower_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R3 AND 1d EMA50 > 0 (rising trend) AND volume > 1.3x average
-            if (close[i] > camarilla_upper_aligned[i] and 
+            # LONG: Williams %R < -80 (oversold) AND 1d EMA50 rising AND volume > 1.5x average
+            if (williams_r[i] < -80 and 
                 ema50_1d_aligned[i] > np.roll(ema50_1d_aligned, 1)[i] and  # EMA50 rising
-                volume[i] > 1.3 * avg_volume[i]):
-                signals[i] = 0.25
+                volume[i] > 1.5 * avg_volume[i]):
+                signals[i] = 0.30
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Camarilla S3 AND 1d EMA50 < 0 (falling trend) AND volume > 1.3x average
-            elif (close[i] < camarilla_lower_aligned[i] and 
+            # SHORT: Williams %R > -20 (overbought) AND 1d EMA50 falling AND volume > 1.5x average
+            elif (williams_r[i] > -20 and 
                   ema50_1d_aligned[i] < np.roll(ema50_1d_aligned, 1)[i] and  # EMA50 falling
-                  volume[i] > 1.3 * avg_volume[i]):
-                signals[i] = -0.25
+                  volume[i] > 1.5 * avg_volume[i]):
+                signals[i] = -0.30
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
@@ -96,30 +88,30 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
+            # EXIT LONG: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
