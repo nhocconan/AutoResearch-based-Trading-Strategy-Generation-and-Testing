@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator with 1w EMA trend filter and volume confirmation.
-# Williams Alligator uses three SMAs (jaw=13, teeth=8, lips=5) to identify trend and non-trend markets.
-# Long when lips > teeth > jaw (bullish alignment) with volume > 1.5x 20-bar average and price above 1w EMA50.
-# Short when lips < teeth < jaw (bearish alignment) with volume > 1.5x 20-bar average and price below 1w EMA50.
-# Exit when Alligator lines cross (trend weakening) or volume drops below 0.8x average.
-# Designed to capture strong trends in both bull and bear markets while avoiding choppy regimes.
-# Discrete sizing 0.25 targets 12-37 trades/year on 12h timeframe.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel and close > 1w EMA34 with volume > 1.5x 20-bar average.
+# Short when price breaks below lower Donchian channel and close < 1w EMA34 with volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to target 30-100 total trades over 4 years on 1d timeframe.
+# Designed to capture strong trending moves while filtering choppy markets via 1w EMA trend and volume spike confirmation.
 
-name = "12h_WilliamsAlligator_1wEMA50_Trend_VolumeConfirm"
-timeframe = "12h"
+name = "1d_Donchian20_1wEMA34_Trend_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,13 +23,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    lookback = 20  # for volume average
+    lookback = 20  # for Donchian and volume average
     
-    # Calculate Williams Alligator SMAs on 12h timeframe
-    # Jaw: SMA(13), Teeth: SMA(8), Lips: SMA(5)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
     
     # Get 1w data for EMA trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -40,14 +36,14 @@ def generate_signals(prices):
     
     close_1w = df_1w['close'].values
     
-    # Calculate EMA(50) on 1w close
-    if len(close_1w) < 50:
-        ema_50_1w = np.full(len(close_1w), np.nan)
+    # Calculate EMA(34) on 1w close
+    if len(close_1w) < 34:
+        ema_34_1w = np.full(len(close_1w), np.nan)
     else:
-        ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+        ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1w EMA to 12h timeframe (wait for 1w bar to close)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1w EMA to 1d timeframe (wait for 1w bar to close)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
@@ -57,36 +53,38 @@ def generate_signals(prices):
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Lips > Teeth > Jaw (bullish alignment) with volume spike and price above 1w EMA50
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
+            # LONG: Price breaks above upper Donchian, close > 1w EMA34, volume spike
+            if (high[i] > highest_high[i] and 
+                close[i] > ema_34_1w_aligned[i] and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Lips < Teeth < Jaw (bearish alignment) with volume spike and price below 1w EMA50
-            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
+            # SHORT: Price breaks below lower Donchian, close < 1w EMA34, volume spike
+            elif (low[i] < lowest_low[i] and 
+                  close[i] < ema_34_1w_aligned[i] and 
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alligator lines cross (lips <= teeth) OR volume drops below 0.8x average
-            if lips[i] <= teeth[i] or volume[i] < 0.8 * avg_volume[i]:
+            # EXIT LONG: Price breaks below lower Donchian OR volume dries up (< 0.8x average)
+            if (low[i] < lowest_low[i] or 
+                volume[i] < 0.8 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator lines cross (lips >= teeth) OR volume drops below 0.8x average
-            if lips[i] >= teeth[i] or volume[i] < 0.8 * avg_volume[i]:
+            # EXIT SHORT: Price breaks above upper Donchian OR volume dries up (< 0.8x average)
+            if (high[i] > highest_high[i] or 
+                volume[i] < 0.8 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
