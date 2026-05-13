@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_Camarilla_R1_S1_Breakout_1wTrend
-# Hypothesis: Use Camarilla pivot levels from daily data combined with 1-week EMA trend filter.
-# Long when price breaks above daily R1 with volume spike and 1w EMA20 uptrend.
-# Short when price breaks below daily S1 with volume spike and 1w EMA20 downtrend.
-# Exit on mean reversion to daily pivot point (PP). Designed for low turnover (10-20 trades/year)
-# to avoid fee drag and work in both bull and bear markets via trend filter.
+# 4h_WeeklyPivot_Breakout_1dTrend
+# Hypothesis: Use weekly pivot points from Monday's session to identify key support/resistance.
+# Long when price breaks above weekly R1 with volume spike and 1d EMA50 uptrend.
+# Short when price breaks below weekly S1 with volume spike and 1d EMA50 downtrend.
+# Exit on mean reversion to weekly pivot (PP). Weekly pivots reset every Monday, providing
+# fresh levels that adapt to market regime. Designed for low turnover (~15-25/year) to avoid fee drag.
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend"
-timeframe = "1d"
+name = "4h_WeeklyPivot_Breakout_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,52 +24,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivots
+    # Calculate weekly pivot points using Monday's OHLC
+    # We'll compute weekly high/low/close from Friday's close to next Friday's close
+    # But simpler: use 5-day (1 week) rolling window ending on Friday
+    # Since we don't have day-of-week easily, approximate with 5-period (1 week) rolling on daily data
+    # Instead: calculate pivots from prior week's daily OHLC
+    # Get 1d data first
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
-
-    # Calculate Camarilla pivot levels for each day using prior day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C, H, L are close, high, low of previous day
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Calculate Camarilla levels
-    range_val = prev_high - prev_low
-    camarilla_pp = prev_close  # Not used directly but for reference
-    camarilla_r1 = prev_close + range_val * 1.1 / 12
-    camarilla_s1 = prev_close - range_val * 1.1 / 12
-    
-    # Align Camarilla levels to 1d timeframe (already aligned via shift)
-    # Since we used shift(1), values are already for current day
-    r1 = camarilla_r1
-    s1 = camarilla_s1
-    pp = camarilla_pp  # daily pivot point
-
-    # Get 1w EMA20 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate weekly high, low, close from prior 5 trading days (approx 1 week)
+    # Use rolling window of 5 on daily data
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
+    
+    # Weekly pivot points
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    
+    # Align weekly pivots to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
 
-    # Volume confirmation: current volume > 2.0 x 20-day average
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
+
+    # Get 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if data is not ready
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(pp[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,26 +80,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: break above daily R1 with volume spike and 1w EMA20 uptrend
-            if close[i] > r1[i] and volume_spike[i] and close[i] > ema_1w_aligned[i]:
+            # LONG: break above weekly R1 with volume spike and 1d EMA50 uptrend
+            if close[i] > r1_aligned[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below daily S1 with volume spike and 1w EMA20 downtrend
-            elif close[i] < s1[i] and volume_spike[i] and close[i] < ema_1w_aligned[i]:
+            # SHORT: break below weekly S1 with volume spike and 1d EMA50 downtrend
+            elif close[i] < s1_aligned[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below daily pivot (mean reversion to center)
-            if close[i] < pp[i]:
+            # EXIT LONG: price crosses below weekly pivot (mean reversion to center)
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above daily pivot
-            if close[i] > pp[i]:
+            # EXIT SHORT: price crosses above weekly pivot
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
