@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
-# Hypothesis: Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume spike captures momentum in both bull and bear regimes.
-# Uses price rejection at key intraday pivot levels for mean-reversion exits.
-# Entry: Long when close > R1 + 12h EMA50 uptrend + volume > 1.5x 20-period average; Short when close < S1 + 12h EMA50 downtrend + volume spike.
-# Exit: Mean reversion to Camarilla Pivot Point (PP) to avoid overstaying in extended moves.
-# Target: 25-35 trades/year on 4h to stay within optimal range while capturing significant moves.
+# 1h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot breakouts with daily trend and volume filter capture momentum in both bull and bear markets.
+# Uses 1d EMA50 for trend direction and 1h for entry timing. Session filter (08-20 UTC) reduces noise.
+# Target: 15-30 trades/year on 1h to avoid fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,37 +22,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate previous day's high, low, close for Camarilla levels
-    # Shift by 1 to use previous day's data only
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = prev_high[1] if n > 1 else 0
-    prev_low[0] = prev_low[1] if n > 1 else 0
-    prev_close[0] = prev_close[1] if n > 1 else 0
+    # Get 1d data once
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
 
-    # Camarilla levels: PP = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    PP = (prev_high + prev_low + prev_close) / 3.0
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # 12h EMA50 for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Camarilla levels from previous day (using prior day's close)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    # Calculate Camarilla for each 1d bar using previous day's data
+    camarilla_r1 = np.zeros(len(close_1d))
+    camarilla_s1 = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        prev_close = close_1d[i-1]
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        camarilla_r1[i] = prev_close + 1.1 * (prev_high - prev_low) / 12
+        camarilla_s1[i] = prev_close - 1.1 * (prev_high - prev_low) / 12
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5x 24-period average
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(24, n):
         # Skip if any required value is NaN
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(PP[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(vol_avg_24[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,33 +81,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above R1 + 12h EMA50 uptrend + volume spike
-            if (close[i] > R1[i] and 
-                close[i] > ema50_12h_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = 0.25
+            # LONG: Close above R1 + 1d uptrend + volume spike
+            if (close[i] > camarilla_r1_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and
+                volume[i] > vol_avg_24[i] * 1.5):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Close below S1 + 12h EMA50 downtrend + volume spike
-            elif (close[i] < S1[i] and 
-                  close[i] < ema50_12h_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = -0.25
+            # SHORT: Close below S1 + 1d downtrend + volume spike
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and
+                  volume[i] > vol_avg_24[i] * 1.5):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Mean reversion to Camarilla Pivot Point (PP)
-            if close[i] < PP[i]:
+            # EXIT LONG: Mean reversion to S1 or trend change
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Mean reversion to Camarilla Pivot Point (PP)
-            if close[i] > PP[i]:
+            # EXIT SHORT: Mean reversion to R1 or trend change
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
