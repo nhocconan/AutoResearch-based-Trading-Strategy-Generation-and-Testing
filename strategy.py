@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Use daily Camarilla R1/S1 levels as entry points, with weekly EMA50 trend filter and volume confirmation.
-# Camarilla levels provide precise support/resistance; weekly trend ensures trades align with higher timeframe direction.
-# Works in bull (buy R1 in uptrend) and bear (sell S1 in downtrend). Target: 75-200 total trades over 4 years.
+# 4h_RSI_40_60_Momentum_1dTrend_Volume
+# Hypothesis: Use RSI(14) momentum (40-60 range) with 1d EMA50 trend filter and volume confirmation.
+# RSI between 40 and 60 indicates balanced momentum without overextension. Enter long when RSI > 50 in bullish 1d trend,
+# short when RSI < 50 in bearish 1d trend, both with volume spike. Avoids overextended RSI extremes.
+# Works in bull (follows momentum with bullish 1d trend) and bear (avoids bullish momentum in bearish 1d trend).
+# Target: 60-120 total trades over 4 years = 15-30/year.
 
-name = "4h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+name = "4h_RSI_40_60_Momentum_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,42 +19,36 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels: R1, S1
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.1 / 12
-    camarilla_s1 = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.1 / 12
-    camarilla_r1_vals = camarilla_r1.values
-    camarilla_s1_vals = camarilla_s1.values
-
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
     # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
-    # Align Camarilla levels to 4h
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_vals)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_vals)
+    # RSI(14) calculation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if any required value is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(vol_avg_20[i]) or 
+            np.isnan(rsi_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,30 +57,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price crosses above R1 + price above weekly EMA (bullish trend) + volume spike
-            if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and
+            # LONG: RSI > 50 (bullish momentum) + price above 1d EMA (bullish trend) + volume spike
+            if (rsi_values[i] > 50 and 
+                close[i] > ema_50_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price crosses below S1 + price below weekly EMA (bearish trend) + volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and
+            # SHORT: RSI < 50 (bearish momentum) + price below 1d EMA (bearish trend) + volume spike
+            elif (rsi_values[i] < 50 and 
+                  close[i] < ema_50_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below S1 or price below weekly EMA
-            if (close[i] < camarilla_s1_aligned[i] or close[i] < ema_50_1w_aligned[i]):
+            # EXIT LONG: RSI < 40 (oversold) or price below 1d EMA
+            if (rsi_values[i] < 40 or close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above R1 or price above weekly EMA
-            if (close[i] > camarilla_r1_aligned[i] or close[i] > ema_50_1w_aligned[i]):
+            # EXIT SHORT: RSI > 60 (overbought) or price above 1d EMA
+            if (rsi_values[i] > 60 or close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
