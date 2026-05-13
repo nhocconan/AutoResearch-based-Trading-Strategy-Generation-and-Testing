@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6H_Williams_R1_S1_Reversal
-Hypothesis: Williams %R extreme readings (below -80 oversold, above -20 overbought) on 1d timeframe signal potential reversals, confirmed by price rejection at daily R1/S1 pivot levels and volume spike. Enter long when Williams %R crosses above -80 from below with price at or above daily S1 and volume confirmation; enter short when crosses below -20 from above with price at or below daily R1 and volume confirmation. Exit when Williams %R returns to neutral range (-50) or opposite extreme is reached. Designed for 6h timeframe to capture intraday reversals within daily extremes while limiting trades to avoid fee drag. Works in both bull (buy oversold dips) and bear (sell overbought rallies) markets.
+4h_Camarilla_R1S1_Breakout_1D_Trend
+Hypothesis: Use daily Camarilla pivot levels (R1, S1) as support/resistance levels with breakout entries. Go long when price breaks above R1 with volume confirmation, short when breaks below S1 with volume confirmation. Filter by daily EMA34 trend: only long when price > EMA34, only short when price < EMA34. Camarilla levels work well in ranging and trending markets, and EMA34 filter avoids counter-trend trades. Designed for 4h timeframe to target 20-50 trades/year with strong edge in both bull and bear markets.
 """
 
-name = "6H_Williams_R1_S1_Reversal"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1D_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,80 +22,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Williams %R and pivot levels
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Using 14-period lookback
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
-    # Handle division by zero when high == low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Camarilla pivot formula
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    # R1 = close + (range * 1.1 / 12)
+    # S1 = close - (range * 1.1 / 12)
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Calculate daily pivot points (standard formula)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
-    
-    # Align Williams %R and pivot levels to 6h timeframe
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate volume average (24-period for 6d equivalent) for volume spike filter
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Get daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate volume average (20-period) for volume spike filter
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(williams_r_aligned[i-1]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma_24[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 2.0x 24-period average
-        vol_spike = volume[i] > 2.0 * vol_ma_24[i]
+        # Volume spike condition: current volume > 1.5x 20-period average
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Williams %R crosses above -80 from below (ending oversold) + price at/above S1 + volume spike
-            if (williams_r_aligned[i-1] <= -80 and williams_r_aligned[i] > -80 and 
-                close[i] >= s1_aligned[i] and vol_spike):
+            # LONG: Price breaks above R1 with volume confirmation and price > EMA34
+            if high[i] > r1_aligned[i] and vol_spike and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R crosses below -20 from above (ending overbought) + price at/below R1 + volume spike
-            elif (williams_r_aligned[i-1] >= -20 and williams_r_aligned[i] < -20 and 
-                  close[i] <= r1_aligned[i] and vol_spike):
+            # SHORT: Price breaks below S1 with volume confirmation and price < EMA34
+            elif low[i] < s1_aligned[i] and vol_spike and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R reaches -20 (overbought) or crosses below -50 (losing momentum)
-            if williams_r_aligned[i] >= -20 or williams_r_aligned[i] < -50:
+            # EXIT LONG: Price breaks below S1 or EMA34
+            if low[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R reaches -80 (oversold) or crosses above -50 (losing momentum)
-            if williams_r_aligned[i] <= -80 or williams_r_aligned[i] > -50:
+            # EXIT SHORT: Price breaks above R1 or EMA34
+            if high[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
