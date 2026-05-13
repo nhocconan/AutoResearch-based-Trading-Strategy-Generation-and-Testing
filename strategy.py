@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 6h_ADX_Stochastic_Reversal_1dTrend_Volume
-# Hypothesis: Mean-reversion pullbacks in strong trends using ADX (trend strength) + Stochastic (overbought/oversold).
-# Enter long when ADX > 25 (strong trend) and %K crosses above 20 from below (oversold bounce).
-# Enter short when ADX > 25 and %K crosses below 80 from above (overbought rejection).
-# Exit when Stochastic returns to neutral range (40-60) or ADX weakens (<20).
-# Trend filter from 1d EMA50 ensures alignment with higher timeframe momentum.
-# Works in bull/bear by fading overextensions within the dominant trend.
-# Target: 20-35 trades/year to minimize fee drag.
+# 4h_KAMA_Direction_1dRSI_Filter_Volume
+# Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) on 4h for trend direction,
+# combined with 1d RSI for overbought/oversold filtering and volume confirmation.
+# Enter long when KAMA turns up, RSI < 50 (not overbought), and volume spike.
+# Enter short when KAMA turns down, RSI > 50 (not oversold), and volume spike.
+# Exit when KAMA reverses direction. This adapts to market conditions and avoids
+# chasing extremes, working in both bull and bear markets.
 
-name = "6h_ADX_Stochastic_Reversal_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_KAMA_Direction_1dRSI_Filter_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,61 +20,67 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
+    # Get 1d data for RSI filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     close_1d = df_1d['close'].values
 
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate KAMA on 4h close
+    def kama(close, length=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.where(volatility != 0, change / volatility, 0)
+        # Smoothing Constant
+        sc = np.power(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1), 2)
+        # Initialize KAMA
+        kama_vals = np.zeros_like(close)
+        kama_vals[:length] = close[:length]
+        for i in range(length, len(close)):
+            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
+        return kama_vals
 
-    # ADX calculation (14-period)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    kama_vals = kama(close, length=10, fast=2, slow=30)
 
-    # Directional Movement
-    up_move = high - np.concatenate([[high[0]], high[:-1]])
-    down_move = np.concatenate([[low[0]], low[:-1]]) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate 1d RSI(14)
+    def rsi(close, length=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[length] = np.mean(gain[:length])
+        avg_loss[length] = np.mean(loss[:length])
+        for i in range(length+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_vals = 100 - (100 / (1 + rs))
+        # Pad beginning
+        rsi_vals = np.concatenate([np.full(length, np.nan), rsi_vals[length:]])
+        return rsi_vals
 
-    # Smoothed DM
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    rsi_1d = rsi(close_1d, length=14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
 
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-
-    # Stochastic Oscillator (14,3,3)
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low)
-    # Avoid division by zero
-    k_percent = np.where((highest_high - lowest_low) == 0, 50, k_percent)
-    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
-
-    # Volume confirmation: volume > 1.3x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_avg_20 = np.zeros_like(volume)
+    vol_series = pd.Series(volume)
+    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(adx[i]) or np.isnan(k_percent[i]) or np.isnan(d_percent[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(kama_vals[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,32 +89,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Strong trend (ADX>25) + Stochastic crosses above 20 from below + price > 1d EMA50 + volume
-            if (adx[i] > 25 and 
-                k_percent[i] > 20 and d_percent[i-1] <= 20 and  # cross above 20
-                close[i] > ema50_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.3):
+            # LONG: KAMA turning up (current > previous), RSI < 50, volume spike
+            if (kama_vals[i] > kama_vals[i-1] and 
+                rsi_1d_aligned[i] < 50 and
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Strong trend (ADX>25) + Stochastic crosses below 80 from above + price < 1d EMA50 + volume
-            elif (adx[i] > 25 and 
-                  k_percent[i] < 80 and d_percent[i-1] >= 80 and  # cross below 80
-                  close[i] < ema50_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.3):
+            # SHORT: KAMA turning down (current < previous), RSI > 50, volume spike
+            elif (kama_vals[i] < kama_vals[i-1] and 
+                  rsi_1d_aligned[i] > 50 and
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Stochastic returns to neutral (>40) or trend weakens (ADX<20)
-            if k_percent[i] > 40 or adx[i] < 20:
+            # EXIT LONG: KAMA turns down
+            if kama_vals[i] < kama_vals[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Stochastic returns to neutral (<60) or trend weakens (ADX<20)
-            if k_percent[i] < 60 or adx[i] < 20:
+            # EXIT SHORT: KAMA turns up
+            if kama_vals[i] > kama_vals[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
