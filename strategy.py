@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d KAMA trend with 1w EMA34 filter and volume confirmation.
-# Long when KAMA direction is up AND 1w EMA34 is rising AND volume > 1.8x 20-period average.
-# Short when KAMA direction is down AND 1w EMA34 is falling AND volume > 1.8x 20-period average.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 level AND 1d EMA50 is rising AND volume > 1.5x 20-period average.
+# Short when price breaks below Camarilla S3 level AND 1d EMA50 is falling AND volume > 1.5x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
-# Discrete position sizing (0.25) to minimize fee churn.
-# Target: 50-100 total trades over 4 years (12-25/year) on 1d.
+# Uses discrete position sizing (0.25) to minimize fee churn.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
 
-name = "1d_KAMA_1wEMA34_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,9 +19,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # Calculate ATR(14) for stoploss
@@ -29,69 +29,58 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # KAMA (Kaufman Adaptive Moving Average) - trend direction
-    def kama(source, period=10, fast=2, slow=30):
-        """Kaufman Adaptive Moving Average"""
-        if len(source) < period:
-            return np.full_like(source, np.nan, dtype=np.float64)
-        
-        # Efficiency Ratio
-        change = np.abs(np.diff(source, n=period))
-        volatility = np.sum(np.abs(np.diff(source)), axis=0) if len(source) > 1 else 0
-        er = np.zeros_like(source)
-        er[period:] = change[period-1:] / np.maximum(volatility[period-1:], 1e-10)
-        
-        # Smoothing Constants
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        
-        # KAMA calculation
-        result = np.full_like(source, np.nan, dtype=np.float64)
-        result[period-1] = np.mean(source[:period])
-        for i in range(period, len(source)):
-            result[i] = result[i-1] + sc[i] * (source[i] - result[i-1])
-        return result
+    # Calculate Camarilla pivot levels (R3, S3) from previous day
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # Using previous bar's high/low/close for today's levels
+    camarilla_r3 = close + 1.1 * (high - low) / 2
+    camarilla_s3 = close - 1.1 * (high - low) / 2
+    # Shift by 1 to use previous bar's levels (no look-ahead)
+    camarilla_r3 = np.roll(camarilla_r3, 1)
+    camarilla_s3 = np.roll(camarilla_s3, 1)
+    camarilla_r3[0] = np.nan  # First bar has no previous
+    camarilla_s3[0] = np.nan
     
-    kama_values = kama(close, 10, 2, 30)
-    kama_up = kama_values > np.roll(kama_values, 1)
-    kama_down = kama_values < np.roll(kama_values, 1)
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate EMA(50) on 1d data
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate EMA(34) on 1w data
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align 1d EMA50 to 12h timeframe (wait for 1d bar to close)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align 1w EMA34 to 1d timeframe (wait for 1w bar to close)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
     lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(50, n):  # Start after sufficient data for indicators
+    for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(kama_values[i]) or np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: KAMA up AND 1w EMA34 rising AND volume spike
-            if (kama_up[i] and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and volume_confirm[i]):
+            # LONG: Price breaks above R3 AND 1d EMA50 rising AND volume spike
+            if (close[i] > camarilla_r3[i] and 
+                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: KAMA down AND 1w EMA34 falling AND volume spike
-            elif (kama_down[i] and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and volume_confirm[i]):
+            # SHORT: Price breaks below S3 AND 1d EMA50 falling AND volume spike
+            elif (close[i] < camarilla_s3[i] and 
+                  ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
