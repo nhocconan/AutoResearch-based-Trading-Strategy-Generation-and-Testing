@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h EMA crossover with 4h ADX trend filter and 1d volatility regime filter.
-# Long when 1h EMA21 crosses above EMA50 AND 4h ADX > 25 (trending) AND 1d ATR ratio < 0.8 (low volatility).
-# Short when 1h EMA21 crosses below EMA50 AND 4h ADX > 25 AND 1d ATR ratio < 0.8.
-# Exit on opposite EMA crossover. Uses session filter (08-20 UTC) to avoid noise.
-# Designed for 1h timeframe with strict entry to target 15-37 trades/year.
-# Works in bull/bear: ADX filters strong trends, volatility filter avoids choppy regimes.
+# Hypothesis: 6h Williams Alligator + Elder Ray power with 1w trend filter.
+# Long when: Alligator jaws < teeth < lips (bullish alignment) AND Bull Power > 0 AND price > 1w EMA34.
+# Short when: Alligator jaws > teeth > lips (bearish alignment) AND Bear Power < 0 AND price < 1w EMA34.
+# Exit on close crossing opposite Alligator teeth line.
+# Uses 6h primary timeframe with 1w HTF for major trend alignment and 1d for Elder Ray.
+# Williams Alligator identifies trend phases via smoothed medians, Elder Ray measures bull/bear power relative to EMA13.
+# Combines trend confirmation (Alligator) with momentum measurement (Elder Ray) for high-conviction entries.
+# Designed to work in both bull and bear markets by requiring alignment with 1w trend via EMA34 filter.
 
-name = "1h_EMA21_50_ADX25_VolRegime_Session_v1"
-timeframe = "1h"
+name = "6h_Alligator_ElderRay_1wEMA34_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,100 +25,86 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate EMAs on 1h
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA13 for Elder Ray power calculation
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Get 4h data for ADX trend filter
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate Bull Power and Bear Power
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Calculate ADX(14) on 4h
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_4h[0] = tr1[0]
-    atr_4h = pd.Series(tr_4h).rolling(window=14, min_periods=14).mean().values
+    # Williams Alligator lines (smoothed medians)
+    # Jaw: 13-period SMMA, shifted 8 bars ahead
+    # Teeth: 8-period SMMA, shifted 5 bars ahead  
+    # Lips: 5-period SMMA, shifted 3 bars ahead
+    def smma(data, period):
+        """Smoothed Moving Average"""
+        result = np.full_like(data, np.nan, dtype=float)
+        if len(data) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (Prev SMMA * (Period-1) + Current Price) / Period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    plus_dm = np.where((high_4h - np.roll(high_4h, 1)) > (np.roll(low_4h, 1) - low_4h),
-                       np.maximum(high_4h - np.roll(high_4h, 1), 0), 0)
-    minus_dm = np.where((np.roll(low_4h, 1) - low_4h) > (high_4h - np.roll(high_4h, 1)),
-                        np.maximum(np.roll(low_4h, 1) - low_4h, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # Calculate median price for Alligator input
+    median_price = (high + low) / 2
     
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_4h
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_4h
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    jaw_raw = smma(median_price, 13)
+    teeth_raw = smma(median_price, 8)
+    lips_raw = smma(median_price, 5)
     
-    # Get 1d data for volatility regime filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Apply Alligator shifts (jaw shifted 8, teeth shifted 5, lips shifted 3)
+    jaw = np.roll(jaw_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
     
-    # Calculate ATR ratio: current ATR(7) / ATR(30) to detect low volatility regimes
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]
-    atr_7_1d = pd.Series(tr_1d).rolling(window=7, min_periods=7).mean().values
-    atr_30_1d = pd.Series(tr_1d).rolling(window=30, min_periods=30).mean().values
-    atr_ratio_1d = atr_7_1d / atr_30_1d
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # Already datetime64[ms], .hour works directly
+    # Calculate EMA34 on 1w close for major trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align HTF arrays to 6h timeframe (wait for completed 1w bar)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient data for EMAs
+    for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(ema21[i]) or np.isnan(ema50[i]) or 
-            np.isnan(adx_4h_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Check session: 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: EMA21 > EMA50 AND ADX > 25 AND ATR ratio < 0.8 (low vol)
-            if ema21[i] > ema50[i] and adx_4h_aligned[i] > 25 and atr_ratio_1d_aligned[i] < 0.8:
-                signals[i] = 0.20
+            # LONG: Bullish Alligator alignment AND Bull Power > 0 AND price > 1w EMA34
+            if jaw[i] < teeth[i] and teeth[i] < lips[i] and bull_power[i] > 0 and close[i] > ema34_1w_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: EMA21 < EMA50 AND ADX > 25 AND ATR ratio < 0.8 (low vol)
-            elif ema21[i] < ema50[i] and adx_4h_aligned[i] > 25 and atr_ratio_1d_aligned[i] < 0.8:
-                signals[i] = -0.20
+            # SHORT: Bearish Alligator alignment AND Bear Power < 0 AND price < 1w EMA34
+            elif jaw[i] > teeth[i] and teeth[i] > lips[i] and bear_power[i] < 0 and close[i] < ema34_1w_aligned[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: EMA21 crosses below EMA50
-            if ema21[i] < ema50[i]:
+            # EXIT LONG: price crosses below Alligator teeth (trend weakening)
+            if close[i] < teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: EMA21 crosses above EMA50
-            if ema21[i] > ema50[i]:
+            # EXIT SHORT: price crosses above Alligator teeth (trend weakening)
+            if close[i] > teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
