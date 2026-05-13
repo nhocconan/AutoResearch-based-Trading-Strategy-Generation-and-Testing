@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "6h_12hVWAP_Bounce_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,72 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 12h VWAP
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
         return np.zeros(n)
+    vwap_12h = (df_12h['close'] * df_12h['volume']).cumsum() / df_12h['volume'].cumsum()
+    vwap_12h = vwap_12h.values
+    vwap_12h_aligned = align_htf_to_ltf(prices, df_12h, vwap_12h)
     
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
-    
-    R4 = pc + (1.1/2) * (ph - pl)
-    R3 = pc + (1.1/4) * (ph - pl)
-    R2 = pc + (1.1/6) * (ph - pl)
-    R1 = pc + (1.1/12) * (ph - pl)
-    S1 = pc - (1.1/12) * (ph - pl)
-    S2 = pc - (1.1/6) * (ph - pl)
-    S3 = pc - (1.1/4) * (ph - pl)
-    S4 = pc - (1.1/2) * (ph - pl)
-    
-    R1_1d = align_htf_to_ltf(prices, df_1d, R1)
-    S1_1d = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # 1d EMA34 trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # 4h volume filter: volume > 1.5 x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # 1d trend: EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
-        if (np.isnan(R1_1d[i]) or np.isnan(S1_1d[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+    for i in range(50, n):
+        if np.isnan(vwap_12h_aligned[i]) or np.isnan(ema50_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
-        price_above_R1 = close[i] > R1_1d[i]
-        price_below_S1 = close[i] < S1_1d[i]
-        price_above_ema = close[i] > ema34_1d_aligned[i]
-        price_below_ema = close[i] < ema34_1d_aligned[i]
+        price = close[i]
+        vwap = vwap_12h_aligned[i]
+        ema50 = ema50_1d_aligned[i]
         
         if position == 0:
-            # LONG: break above R1 + uptrend + volume
-            if price_above_R1 and price_above_ema and vol_filter:
+            # LONG: price near 12h VWAP (within 0.5%) and above 1d EMA50
+            if abs(price - vwap) / vwap < 0.005 and price > ema50:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1 + downtrend + volume
-            elif price_below_S1 and price_below_ema and vol_filter:
+            # SHORT: price near 12h VWAP and below 1d EMA50
+            elif abs(price - vwap) / vwap < 0.005 and price < ema50:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: close below S1 or trend change
-            if price_below_S1 or price_below_ema:
+            # EXIT LONG: price moves away from VWAP or trend changes
+            if abs(price - vwap) / vwap > 0.015 or price < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: close above R1 or trend change
-            if price_above_R1 or price_above_ema:
+            # EXIT SHORT: price moves away from VWAP or trend changes
+            if abs(price - vwap) / vwap > 0.015 or price > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
