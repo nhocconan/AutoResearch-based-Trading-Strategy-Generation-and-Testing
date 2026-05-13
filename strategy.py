@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_Trend_Volume
-# Hypothesis: Trade 1-hour Camarilla pivot point breakouts filtered by 4-hour trend and 1-day volume.
-# Long when price breaks above R1 with 4h uptrend and volume spike.
-# Short when price breaks below S1 with 4h downtrend and volume spike.
-# Exit when price retests the pivot point (PP) or trend reverses.
-# Uses 4h trend filter to avoid counter-trend whipsaws and volume to confirm breakout strength.
-# Designed for low trade frequency (15-35/year) to avoid fee drag, works in bull/bear via trend filter.
+# 6h_MACD_EMA_Trend_Follower
+# Hypothesis: Follow medium-term trend using 6h MACD histogram and EMA200 filter.
+# Long when MACD histogram turns positive AND price above EMA200 (6h).
+# Short when MACD histogram turns negative AND price below EMA200 (6h).
+# Uses weekly trend filter to avoid counter-trend trades in strong trends.
+# Designed to capture trends while minimizing whipsaws in both bull and bear markets.
 
-name = "1h_Camarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "1h"
+name = "6h_MACD_EMA_Trend_Follower"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,37 +24,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    # 4h EMA50 for trend direction
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Get 6h data for MACD and EMA200
+    df_6h = get_htf_data(prices, '6h')
+    
+    # MACD (12,26,9) on 6h close
+    close_6h = df_6h['close'].values
+    ema12 = pd.Series(close_6h).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close_6h).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
+    
+    # EMA200 on 6h close
+    ema200_6h = pd.Series(close_6h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Weekly trend filter: price above/below weekly EMA50
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
 
-    # Get 1d data for Camarilla pivot levels (previous day)
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate Camarilla levels using previous day's OHLC
-    c_high = df_1d['high'].values
-    c_low = df_1d['low'].values
-    c_close = df_1d['close'].values
-    # Camarilla: PP = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_pp = (c_high + c_low + c_close) / 3
-    camarilla_r1 = c_close + (c_high - c_low) * 1.1 / 12
-    camarilla_s1 = c_close - (c_high - c_low) * 1.1 / 12
-    # Align to 1h: each 1d value applies to the next 24h (6 bars of 1h) after the day closes
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-
-    # Volume filter: >1.5x 24-period average (6h)
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Align 6h indicators to lower timeframe (15m equivalent for 6h)
+    macd_hist_aligned = align_htf_to_ltf(prices, df_6h, macd_hist)
+    ema200_6h_aligned = align_htf_to_ltf(prices, df_6h, ema200_6h)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(24, n):  # start after warmup for vol_avg_24
+    for i in range(100, n):  # Start after warmup period
         # Skip if any required value is NaN
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_avg_24[i]) or \
-           np.isnan(camarilla_pp_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
+        if (np.isnan(macd_hist_aligned[i]) or np.isnan(ema200_6h_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,38 +61,47 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # MACD histogram crossover signals
+        macd_hist_prev = macd_hist_aligned[i-1] if i > 0 else 0
+        macd_hist_curr = macd_hist_aligned[i]
+        
+        # Bullish crossover: MACD hist crosses above zero
+        bullish_cross = macd_hist_prev <= 0 and macd_hist_curr > 0
+        # Bearish crossover: MACD hist crosses below zero
+        bearish_cross = macd_hist_prev >= 0 and macd_hist_curr < 0
+        
+        # Price relative to EMA200
+        price_above_ema200 = close[i] > ema200_6h_aligned[i]
+        price_below_ema200 = close[i] < ema200_6h_aligned[i]
+        
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+
         if position == 0:
-            # LONG: Price breaks above R1 with 4h uptrend and volume spike
-            if close[i] > camarilla_r1_aligned[i]:
-                if close[i] > ema_50_4h_aligned[i] and volume[i] > vol_avg_24[i] * 1.5:
-                    signals[i] = 0.20
-                    position = 1
-            # SHORT: Price breaks below S1 with 4h downtrend and volume spike
-            elif close[i] < camarilla_s1_aligned[i]:
-                if close[i] < ema_50_4h_aligned[i] and volume[i] > vol_avg_24[i] * 1.5:
-                    signals[i] = -0.20
-                    position = -1
+            # LONG: MACD bullish crossover + price above EMA200 + weekly uptrend
+            if bullish_cross and price_above_ema200 and weekly_uptrend:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: MACD bearish crossover + price below EMA200 + weekly downtrend
+            elif bearish_cross and price_below_ema200 and weekly_downtrend:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price retests PP or trend turns down
-            if close[i] < camarilla_pp_aligned[i]:  # retest pivot point
-                signals[i] = 0.0
-                position = 0
-            elif close[i] < ema_50_4h_aligned[i]:  # trend turned down
+            # EXIT LONG: MACD bearish crossover OR price below EMA200 OR weekly downtrend
+            if bearish_cross or not price_above_ema200 or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price retests PP or trend turns up
-            if close[i] > camarilla_pp_aligned[i]:  # retest pivot point
-                signals[i] = 0.0
-                position = 0
-            elif close[i] > ema_50_4h_aligned[i]:  # trend turned up
+            # EXIT SHORT: MACD bullish crossover OR price above EMA200 OR weekly uptrend
+            if bullish_cross or not price_below_ema200 or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
