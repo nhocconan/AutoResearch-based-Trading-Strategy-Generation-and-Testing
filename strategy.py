@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation (>2.0x avg volume).
-# Uses ATR(14) trailing stop (3.0x) for risk control. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
-# EMA200 ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Donchian(20) breakouts capture momentum in both bull and bear markets when aligned with HTF trend.
-# Volume confirmation filters out false breakouts.
+# Hypothesis: 4h Williams %R mean reversion with 12h EMA trend filter and volume confirmation (>1.2x avg volume). 
+# Long when Williams %R < -80 (oversold) and 12h EMA21 > EMA50; short when Williams %R > -20 (overbought) and 12h EMA21 < EMA50.
+# Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# Williams %R captures short-term exhaustion while 12h EMA filter ensures alignment with intermediate trend.
+# Volume confirmation filters out low-momentum breakouts. Works in bull via mean-reversion longs and in bear via mean-reversion shorts.
 
-name = "6h_Donchian20_1dEMA200_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "4h_WilliamsR_MeanReversion_12hEMATrend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,20 +34,25 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Get 1d data for EMA200 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA200 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 12h EMA21 and EMA50 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema21_12h = close_12h_series.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA200 to 6h timeframe (wait for daily bar to close)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align 12h EMAs to 4h timeframe (wait for 12h bar to close)
+    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,24 +61,23 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema21_12h_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND 1d EMA200 > close AND volume > 2.0x average
-            if (close[i] > highest_high[i] and 
-                ema200_1d_aligned[i] < close[i] and 
-                volume[i] > 2.0 * avg_volume[i]):
+            # LONG: Williams %R < -80 (oversold) AND 12h EMA21 > EMA50 AND volume > 1.2x average
+            if (williams_r[i] < -80 and 
+                ema21_12h_aligned[i] > ema50_12h_aligned[i] and 
+                volume[i] > 1.2 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian lower AND 1d EMA200 < close AND volume > 2.0x average
-            elif (close[i] < lowest_low[i] and 
-                  ema200_1d_aligned[i] > close[i] and 
-                  volume[i] > 2.0 * avg_volume[i]):
+            # SHORT: Williams %R > -20 (overbought) AND 12h EMA21 < EMA50 AND volume > 1.2x average
+            elif (williams_r[i] > -20 and 
+                  ema21_12h_aligned[i] < ema50_12h_aligned[i] and 
+                  volume[i] > 1.2 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -87,8 +90,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (3.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 3.0 * atr[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -102,8 +105,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (3.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 3.0 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
