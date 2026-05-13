@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams %R reversal with 1d ADX trend filter and volume confirmation.
-# Enters long when Williams %R crosses above -80 from oversold with 1d bullish trend (ADX>25 and +DI>-DI) and volume > 1.5x MA20.
-# Enters short when Williams %R crosses below -20 from overbought with 1d bearish trend (ADX>25 and +DI<+DI) and volume > 1.5x MA20.
-# Exits when Williams %R returns to -50 (mean reversion) or opposing signal occurs.
-# Uses discrete position sizing (0.25) to minimize fee drag and manage drawdown.
-# Designed for low trade frequency (~12-37/year) to work in both bull and bear markets by requiring strong volume confirmation and trend alignment.
-# Williams %R is effective in ranging markets (common in 2025 BTC/ETH bear/range) while ADX filter avoids whipsaws in strong trends.
+# Hypothesis: 4h Donchian channel breakout with 1d trend filter (EMA34), volume confirmation (>1.5x MA20), and ATR-based stoploss.
+# Enters long when price breaks above Donchian(20) upper band with bullish 1d trend and volume spike.
+# Enters short when price breaks below Donchian(20) lower band with bearish 1d trend and volume spike.
+# Exits via ATR trailing stop: long exits when price drops below highest high since entry minus 2.5*ATR(14);
+# short exits when price rises above lowest low since entry plus 2.5*ATR(14).
+# Uses discrete position sizing (0.30) to balance return and drawdown.
+# Designed for moderate trade frequency (~20-50/year) to work in both bull and bear markets by requiring
+# strong breakout conditions with volume confirmation and trend alignment, reducing false signals and fee drag.
 
-name = "12h_WilliamsR_Reversal_1dADX_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_1dTrend_Volume_ATRStop"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,42 +26,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams %R (14-period)
+    # Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # ATR(14) for volatility and stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Get 1d data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    
-    # Get 1d data for ADX and DI (14-period)
-    # True Range
-    tr1 = pd.Series(high_1d - low_1d).values
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1))).values
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1))).values
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    # Smooth TR, DM+ and DM- with Wilder's smoothing (EMA with alpha=1/period)
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    di_plus_aligned = align_htf_to_ltf(prices, df_1d, di_plus)
-    di_minus_aligned = align_htf_to_ltf(prices, df_1d, di_minus)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
@@ -69,39 +54,45 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or \
-           np.isnan(di_plus_aligned[i]) or np.isnan(di_minus_aligned[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+           np.isnan(atr[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R crosses above -80 from oversold with 1d bullish trend and volume spike
-            if (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80 and 
-                adx_aligned[i] > 25 and di_plus_aligned[i] > di_minus_aligned[i] and volume_spike[i]):
-                signals[i] = 0.25
+            # LONG: Price breaks above Donchian upper with bullish 1d trend and volume spike
+            if close[i] > donchian_upper[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Williams %R crosses below -20 from overbought with 1d bearish trend and volume spike
-            elif (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20 and 
-                  adx_aligned[i] > 25 and di_plus_aligned[i] < di_minus_aligned[i] and volume_spike[i]):
-                signals[i] = -0.25
+                highest_high_since_entry = high[i]
+            # SHORT: Price breaks below Donchian lower with bearish 1d trend and volume spike
+            elif close[i] < donchian_lower[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+                signals[i] = -0.30
                 position = -1
+                lowest_low_since_entry = low[i]
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R returns to -50 (mean reversion) or bearish crossover
-            if williams_r_aligned[i] >= -50 or (williams_r_aligned[i] < -20 and williams_r_aligned[i-1] >= -20):
+            # Update highest high since entry
+            highest_high_since_entry = max(highest_high_since_entry, high[i])
+            # EXIT LONG: Price drops below highest high since entry minus 2.5*ATR
+            if close[i] < highest_high_since_entry - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Williams %R returns to -50 (mean reversion) or bullish crossover
-            if williams_r_aligned[i] <= -50 or (williams_r_aligned[i] > -80 and williams_r_aligned[i-1] <= -80):
+            # Update lowest low since entry
+            lowest_low_since_entry = min(lowest_low_since_entry, low[i])
+            # EXIT SHORT: Price rises above lowest low since entry plus 2.5*ATR
+            if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
