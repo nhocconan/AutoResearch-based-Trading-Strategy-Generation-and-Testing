@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions; mean reversion works well in ranging markets.
-# 1d EMA50 provides trend filter to avoid counter-trend trades during strong moves.
-# Volume spike (>1.8x 20-bar avg) confirms participation. Designed for low trade frequency
-# (<75 total 6h trades) to minimize fee drag while capturing reversals in both bull and bear markets.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>1.5x 24-bar avg volume).
+# Uses Donchian channels for structure, 1d EMA50 for trend alignment (works in bull/bear via trend filter),
+# and volume spike to avoid false breakouts. Targets low trade frequency (<150 total 12h trades over 4 years)
+# to minimize fee drag while capturing strong momentum moves. Designed for BTC/ETH primarily.
 
-name = "6h_WilliamsR_MeanReversion_1dEMA50_Volume_Confirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -30,54 +29,52 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams %R (14-period)
-    lookback_wr = 14
-    highest_high = pd.Series(high).rolling(window=lookback_wr, min_periods=lookback_wr).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_wr, min_periods=lookback_wr).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Donchian channels (20-period) on 12h data
+    lookback_dc = 20
+    dc_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().shift(1).values
+    dc_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().shift(1).values
     
-    # Calculate average volume for confirmation (20-period)
-    lookback_vol = 20
+    # Calculate average volume for confirmation (24-period = 12 days of 12h bars)
+    lookback_vol = 24
     avg_volume = pd.Series(volume).rolling(window=lookback_vol, min_periods=lookback_vol).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(lookback_wr, lookback_vol) + 1, n):
+    for i in range(max(lookback_dc, lookback_vol, 1), n):
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
+            np.isnan(dc_high[i]) or 
+            np.isnan(dc_low[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R oversold (< -80), price > 1d EMA50, volume spike
-            if (williams_r[i] < -80 and 
+            # LONG: Price breaks above Donchian high, close > 1d EMA50, volume spike (>1.5x avg)
+            if (high[i] > dc_high[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
-                volume[i] > 1.8 * avg_volume[i]):
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R overbought (> -20), price < 1d EMA50, volume spike
-            elif (williams_r[i] > -20 and 
+            # SHORT: Price breaks below Donchian low, close < 1d EMA50, volume spike (>1.5x avg)
+            elif (low[i] < dc_low[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
-                  volume[i] > 1.8 * avg_volume[i]):
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R rises above -50 (mean reversion) or volume drops
-            if (williams_r[i] > -50) or (volume[i] < 0.6 * avg_volume[i]):
+            # EXIT LONG: Close if price breaks below Donchian low or volume drops below 0.5x avg
+            if (low[i] < dc_low[i]) or (volume[i] < 0.5 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # EXIT SHORT: Williams %R falls below -50 (mean reversion) or volume drops
-            if (williams_r[i] < -50) or (volume[i] < 0.6 * avg_volume[i]):
+            # EXIT SHORT: Close if price breaks above Donchian high or volume drops below 0.5x avg
+            if (high[i] > dc_high[i]) or (volume[i] < 0.5 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
