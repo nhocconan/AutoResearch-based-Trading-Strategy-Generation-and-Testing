@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 4h_MultiTimeframe_Adaptive_Strategy_v1
-# Hypothesis: Multi-timeframe strategy combining 1d trend direction (EMA34), 4h momentum (RSI), and volume confirmation. 
-# Uses adaptive position sizing based on volatility (ATR) and avoids overtrading by requiring confluence of multiple conditions.
-# Designed for both bull and bear markets: long in uptrend (price > EMA34) with bullish momentum, short in downtrend (price < EMA34) with bearish momentum.
-# Includes volatility-based stop loss and cooldown periods to reduce false signals and manage risk.
+# 1d_Camarilla_R1_S1_Breakout_1wTrend_Volume_Momentum
+# Hypothesis: Breakouts above weekly Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34), with volume confirmation (volume > 1.8x 20-period average). Uses 1d timeframe to reduce trade frequency and capture momentum. Designed to work in both bull and bear markets by requiring trend alignment and avoiding whipsaw through volume confirmation. Focus on BTC/ETH with robust risk controls.
 
-name = "4h_MultiTimeframe_Adaptive_Strategy_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,41 +20,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for Camarilla levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend direction
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Camarilla levels for each 1w bar (based on previous week's range)
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
-    # Calculate 4h RSI for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
+    camarilla_r1 = np.full_like(prev_close, np.nan)
+    camarilla_s1 = np.full_like(prev_close, np.nan)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    
+    # Align Camarilla levels to 1d timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    
+    # Get 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma)
-    
-    # Volatility filter: ATR(14) for dynamic sizing
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Dynamic position size based on volatility (inverse volatility scaling)
-    # Normalize ATR to get volatility factor, then scale position size
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    vol_factor = np.clip(atr_ma / (atr + 1e-10), 0.5, 2.0)  # Inverse volatility: higher volatility = smaller position
-    base_size = 0.25
-    position_size = base_size * vol_factor
+    volume_confirmed = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,31 +59,35 @@ def generate_signals(prices):
             cooldown -= 1
         
         if position == 0 and cooldown == 0:
-            # LONG: Uptrend (price > EMA34) + bullish momentum (RSI > 50) + volume confirmation
-            if close[i] > ema_34_1d_aligned[i] and rsi[i] > 50 and volume_confirmed[i]:
-                signals[i] = position_size[i]
+            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1w_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend (price < EMA34) + bearish momentum (RSI < 50) + volume confirmation
-            elif close[i] < ema_34_1d_aligned[i] and rsi[i] < 50 and volume_confirmed[i]:
-                signals[i] = -position_size[i]
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34)
+            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1w_aligned[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal (price < EMA34) or bearish momentum (RSI < 40)
-            if close[i] < ema_34_1d_aligned[i] or rsi[i] < 40:
+            # EXIT LONG: Price crosses back below R1 or trend weakens (price < EMA34)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                cooldown = 4  # 4-bar cooldown after exit
+                cooldown = 3  # 3-bar cooldown after exit
             else:
-                signals[i] = position_size[i]
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal (price > EMA34) or bullish momentum (RSI > 60)
-            if close[i] > ema_34_1d_aligned[i] or rsi[i] > 60:
+            # EXIT SHORT: Price crosses back above S1 or trend weakens (price > EMA34)
+            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+               high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                cooldown = 4  # 4-bar cooldown after exit
+                cooldown = 3  # 3-bar cooldown after exit
             else:
-                signals[i] = -position_size[i]
+                signals[i] = -0.25
     
     return signals
