@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_Filter_v1
-Hypothesis: Use 1h Camarilla pivot breakout (R1/S1) with 4h trend filter (EMA50) and session filter (08-20 UTC). 
-Camarilla levels provide high-probability reversal/breakout zones. 4h EMA50 ensures trading with higher timeframe trend.
-Session filter reduces noise during low-volume hours. Designed for 1h timeframe to achieve 15-37 trades/year.
-Works in bull markets (breakouts with trend) and bear markets (mean reversion at extremes in ranging conditions).
+1d_ThreeBarReversal_LiquiditySweep
+Hypothesis: Capture institutional reversal patterns where price sweeps liquidity (equal highs/lows) and reverses with a three-bar reversal pattern. This works in both bull and bear markets as it targets exhaustion moves. Uses 1d timeframe to limit trades and avoid fee drag. Confirmed by volume spike and filtered by weekly EMA200 trend for higher probability entries.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Filter_v1"
-timeframe = "1h"
+name = "1d_ThreeBarReversal_LiquiditySweep"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,107 +14,113 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get daily data for equal high/low detection
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1h Camarilla pivots using previous day's OHLC
-    # We need to group by day to get previous day's OHLC
-    # Create date column for grouping
-    dates = pd.to_datetime(prices['open_time']).date
-    unique_dates = np.unique(dates)
+    # Find equal highs/lows within 0.1% tolerance (liquidity pools)
+    def find_equal_levels(arr, tolerance=0.001):
+        equal_high = np.zeros(len(arr), dtype=bool)
+        equal_low = np.zeros(len(arr), dtype=bool)
+        for i in range(2, len(arr)):
+            # Check if current high equals any of last 5 bars
+            for j in range(max(0, i-5), i):
+                if abs(arr[i] - arr[j]) / arr[j] < tolerance:
+                    equal_high[i] = True
+                    break
+            # Check if current low equals any of last 5 bars
+            for j in range(max(0, i-5), i):
+                if abs(arr[i] - arr[j]) / arr[j] < tolerance:
+                    equal_low[i] = True
+                    break
+        return equal_high, equal_low
     
-    # Arrays to store Camarilla levels for each bar
-    R1 = np.full(n, np.nan)
-    S1 = np.full(n, np.nan)
+    equal_high_1d, equal_low_1d = find_equal_levels(high_1d), find_equal_levels(low_1d)
     
-    # Calculate for each day
-    for i, date in enumerate(unique_dates):
-        # Get indices for this day
-        day_mask = (dates == date)
-        if not np.any(day_mask):
-            continue
-            
-        # Get previous day's data (if exists)
-        if i == 0:
-            # First day, no previous day
-            continue
-            
-        prev_date = unique_dates[i-1]
-        prev_mask = (dates == prev_date)
-        
-        if not np.any(prev_mask):
-            continue
-            
-        # Previous day's OHLC
-        prev_high = np.max(high[prev_mask])
-        prev_low = np.min(low[prev_mask])
-        prev_close = close[prev_mask][-1]  # Last close of previous day
-        
-        # Calculate Camarilla levels
-        range_val = prev_high - prev_low
-        if range_val <= 0:
-            continue
-            
-        # Camarilla R1 and S1
-        R1_val = prev_close + (range_val * 1.1 / 12)
-        S1_val = prev_close - (range_val * 1.1 / 12)
-        
-        # Apply to current day's bars
-        R1[day_mask] = R1_val
-        S1[day_mask] = S1_val
+    # Align equal high/low signals to lower timeframe
+    equal_high_aligned = align_htf_to_ltf(prices, df_1d, equal_high_1d.astype(float))
+    equal_low_aligned = align_htf_to_ltf(prices, df_1d, equal_low_1d.astype(float))
     
-    # Session filter: 08-20 UTC
-    hours = pd.to_datetime(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Three-bar reversal pattern detection
+    # Bullish: down, down, up with higher close
+    # Bearish: up, up, down with lower close
+    bullish_reversal = np.zeros(n, dtype=bool)
+    bearish_reversal = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n):
+        if (close[i-2] > close[i-1] and  # first bar down
+            close[i-1] > close[i] and   # second bar down
+            close[i] > close[i-1]):     # third bar up (reversal)
+            bullish_reversal[i] = True
+        if (close[i-2] < close[i-1] and  # first bar up
+            close[i-1] < close[i] and   # second bar up
+            close[i] < close[i-1]):     # third bar down (reversal)
+            bearish_reversal[i] = True
+    
+    # Get weekly EMA200 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Volume spike: current volume > 2x 20-day average (institutional participation)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Skip if required data is not available
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or 
-            not in_session[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(equal_high_aligned[i]) or np.isnan(equal_low_aligned[i]) or
+            np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume spike condition
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        
         if position == 0:
-            # LONG: Break above R1 with 4h uptrend (price > EMA50)
-            if close[i] > R1[i] and close[i] > ema_50_4h_aligned[i]:
-                signals[i] = 0.20
+            # LONG: liquidity sweep below (equal low) + bullish reversal + volume spike + above weekly EMA200
+            if (equal_low_aligned[i] and bullish_reversal[i] and vol_spike and 
+                close[i] > ema_200_1w_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 with 4h downtrend (price < EMA50)
-            elif close[i] < S1[i] and close[i] < ema_50_4h_aligned[i]:
-                signals[i] = -0.20
+            # SHORT: liquidity sweep above (equal high) + bearish reversal + volume spike + below weekly EMA200
+            elif (equal_high_aligned[i] and bearish_reversal[i] and vol_spike and 
+                  close[i] < ema_200_1w_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or 4h trend turns down
-            if close[i] < S1[i] or close[i] < ema_50_4h_aligned[i]:
+            # EXIT LONG: price breaks below entry low or reversal signal
+            entry_low = low[i-1] if i > 0 else low[i]
+            if close[i] < entry_low or bearish_reversal[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or 4h trend turns up
-            if close[i] > R1[i] or close[i] > ema_50_4h_aligned[i]:
+            # EXIT SHORT: price breaks above entry high or reversal signal
+            entry_high = high[i-1] if i > 0 else high[i]
+            if close[i] > entry_high or bullish_reversal[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
