@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_R1S1_Breakout_TrendVolume
-Hypothesis: Camarilla pivot levels (R1/S1) from 1d combined with 12h trend (EMA50) and volume confirmation provide robust entries in both bull and bear markets. 
-Breakout above R1 with uptrend and volume spike = long. Breakdown below S1 with downtrend and volume spike = short. 
-Exit on opposite touch (S1 for long, R1 for short) or trend reversal. Uses 1w trend filter for higher timeframe bias.
-Target: 12-37 trades/year per symbol.
+4h_Pivot_Trend_Follow_HTF_Volume
+Hypothesis: Daily pivot points (PP, S1, R1) provide reliable support/resistance. 
+Breakout above R1 with daily/weekly uptrend and volume spike = long.
+Breakdown below S1 with daily/weekly downtrend and volume spike = short.
+Exit when price returns to pivot point or trend reverses.
+Uses 4h price for entry/exit, 1d/1w for trend filter, volume confirmation to filter noise.
+Target: 20-40 trades/year per symbol.
 """
 
-name = "12h_Camarilla_Pivot_R1S1_Breakout_TrendVolume"
-timeframe = "12h"
+name = "4h_Pivot_Trend_Follow_HTF_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,12 +27,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h EMA50 for trend
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = close > ema_50
-    downtrend_12h = close < ema_50
+    # Daily Pivot Points (calculated from previous day)
+    # We need to get daily OHLC to calculate pivots, then align to 4h
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # 1w trend filter (HTF)
+    # Calculate daily pivot points: PP = (H + L + C)/3, S1 = 2*PP - H, R1 = 2*PP - L
+    # Use previous day's values (shifted by 1) to avoid look-ahead
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    # Shift by 1 to use previous day's data for today's pivot
+    prev_daily_high = np.concatenate([[np.nan], daily_high[:-1]])
+    prev_daily_low = np.concatenate([[np.nan], daily_low[:-1]])
+    prev_daily_close = np.concatenate([[np.nan], daily_close[:-1]])
+    
+    # Calculate pivot points
+    pp = (prev_daily_high + prev_daily_low + prev_daily_close) / 3.0
+    s1 = 2 * pp - prev_daily_high
+    r1 = 2 * pp - prev_daily_low
+    
+    # Align pivot levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    
+    # 4h trend: EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_4h = close > ema_50
+    downtrend_4h = close < ema_50
+    
+    # Weekly trend filter (HTF)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -39,25 +68,6 @@ def generate_signals(prices):
     downtrend_1w = df_1w['close'].values < ema_50_1w
     uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
     downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
-    
-    # Daily OHLC for Camarilla pivots (use prior day's data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla R1 and S1: (H+L+C)/3 ± 1.1*(H-L)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r1 = pivot + 1.1 * (high_1d - low_1d) / 12
-    s1 = pivot - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align to 12h timeframe (these levels are valid for the entire day)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
@@ -69,36 +79,42 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
+        # Skip if pivot data not available (first day)
+        if np.isnan(pp_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]):
+            signals[i] = 0.0
+            continue
+            
         # Get values
-        r1_val = r1_aligned[i]
+        pp_val = pp_aligned[i]
         s1_val = s1_aligned[i]
-        uptrend = uptrend_12h[i]
-        downtrend = downtrend_12h[i]
+        r1_val = r1_aligned[i]
+        uptrend = uptrend_4h[i]
+        downtrend = downtrend_4h[i]
         uptrend_htf = uptrend_1w_aligned[i]
         downtrend_htf = downtrend_1w_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: break above R1, 12h uptrend, 1w uptrend filter, volume confirmation
+            # LONG: break above R1, 4h uptrend, weekly uptrend filter, volume confirmation
             if close[i] > r1_val and uptrend and uptrend_htf and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1, 12h downtrend, 1w downtrend filter, volume confirmation
+            # SHORT: break below S1, 4h downtrend, weekly downtrend filter, volume confirmation
             elif close[i] < s1_val and downtrend and downtrend_htf and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch S1 or 12h trend turns down
-            if close[i] < s1_val or not uptrend:
+            # EXIT LONG: return to pivot point or 4h trend turns down
+            if close[i] <= pp_val or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch R1 or 12h trend turns up
-            if close[i] > r1_val or not downtrend:
+            # EXIT SHORT: return to pivot point or 4h trend turns up
+            if close[i] >= pp_val or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
