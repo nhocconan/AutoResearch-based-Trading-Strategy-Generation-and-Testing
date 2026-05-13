@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_ThreeBarReversal_LiquiditySweep
-Hypothesis: Capture institutional reversal patterns where price sweeps liquidity (equal highs/lows) and reverses with a three-bar reversal pattern. This works in both bull and bear markets as it targets exhaustion moves. Uses 1d timeframe to limit trades and avoid fee drag. Confirmed by volume spike and filtered by weekly EMA200 trend for higher probability entries.
+4h_Camarilla_Pivot_S1_S3_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels from daily timeframe provide high-probability support/resistance. 
+Breakout above S3 (strong resistance) or below S1 (strong support) with volume confirmation and 
+daily EMA trend filter captures momentum moves. Works in bull markets (breakouts continue) and 
+bear markets (breakdowns continue). Designed for 4h timeframe with tight entry conditions 
+(~25-40 trades/year) to avoid fee drag.
 """
 
-name = "1d_ThreeBarReversal_LiquiditySweep"
-timeframe = "1d"
+name = "4h_Camarilla_Pivot_S1_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,62 +26,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for equal high/low detection
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate Camarilla pivot levels for each day
+    # Based on previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Find equal highs/lows within 0.1% tolerance (liquidity pools)
-    def find_equal_levels(arr, tolerance=0.001):
-        equal_high = np.zeros(len(arr), dtype=bool)
-        equal_low = np.zeros(len(arr), dtype=bool)
-        for i in range(2, len(arr)):
-            # Check if current high equals any of last 5 bars
-            for j in range(max(0, i-5), i):
-                if abs(arr[i] - arr[j]) / arr[j] < tolerance:
-                    equal_high[i] = True
-                    break
-            # Check if current low equals any of last 5 bars
-            for j in range(max(0, i-5), i):
-                if abs(arr[i] - arr[j]) / arr[j] < tolerance:
-                    equal_low[i] = True
-                    break
-        return equal_high, equal_low
+    # Camarilla levels: S1 = C - (H-L)*1.12/6, S3 = C - (H-L)*1.12/2
+    # R1 = C + (H-L)*1.12/6, R3 = C + (H-L)*1.12/2
+    range_1d = high_1d - low_1d
+    s1_1d = close_1d - (range_1d * 1.12 / 6)
+    s3_1d = close_1d - (range_1d * 1.12 / 2)
+    r1_1d = close_1d + (range_1d * 1.12 / 6)
+    r3_1d = close_1d + (range_1d * 1.12 / 2)
     
-    equal_high_1d, equal_low_1d = find_equal_levels(high_1d), find_equal_levels(low_1d)
+    # Align daily levels to 4h timeframe (wait for daily close)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     
-    # Align equal high/low signals to lower timeframe
-    equal_high_aligned = align_htf_to_ltf(prices, df_1d, equal_high_1d.astype(float))
-    equal_low_aligned = align_htf_to_ltf(prices, df_1d, equal_low_1d.astype(float))
+    # Get daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Three-bar reversal pattern detection
-    # Bullish: down, down, up with higher close
-    # Bearish: up, up, down with lower close
-    bullish_reversal = np.zeros(n, dtype=bool)
-    bearish_reversal = np.zeros(n, dtype=bool)
-    
-    for i in range(2, n):
-        if (close[i-2] > close[i-1] and  # first bar down
-            close[i-1] > close[i] and   # second bar down
-            close[i] > close[i-1]):     # third bar up (reversal)
-            bullish_reversal[i] = True
-        if (close[i-2] < close[i-1] and  # first bar up
-            close[i-1] < close[i] and   # second bar up
-            close[i] < close[i-1]):     # third bar down (reversal)
-            bearish_reversal[i] = True
-    
-    # Get weekly EMA200 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
-    # Volume spike: current volume > 2x 20-day average (institutional participation)
+    # Calculate volume spike (current volume > 2x 20-period average)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -85,39 +63,36 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(equal_high_aligned[i]) or np.isnan(equal_low_aligned[i]) or
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(s1_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition
+        # Volume spike condition: current volume > 2x 20-period average
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: liquidity sweep below (equal low) + bullish reversal + volume spike + above weekly EMA200
-            if (equal_low_aligned[i] and bullish_reversal[i] and vol_spike and 
-                close[i] > ema_200_1w_aligned[i]):
+            # LONG: Break above R3 with volume spike and price above daily EMA34 (bullish trend)
+            if close[i] > r3_aligned[i] and vol_spike and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: liquidity sweep above (equal high) + bearish reversal + volume spike + below weekly EMA200
-            elif (equal_high_aligned[i] and bearish_reversal[i] and vol_spike and 
-                  close[i] < ema_200_1w_aligned[i]):
+            # SHORT: Break below S3 with volume spike and price below daily EMA34 (bearish trend)
+            elif close[i] < s3_aligned[i] and vol_spike and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below entry low or reversal signal
-            entry_low = low[i-1] if i > 0 else low[i]
-            if close[i] < entry_low or bearish_reversal[i]:
+            # EXIT LONG: Price breaks below R1 or daily EMA34
+            if close[i] < r1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above entry high or reversal signal
-            entry_high = high[i-1] if i > 0 else high[i]
-            if close[i] > entry_high or bullish_reversal[i]:
+            # EXIT SHORT: Price breaks above S1 or daily EMA34
+            if close[i] > s1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
