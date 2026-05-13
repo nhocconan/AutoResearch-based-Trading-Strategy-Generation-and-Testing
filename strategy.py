@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX > 25 trend filter and volume spike > 2.0x average.
-# Long when price closes above R3 with 1d ADX > 25 and volume > 2.0x 20-bar average volume.
-# Short when price closes below S3 with 1d ADX > 25 and volume > 2.0x average.
-# Exit when price reverses and closes below/above the opposite Camarilla level (S3 for longs, R3 for shorts).
-# Uses discrete position sizing 0.25. Target: 75-200 total trades over 4 years on 4h timeframe.
-# Higher volume threshold (2.0x vs 1.8x) reduces overtrading and fee drag while maintaining edge in strong moves.
-# 1d ADX ensures we only trade in trending markets, avoiding choppy conditions that cause false breakouts.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX > 25 trend filter and volume confirmation.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Long when Bull Power > 0, ADX > 25, and volume > 1.5x average.
+# Short when Bear Power > 0, ADX > 25, and volume > 1.5x average.
+# Exit when power reverses sign or ADX < 20 (trend weakening).
+# Uses discrete position sizing 0.25. Target: 50-150 total trades over 4 years on 6h timeframe.
+# Elder Ray measures buying/selling pressure relative to trend (EMA13). Combined with ADX trend filter
+# and volume confirmation, it avoids false signals in choppy markets while capturing strong moves.
+# Works in both bull and bear markets by adapting to trend direction via ADX.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dADX25_VolumeSpike_v2"
-timeframe = "4h"
+name = "6h_ElderRay_1dADX25_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,20 +27,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day (approx using 6x 4h bars)
-    lookback = 6  # 6 * 4h = 24h approx
-    if n < lookback + 1:
-        return np.zeros(n)
+    # Calculate EMA13 for Elder Ray
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # Calculate rolling max/min/close for previous "day"
-    high_prev = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    low_prev = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
-    close_prev = pd.Series(close).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
-    
-    # Camarilla R3 and S3 levels
-    camarilla_range = high_prev - low_prev
-    r3 = close_prev + 1.1 * camarilla_range / 2
-    s3 = close_prev - 1.1 * camarilla_range / 2
+    # Elder Ray components
+    bull_power = high - ema13  # Buying pressure
+    bear_power = ema13 - low   # Selling pressure
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,44 +66,44 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
     adx_1d = pd.Series(dx).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
     
-    # Align 1d ADX to 4h timeframe (wait for 1d bar to close)
+    # Align 1d ADX to 6h timeframe (wait for 1d bar to close)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback + 20, n):  # Start after sufficient data
+    for i in range(20, n):  # Start after sufficient data for volume avg
         # Skip if any required data is NaN
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
             np.isnan(adx_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price closes above R3 with 1d ADX > 25 and volume spike > 2.0x
-            if (close[i] > r3[i] and 
+            # LONG: Bull Power > 0 (buying pressure) with ADX > 25 and volume spike
+            if (bull_power[i] > 0 and 
                 adx_1d_aligned[i] > 25 and 
-                volume[i] > 2.0 * avg_volume[i]):
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below S3 with 1d ADX > 25 and volume spike > 2.0x
-            elif (close[i] < s3[i] and 
+            # SHORT: Bear Power > 0 (selling pressure) with ADX > 25 and volume spike
+            elif (bear_power[i] > 0 and 
                   adx_1d_aligned[i] > 25 and 
-                  volume[i] > 2.0 * avg_volume[i]):
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below S3 (reversal signal)
-            if close[i] < s3[i]:
+            # EXIT LONG: Bull Power <= 0 (buying pressure gone) or ADX < 20 (trend weakening)
+            if bull_power[i] <= 0 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above R3 (reversal signal)
-            if close[i] > r3[i]:
+            # EXIT SHORT: Bear Power <= 0 (selling pressure gone) or ADX < 20 (trend weakening)
+            if bear_power[i] <= 0 or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
