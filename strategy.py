@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-Hypothesis: Camarilla R1/S1 breakouts with weekly trend filter and volume confirmation capture breakouts in both bull and bear markets. Uses 12h timeframe to minimize trade frequency and maximize signal quality, with weekly trend filter to avoid counter-trend trades in bear markets. Designed for 15-30 trades/year with strong breakout logic and volume confirmation.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
+Hypothesis: Camarilla pivot levels (R1/S1) from daily pivot act as strong support/resistance.
+Breakouts above R1 or below S1 with volume confirmation and trend filter (EMA34 on 1d) capture
+trends in both bull and bear markets. Low trade frequency (target 20-40/year) with clear
+entry/exit rules minimizes fee drag. Works in bull via breakouts, in bear via breakdowns.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,23 +25,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate previous day's Camarilla levels (R1, S1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Calculate daily pivot points from 1d data
+    df_1d = get_htf_data(prices, '1d')
+    # Typical price for each day
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Pivot point
+    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Calculate support and resistance levels
+    # R1 = (2 * Pivot) - Low
+    # S1 = (2 * Pivot) - High
+    r1 = (2 * pivot) - df_1d['low']
+    s1 = (2 * pivot) - df_1d['high']
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 12
-    s1 = prev_close - camarilla_range * 1.1 / 12
+    # Align to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
     
-    # Calculate 1-week trend filter (EMA 34)
-    df_1w = get_htf_data(prices, '1w')
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1-day EMA34 trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,32 +53,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(34, n):  # Start after EMA warmup
         if position == 0:
-            # LONG: Price breaks above R1 with volume confirmation and weekly uptrend
-            if close[i] > r1[i] and volume_confirm[i]:
-                # Additional filter: only take long if price above weekly EMA34 (uptrend filter)
-                if close[i] > ema_34_1w_aligned[i]:
+            # LONG: Price breaks above R1 with volume confirmation and uptrend
+            if close[i] > r1_aligned[i] and volume_confirm[i]:
+                # Additional filter: only take long if price above 1-day EMA34 (uptrend)
+                if close[i] > ema34_1d_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-            # SHORT: Price breaks below S1 with volume confirmation and weekly downtrend
-            elif close[i] < s1[i] and volume_confirm[i]:
-                # Additional filter: only take short if price below weekly EMA34 (downtrend filter)
-                if close[i] < ema_34_1w_aligned[i]:
+            # SHORT: Price breaks below S1 with volume confirmation and downtrend
+            elif close[i] < s1_aligned[i] and volume_confirm[i]:
+                # Additional filter: only take short if price below 1-day EMA34 (downtrend)
+                if close[i] < ema34_1d_aligned[i]:
                     signals[i] = -0.25
                     position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 (breakdown) or weekly trend turns down
-            if close[i] < s1[i] or close[i] < ema_34_1w_aligned[i]:
+            # EXIT LONG: Price crosses below pivot or S1 (support break)
+            if close[i] < s1_aligned[i] or close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 (breakout) or weekly trend turns up
-            if close[i] > r1[i] or close[i] > ema_34_1w_aligned[i]:
+            # EXIT SHORT: Price crosses above pivot or R1 (resistance break)
+            if close[i] > r1_aligned[i] or close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
