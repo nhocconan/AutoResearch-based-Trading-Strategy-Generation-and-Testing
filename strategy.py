@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Positioning_v2
-Hypothesis: Weekly pivot points (PP, R1/S1, R2/S2) on 1w timeframe act as major support/resistance zones.
-Price tends to respect these levels, bouncing off R1/S1 or breaking through R2/S2 with momentum.
-We enter long when price bounces above S1 with bullish weekly bias, short when rejected at R1 with bearish bias.
-Position size 0.25 targets ~20-30 trades/year to minimize fee drag. Uses 1d trend filter for alignment.
-Works in bull markets via R2/S2 breakouts and in bear markets via R1/S1 mean reversion.
+4h_KAMA_Trend_With_1dVWAP_Support_Resistance
+Hypothesis: KAMA adapts to market noise, reducing whipsaw in ranging markets.
+Trades in direction of KAMA trend when price is near 1d VWAP support/resistance
+with volume confirmation. VWAP acts as dynamic support/resistance in trending
+markets. Position size 0.25 limits risk and targets ~20-30 trades/year.
+Works in bull (trend following) and bear (mean reversion near VWAP).
 """
 
-name = "6h_Weekly_Pivot_Positioning_v2"
-timeframe = "6h"
+name = "4h_KAMA_Trend_With_1dVWAP_Support_Resistance"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,38 +21,46 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # KAMA: Kaufman Adaptive Moving Average
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly below
     
-    # Calculate weekly pivot points: PP, R1, S1, R2, S2
-    # Standard formula: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
-    # R2 = PP + (H-L), S2 = PP - (H-L)
-    h_1w = df_1w['high'].values
-    l_1w = df_1w['low'].values
-    c_1w = df_1w['close'].values
+    # Proper ER calculation
+    er = np.zeros_like(close)
+    for i in range(10, len(close)):
+        if i >= 10:
+            direction = np.abs(close[i] - close[i-10])
+            volatility = np.sum(np.abs(np.diff(close[i-10:i+1])))
+            if volatility > 0:
+                er[i] = direction / volatility
+            else:
+                er[i] = 0
     
-    weekly_pp = (h_1w + l_1w + c_1w) / 3.0
-    weekly_r1 = 2 * weekly_pp - l_1w
-    weekly_s1 = 2 * weekly_pp - h_1w
-    weekly_r2 = weekly_pp + (h_1w - l_1w)
-    weekly_s2 = weekly_pp - (h_1w - l_1w)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1) # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Align weekly pivots to 6h chart (waits for weekly close)
-    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Get 1d trend filter (EMA 50)
+    # Get 1d data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_array = vwap_1d.values
+    
+    # Align VWAP to 4h chart
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_array)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,44 +69,32 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(30, n):
         if position == 0:
-            # LONG: Price bounces above S1 with volume and bullish 1d trend
-            # OR breaks above R2 with volume (strong momentum)
-            long_condition = (
-                (close[i] > weekly_s1_aligned[i] and close[i-1] <= weekly_s1_aligned[i-1] and volume_filter[i] and close[i] > ema50_1d_aligned[i]) or
-                (close[i] > weekly_r2_aligned[i] and close[i-1] <= weekly_r2_aligned[i-1] and volume_filter[i])
-            )
-            
-            # SHORT: Price rejected at R1 with volume and bearish 1d trend
-            # OR breaks below S2 with volume (strong momentum down)
-            short_condition = (
-                (close[i] < weekly_r1_aligned[i] and close[i-1] >= weekly_r1_aligned[i-1] and volume_filter[i] and close[i] < ema50_1d_aligned[i]) or
-                (close[i] < weekly_s2_aligned[i] and close[i-1] >= weekly_s2_aligned[i-1] and volume_filter[i])
-            )
-            
-            if long_condition:
+            # LONG: Price above KAMA and near VWAP support with volume
+            if (close[i] > kama[i] and 
+                close[i] <= vwap_1d_aligned[i] * 1.01 and  # within 1% above VWAP
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            elif short_condition:
+            # SHORT: Price below KAMA and near VWAP resistance with volume
+            elif (close[i] < kama[i] and 
+                  close[i] >= vwap_1d_aligned[i] * 0.99 and  # within 1% below VWAP
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-                
         elif position == 1:
-            # EXIT LONG: Price returns to weekly PP or breaks below S1 with volume
-            if (close[i] < weekly_pp_aligned[i]) or \
-               (close[i] < weekly_s1_aligned[i] and volume_filter[i]):
+            # EXIT LONG: Price crosses below KAMA or moves far from VWAP
+            if (close[i] < kama[i]) or (close[i] > vwap_1d_aligned[i] * 1.02):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                
         elif position == -1:
-            # EXIT SHORT: Price returns to weekly PP or breaks above R1 with volume
-            if (close[i] > weekly_pp_aligned[i]) or \
-               (close[i] > weekly_r1_aligned[i] and volume_filter[i]):
+            # EXIT SHORT: Price crosses above KAMA or moves far from VWAP
+            if (close[i] > kama[i]) or (close[i] < vwap_1d_aligned[i] * 0.98):
                 signals[i] = 0.0
                 position = 0
             else:
