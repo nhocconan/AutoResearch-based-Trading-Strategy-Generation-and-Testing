@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R with 12h EMA50 trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions; extreme readings (< -80 or > -20) signal potential reversals.
-# Long when Williams %R crosses above -80 from below AND price > 12h EMA50 AND volume > 1.5x 20-period average.
-# Short when Williams %R crosses below -20 from above AND price < 12h EMA50 AND volume > 1.5x 20-period average.
-# Exit on opposite signal or ATR(14) trailing stop (2.5x).
-# Uses 6h primary timeframe with 12h trend filter to target 50-150 total trades over 4 years.
-# Williams %R is mean-reversion oriented but combined with trend filter to avoid counter-trend trades in strong moves.
-# Volume confirmation ensures breakouts have participation. Designed for BTC/ETH with strict entry conditions.
+# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R4 AND close > 1d EMA34 AND volume > 2.0x 20-period average.
+# Short when price breaks below Camarilla S4 AND close < 1d EMA34 AND volume > 2.0x 20-period average.
+# Exit on ATR(14) trailing stop (2.0x). Uses 4h primary timeframe to target 75-200 trades over 4 years.
+# Camarilla R4/S4 levels provide strong intraday support/resistance, 1d EMA34 filters daily trend,
+# volume spike confirms breakout authenticity. Designed for BTC/ETH with strict entry conditions to avoid overtrading.
 
-name = "6h_WilliamsR_12hEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R4_S4_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,27 +32,34 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    # Avoid division by zero
-    denom = highest_high - lowest_low
-    denom = np.where(denom == 0, 1e-10, denom)
-    williams_r = -100 * (highest_high - close) / denom
+    # Calculate Camarilla levels (based on previous bar's range) to avoid look-ahead
+    # R4 = close + 1.1 * (high - low)
+    # S4 = close - 1.1 * (high - low)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    # First bar uses current values (no previous data)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Get 12h data for EMA50 trend filter (MTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    camarilla_range = prev_high - prev_low
+    r4 = prev_close + 1.1 * camarilla_range
+    s4 = prev_close - 1.1 * camarilla_range
     
-    # Calculate EMA50 on 12h close
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 1d data for EMA34 trend filter (MTF)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Align HTF arrays to 6h timeframe (wait for completed 12h bar)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate EMA34 on 1d close
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current 6h volume > 1.5x 20-period average (spike confirmation)
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_6h)
+    # Align HTF arrays to 4h timeframe (wait for completed 1d bar)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter: current 4h volume > 2.0x 20-period average (spike confirmation)
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,19 +68,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_6h[i])):
+        if (np.isnan(r4[i]) or np.isnan(s4[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R crosses above -80 from below AND price > 12h EMA50 AND volume spike
-            if williams_r[i] > -80 and williams_r[i-1] <= -80 and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
+            # LONG: price breaks above R4 AND close > 1d EMA34 AND volume spike
+            if close[i] > r4[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Williams %R crosses below -20 from above AND price < 12h EMA50 AND volume spike
-            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
+            # SHORT: price breaks below S4 AND close < 1d EMA34 AND volume spike
+            elif close[i] < s4[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -88,10 +93,9 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit or opposite signal
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
-            opposite_signal = williams_r[i] < -80 and williams_r[i-1] >= -80  # Re-entry condition
-            if trailing_stop or opposite_signal:
+            # EXIT LONG: trailing stop hit (opposite breakout handled by next bar's entry logic)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
@@ -104,10 +108,9 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit or opposite signal
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
-            opposite_signal = williams_r[i] > -20 and williams_r[i-1] <= -20  # Re-entry condition
-            if trailing_stop or opposite_signal:
+            # EXIT SHORT: trailing stop hit (opposite breakout handled by next bar's entry logic)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
