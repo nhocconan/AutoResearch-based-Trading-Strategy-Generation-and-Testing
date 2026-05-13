@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_Bounce_Momentum
-Hypothesis: Price tends to bounce off daily pivot points with momentum in 6h timeframe.
-Long when price bounces above S1 with bullish momentum, short when rejected at R1 with bearish momentum.
-Uses daily pivot levels as support/resistance and 6h RSI for momentum confirmation.
-Target: 15-25 trades/year per symbol to avoid fee drag.
-Works in both bull and bear markets as pivot levels adapt to price action.
+12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
+Hypothesis: Camarilla pivot levels (R1/S1) on 1d combined with 1w trend filter and volume confirmation
+captures breakouts with low false signals. Designed for 12h timeframe to keep trades < 150 total over 4 years.
+Uses 1w EMA20 trend filter and volume > 1.5x average to reduce false signals.
+Target: 20-40 trades/year per symbol to avoid fee drag.
 """
 
-name = "6h_Pivot_Bounce_Momentum"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,58 +17,65 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get daily pivot data ONCE before loop
+    # Calculate Camarilla levels from 1d data
     df_1d = get_htf_data(prices, '1d')
-    # Calculate daily pivot points: P = (H+L+C)/3, S1 = 2P - H, R1 = 2P - L
-    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    s1 = 2 * pivot - df_1d['high']
-    r1 = 2 * pivot - df_1d['low']
+    # Typical price for Camarilla: (high + low + close) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    P = typical_price.values
+    H = df_1d['high'].values
+    L = df_1d['low'].values
+    # Camarilla R1 and S1
+    R1 = P + 1.1 * (H - L) / 12
+    S1 = P - 1.1 * (H - L) / 12
     
-    # Align pivot levels to 6h timeframe (waits for daily close)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    # Align to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Trend filter: 1w EMA20
+    df_1w = get_htf_data(prices, '1w')
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    uptrend = close > ema_20_1w_aligned
+    downtrend = close < ema_20_1w_aligned
+    
+    # Volume confirmation: > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         if position == 0:
-            # LONG: price bounces above S1 with bullish momentum (RSI > 50 and rising)
-            if close[i] > s1_aligned[i] and rsi[i] > 50 and rsi[i] > rsi[i-1]:
+            # LONG: break above R1, uptrend, volume confirmation
+            if close[i] > R1_aligned[i] and uptrend[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price rejected at R1 with bearish momentum (RSI < 50 and falling)
-            elif close[i] < r1_aligned[i] and rsi[i] < 50 and rsi[i] < rsi[i-1]:
+            # SHORT: break below S1, downtrend, volume confirmation
+            elif close[i] < S1_aligned[i] and downtrend[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price falls back below S1 or momentum turns bearish
-            if close[i] < s1_aligned[i] or rsi[i] < 50:
+            # EXIT LONG: price falls back below S1 or trend reverses
+            if close[i] < S1_aligned[i] or not uptrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price rises back above R1 or momentum turns bullish
-            if close[i] > r1_aligned[i] or rsi[i] > 50:
+            # EXIT SHORT: price rises back above R1 or trend reverses
+            if close[i] > R1_aligned[i] or not downtrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
