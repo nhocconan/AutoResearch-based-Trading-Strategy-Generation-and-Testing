@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20-bar avg volume). Uses chop regime filter (CHOP(14) < 38.2 = trending) to avoid false breakouts in ranging markets. Discrete position sizing (0.25) minimizes fee churn. Targets 50-150 total trades over 4 years on BTC/ETH/SOL.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike (>2x 20-bar avg), and chop regime filter (CHOP(14) < 38.2 = trending). Uses discrete position sizing (0.30) to minimize fee churn. Designed for BTC/ETH robustness in both bull and bear markets via confluence of price structure, trend, volume, and regime filters. Targets 75-200 total trades over 4 years.
 
-name = "12h_Donchian20_Breakout_1dEMA34_VolumeChopRegime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -46,9 +46,12 @@ def generate_signals(prices):
     chop_1d = np.where(true_range_sum == 0, 50, chop_1d)  # avoid div by zero
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate Donchian channels (20-period) on 12h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate Camarilla pivot levels (R3, S3) from 1d OHLC
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -60,44 +63,44 @@ def generate_signals(prices):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high, price > 1d EMA34, volume spike (>1.5x avg), trending regime (CHOP < 38.2)
-            if (close[i] > donchian_high[i] and 
+            # LONG: Price breaks above Camarilla R3, price > 1d EMA34, volume spike (>2x avg), trending regime (CHOP < 38.2)
+            if (close[i] > camarilla_r3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 1.5 * avg_volume[i] and 
+                volume[i] > 2.0 * avg_volume[i] and 
                 chop_1d_aligned[i] < 38.2):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Price breaks below Donchian low, price < 1d EMA34, volume spike (>1.5x avg), trending regime (CHOP < 38.2)
-            elif (close[i] < donchian_low[i] and 
+            # SHORT: Price breaks below Camarilla S3, price < 1d EMA34, volume spike (>2x avg), trending regime (CHOP < 38.2)
+            elif (close[i] < camarilla_s3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 1.5 * avg_volume[i] and 
+                  volume[i] > 2.0 * avg_volume[i] and 
                   chop_1d_aligned[i] < 38.2):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close position if price drops below Donchian low (reversal) OR chop becomes too high (choppy market)
-            if (close[i] < donchian_low[i] or 
+            # EXIT LONG: Close position if price drops below Camarilla S3 (reversal) OR chop becomes too high (choppy market)
+            if (close[i] < camarilla_s3_aligned[i] or 
                 chop_1d_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Close position if price rises above Donchian high (reversal) OR chop becomes too high (choppy market)
-            if (close[i] > donchian_high[i] or 
+            # EXIT SHORT: Close position if price rises above Camarilla R3 (reversal) OR chop becomes too high (choppy market)
+            if (close[i] > camarilla_r3_aligned[i] or 
                 chop_1d_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
