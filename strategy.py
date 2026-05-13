@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_ChaikinBreakout_TrendFilter"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,39 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1. Chaikin Oscillator (3,10) - momentum indicator
-    # ADL = cumulative ((Close - Low) - (High - Close)) / (High - Low) * Volume
-    adl = np.zeros(n)
-    for i in range(n):
-        if high[i] == low[i]:
-            adl[i] = adl[i-1] if i > 0 else 0
-        else:
-            clv = ((close[i] - low[i]) - (high[i] - close[i])) / (high[i] - low[i])
-            adl[i] = (adl[i-1] if i > 0 else 0) + clv * volume[i]
-    
-    # Chaikin Oscillator = EMA(3,ADL) - EMA(10,ADL)
-    def ema(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        multiplier = 2 / (period + 1)
-        result[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = (arr[i] - result[i-1]) * multiplier + result[i-1]
-        return result
-    
-    ema3 = ema(adl, 3)
-    ema10 = ema(adl, 10)
-    chaikin = ema3 - ema10
-    
-    # 2. 12h trend filter: EMA(50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1d Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # 3. Volume filter: current volume > 1.8 x 20-period average
+    ph = df_1d['high'].values
+    pl = df_1d['low'].values
+    pc = df_1d['close'].values
+    
+    R4 = pc + (1.1/2) * (ph - pl)
+    R3 = pc + (1.1/4) * (ph - pl)
+    R2 = pc + (1.1/6) * (ph - pl)
+    R1 = pc + (1.1/12) * (ph - pl)
+    S1 = pc - (1.1/12) * (ph - pl)
+    S2 = pc - (1.1/6) * (ph - pl)
+    S3 = pc - (1.1/4) * (ph - pl)
+    S4 = pc - (1.1/2) * (ph - pl)
+    
+    R1_1d = align_htf_to_ltf(prices, df_1d, R1)
+    S1_1d = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # 1d EMA34 trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 4h volume filter: volume > 1.5 x 20-period average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -57,39 +50,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(chaikin[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+    for i in range(34, n):
+        if (np.isnan(R1_1d[i]) or np.isnan(S1_1d[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        vol_filter = volume[i] > 1.8 * vol_ma_20[i]
-        chaikin_positive = chaikin[i] > 0
-        chaikin_negative = chaikin[i] < 0
-        price_above_ema = close[i] > ema50_12h_aligned[i]
-        price_below_ema = close[i] < ema50_12h_aligned[i]
+        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        price_above_R1 = close[i] > R1_1d[i]
+        price_below_S1 = close[i] < S1_1d[i]
+        price_above_ema = close[i] > ema34_1d_aligned[i]
+        price_below_ema = close[i] < ema34_1d_aligned[i]
         
         if position == 0:
-            # LONG: Chaikin positive + price above 12h EMA + volume confirmation
-            if chaikin_positive and price_above_ema and vol_filter:
+            # LONG: break above R1 + uptrend + volume
+            if price_above_R1 and price_above_ema and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Chaikin negative + price below 12h EMA + volume confirmation
-            elif chaikin_negative and price_below_ema and vol_filter:
+            # SHORT: break below S1 + downtrend + volume
+            elif price_below_S1 and price_below_ema and vol_filter:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Chaikin turns negative or price below 12h EMA
-            if chaikin_negative or price_below_ema:
+            # EXIT LONG: close below S1 or trend change
+            if price_below_S1 or price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Chaikin turns positive or price above 12h EMA
-            if chaikin_positive or price_above_ema:
+            # EXIT SHORT: close above R1 or trend change
+            if price_above_R1 or price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
