@@ -3,7 +3,6 @@
 # Long when price breaks above R3 AND 1d EMA34 rising AND volume > 2.0x average.
 # Short when price breaks below S3 AND 1d EMA34 falling AND volume > 2.0x average.
 # Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Uses 1d HTF for trend filter to reduce noise and avoid overtrading.
 # Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
 name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
