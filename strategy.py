@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
 # Hypothesis: Use 1d Camarilla pivot levels (R1/S1) as support/resistance.
 # Enter long when price breaks above R1 with volume spike and 1d EMA34 uptrend.
 # Enter short when price breaks below S1 with volume spike and 1d EMA34 downtrend.
@@ -8,7 +8,7 @@
 # Designed to work in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
 # Target: 20-40 trades/year per symbol.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
