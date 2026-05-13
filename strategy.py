@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike > 2.0x average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike > 2.0x average.
 # Long when price closes above R3 with 1d EMA34 uptrend (close > EMA34) and volume > 2.0x 20-bar average volume.
 # Short when price closes below S3 with 1d EMA34 downtrend (close < EMA34) and volume > 2.0x average.
 # Exit when price reverses and closes below/above the opposite Camarilla level (S3 for longs, R3 for shorts).
-# Uses discrete position sizing 0.25. Target: 50-150 total trades over 4 years on 6h timeframe.
+# Uses discrete position sizing 0.25. Target: 75-200 total trades over 4 years on 4h timeframe.
 # Higher volume threshold (2.0x vs 1.8x) reduces overtrading and fee drag while maintaining edge in strong moves.
-# 1d EMA34 ensures we only trade in the direction of the intermediate trend, avoiding counter-trend false breakouts.
+# 1d EMA34 ensures we only trade in the direction of the daily trend, avoiding counter-trend false breakouts.
+# This strategy focuses on BTC/ETH as primary targets with SOL as secondary, using tight entry conditions to minimize fee drag.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,8 +26,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day (approx using 4x 6h bars)
-    lookback = 4  # 4 * 6h = 24h approx
+    # Calculate Camarilla levels from previous day (approx using 6x 4h bars)
+    lookback = 6  # 6 * 4h = 24h approx
     if n < lookback + 1:
         return np.zeros(n)
     
@@ -50,7 +51,7 @@ def generate_signals(prices):
     # Calculate EMA34 on 1d data
     ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
     
-    # Align 1d EMA34 to 6h timeframe (wait for 1d bar to close)
+    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
