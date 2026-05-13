@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ElderRay_BullBearPower_Signal"
-timeframe = "6h"
+name = "1d_Wedge_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1D data ONCE for Elder Ray and trend context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    close_1w_series = pd.Series(close_1w)
+    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Elder Ray Power calculation on daily data
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d   # Bull Power = High - EMA13
-    bear_power = low_1d - ema13_1d    # Bear Power = Low - EMA13
+    # Calculate 14-period ATR for volatility
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Elder Ray components to 6H timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Calculate 20-period high/low for Donchian channel
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 6H EMA34 for trend filter (longer-term trend)
-    close_s = pd.Series(close)
-    ema34_6h = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Volume filter: current volume > 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     volume_s = pd.Series(volume)
     vol_ma20 = volume_s.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma20
+    volume_ok = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after sufficient data
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema34_6h[i])):
+    for i in range(20, n):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(vol_ma20[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to EMA34
-        price_above_ema = close[i] > ema34_6h[i]
-        price_below_ema = close[i] < ema34_6h[i]
+        # Trend filter: price relative to weekly EMA50
+        price_above_weekly_ema = close[i] > ema50_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema50_1w_aligned[i]
         
         if position == 0:
-            # LONG: Strong bull power + price above EMA34 + volume confirmation
-            if (bull_power_aligned[i] > 0) and price_above_ema and volume_ok[i]:
+            # LONG: Break above 20-day high with volume and weekly uptrend
+            if (close[i] > high_20[i]) and price_above_weekly_ema and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Strong bear power + price below EMA34 + volume confirmation
-            elif (bear_power_aligned[i] < 0) and price_below_ema and volume_ok[i]:
+            # SHORT: Break below 20-day low with volume and weekly downtrend
+            elif (close[i] < low_20[i]) and price_below_weekly_ema and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull power turns negative or price closes below EMA34
-            if (bull_power_aligned[i] <= 0) or (close[i] < ema34_6h[i]):
+            # EXIT LONG: Price falls back below 20-day low or ATR-based stop
+            if (close[i] < low_20[i]) or (close[i] < (high[i] - 2.0 * atr[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear power turns positive or price closes above EMA34
-            if (bear_power_aligned[i] >= 0) or (close[i] > ema34_6h[i]):
+            # EXIT SHORT: Price rises back above 20-day high or ATR-based stop
+            if (close[i] > high_20[i]) or (close[i] > (low[i] + 2.0 * atr[i])):
                 signals[i] = 0.0
                 position = 0
             else:
