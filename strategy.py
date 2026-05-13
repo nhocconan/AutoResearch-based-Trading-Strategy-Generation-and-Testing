@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1h_Donchian_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,66 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 4H Donchian breakout for trend direction (upper/lower bands)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    high_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    upper_band = align_htf_to_ltf(prices, df_4h, high_20_4h)
+    lower_band = align_htf_to_ltf(prices, df_4h, low_20_4h)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    # 1D volume filter (high volume confirms institutional interest)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate EMA50 on 12h for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = align_htf_to_ltf(prices, df_1d, volume_1d > vol_ma20_1d)
     
-    # Volume filter: current volume > 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma20
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_ok = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient data
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(close[i])):
+    for i in range(20, n):
+        # Skip if any required data is NaN
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(close[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to 12h EMA50
-        price_above_ema = close[i] > ema50_12h_aligned[i]
-        price_below_ema = close[i] < ema50_12h_aligned[i]
+        if not session_ok[i]:
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # LONG: Break above upper Donchian with volume and uptrend
-            if (close[i] > upper[i]) and price_above_ema and volume_ok[i]:
-                signals[i] = 0.25
+            # LONG: Break above 4H upper band with volume spike
+            if close[i] > upper_band[i] and volume_spike[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Break below lower Donchian with volume and downtrend
-            elif (close[i] < lower[i]) and price_below_ema and volume_ok[i]:
-                signals[i] = -0.25
+            # SHORT: Break below 4H lower band with volume spike
+            elif close[i] < lower_band[i] and volume_spike[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls back below lower Donchian or volume drops
-            if (close[i] < lower[i]) or not volume_ok[i]:
+            # EXIT LONG: Price falls back below 4H lower band or volume drops
+            if close[i] < lower_band[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price rises back above upper Donchian or volume drops
-            if (close[i] > upper[i]) or not volume_ok[i]:
+            # EXIT SHORT: Price rises back above 4H upper band or volume drops
+            if close[i] > upper_band[i] or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
