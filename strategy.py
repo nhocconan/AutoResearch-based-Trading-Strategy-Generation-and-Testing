@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dEMA50_Volume
-# Hypothesis: Use daily Camarilla pivot R1/S1 levels for breakout entries with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above daily R1 in uptrend (price > EMA50) with volume spike, short when price breaks below daily S1 in downtrend (price < EMA50) with volume spike.
-# Exit when price returns to daily pivot point (PP) or trend changes.
-# Daily Camarilla levels provide intraday support/resistance, reducing false breakouts.
-# Designed for moderate trade frequency (50-150 total trades over 4 years) with clear entry/exit rules to avoid overtrading.
+# 6h_Weekly_Pivot_R3_S3_Breakout_1wTrend_Volume
+# Hypothesis: Use weekly pivot points R3/S3 (stronger support/resistance than R1/S1) for breakout entries.
+# Enter long when price breaks above weekly R3 in weekly uptrend with volume spike.
+# Enter short when price breaks below weekly S3 in weekly downtrend with volume spike.
+# Exit when price returns to weekly pivot point (PP).
+# Weekly pivots reduce false breakouts; R3/S3 levels require stronger momentum, improving win rate in both bull and bear markets.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Volume"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,26 +24,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot point calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily Camarilla pivot points: PP, R1, S1
-    # Standard Camarilla formulas:
+    # Calculate weekly pivot points: PP, R1, S1, R2, S2, R3, S3
+    # Standard pivot point formulas:
     # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pp_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    r1_1d = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.1 / 12
-    s1_1d = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.1 / 12
+    # R1 = (2 * PP) - L
+    # S1 = (2 * PP) - H
+    # R2 = PP + (H - L)
+    # S2 = PP - (H - L)
+    # R3 = H + 2*(PP - L)
+    # S3 = L - 2*(H - PP)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Align daily Camarilla levels to 4h timeframe
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d.values)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d.values)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d.values)
+    pp_1w = (high_w + low_w + close_w) / 3
+    r1_1w = (2 * pp_1w) - low_w
+    s1_1w = (2 * pp_1w) - high_w
+    r2_1w = pp_1w + (high_w - low_w)
+    s2_1w = pp_1w - (high_w - low_w)
+    r3_1w = high_w + 2 * (pp_1w - low_w)
+    s3_1w = low_w - 2 * (high_w - pp_1w)
+    
+    # Align weekly pivot levels to 6h timeframe
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
 
-    # Get daily data for EMA trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly trend: price above/below weekly EMA200
+    ema_200_1w = pd.Series(close_w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
 
     # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,8 +65,8 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(pp_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
+            np.isnan(pp_1w_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,30 +76,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + price above 1d EMA50 (uptrend) + volume spike
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and
+            # LONG: Price breaks above R3 + price above weekly EMA200 (uptrend) + volume spike
+            if (close[i] > r3_1w_aligned[i] and 
+                close[i] > ema_200_1w_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + price below 1d EMA50 (downtrend) + volume spike
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and
+            # SHORT: Price breaks below S3 + price below weekly EMA200 (downtrend) + volume spike
+            elif (close[i] < s3_1w_aligned[i] and 
+                  close[i] < ema_200_1w_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to pivot point (PP) or trend changes (price below EMA50)
-            if (close[i] <= pp_1d_aligned[i] or close[i] < ema_50_1d_aligned[i]):
+            # EXIT LONG: Price returns to pivot point (PP)
+            if close[i] <= pp_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot point (PP) or trend changes (price above EMA50)
-            if (close[i] >= pp_1d_aligned[i] or close[i] > ema_50_1d_aligned[i]):
+            # EXIT SHORT: Price returns to pivot point (PP)
+            if close[i] >= pp_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
