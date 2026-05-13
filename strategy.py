@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_BullBearPower_1dTrend_Volume
-# Hypothesis: Elder Ray's Bull Power (high - EMA13) and Bear Power (EMA13 - low) measure bull/bear strength relative to trend.
-# Go long when Bull Power > 0 (bulls in control) with 1d uptrend and volume confirmation.
-# Go short when Bear Power > 0 (bears in control) with 1d downtrend and volume confirmation.
-# Works in bull markets (Bull Power > 0 in uptrend) and bear markets (Bear Power > 0 in downtrend).
-# Target: 15-35 trades/year per symbol to minimize fee drag.
+# 12h_KAMA_Direction_RSI_Pullback_TrendFilter
+# Hypothesis: Use 1d KAMA trend direction with RSI pullback entries on 12h timeframe.
+# In uptrend (price > KAMA), buy RSI pullbacks below 40; in downtrend (price < KAMA), sell RSI bounces above 60.
+# Adds 1w trend filter to avoid counter-trend trades in strong markets. Works in both bull and bear by
+# following the higher timeframe trend while capturing mean-reversion entries.
+# Target: 15-30 trades/year to minimize fee drag.
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_KAMA_Direction_RSI_Pullback_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,36 +24,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA13 and trend
+    # Get 1d data for KAMA trend
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA13 on 1d close
-    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate KAMA ( Kaufman Adaptive Moving Average )
+    close_1d = df_1d['close']
+    change = abs(close_1d.diff())
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    kama = np.zeros(len(close_1d))
+    kama[0] = close_1d.iloc[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close_1d.iloc[i] - kama[i-1])
     
-    # Calculate Elder Ray components on 1d
-    bull_power_1d = df_1d['high'].values - ema13_1d  # Bull Power = High - EMA13
-    bear_power_1d = ema13_1d - df_1d['low'].values   # Bear Power = EMA13 - Low
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close']
+    ema200_1w = close_1w.ewm(span=200, min_periods=200).mean().values
     
-    # 1d trend: EMA50
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume spike: volume > 2.0 * 3-period average (1.5 days worth at 6h)
-    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
-    volume_spike = volume > 2.0 * vol_ma_3
+    # RSI on 12h price
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+
+    # Align indicators to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,27 +73,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        kama_val = kama_aligned[i]
+        ema200_val = ema200_1w_aligned[i]
+        rsi_val = rsi[i]
+
         if position == 0:
-            # LONG: Bull Power > 0 (bulls in control) + 1d uptrend + volume spike
-            if bull_power_aligned[i] > 0 and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: price > KAMA (uptrend) AND RSI < 40 (pullback) AND price > 200w EMA (bull regime)
+            if close[i] > kama_val and rsi_val < 40 and close[i] > ema200_val:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power > 0 (bears in control) + 1d downtrend + volume spike
-            elif bear_power_aligned[i] > 0 and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: price < KAMA (downtrend) AND RSI > 60 (bounce) AND price < 200w EMA (bear regime)
+            elif close[i] < kama_val and rsi_val > 60 and close[i] < ema200_val:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power <= 0 or trend reversal
-            if bull_power_aligned[i] <= 0 or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: price < KAMA (trend change) OR RSI > 70 (overbought)
+            if close[i] < kama_val or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power <= 0 or trend reversal
-            if bear_power_aligned[i] <= 0 or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: price > KAMA (trend change) OR RSI < 30 (oversold)
+            if close[i] > kama_val or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
