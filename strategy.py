@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe act as key support/resistance levels. 
-Breakouts above R1 or below S1 with volume confirmation and daily EMA34 trend filter capture 
-trends in both bull and bear markets. Designed for low trade frequency (20-40/year) with 
-clear entry/exit rules to minimize fee drag.
+4h_Choppiness_Index_MeanReversion
+Hypothesis: Mean-reversion on 4h timeframe using Choppiness Index to identify range-bound markets (chop > 61.8).
+Enter long at lower Bollinger Band with RSI < 30, short at upper Bollinger Band with RSI > 70.
+Exit when price crosses Bollinger middle band or RSI reverts to neutral.
+Designed for low trade frequency in both bull and bear markets by combining regime filter with mean reversion.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_Choppiness_Index_MeanReversion"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,28 +25,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate Choppiness Index (14-period)
+    atr = pd.Series(high - low).rolling(window=14, min_periods=14).mean()
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr.sum() / (highest_high - lowest_low)) / np.log10(14)
+    chop_values = chop.fillna(50).values  # neutral when undefined
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We need previous day's values, so shift by 1
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Bollinger Bands (20, 2.0)
+    sma = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_bb = sma + 2.0 * std
+    lower_bb = sma - 2.0 * std
+    middle_bb = sma
+    upper_bb_values = upper_bb.fillna(0).values
+    lower_bb_values = lower_bb.fillna(0).values
+    middle_bb_values = middle_bb.fillna(0).values
     
-    # Calculate Camarilla R1 and S1 for each day
-    camarilla_range = (prev_high - prev_low) * 1.1 / 12
-    r1_levels = prev_close + camarilla_range
-    s1_levels = prev_close - camarilla_range
-    
-    # Align daily levels to 4h timeframe (will be available after daily bar closes)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_levels)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_levels)
-    
-    # Daily EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = (100 - (100 / (1 + rs))).fillna(50).values
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,31 +59,40 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
+        # Only trade in ranging markets (chop > 61.8)
+        if chop_values[i] <= 61.8:
+            # Exit any position when market starts trending
+            if position == 1:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+            
         if position == 0:
-            # LONG: Price breaks above R1 with volume confirmation and uptrend filter
-            if close[i] > r1_aligned[i] and volume_confirm[i]:
-                # Additional filter: only take long if price above daily EMA34 (uptrend)
-                if close[i] > ema_34_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # SHORT: Price breaks below S1 with volume confirmation and downtrend filter
-            elif close[i] < s1_aligned[i] and volume_confirm[i]:
-                # Additional filter: only take short if price below daily EMA34 (downtrend)
-                if close[i] < ema_34_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # LONG: Price at lower BB with oversold RSI and volume confirmation
+            if close[i] <= lower_bb_values[i] and rsi[i] < 30 and volume_confirm[i]:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Price at upper BB with overbought RSI and volume confirmation
+            elif close[i] >= upper_bb_values[i] and rsi[i] > 70 and volume_confirm[i]:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below R1 or trend changes (below EMA34)
-            if close[i] < r1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: Price crosses above middle BB or RSI > 50
+            if close[i] >= middle_bb_values[i] or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above S1 or trend changes (above EMA34)
-            if close[i] > s1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: Price crosses below middle BB or RSI < 50
+            if close[i] <= middle_bb_values[i] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
