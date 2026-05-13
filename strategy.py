@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS
-# Hypothesis: Use Camarilla R3/S3 levels from daily pivot for breakout entries, confirmed by 1d EMA34 trend and volume spikes.
-# This combines price channel breakout with trend alignment and volume confirmation for high-probability setups.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS_v2
+# Hypothesis: Refined version with stricter entry conditions (volume spike > 2.5x, tighter trend filter) to reduce trade frequency and avoid overtrading.
+# Uses Camarilla R3/S3 levels from daily pivot for breakout entries, confirmed by 1d EMA34 trend and volume spikes.
 # Designed to work in both bull and bear markets by filtering counter-trend trades and avoiding overtrading.
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,6 +30,11 @@ def generate_signals(prices):
     plow = np.roll(df_1d['low'].values, 1)
     pclose = np.roll(df_1d['close'].values, 1)
 
+    # Handle first value after roll (set to NaN)
+    phigh[0] = np.nan
+    plow[0] = np.nan
+    pclose[0] = np.nan
+
     # Camarilla calculations
     range_val = phigh - plow
     R3 = pclose + (range_val * 1.1 / 4)
@@ -43,9 +48,9 @@ def generate_signals(prices):
     ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Volume spike detection: current volume > 2x 20-period average
+    # Volume spike detection: current volume > 2.5x 20-period average (stricter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (2.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
