@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1H_Stochastic_Pullback_4hTrend_Volume
-# Hypothesis: 1h stochastic pullback in 4h trend direction with volume confirmation.
-# Uses mean-reversion entries within established 4h trends, filtered by volume spikes.
-# Works in bull/bear by following 4h trend direction; volume confirms institutional interest.
-# Target: 15-37 trades/year per symbol (60-150 total over 4 years) to minimize fee drag.
+# 6H_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 breakouts on 6h filtered by 1d trend and volume spikes.
+# R3/S3 levels represent stronger support/resistance than R1/S1, reducing false breakouts.
+# Trend filter uses 1-day EMA34 to ensure alignment with higher timeframe momentum.
+# Volume confirmation requires >2x 20-period average to confirm institutional participation.
+# Works in bull/bear by following 1d trend direction; avoids range-bound whipsaws.
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag.
 
-name = "1H_Stochastic_Pullback_4hTrend_Volume"
-timeframe = "1h"
+name = "6H_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,18 +25,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1d data for HTF trend filter
+    df_1d = get_htf_data(prices, '1d')
 
-    # Stochastic(14,3) on 1h
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    k_percent = 100 * ((close - lowest_low) / (highest_high - lowest_low))
-    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    # Calculate Camarilla pivot levels for 6h (based on previous 6h bar)
+    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
 
-    # Trend filter: 4h EMA50
-    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    rang = prev_high - prev_low
+    r3 = prev_close + rang * 1.1 / 4
+    s3 = prev_close - rang * 1.1 / 4
+
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
     # Volume confirmation: current volume > 2.0 x 20-period average (strong spike)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,9 +54,9 @@ def generate_signals(prices):
 
     for i in range(20, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(k_percent[i]) or 
-            np.isnan(d_percent[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or 
+        if (np.isnan(r3[i]) or 
+            np.isnan(s3[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -57,35 +66,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Pullback to support in uptrend with volume spike
-            if (k_percent[i] < 20 and 
-                d_percent[i] < 20 and 
-                close[i] > ema50_4h_aligned[i] and 
+            # LONG: Break above R3 in uptrend with volume spike
+            if (close[i] > r3[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Pullback to resistance in downtrend with volume spike
-            elif (k_percent[i] > 80 and 
-                  d_percent[i] > 80 and 
-                  close[i] < ema50_4h_aligned[i] and 
+            # SHORT: Break below S3 in downtrend with volume spike
+            elif (close[i] < s3[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Stochastic overbought or trend turns down
-            if k_percent[i] > 80 or close[i] < ema50_4h_aligned[i]:
+            # EXIT LONG: Price breaks below S3 or trend turns down
+            if close[i] < s3[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Stochastic oversold or trend turns up
-            if k_percent[i] < 20 or close[i] > ema50_4h_aligned[i]:
+            # EXIT SHORT: Price breaks above R3 or trend turns up
+            if close[i] > r3[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
