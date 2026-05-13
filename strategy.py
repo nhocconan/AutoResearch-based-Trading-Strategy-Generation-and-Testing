@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Pivot_Breakout_1wTrend
-Hypothesis: Use daily Camarilla R3/S3 levels as key reversal levels with weekly trend filter (price above/below 50-week EMA). 
-Go long when price breaks above R3 with volume confirmation in bullish weekly trend, short when price breaks below S3 in bearish weekly trend.
-Camarilla levels work well in ranging markets (common in 2025-2026) while the weekly trend filter prevents counter-trend trades.
-Designed for 12h timeframe to target 12-37 trades/year with low frequency and high win rate.
+1h_4h_Camarilla_R3_S3_Breakout_1dTrend
+Hypothesis: Use daily close above/below 200 EMA as trend filter. In uptrend (price > EMA200), go long when price breaks above Camarilla R3 level from prior 4h bar. In downtrend (price < EMA200), go short when price breaks below Camarilla S3 level from prior 4h bar. Camarilla levels provide intraday support/resistance based on prior bar's range. This strategy limits entries by requiring trend alignment and breakouts, reducing trade frequency. Designed for 1h timeframe with 4h levels for structure and daily trend filter to work in both bull (catch breakouts) and bear (catch breakdowns) markets.
 """
 
-name = "12h_Camarilla_R3_S3_Pivot_Breakout_1wTrend"
-timeframe = "12h"
+name = "1h_4h_Camarilla_R3_S3_Breakout_1dTrend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,75 +20,65 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # Get 4h data for Camarilla calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels for each 4h bar: R3, S3
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    hl_range = df_4h['high'].values - df_4h['low'].values
+    camarilla_r3 = df_4h['close'].values + 1.1 * hl_range / 2.0
+    camarilla_s3 = df_4h['close'].values - 1.1 * hl_range / 2.0
+    
+    # Align Camarilla levels to 1h timeframe (wait for 4h bar close)
+    r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    
+    # Get daily data for 200 EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla formula: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    cam_r3 = close_1d + 1.1 * (high_1d - low_1d)
-    cam_s3 = close_1d - 1.1 * (high_1d - low_1d)
-    
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, cam_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, cam_s3)
-    
-    # Get weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate volume average (24-period = 12 days) for volume spike filter
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate daily EMA200
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_24[i])):
+            np.isnan(ema_200_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.3x 24-period average
-        vol_spike = volume[i] > 1.3 * vol_ma_24[i]
-        
         if position == 0:
-            # LONG: Price breaks above R3 with volume spike in bullish weekly trend
-            if close[i] > r3_aligned[i] and vol_spike and close[i] > ema_50_1w_aligned[i]:
-                signals[i] = 0.25
+            # LONG: price > EMA200 (uptrend) and price breaks above R3 from prior 4h bar
+            if close[i] > ema_200_aligned[i] and high[i] > r3_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below S3 with volume spike in bearish weekly trend
-            elif close[i] < s3_aligned[i] and vol_spike and close[i] < ema_50_1w_aligned[i]:
-                signals[i] = -0.25
+            # SHORT: price < EMA200 (downtrend) and price breaks below S3 from prior 4h bar
+            elif close[i] < ema_200_aligned[i] and low[i] < s3_aligned[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 or weekly trend turns bearish
-            if close[i] < s3_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # EXIT LONG: price breaks below S3 or trend reverses
+            if low[i] < s3_aligned[i] or close[i] < ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 or weekly trend turns bullish
-            if close[i] > r3_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # EXIT SHORT: price breaks above R3 or trend reverses
+            if high[i] > r3_aligned[i] or close[i] > ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
