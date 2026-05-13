@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h EMA crossover with 4h Supertrend regime filter and volume spike confirmation.
-# Long when 1h EMA20 crosses above EMA50 AND 4h Supertrend is bullish AND volume > 1.5x average.
-# Short when 1h EMA20 crosses below EMA50 AND 4h Supertrend is bearish AND volume > 1.5x average.
-# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.20.
-# Target: 60-150 total trades over 4 years (15-37/year) on 1h.
+# Hypothesis: 6h Williams %R extreme with 1d EMA34 trend filter and volume spike confirmation.
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 (uptrend) AND volume > 2.0x average.
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 (downtrend) AND volume > 2.0x average.
+# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
 
-name = "1h_EMA20_50_Cross_4hSupertrend_VolumeSpike_ATRStop_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -34,61 +34,22 @@ def generate_signals(prices):
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate 1h EMA20 and EMA50 for crossover signals
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Williams %R (14 period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Get 4h data for Supertrend regime filter
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Supertrend on 4h
-    # ATR period 10, multiplier 3.0
-    tr1_4h = high_4h - low_4h
-    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    tr_4h[0] = tr1_4h[0]
-    atr_4h = pd.Series(tr_4h).rolling(window=10, min_periods=10).mean().values
+    # Calculate 1d EMA34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Basic upper and lower bands
-    hl2_4h = (high_4h + low_4h) / 2
-    upper_band_4h = hl2_4h + (3.0 * atr_4h)
-    lower_band_4h = hl2_4h - (3.0 * atr_4h)
-    
-    # Initialize Supertrend arrays
-    supertrend_4h = np.full_like(close_4h, np.nan)
-    direction_4h = np.full_like(close_4h, np.nan)  # 1 for uptrend, -1 for downtrend
-    
-    # Calculate Supertrend
-    for i in range(len(close_4h)):
-        if i == 0:
-            supertrend_4h[i] = hl2_4h[i]
-            direction_4h[i] = 1  # Start with uptrend
-        else:
-            if close_4h[i-1] > supertrend_4h[i-1]:
-                # Previous close was above previous Supertrend
-                upper_band_4h[i] = min(upper_band_4h[i], upper_band_4h[i-1])
-                if close_4h[i] <= upper_band_4h[i]:
-                    supertrend_4h[i] = upper_band_4h[i]
-                    direction_4h[i] = -1  # Downtrend
-                else:
-                    supertrend_4h[i] = upper_band_4h[i]
-                    direction_4h[i] = 1   # Uptrend
-            else:
-                # Previous close was below previous Supertrend
-                lower_band_4h[i] = max(lower_band_4h[i], lower_band_4h[i-1])
-                if close_4h[i] >= lower_band_4h[i]:
-                    supertrend_4h[i] = lower_band_4h[i]
-                    direction_4h[i] = 1   # Uptrend
-                else:
-                    supertrend_4h[i] = lower_band_4h[i]
-                    direction_4h[i] = -1  # Downtrend
-    
-    # Align 4h Supertrend direction to 1h timeframe (wait for 4h bar to close)
-    direction_4h_aligned = align_htf_to_ltf(prices, df_4h, direction_4h)
+    # Align 1d EMA34 to 6h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -97,29 +58,24 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50[i]) or 
-            np.isnan(direction_4h_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Check for EMA crossover
-            ema_cross_up = (ema_20[i] > ema_50[i]) and (ema_20[i-1] <= ema_50[i-1])
-            ema_cross_down = (ema_20[i] < ema_50[i]) and (ema_20[i-1] >= ema_50[i-1])
-            
-            # LONG: EMA20 crosses above EMA50 AND 4h Supertrend bullish AND volume > 1.5x average
-            if (ema_cross_up and 
-                direction_4h_aligned[i] == 1 and 
-                volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = 0.20
+            # LONG: Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume > 2.0x average
+            if (williams_r[i] < -80 and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > 2.0 * avg_volume[i]):
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: EMA20 crosses below EMA50 AND 4h Supertrend bearish AND volume > 1.5x average
-            elif (ema_cross_down and 
-                  direction_4h_aligned[i] == -1 and 
-                  volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = -0.20
+            # SHORT: Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume > 2.0x average
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > 2.0 * avg_volume[i]):
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
@@ -139,7 +95,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
@@ -154,7 +110,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
