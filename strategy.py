@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_Pivot_R1_S1_Breakout_1D_Trend"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,13 +30,13 @@ def generate_signals(prices):
     pivot = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla levels
-    R1 = close_1d + (range_1d * 1.1 / 12)
-    S1 = close_1d - (range_1d * 1.1 / 12)
+    # Camarilla R3 and S3 levels
+    R3 = close_1d + (range_1d * 1.1 / 4)
+    S3 = close_1d - (range_1d * 1.1 / 4)
     
     # Align pivot levels to 4h timeframe (using previous day's levels)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # 1D EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -51,38 +51,38 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(34, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_filter = volume[i] > 2.0 * vol_ma_20[i]
-        price_above_R1 = close[i] > R1_aligned[i]
-        price_below_S1 = close[i] < S1_aligned[i]
+        price_above_R3 = close[i] > R3_aligned[i]
+        price_below_S3 = close[i] < S3_aligned[i]
         price_above_ema = close[i] > ema34_1d_aligned[i]
         price_below_ema = close[i] < ema34_1d_aligned[i]
         
         if position == 0:
-            # LONG: Break above R1 + uptrend + volume confirmation
-            if price_above_R1 and price_above_ema and vol_filter:
+            # LONG: Break above R3 + uptrend + volume confirmation
+            if price_above_R3 and price_above_ema and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 + downtrend + volume confirmation
-            elif price_below_S1 and price_below_ema and vol_filter:
+            # SHORT: Break below S3 + downtrend + volume confirmation
+            elif price_below_S3 and price_below_ema and vol_filter:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below EMA34 or breaks below S1
-            if price_below_ema or price_below_S1:
+            # EXIT LONG: Price falls below EMA34 or breaks below S3
+            if price_below_ema or price_below_S3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above EMA34 or breaks above R1
-            if price_above_ema or price_above_R1:
+            # EXIT SHORT: Price rises above EMA34 or breaks above R3
+            if price_above_ema or price_above_R3:
                 signals[i] = 0.0
                 position = 0
             else:
