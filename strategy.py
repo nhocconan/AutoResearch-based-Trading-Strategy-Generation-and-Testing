@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 1d_Choppiness_Index_Regime + Donchian(20) Breakout + Volume Confirmation
-# Hypothesis: Choppiness Index (CHOP) filters market regime. In trending markets (CHOP < 38.2), we trade Donchian breakouts; in ranging markets (CHOP > 61.8), we avoid trades. This avoids whipsaws in sideways markets and captures trends in both bull and bear regimes. Volume confirmation ensures breakout validity. Designed for low trade frequency (target: 10-25/year) to minimize fee drag.
+# 4h_Elder_Ray_Power_Bull_Bear_Momentum
+# Hypothesis: Elder Ray Index measures bull/bear power via EMA and price extremes.
+# Long when Bull Power > 0 and Bear Power < 0 with volume confirmation; short when Bear Power > 0 and Bull Power < 0.
+# Uses 1d EMA13 as trend filter to avoid counter-trend trades. Designed for low trade frequency (<30/year) to minimize
+# fee drag and improve generalization in both bull and bear markets via momentum exhaustion signals.
 
-name = "1d_Choppiness_Index_Regime + Donchian(20) Breakout + Volume Confirmation"
-timeframe = "1d"
+name = "4h_Elder_Ray_Power_Bull_Bear_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,34 +23,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Choppiness Index (CHOP) - 14 period
-    def true_range(h, l, c_prev):
-        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    # EMA13 for Elder Ray calculation
+    def ema(arr, span):
+        return pd.Series(arr).ewm(span=span, adjust=False, min_periods=span).mean().values
 
-    tr = np.zeros_like(high)
-    tr[0] = high[0] - low[0]  # first TR
-    for i in range(1, n):
-        tr[i] = true_range(high[i], low[i], close[i-1])
+    ema13 = ema(close, 13)
 
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
 
-    chop = np.full(n, np.nan)
-    for i in range(14, n):
-        if atr14[i] > 0 and highest_high14[i] > lowest_low14[i]:
-            chop[i] = 100 * np.log14(np.sum(tr[i-13:i+1]) / (atr14[i] * 14)) / np.log14(14)
-        else:
-            chop[i] = 50.0  # neutral if invalid
-
-    # Donchian(20) channels
-    highest_high20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-
-    # Weekly trend filter: EMA50 on 1w
-    df_1w = get_htf_data(prices, '1w')
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Get 1d data for EMA13 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
 
     # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,10 +45,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # warmup for CHOP(14) + Donchian(20)
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(chop[i]) or np.isnan(highest_high20[i]) or np.isnan(lowest_low20[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema13_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,32 +57,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Chop < 38.2 (trending) + close > Donchian High + volume spike + price > weekly EMA50 (uptrend)
-            if (chop[i] < 38.2 and
-                close[i] > highest_high20[i] and
-                volume[i] > vol_avg_20[i] * 1.5 and
-                close[i] > ema50_1w_aligned[i]):
+            # LONG: Bull Power > 0 (bulls in control) AND Bear Power < 0 (bears weak) AND price > EMA13 (uptrend) + volume
+            if (bull_power[i] > 0 and bear_power[i] < 0 and 
+                close[i] > ema13_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Chop < 38.2 (trending) + close < Donchian Low + volume spike + price < weekly EMA50 (downtrend)
-            elif (chop[i] < 38.2 and
-                  close[i] < lowest_low20[i] and
-                  volume[i] > vol_avg_20[i] * 1.5 and
-                  close[i] < ema50_1w_aligned[i]):
+            # SHORT: Bear Power > 0 (bears in control) AND Bull Power < 0 (bulls weak) AND price < EMA13 (downtrend) + volume
+            elif (bear_power[i] > 0 and bull_power[i] < 0 and 
+                  close[i] < ema13_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Chop > 61.8 (ranging) OR close < Donchian Low
-            if (chop[i] > 61.8 or close[i] < lowest_low20[i]):
+            # EXIT LONG: Bear Power turns positive (bears gaining) OR price breaks below EMA13
+            if (bear_power[i] >= 0 or close[i] < ema13_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Chop > 61.8 (ranging) OR close > Donchian High
-            if (chop[i] > 61.8 or close[i] > highest_high20[i]):
+            # EXIT SHORT: Bull Power turns positive (bulls gaining) OR price breaks above EMA13
+            if (bull_power[i] >= 0 or close[i] > ema13_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
