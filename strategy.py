@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Camarilla pivot levels (R1/S1) on 4h with 1d EMA50 trend filter and volume spike confirmation.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) on 4h with 1d trend filter and volume spike confirmation.
+# Uses daily Camarilla levels calculated from previous day's high/low/close.
+# Trend filter: 1d EMA50 (only trade in direction of higher timeframe trend).
+# Volume confirmation: current volume > 2.0 x 20-period average.
 # Designed to capture breakouts from key intraday resistance/support levels with trend alignment.
-# Target: 15-40 trades/year per symbol to minimize fee drag while maintaining edge.
-# Works in both bull and bear markets via trend filter and volume confirmation.
+# Target: 20-50 trades/year per symbol to minimize fee drift while maintaining edge.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
