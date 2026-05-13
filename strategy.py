@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Vortex_Volume_Trend_Filter
-# Hypothesis: The Vortex Indicator identifies trend direction by measuring upward and downward vortex movement.
-# Long when VI+ > VI- with volume confirmation and price above 12h EMA50 (bullish trend).
-# Short when VI- > VI+ with volume confirmation and price below 12h EMA50 (bearish trend).
-# Uses 1d ADX as a regime filter: only trade when ADX > 25 (trending market).
-# Designed to avoid whipsaws in ranging markets and reduce trade frequency for better generalization.
+# 6h_KAMA_Regime_Trend_Breakout
+# Hypothesis: Kaufman Adaptive Moving Average (KAMA) adapts to market noise, providing a dynamic trend filter. 
+# Combined with 1-day Donchian breakout direction and volume confirmation, this strategy aims to capture 
+# strong trending moves while avoiding choppy markets. Designed for 6h timeframe with 1d HTF trend filter.
+# Expected trade frequency: 15-30 per year per symbol, targeting 60-120 total trades over 4 years.
+# Works in both bull and bear markets by using adaptive trend strength and breakout direction from higher timeframe.
 
-name = "4h_Vortex_Volume_Trend_Filter"
-timeframe = "4h"
+name = "6h_KAMA_Regime_Trend_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,64 +24,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # KAMA: Kaufman Adaptive Moving Average
+    def kama(close, length=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.zeros_like(close)
+        er[length:] = change[length-1:] / (volatility[length-1:] + 1e-10)
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # Initialize KAMA
+        kama_values = np.zeros_like(close)
+        kama_values[length-1] = close[length-1]
+        for i in range(length, len(close)):
+            kama_values[i] = kama_values[i-1] + sc[i] * (close[i] - kama_values[i-1])
+        return kama_values
 
-    # Vortex Indicator: +VM and -VM
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = 0
-    vm_minus[0] = 0
+    # Calculate KAMA
+    kama_values = kama(close, 10, 2, 30)
 
-    # Sum over 14 periods
-    period = 14
-    sum_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    sum_vm_plus = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
-    sum_vm_minus = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
-
-    # VI+ and VI-
-    vi_plus = sum_vm_plus / sum_tr
-    vi_minus = sum_vm_minus / sum_tr
-
-    # Get 1d data for ADX trend filter
+    # Get 1-day data for Donchian breakout direction
     df_1d = get_htf_data(prices, '1d')
-    # ADX calculation
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
-    # Smoothed +/-DM
-    smoothed_plus_dm = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values
-    smoothed_minus_dm = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values
-    # DI+ and DI-
-    plus_di = 100 * smoothed_plus_dm / pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
-    minus_di = 100 * smoothed_minus_dm / pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Donchian channels (20-period)
+    donch_high = np.zeros_like(high_1d)
+    donch_low = np.zeros_like(low_1d)
+    for i in range(20, len(high_1d)):
+        donch_high[i] = np.max(high_1d[i-20:i])
+        donch_low[i] = np.min(low_1d[i-20:i])
+    
+    # Donchian breakout direction: 1 if above upper band, -1 if below lower band, 0 otherwise
+    donch_direction = np.zeros_like(high_1d)
+    donch_direction[high_1d > donch_high] = 1
+    donch_direction[low_1d < donch_low] = -1
+    
+    # Align Donchian direction to 6t timeframe
+    donch_direction_aligned = align_htf_to_ltf(prices, df_1d, donch_direction)
 
     # Volume filter: >1.8x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20 = np.zeros_like(volume)
+    vol_series = pd.Series(volume)
+    vol_avg_20[20:] = vol_series.rolling(window=20, min_periods=20).mean().values[20:]
+    vol_avg_20[:20] = vol_avg_20[20]  # fill initial values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after warmup period for indicators
-        # Skip if any required value is NaN
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
+    for i in range(60, n):  # Start after sufficient data for indicators
+        # Skip if any required value is NaN or not available
+        if (np.isnan(kama_values[i]) or np.isnan(donch_direction_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -91,36 +84,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: VI+ > VI- (bullish vortex) + ADX > 25 (trending) + price > EMA50 + volume spike
-            if (vi_plus[i] > vi_minus[i] and 
-                adx_aligned[i] > 25 and
-                close[i] > ema50_12h_aligned[i] and
+            # LONG: Price above KAMA (uptrend) + bullish Donchian breakout + volume spike
+            if (close[i] > kama_values[i] and 
+                donch_direction_aligned[i] == 1 and
                 volume[i] > vol_avg_20[i] * 1.8):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: VI- > VI+ (bearish vortex) + ADX > 25 (trending) + price < EMA50 + volume spike
-            elif (vi_minus[i] > vi_plus[i] and 
-                  adx_aligned[i] > 25 and
-                  close[i] < ema50_12h_aligned[i] and
+            # SHORT: Price below KAMA (downtrend) + bearish Donchian breakout + volume spike
+            elif (close[i] < kama_values[i] and 
+                  donch_direction_aligned[i] == -1 and
                   volume[i] > vol_avg_20[i] * 1.8):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: VI- > VI+ or ADX drops below 20 or price breaks below EMA50
-            if (vi_minus[i] > vi_plus[i] or 
-                adx_aligned[i] < 20 or 
-                close[i] < ema50_12h_aligned[i]):
+            # EXIT LONG: Price crosses below KAMA or bearish Donchian breakout
+            if (close[i] < kama_values[i] or donch_direction_aligned[i] == -1):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: VI+ > VI- or ADX drops below 20 or price breaks above EMA50
-            if (vi_plus[i] > vi_minus[i] or 
-                adx_aligned[i] < 20 or 
-                close[i] > ema50_12h_aligned[i]):
+            # EXIT SHORT: Price crosses above KAMA or bullish Donchian breakout
+            if (close[i] > kama_values[i] or donch_direction_aligned[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
