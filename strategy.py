@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: 4h Camarilla pivot R1/S1 breakout with 1d EMA trend filter and volume spike confirmation.
-# Uses price action at key daily pivot levels for entries, filtered by 1d trend direction and volume confirmation.
-# Designed to capture breakouts in both bull and bear markets by aligning with higher timeframe trend.
-# Low-frequency trading to minimize fee drag, targeting 20-50 trades per year.
+# 6h_BollingerBreakout_Pullback_1dTrend
+# Hypothesis: Bollinger Band breakout with pullback entry on 6h, filtered by 1d trend and volume confirmation.
+# This strategy aims to capture trend continuation after pullbacks in trending markets while avoiding false breakouts in ranging conditions.
+# Works in both bull and bear markets by only trading in the direction of the 1d trend.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_BollingerBreakout_Pullback_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,38 +25,55 @@ def generate_signals(prices):
     # Get 1d data for HTF filters
     df_1d = get_htf_data(prices, '1d')
 
-    # Calculate 4h Camarilla pivot levels using previous day's OHLC
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We need previous day's OHLC, so we shift the 1d data by 1
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Calculate Camarilla R1 and S1 levels
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align to 4h timeframe (these levels are constant throughout the day)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Bollinger Bands (20, 2) on 6h
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_bb = sma20 + (2 * std20)
+    lower_bb = sma20 - (2 * std20)
 
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Bollinger Band breakout signals (when price crosses outside bands)
+    bb_breakout_up = close > upper_bb
+    bb_breakout_down = close < lower_bb
+
+    # Pullback condition: price returns inside bands after breakout
+    # We track if a breakout occurred and price has since returned inside
+    breakout_up_active = np.zeros(n, dtype=bool)
+    breakout_down_active = np.zeros(n, dtype=bool)
+
+    for i in range(1, n):
+        # Carry forward breakout state
+        breakout_up_active[i] = breakout_up_active[i-1]
+        breakout_down_active[i] = breakout_down_active[i-1]
+
+        # Activate breakout state when price breaks outside bands
+        if bb_breakout_up[i]:
+            breakout_up_active[i] = True
+        if bb_breakout_down[i]:
+            breakout_down_active[i] = True
+
+        # Deactivate breakout state when price returns inside bands
+        if breakout_up_active[i] and (lower_bb[i] <= close[i] <= upper_bb[i]):
+            breakout_up_active[i] = False
+        if breakout_down_active[i] and (lower_bb[i] <= close[i] <= upper_bb[i]):
+            breakout_down_active[i] = False
+
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Volume spike: current volume > 2x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_confirmed = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after sufficient warmup
+    for i in range(20, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
+        if (np.isnan(upper_bb[i]) or 
+            np.isnan(lower_bb[i]) or 
             np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+            np.isnan(volume_confirmed[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,30 +82,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above R1 with volume spike and uptrend
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > ema34_1d_aligned[i]):
+            # LONG: Bullish breakout pullback in uptrend with volume
+            if (breakout_up_active[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume_confirmed[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 with volume spike and downtrend
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+            # SHORT: Bearish breakout pullback in downtrend with volume
+            elif (breakout_down_active[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume_confirmed[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks back below R1 or trend turns down
-            if close[i] < camarilla_r1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price breaks below Bollinger middle or trend turns down
+            if close[i] < sma20[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks back above S1 or trend turns up
-            if close[i] > camarilla_s1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above Bollinger middle or trend turns up
+            if close[i] > sma20[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
