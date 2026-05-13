@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Camarilla pivot levels (R1/S1) on 1d act as strong support/resistance. 
-Breakout above R1 or below S1 with volume confirmation and aligned 1d trend (close > EMA34) signals continuation. 
-Designed for low trade frequency (~20-40/year) to minimize fee drag in 4-hour bars.
-Works in both bull and bear markets by following trend + momentum.
+4h_Donchian_Breakout_Volume_Trend
+Hypothesis: Donchian(20) breakouts on 4h with volume confirmation and trend alignment (price > EMA50 for longs, < EMA50 for shorts) capture momentum with controlled risk. Uses 30% position size to balance return and drawdown. Designed for low trade frequency (~25-40/year) to minimize fee drag.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+name = "4h_Donchian_Breakout_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,67 +22,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4h data for EMA50 trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # Typical Price = (H + L + C) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Range = H - L
-    range_ = df_1d['high'] - df_1d['low']
+    # EMA(50) on 4h close for trend filter
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Camarilla levels
-    # R1 = Close + (Range * 1.1/12)
-    # S1 = Close - (Range * 1.1/12)
-    camarilla_r1 = df_1d['close'] + (range_ * 1.1 / 12)
-    camarilla_s1 = df_1d['close'] - (range_ * 1.1 / 12)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
-    # Align to 4h - use previous day's levels (available at 4h open)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
-    
-    # 1d trend filter: EMA(34) on close
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: current volume > 2.0x 24-period average (4 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    # Donchian channels (20-period) - calculated on price data
+    # Highest high of last 20 periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lowest low of last 20 periods
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
+    for i in range(20, n):
         if position == 0:
-            # LONG: Price breaks above R1, volume confirmation, price above 1d EMA34 (uptrend)
-            if (close[i] > camarilla_r1_aligned[i] and 
+            # LONG: Price breaks above Donchian high, volume confirmation, price above EMA50 (uptrend)
+            if (close[i] > donchian_high[i] and 
                 volume_filter[i] and 
-                close[i] > ema34_1d_aligned[i]):
-                signals[i] = 0.25
+                close[i] > ema50_4h_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Price breaks below S1, volume confirmation, price below 1d EMA34 (downtrend)
-            elif (close[i] < camarilla_s1_aligned[i] and 
+            # SHORT: Price breaks below Donchian low, volume confirmation, price below EMA50 (downtrend)
+            elif (close[i] < donchian_low[i] and 
                   volume_filter[i] and 
-                  close[i] < ema34_1d_aligned[i]):
-                signals[i] = -0.25
+                  close[i] < ema50_4h_aligned[i]):
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R1 (failed breakout) OR volume drops
-            if (close[i] < camarilla_r1_aligned[i] or 
-                not volume_filter[i]):
+            # EXIT LONG: Price re-enters below Donchian high (failed breakout) OR trend turns bearish
+            if (close[i] < donchian_high[i] or 
+                close[i] < ema50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S1 (failed breakdown) OR volume drops
-            if (close[i] > camarilla_s1_aligned[i] or 
-                not volume_filter[i]):
+            # EXIT SHORT: Price re-enters above Donchian low (failed breakdown) OR trend turns bullish
+            if (close[i] > donchian_low[i] or 
+                close[i] > ema50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
