@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_FisherTransform_Trend_Reversal_v1
-# Hypothesis: The Ehlers Fisher Transform identifies turning points in price cycles.
-# On 6h timeframe, we use Fisher(10) crossing above -1.5 for longs and below +1.5 for shorts,
-# filtered by daily trend (price vs EMA50) and volume spikes to avoid false signals in chop.
-# This mean-reversion mechanism works in both bull (buying dips) and bear (selling rallies) markets.
-# Targets 10-25 trades/year by requiring confluence of Fisher extreme, trend alignment, and volume.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: On 4h timeframe, breakout beyond Camarilla R3/S3 levels (extreme daily support/resistance) 
+# with alignment to daily trend (price vs EMA34) and volume confirmation captures strong momentum moves.
+# R3/S3 represent stronger levels than R1/S1, filtering for higher-conviction breakouts.
+# Works in both bull and bear markets by following daily trend direction.
+# Targets low-frequency, high-quality setups to minimize fee drag on 4h chart.
 
-name = "6h_FisherTransform_Trend_Reversal_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,35 +24,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # === 1. Fisher Transform (10-period) on close ===
-    # Normalize price to [-1, 1] over lookback period
-    def fish_transform(series, length):
-        if len(series) < length:
-            return np.full_like(series, np.nan)
-        highest = pd.Series(series).rolling(window=length, min_periods=length).max().values
-        lowest = pd.Series(series).rolling(window=length, min_periods=length).min().values
-        # Avoid division by zero
-        diff = highest - lowest
-        diff[diff == 0] = 1e-10
-        # Normalize to [-1, 1]
-        value = 2 * ((series - lowest) / diff - 0.5)
-        # Clamp to avoid math domain errors
-        value = np.clip(value, -0.999, 0.999)
-        # Fisher transform
-        fish = 0.5 * np.log((1 + value) / (1 - value))
-        # Smoothed
-        fish_smoothed = pd.Series(fish).ewm(alpha=0.5, adjust=False).mean().values
-        return fish_smoothed
-
-    fish = fish_transform(close, 10)
-
-    # === 2. Daily trend filter: EMA50 ===
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # === 3. Volume spike: > 2.0 x 20-period average ===
+    # Calculate Camarilla pivot levels for each day
+    # Pivot = (H + L + C) / 3
+    # R3 = C + (H - L) * 1.1 / 4
+    # S3 = C - (H - L) * 1.1 / 4
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0
+    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0
+
+    # Align to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Volume spike: volume > 2.0 * 20-period average (~10 days at 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * vol_ma_20
 
@@ -61,8 +55,9 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(fish[i]) or 
-            np.isnan(ema50_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
+            np.isnan(ema34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,26 +66,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Fisher crosses above -1.5 (oversold reversal) + uptrend + volume spike
-            if fish[i] > -1.5 and fish[i-1] <= -1.5 and close[i] > ema50_aligned[i] and volume_spike[i]:
+            # LONG: Uptrend + breakout above R3 + volume spike
+            if close[i] > ema34_aligned[i] and close[i] > r3_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Fisher crosses below +1.5 (overbought reversal) + downtrend + volume spike
-            elif fish[i] < 1.5 and fish[i-1] >= 1.5 and close[i] < ema50_aligned[i] and volume_spike[i]:
+            # SHORT: Downtrend + breakdown below S3 + volume spike
+            elif close[i] < ema34_aligned[i] and close[i] < s3_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Fisher crosses below +1.5 (overbought) or trend turns bearish
-            if fish[i] < 1.5 and fish[i-1] >= 1.5 or close[i] < ema50_aligned[i]:
+            # EXIT LONG: Price breaks below S3 or trend turns bearish
+            if close[i] < s3_aligned[i] or close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Fisher crosses above -1.5 (oversold) or trend turns bullish
-            if fish[i] > -1.5 and fish[i-1] <= -1.5 or close[i] > ema50_aligned[i]:
+            # EXIT SHORT: Price breaks above R3 or trend turns bullish
+            if close[i] > r3_aligned[i] or close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
