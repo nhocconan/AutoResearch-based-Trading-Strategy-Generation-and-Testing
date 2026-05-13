@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_RSI_Divergence_Trend_Pullback
-# Hypothesis: Combine 4-hour RSI divergence with 1-day EMA trend filter and volume confirmation.
-# RSI divergence identifies potential reversals with momentum exhaustion.
-# The 1d EMA200 filter ensures trades align with long-term trend, reducing false signals.
-# Volume confirmation adds conviction to reversal signals.
-# Works in bull markets (buy bullish divergence in uptrend) and bear markets (sell bearish divergence in downtrend).
+# 12h_Keltner_Breakout_ATR_Volume
+# Hypothesis: Use 12-hour Keltner Channel breakouts filtered by 1-day EMA trend and volume confirmation.
+# Keltner Channels (EMA ± ATR multiplier) adapt to volatility, reducing false breakouts in low volatility.
+# The 1d EMA50 filter ensures trades align with the daily trend, improving edge in both bull and bear markets.
+# Volume confirmation adds conviction to breakout moves. Works in bull markets (follows upward breaks with bullish trend)
+# and bear markets (avoids upward breaks in bearish trend, takes downward breaks).
 # Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "4h_RSI_Divergence_Trend_Pullback"
-timeframe = "4h"
+name = "12h_Keltner_Breakout_ATR_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,60 +25,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA200 trend filter
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA200 for trend filter
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Calculate RSI(14) on 4h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate RSI divergence signals
-    # Bullish divergence: price makes lower low, RSI makes higher low
-    # Bearish divergence: price makes higher high, RSI makes lower high
-    lookback = 14
-    bullish_div = np.zeros(n, dtype=bool)
-    bearish_div = np.zeros(n, dtype=bool)
-    
-    for i in range(lookback, n):
-        # Bullish divergence
-        if (low[i] < low[i-lookback] and 
-            rsi[i] > rsi[i-lookback]):
-            # Check if it's a meaningful divergence
-            price_lower = low[i] == np.min(low[i-lookback:i+1])
-            rsi_higher = rsi[i] == np.max(rsi[i-lookback:i+1])
-            if price_lower and rsi_higher:
-                bullish_div[i] = True
-        
-        # Bearish divergence
-        if (high[i] > high[i-lookback] and 
-            rsi[i] < rsi[i-lookback]):
-            # Check if it's a meaningful divergence
-            price_higher = high[i] == np.max(high[i-lookback:i+1])
-            rsi_lower = rsi[i] == np.min(rsi[i-lookback:i+1])
-            if price_higher and rsi_lower:
-                bearish_div[i] = True
-    
-    # Align 1d EMA200 to 4h timeframe
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # Volume filter: >1.5x 20-period average on 4h
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+
+    # Calculate ATR(14) on 12h for Keltner Channel width
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+
+    # Calculate EMA(20) on 12h for Keltner Channel midline
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+
+    # Keltner Channels: upper = EMA + 2*ATR, lower = EMA - 2*ATR
+    keltner_upper = ema_20 + 2 * atr
+    keltner_lower = ema_20 - 2 * atr
+
+    # Volume filter: >1.5x 20-period average on 12h
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,30 +64,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: bullish RSI divergence + price above 1d EMA200 (bullish trend) + volume spike
-            if (bullish_div[i] and 
-                close[i] > ema_200_1d_aligned[i] and
+            # LONG: price breaks above Keltner Upper + price above 1d EMA50 (bullish trend) + volume spike
+            if (close[i] > keltner_upper[i] and 
+                close[i] > ema_50_1d_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: bearish RSI divergence + price below 1d EMA200 (bearish trend) + volume spike
-            elif (bearish_div[i] and 
-                  close[i] < ema_200_1d_aligned[i] and
+            # SHORT: price breaks below Keltner Lower + price below 1d EMA50 (bearish trend) + volume spike
+            elif (close[i] < keltner_lower[i] and 
+                  close[i] < ema_50_1d_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: bearish RSI divergence or price below 1d EMA200
-            if (bearish_div[i] or close[i] < ema_200_1d_aligned[i]):
+            # EXIT LONG: price breaks below Keltner Lower or price below 1d EMA50
+            if (close[i] < keltner_lower[i] or close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: bullish RSI divergence or price above 1d EMA200
-            if (bullish_div[i] or close[i] > ema_200_1d_aligned[i]):
+            # EXIT SHORT: price breaks above Keltner Upper or price above 1d EMA50
+            if (close[i] > keltner_upper[i] or close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
