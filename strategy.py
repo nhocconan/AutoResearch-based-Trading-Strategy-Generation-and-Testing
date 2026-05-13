@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels (R1/S1) on 1d timeframe provide key support/resistance levels.
-# Long when price breaks above R1 with volume spike and price above 1d EMA34 (uptrend).
-# Short when price breaks below S1 with volume spike and price below 1d EMA34 (downtrend).
-# Exit when price crosses back through the pivot point (mean reversion within day's range).
-# Uses 1d timeframe for Camarilla levels and EMA trend filter to avoid whipsaws.
-# Designed for 20-40 trades/year to minimize fee drift. Works in both bull and bear by
-# capturing institutional reversal points with trend alignment.
+# 1d_KAMA_RSI_Chop_Filter_v2
+# Hypothesis: KAMA identifies trend direction, RSI filters entry timing, and Chop determines regime.
+# In trending markets (Chop < 38.2): enter long when KAMA up + RSI > 50, short when KAMA down + RSI < 50.
+# In ranging markets (Chop > 61.8): long when RSI < 30, short when RSI > 70.
+# Exit on opposite RSI extreme. Daily timeframe to minimize trades (<20/year) and avoid fee drag.
+# Uses weekly trend filter to ensure alignment with higher timeframe momentum.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_Filter_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -26,49 +24,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Camarilla pivot levels from previous 1d
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # KAMA (adaptive moving average) - trend identification
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.zeros(n)
+    for i in range(10, n):
+        if np.sum(volatility[i-9:i+1]) > 0:
+            er[i] = np.sum(change[i-9:i+1]) / np.sum(volatility[i-9:i+1])
+        else:
+            er[i] = 0
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
 
-    # Calculate Camarilla levels: R1, S1, PP
-    R1 = np.full(n, np.nan)
-    S1 = np.full(n, np.nan)
-    PP = np.full(n, np.nan)
-    for i in range(len(close_1d)):
-        # Previous day's range
-        range_1d = high_1d[i] - low_1d[i]
-        # Camarilla formulas
-        R1_val = close_1d[i] + range_1d * 1.1 / 12
-        S1_val = close_1d[i] - range_1d * 1.1 / 12
-        PP_val = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
-        R1[i] = R1_val
-        S1[i] = S1_val
-        PP[i] = PP_val
+    # RSI (14-period) - momentum oscillator
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(14, n):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[i-13:i+1])
+            avg_loss[i] = np.mean(loss[i-13:i+1])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
 
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    PP_aligned = align_htf_to_ltf(prices, df_1d, PP)
+    # Chop Index (14-period) - regime detection
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.zeros(n)
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-13:i+1])
+    highest_high = np.zeros(n)
+    lowest_low = np.zeros(n)
+    for i in range(14, n):
+        highest_high[i] = np.max(high[i-13:i+1])
+        lowest_low[i] = np.min(low[i-13:i+1])
+    chop = np.zeros(n)
+    for i in range(14, n):
+        if highest_high[i] != lowest_low[i]:
+            chop[i] = 100 * np.log10(np.sum(tr[i-13:i+1]) / (highest_high[i] - lowest_low[i])) / np.log10(14)
+        else:
+            chop[i] = 50
 
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-
-    # Volume confirmation: current volume > 2.0 x 24-period average (6h)
-    vol_ma = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    # Weekly EMA (34-period) - higher timeframe trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(24, n):
-        # Skip if data is not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(PP_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i])):
+    for i in range(30, n):  # Start after warmup
+        # Skip if data not ready
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,26 +96,38 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: break above R1 with volume spike and price above 1d EMA34 (uptrend)
-            if close[i] > R1_aligned[i] and volume_spike[i] and close[i] > ema_34_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: break below S1 with volume spike and price below 1d EMA34 (downtrend)
-            elif close[i] < S1_aligned[i] and volume_spike[i] and close[i] < ema_34_aligned[i]:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
+            # Trending market (Chop < 38.2): follow KAMA trend with RSI filter
+            if chop[i] < 38.2:
+                if kama[i] > kama[i-1] and rsi[i] > 50 and close[i] > ema_1w_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif kama[i] < kama[i-1] and rsi[i] < 50 and close[i] < ema_1w_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Ranging market (Chop > 61.8): mean reversion at RSI extremes
+            elif chop[i] > 61.8:
+                if rsi[i] < 30:
+                    signals[i] = 0.25
+                    position = 1
+                elif rsi[i] > 70:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # EXIT LONG: price crosses below pivot point (mean reversion)
-            if close[i] < PP_aligned[i]:
+            # Exit long: RSI overbought in range, or trend reversal in trend
+            if chop[i] > 61.8 and rsi[i] > 70:
+                signals[i] = 0.0
+                position = 0
+            elif chop[i] < 38.2 and kama[i] < kama[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above pivot point
-            if close[i] > PP_aligned[i]:
+            # Exit short: RSI oversold in range, or trend reversal in trend
+            if chop[i] > 61.8 and rsi[i] < 30:
+                signals[i] = 0.0
+                position = 0
+            elif chop[i] < 38.2 and kama[i] > kama[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
