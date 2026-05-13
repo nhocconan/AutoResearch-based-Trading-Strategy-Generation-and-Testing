@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Williams_Vix_Fix_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,31 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Vix Fix (WVF) - measures market fear
-    # High WVF = high fear = potential bottom for mean reversion
-    lookback = 22
-    highest_high = np.full(n, np.nan)
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
+    # Camarilla pivot points from 1d
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Avoid division by zero
-    wvf = np.full(n, np.nan)
-    for i in range(lookback-1, n):
-        if highest_high[i] > 0:
-            wvf[i] = ((highest_high[i] - low[i]) / highest_high[i]) * 100
+    # Calculate Camarilla levels for each 1d bar
+    R1 = np.full(len(df_1d), np.nan)
+    S1 = np.full(len(df_1d), np.nan)
+    for i in range(len(df_1d)):
+        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
+            R1[i] = close_1d[i] + (high_1d[i] - low_1d[i]) * 1.1 / 12
+            S1[i] = close_1d[i] - (high_1d[i] - low_1d[i]) * 1.1 / 12
     
-    # WVF signal: high values indicate fear/oversold
-    wvf_ma = np.full(n, np.nan)
-    wvf_period = 10
-    for i in range(wvf_period-1, n):
-        if not np.isnan(wvf[i-wvf_period+1:i+1]).any():
-            wvf_ma[i] = np.mean(wvf[i-wvf_period+1:i+1])
+    # Align to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # 1d trend filter: EMA(34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
@@ -53,36 +49,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(22, n):
-        if (np.isnan(wvf_ma[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+    for i in range(30, n):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_filter = volume[i] > 1.5 * vol_ma_20[i]
-        wvf_high = wvf_ma[i] > np.percentile(wvf[max(0, i-100):i+1], 80) if i >= 100 else wvf_ma[i] > 50
         
         if position == 0:
-            # LONG: High fear (WVF spike) + 1d uptrend + volume confirmation
-            if wvf_high and close[i] > ema34_1d_aligned[i] and vol_filter:
+            # LONG: Price breaks above R1 + 1d uptrend + volume confirmation
+            if close[i] > R1_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Low fear (complacency) + 1d downtrend + volume confirmation
-            elif not wvf_high and close[i] < ema34_1d_aligned[i] and vol_filter:
+            # SHORT: Price breaks below S1 + 1d downtrend + volume confirmation
+            elif close[i] < S1_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Fear subsides or trend breaks
-            if wvf_ma[i] < np.percentile(wvf[max(0, i-50):i+1], 50) or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price returns below S1 or trend breaks
+            if close[i] < S1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Fear increases or trend breaks
-            if wvf_ma[i] > np.percentile(wvf[max(0, i-50):i+1], 80) or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price returns above R1 or trend breaks
+            if close[i] > R1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
