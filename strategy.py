@@ -1,20 +1,38 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Use 12h Camarilla R3 and S3 levels as breakout triggers with 1d EMA trend filter and volume confirmation.
-# Camarilla levels are intraday support/resistance levels that work well in ranging and trending markets.
-# The breakout strategy captures momentum when price moves beyond these statistically significant levels.
-# Trend filter ensures we only trade in the direction of the higher-timeframe trend.
-# Volume confirmation reduces false breakouts.
-# Works in bull markets (follows bullish breaks with bullish 1d trend) and bear markets (avoids bullish breaks in bearish 1d trend, takes bearish breaks).
-# Target: 80-150 total trades over 4 years = 20-38/year.
+# 12h_KAMA_Trend_Volume_1dTrend_Filter
+# Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) on 12h to capture trend with low lag in whipsaws,
+# combined with 1d EMA trend filter and volume confirmation. KAMA adapts to market noise, reducing false
+# breakouts during chop while maintaining sensitivity to strong trends. Works in bull (follows KAMA up with
+# bullish 1d trend) and bear (avoids false signals via 1d filter). Target: 50-150 total trades over 4 years.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+name = "12h_KAMA_Trend_Volume_1dTrend_Filter"
 timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_kama(close, er_len=10, fast_sc=2, slow_sc=30):
+    """Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close, prepend=close[0]))
+    for i in range(1, len(close)):
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    
+    er = np.zeros_like(close)
+    for i in range(er_len, len(close)):
+        if volatility[i-er_len] != 0:
+            er[i] = change[i] / volatility[i-er_len]
+        else:
+            er[i] = 0
+    
+    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,27 +54,16 @@ def generate_signals(prices):
     # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
-    # Calculate Camarilla levels for 12h timeframe
-    # Camarilla formula: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We only need R3 and S3 for breakout signals
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # First value will be NaN due to roll, we'll handle it in the loop
-    
-    # Calculate Camarilla R3 and S3
-    # R3 = C + ((H-L)*1.1/4)
-    # S3 = C - ((H-L)*1.1/4)
-    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    # Calculate KAMA on 12h data
+    kama = calculate_kama(close, er_len=10, fast_sc=2, slow_sc=30)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start from 20 to ensure we have enough data for indicators
+    for i in range(30, n):  # Start after KAMA warmup
         # Skip if any required value is NaN
         if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i]) or 
-            np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i])):
+            np.isnan(kama[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,14 +72,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above Camarilla R3 + price above 1d EMA (bullish trend) + volume spike
-            if (close[i] > camarilla_r3[i] and 
+            # LONG: price above KAMA + price above 1d EMA (bullish trend) + volume spike
+            if (close[i] > kama[i] and 
                 close[i] > ema_34_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below Camarilla S3 + price below 1d EMA (bearish trend) + volume spike
-            elif (close[i] < camarilla_s3[i] and 
+            # SHORT: price below KAMA + price below 1d EMA (bearish trend) + volume spike
+            elif (close[i] < kama[i] and 
                   close[i] < ema_34_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
@@ -80,15 +87,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below Camarilla S3 or price below 1d EMA
-            if (close[i] < camarilla_s3[i] or close[i] < ema_34_aligned[i]):
+            # EXIT LONG: price below KAMA or price below 1d EMA
+            if (close[i] < kama[i] or close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above Camarilla R3 or price above 1d EMA
-            if (close[i] > camarilla_r3[i] or close[i] > ema_34_aligned[i]):
+            # EXIT SHORT: price above KAMA or price above 1d EMA
+            if (close[i] > kama[i] or close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
