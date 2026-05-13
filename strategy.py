@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-# 1h_HMA_Trend_Filter + Volume + Session
-# Hypothesis: HMA(21) on 4h defines trend, HMA(9) on 1h provides entry timing with volume confirmation.
-# Session filter (08-20 UTC) reduces noise. Works in bull/bear via trend filter. Target: 20-60 trades/year.
+# 6h_RSI_Divergence_1wTrend_Momentum
+# Hypothesis: RSI(14) divergences on 6h with weekly trend filter capture reversals in both bull and bear markets. 
+# Uses hidden bullish/bearish divergences: price makes lower low/higher high while RSI makes higher low/lower low.
+# Weekly trend filter ensures we trade with the higher timeframe momentum, reducing whipsaws.
+# Volume confirmation adds confirmation of momentum strength.
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete position sizing.
 
-name = "1h_HMA_Trend_Filter_Volume_Session"
-timeframe = "1h"
+name = "6h_RSI_Divergence_1wTrend_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -21,51 +24,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # 4h HMA(21) for trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # Hull MA: WMA(2*n, WMA(n, price)) - WMA(n, price)
-    def wma(arr, n):
-        if n <= 1:
-            return arr.copy()
-        weights = np.arange(1, n + 1)
-        return np.convolve(arr, weights, mode='full')[:len(arr)] * weights / (weights.sum())
-    def hull_ma(arr, n):
-        half_n = n // 2
-        sqrt_n = int(np.sqrt(n))
-        wma_half = wma(arr, half_n)
-        wma_full = wma(arr, n)
-        return wma(2 * wma_half - wma_full, sqrt_n)
-    hma_21_4h = hull_ma(close_4h, 21)
-    hma_21_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_21_4h)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
 
-    # 1h HMA(9) for entry
-    def wma_series(arr, n):
-        if n <= 1:
-            return arr.copy()
-        weights = np.arange(1, n + 1)
-        return np.convolve(arr, weights, mode='full')[:len(arr)] * weights / (weights.sum())
-    def hull_ma_series(arr, n):
-        half_n = n // 2
-        sqrt_n = int(np.sqrt(n))
-        wma_half = wma_series(arr, half_n)
-        wma_full = wma_series(arr, n)
-        return wma_series(2 * wma_half - wma_full, sqrt_n)
-    hma_9_1h = hull_ma_series(close, 9)
+    # Weekly trend filter: EMA50 on 1w close
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
 
-    # Volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
-    # Session: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        if (np.isnan(hma_21_4h_aligned[i]) or np.isnan(hma_9_1h[i]) or
-            np.isnan(vol_avg_20[i])):
+    for i in range(14, n):
+        # Skip if any required value is NaN
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_avg_20[i]) or 
+            np.isnan(rsi[i]) or np.isnan(rsi[i-1])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,44 +55,46 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+        # Detect hidden bullish divergence: price makes lower low, RSI makes higher low
+        hidden_bull_div = False
+        if i >= 2:
+            if low[i] < low[i-1] and rsi[i] > rsi[i-1]:
+                hidden_bull_div = True
+
+        # Detect hidden bearish divergence: price makes higher high, RSI makes lower high
+        hidden_bear_div = False
+        if i >= 2:
+            if high[i] > high[i-1] and rsi[i] < rsi[i-1]:
+                hidden_bear_div = True
 
         if position == 0:
-            # LONG: 4h uptrend + 1h HMA rising + volume
-            if (hma_21_4h_aligned[i] > hma_21_4h_aligned[i-1] and
-                hma_9_1h[i] > hma_9_1h[i-1] and
+            # LONG: Hidden bullish divergence + weekly uptrend + volume spike
+            if (hidden_bull_div and 
+                close[i] > ema50_1w_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 4h downtrend + 1h HMA falling + volume
-            elif (hma_21_4h_aligned[i] < hma_21_4h_aligned[i-1] and
-                  hma_9_1h[i] < hma_9_1h[i-1] and
+            # SHORT: Hidden bearish divergence + weekly downtrend + volume spike
+            elif (hidden_bear_div and 
+                  close[i] < ema50_1w_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 4h trend breaks or volume drops
-            if (hma_21_4h_aligned[i] < hma_21_4h_aligned[i-1] or
-                volume[i] < vol_avg_20[i] * 1.2):
+            # EXIT LONG: Hidden bearish divergence or weekly trend turns down
+            if hidden_bear_div or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 4h trend breaks or volume drops
-            if (hma_21_4h_aligned[i] > hma_21_4h_aligned[i-1] or
-                volume[i] < vol_avg_20[i] * 1.2):
+            # EXIT SHORT: Hidden bullish divergence or weekly trend turns up
+            if hidden_bull_div or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
