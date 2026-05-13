@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Use 1d Camarilla pivot levels (R3/S3) as breakout levels with confirmation from 1d EMA trend and volume spikes.
+# 4h_4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Use 1d Camarilla pivot levels (R3/S3) as breakout levels with 1d EMA trend filter and volume spike.
 # Enter long when price breaks above R3 with volume spike and 1d EMA34 uptrend.
 # Enter short when price breaks below S3 with volume spike and 1d EMA34 downtrend.
 # Exit when price returns to the previous day's close (C level).
-# Uses 6h timeframe with 1d trend filter to balance trade frequency and win rate.
+# Uses tighter R3/S3 levels for fewer, higher-quality trades.
 # Designed to work in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
-# Target: 12-37 trades/year per symbol.
+# Target: 15-30 trades/year per symbol.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -46,7 +46,7 @@ def generate_signals(prices):
     S3 = close_1d - (rng * 1.1 / 4)
     R3 = close_1d + (rng * 1.1 / 4)
 
-    # Align pivot levels to 6h timeframe (use previous day's levels)
+    # Align pivot levels to 4h timeframe (use previous day's levels)
     s3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     r3_aligned = align_htf_to_ltf(prices, df_1d, R3)
 
