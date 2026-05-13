@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter, volume confirmation (1.5x MA20), and ATR volatility filter (ATR14 > 0.3 * ATR50).
-# Enters long when price breaks above Donchian upper band with 12h bullish trend (close > EMA50), volume > 1.5x MA20, and sufficient volatility.
-# Enters short when price breaks below Donchian lower band with 12h bearish trend (close < EMA50), volume > 1.5x MA20, and sufficient volatility.
-# Exits when price reverts to the Donchian middle band (20-period mean) or ATR-based stoploss (2.0 * ATR14 from entry).
+# Hypothesis: 1d Camarilla R4/S4 breakout with 1w EMA50 trend filter, volume confirmation (1.5x MA20), and ATR volatility filter (ATR14 > 0.4 * ATR50).
+# Enters long when price breaks above Camarilla R4 level with 1w bullish trend (close > EMA50), volume > 1.5x MA20, and sufficient volatility.
+# Enters short when price breaks below Camarilla S4 level with 1w bearish trend (close < EMA50), volume > 1.5x MA20, and sufficient volatility.
+# Exits when price reverts to the Camarilla pivot point or ATR-based stoploss (2.0 * ATR14 from entry).
 # Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
-# Designed for low trade frequency (~20-50/year) by requiring strict confluence: price breakout + HTF trend + volume spike + volatility filter.
-# Donchian channels provide clear trend-following structure, while 12h EMA50 filter ensures alignment with higher timeframe momentum.
-# Volume threshold (1.5x) and volatility filter (0.3x) reduce false breakouts, improving signal quality in both bull and bear markets.
+# Designed for low trade frequency (~7-25/year) by requiring strict confluence: price breakout + HTF trend + volume spike + volatility filter.
+# Camarilla R4/S4 levels provide strong daily support/resistance, while 1w EMA50 filter ensures alignment with weekly momentum.
+# Volume threshold (1.5x) and volatility filter (0.4x) reduce false breakouts, improving signal quality in both bull and bear markets.
 
-name = "4h_Donchian20_Breakout_12hTrend_Volume_Volatility_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R4_S4_Breakout_1wTrend_Volume_Volatility_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -26,19 +26,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    # Calculate EMA(50) on 12h close
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Calculate EMA(50) on 1w close
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    upper_band = highest_high
-    lower_band = lowest_low
-    middle_band = (upper_band + lower_band) / 2.0
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    prev_high = df_1d['high'].shift(1).values  # previous day high
+    prev_low = df_1d['low'].shift(1).values    # previous day low
+    prev_close = df_1d['close'].shift(1).values # previous day close
+    
+    # Calculate Camarilla levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    r4 = pivot + (range_hl * 1.1 / 2.0)  # Resistance 4
+    s4 = pivot - (range_hl * 1.1 / 2.0)  # Support 4
+    
+    # Align Camarilla levels to 1d timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
@@ -52,7 +62,7 @@ def generate_signals(prices):
     tr[0] = high[0] - low[0]  # first bar
     atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    volatility_filter = atr14 > (0.3 * atr50)  # avoid low volatility breakouts
+    volatility_filter = atr14 > (0.4 * atr50)  # avoid low volatility breakouts
     
     # Track entry price for ATR-based stoploss
     entry_price = np.full(n, np.nan)
@@ -60,28 +70,28 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(middle_band[i]) or \
-           np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i]) or \
+        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(pivot_aligned[i]) or \
+           np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma20[i]) or \
            np.isnan(atr14[i]) or np.isnan(atr50[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper band with 12h bullish trend, volume spike, and sufficient volatility
-            if close[i] > upper_band[i] and close[i] > ema50_12h_aligned[i] and volume_spike[i] and volatility_filter[i]:
+            # LONG: Price breaks above Camarilla R4 with 1w bullish trend, volume spike, and sufficient volatility
+            if close[i] > r4_aligned[i] and close[i] > ema50_1w_aligned[i] and volume_spike[i] and volatility_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
-            # SHORT: Price breaks below Donchian lower band with 12h bearish trend, volume spike, and sufficient volatility
-            elif close[i] < lower_band[i] and close[i] < ema50_12h_aligned[i] and volume_spike[i] and volatility_filter[i]:
+            # SHORT: Price breaks below Camarilla S4 with 1w bearish trend, volume spike, and sufficient volatility
+            elif close[i] < s4_aligned[i] and close[i] < ema50_1w_aligned[i] and volume_spike[i] and volatility_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reverts to Donchian middle band (mean reversion) OR ATR stoploss hit
-            if close[i] < middle_band[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
+            # EXIT LONG: Price reverts to Camarilla pivot (mean reversion) OR ATR stoploss hit
+            if close[i] < pivot_aligned[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
@@ -89,8 +99,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 entry_price[i] = entry_price[i-1]  # carry forward entry price
         elif position == -1:
-            # EXIT SHORT: Price reverts to Donchian middle band (mean reversion) OR ATR stoploss hit
-            if close[i] > middle_band[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
+            # EXIT SHORT: Price reverts to Camarilla pivot (mean reversion) OR ATR stoploss hit
+            if close[i] > pivot_aligned[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
