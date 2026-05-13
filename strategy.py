@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 > EMA200 trend filter and volume confirmation (>1.5x avg volume).
-# Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.20.
-# Target: 80-150 total trades over 4 years (20-37/year) on 1h timeframe.
-# EMA trend filter on 4h ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Camarilla R3/S3 breakouts capture strong intraday momentum moves. Volume confirmation ensures institutional participation.
-# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
-# Session filter (08-20 UTC) reduces noise trades during low-liquidity periods.
+# Hypothesis: 6h Ichimoku Cloud with TK Cross + 1d Cloud Filter + Volume Confirmation.
+# Uses Ichimoku (Tenkan-sen, Kijun-sen, Senkou Span A/B) on 6h for entry signals.
+# Trend filter: price must be above/below 1d Ichimoku cloud to align with higher timeframe trend.
+# Volume confirmation: current volume > 1.5x 20-period average to ensure institutional participation.
+# Discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+# Ichimoku captures momentum and support/resistance; cloud filter reduces counter-trend whipsaw.
+# Works in bull markets via long signals when price above cloud + TK cross up.
+# Works in bear markets via short signals when price below cloud + TK cross down.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMATrend_VolumeSpike_ATRStop_v1"
-timeframe = "1h"
+name = "6h_Ichimoku_TK_Cross_1dCloudFilter_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,111 +26,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for trailing stop
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Ichimoku components on 6h
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 shifted 26 periods ahead
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Get 1d data for Ichimoku cloud filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate 1d Ichimoku components for cloud filter
+    period9_high_1d = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low_1d = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen_1d = (period9_high_1d + period9_low_1d) / 2
+    
+    period26_high_1d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low_1d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen_1d = (period26_high_1d + period26_low_1d) / 2
+    
+    senkou_a_1d = ((tenkan_sen_1d + kijun_sen_1d) / 2)
+    period52_high_1d = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low_1d = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b_1d = ((period52_high_1d + period52_low_1d) / 2)
+    
+    # Align 1d Ichimoku cloud to 6h timeframe (wait for 1d bar to close)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for EMA trend filter and Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Calculate 4h EMA50 and EMA200 for trend filter
-    close_4h_series = pd.Series(close_4h)
-    ema50_4h = close_4h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_4h = close_4h_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align 4h EMAs to 1h timeframe (wait for 4h bar to close)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
-    
-    # Calculate Camarilla levels from previous 4h bar
-    # Camarilla R3 = close + 1.1*(high-low)/2
-    # Camarilla S3 = close - 1.1*(high-low)/2
-    camarilla_range = high_4h - low_4h
-    camarilla_r3 = close_4h + 1.1 * camarilla_range / 2
-    camarilla_s3 = close_4h - 1.1 * camarilla_range / 2
-    
-    # Align Camarilla levels to 1h timeframe (wait for 4h bar to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
-    lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(100, n):  # Start after sufficient data for indicators
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_4h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(avg_volume[i]) or
-            not in_session[i]):
+    for i in range(52, n):  # Start after sufficient data for Ichimoku (52 periods)
+        # Skip if any required data is NaN
+        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
+            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
+        # Determine 6h Ichimoku cloud boundaries (Senkou Span A/B)
+        upper_cloud = np.maximum(senkou_a[i], senkou_b[i])
+        lower_cloud = np.minimum(senkou_a[i], senkou_b[i])
+        
+        # Determine 1d Ichimoku cloud boundaries for trend filter
+        upper_cloud_1d = np.maximum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        lower_cloud_1d = np.minimum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        
+        # TK Cross conditions
+        tk_cross_up = tenkan_sen[i] > kijun_sen[i] and tenkan_sen[i-1] <= kijun_sen[i-1]
+        tk_cross_down = tenkan_sen[i] < kijun_sen[i] and tenkan_sen[i-1] >= kijun_sen[i-1]
+        
         if position == 0:
-            # LONG: Price breaks above Camarilla R3 AND 4h EMA50 > EMA200 AND volume > 1.5x average
-            if (close[i] > camarilla_r3_aligned[i] and 
-                ema50_4h_aligned[i] > ema200_4h_aligned[i] and 
+            # LONG: Price above 6h cloud, TK cross up, price above 1d cloud, volume confirmation
+            if (close[i] > upper_cloud and 
+                tk_cross_up and 
+                close[i] > upper_cloud_1d and 
                 volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-                highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Camarilla S3 AND 4h EMA50 < EMA200 AND volume > 1.5x average
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  ema50_4h_aligned[i] < ema200_4h_aligned[i] and 
+            # SHORT: Price below 6h cloud, TK cross down, price below 1d cloud, volume confirmation
+            elif (close[i] < lower_cloud and 
+                  tk_cross_down and 
+                  close[i] < lower_cloud_1d and 
                   volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
-                lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
                 signals[i] = 0.0
-                # Carry forward tracking values when flat
-                if i > 0:
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:
-            # Update highest high since entry
-            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
-            if trailing_stop:
+            # EXIT LONG: Price crosses below 6h cloud OR TK cross down
+            if close[i] < lower_cloud or tk_cross_down:
                 signals[i] = 0.0
                 position = 0
-                # Reset tracking when flat
-                highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.20
-                # Carry forward tracking
-                if i > 0:
-                    highest_since_entry[i] = highest_since_entry[i-1]
+                signals[i] = 0.25
         elif position == -1:
-            # Update lowest low since entry
-            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
-            if trailing_stop:
+            # EXIT SHORT: Price crosses above 6h cloud OR TK cross up
+            if close[i] > upper_cloud or tk_cross_up:
                 signals[i] = 0.0
                 position = 0
-                # Reset tracking when flat
-                lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.20
-                # Carry forward tracking
-                if i > 0:
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
+                signals[i] = -0.25
     
     return signals
