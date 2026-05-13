@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_HighLow_Breakout_TrendFilter
-Hypothesis: On daily timeframe, go long when price breaks above weekly pivot high in uptrend (price > weekly EMA20), short when price breaks below weekly pivot low in downtrend (price < weekly EMA20), with volume confirmation (volume > 1.5x 20-day average). Designed for 1d timeframe to capture multi-day trends while minimizing trades and fee drag. Uses weekly pivot points for structure and EMA20 for trend filter.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+Hypothesis: Breakouts above 1d Camarilla R1 in uptrend (price > 1d EMA50) and breakdowns below S1 in downtrend (price < 1d EMA50) with volume confirmation (volume > 2.0x 20-period average). Designed for 4h timeframe to balance trade frequency and capture trend moves in both bull and bear markets.
 """
 
-name = "1d_WeeklyPivot_HighLow_Breakout_TrendFilter"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,75 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (based on prior week)
-    prev_weekly_high = df_weekly['high'].shift(1).values
-    prev_weekly_low = df_weekly['low'].shift(1).values
-    prev_weekly_close = df_weekly['close'].shift(1).values
+    # Calculate Camarilla levels for each 1d bar (based on previous day's range)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    valid_idx = ~np.isnan(prev_weekly_high) & ~np.isnan(prev_weekly_low) & ~np.isnan(prev_weekly_close)
-    weekly_pivot_high = np.full_like(prev_weekly_close, np.nan)
-    weekly_pivot_low = np.full_like(prev_weekly_close, np.nan)
+    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
+    camarilla_r1 = np.full_like(prev_close, np.nan)
+    camarilla_s1 = np.full_like(prev_close, np.nan)
     
-    weekly_pivot_high[valid_idx] = prev_weekly_high[valid_idx]
-    weekly_pivot_low[valid_idx] = prev_weekly_low[valid_idx]
+    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     
-    # Align weekly pivot levels to daily timeframe
-    weekly_pivot_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot_high)
-    weekly_pivot_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot_low)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Get weekly EMA20 for trend filter
-    ema_20_weekly = pd.Series(df_weekly['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
+    # Get 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma)
+    volume_confirmed = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     cooldown = 0  # cooldown counter to prevent immediate re-entry
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Decrease cooldown if active
         if cooldown > 0:
             cooldown -= 1
         
         if position == 0 and cooldown == 0:
-            # LONG: Price breaks above weekly pivot high with volume confirmation in uptrend
-            if weekly_pivot_high_aligned[i] > 0 and not np.isnan(weekly_pivot_high_aligned[i]) and \
-               high[i] > weekly_pivot_high_aligned[i] and volume_confirmed[i] and \
-               close[i] > ema_20_weekly_aligned[i]:
+            # LONG: Price breaks above R1 with volume confirmation in uptrend
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and \
+               close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly pivot low with volume confirmation in downtrend
-            elif weekly_pivot_low_aligned[i] > 0 and not np.isnan(weekly_pivot_low_aligned[i]) and \
-                 low[i] < weekly_pivot_low_aligned[i] and volume_confirmed[i] and \
-                 close[i] < ema_20_weekly_aligned[i]:
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend
+            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and \
+                 close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below weekly pivot low or trend weakens
-            if weekly_pivot_low_aligned[i] > 0 and not np.isnan(weekly_pivot_low_aligned[i]) and \
-               (low[i] < weekly_pivot_low_aligned[i] or close[i] < ema_20_weekly_aligned[i]):
+            # EXIT LONG: Price crosses back below R1 or trend weakens
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               (low[i] < camarilla_r1_aligned[i] or close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
-                cooldown = 5  # 5-day cooldown after exit
+                cooldown = 3  # 3-bar cooldown after exit
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above weekly pivot high or trend weakens
-            if weekly_pivot_high_aligned[i] > 0 and not np.isnan(weekly_pivot_high_aligned[i]) and \
-               (high[i] > weekly_pivot_high_aligned[i] or close[i] > ema_20_weekly_aligned[i]):
+            # EXIT SHORT: Price crosses back above S1 or trend weakens
+            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+               (high[i] > camarilla_s1_aligned[i] or close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
-                cooldown = 5  # 5-day cooldown after exit
+                cooldown = 3  # 3-bar cooldown after exit
             else:
                 signals[i] = -0.25
     
