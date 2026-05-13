@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla R1/S1 breakouts with 1d trend filter and volume confirmation on 12h timeframe work in both bull and bear markets.
-Breakout above R1 with 1d uptrend and volume spike = long.
-Breakdown below S1 with 1d downtrend and volume spike = short.
-Exit on opposite Camarilla level touch or trend reversal. Uses 12h timeframe to reduce trade frequency and avoid fee drag.
-Target: 12-37 trades/year per symbol.
+4h_Chaikin_Money_Flow_Trend_Filter
+Hypothesis: Chaikin Money Flow (CMF) measures institutional buying/selling pressure. 
+In bull markets: CMF > 0.10 + price > EMA50 = long. 
+In bear markets: CMF < -0.10 + price < EMA50 = short.
+Uses 12h trend filter for higher timeframe bias and volume confirmation to avoid false signals.
+Target: 20-40 trades/year per symbol with controlled risk.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Chaikin_Money_Flow_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,69 +26,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels using previous day's range
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We need previous day's high, low, close
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # Set first value to avoid NaN
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Chaikin Money Flow (20-period)
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Avoid division by zero
+    hl_range = high - low
+    mfm = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0.0)
+    # Money Flow Volume = MFM * Volume
+    mfv = mfm * volume
+    # CMF = 20-period sum of MFV / 20-period sum of volume
+    mfv_sum = np.zeros(n)
+    vol_sum = np.zeros(n)
+    for i in range(20, n):
+        mfv_sum[i] = np.sum(mfv[i-20:i])
+        vol_sum[i] = np.sum(volume[i-20:i])
+    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0.0)
     
-    range_prev = prev_high - prev_low
-    R1 = prev_close + range_prev * 1.1 / 12
-    S1 = prev_close - range_prev * 1.1 / 12
+    # EMA50 for trend
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1d trend filter: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 12h trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_12h = df_12h['close'].values > ema_50_12h
+    downtrend_12h = df_12h['close'].values < ema_50_12h
+    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
+    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 2.0 * vol_ma
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Get values
-        r1 = R1[i]
-        s1 = S1[i]
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
+        cmf_val = cmf[i]
+        price_above_ema = close[i] > ema_50[i]
+        price_below_ema = close[i] < ema_50[i]
+        uptrend = uptrend_12h_aligned[i]
+        downtrend = downtrend_12h_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: break above R1, 1d uptrend, volume confirmation
-            if close[i] > r1 and uptrend and vol_conf:
+            # LONG: CMF > 0.10, price above EMA50, 12h uptrend, volume confirmation
+            if cmf_val > 0.10 and price_above_ema and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1, 1d downtrend, volume confirmation
-            elif close[i] < s1 and downtrend and vol_conf:
+            # SHORT: CMF < -0.10, price below EMA50, 12h downtrend, volume confirmation
+            elif cmf_val < -0.10 and price_below_ema and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch S1 or 1d trend turns down
-            if close[i] < s1 or not uptrend:
+            # EXIT LONG: CMF < 0.00 or price below EMA50
+            if cmf_val < 0.00 or price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch R1 or 1d trend turns up
-            if close[i] > r1 or not downtrend:
+            # EXIT SHORT: CMF > 0.00 or price above EMA50
+            if cmf_val > 0.00 or price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
