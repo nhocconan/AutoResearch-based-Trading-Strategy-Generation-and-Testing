@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Price reacts to Camarilla pivot levels (R1/S1) derived from 1d timeframe.
-# Go long when price breaks above R1 with 1d uptrend and volume confirmation.
-# Go short when price breaks below S1 with 1d downtrend and volume confirmation.
-# Uses 12h timeframe to reduce trade frequency and avoid fee drag. Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
-# Target: 12-37 trades/year per symbol to minimize fee drag.
+# 4h_Donchian_20_Breakout_Volume_Trend_1d
+# Hypothesis: Price breaks Donchian(20) channels with volume confirmation and 1d trend filter.
+# Long: Close breaks above upper Donchian(20) + volume spike + 1d uptrend (close > EMA50).
+# Short: Close breaks below lower Donchian(20) + volume spike + 1d downtrend (close < EMA50).
+# Exit: Opposite Donchian break or trend reversal.
+# Donchian captures breakouts, volume confirms institutional interest, 1d trend filters counter-trend noise.
+# Works in bull (breakouts in uptrend) and bear (breakdowns in downtrend).
+# Target: 20-50 trades/year per symbol to minimize fee drag.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_Breakout_Volume_Trend_1d"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,37 +26,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot calculation and trend
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla pivot levels (R1, S1) from previous 1d bar
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    camarilla_width = (high_1d - low_1d) * 1.1 / 12
-    r1 = close_1d + camarilla_width
-    s1 = close_1d - camarilla_width
-    
+    # Donchian(20) on 4h
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    upper = high_roll
+    lower = low_roll
+
     # 1d trend: EMA50
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d indicators to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume spike: volume > 2.0 * 24-period average (12 days worth at 12h)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > 2.0 * vol_ma_24
-    
+
+    # Volume spike: volume > 2.0 * 3-period average (1.5 days worth at 4h)
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    volume_spike = volume > 2.0 * vol_ma_3
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
+        if (np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or 
             np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,26 +58,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R1 + 1d uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > upper + 1d uptrend + volume spike
+            if close[i] > upper[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S1 + 1d downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < lower + 1d downtrend + volume spike
+            elif close[i] < lower[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S1 or trend reversal
-            if close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close below lower or trend reversal
+            if close[i] < lower[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R1 or trend reversal
-            if close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close above upper or trend reversal
+            if close[i] > upper[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
