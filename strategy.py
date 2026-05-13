@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter_With_Volume_And_Keltner
-Hypothesis: KAMA adapts to market noise, filtering false signals in ranging markets while capturing trends.
-Combined with Keltner channel breakouts and volume confirmation, this creates a robust trend-following system
-that works in both bull and bear markets by avoiding whipsaws. Target: 10-20 trades/year on 1d timeframe.
+4h_Donchian20_Breakout_1dTrend_VolumeSpike
+Hypothesis: Donchian channel (20-period high/low) breakouts on 4h timeframe, 
+confirmed by 1d trend (price > EMA50) and volume spikes (>2x 24-period average), 
+capture momentum continuation in both bull and bear markets. 
+Position size 0.25 limits risk; exit when price re-enters the Donchian channel 
+or trend reverses. Targets 20-40 trades/year to minimize fee drag.
 """
 
-name = "1d_KAMA_Trend_Filter_With_Volume_And_Keltner"
-timeframe = "1d"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,92 +26,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # KAMA calculation (adaptive moving average)
-    # Efficiency Ratio: ER = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(close - np.roll(close, 10))
-    change[0:10] = np.nan  # Not enough data for first 10 periods
+    # 1d trend filter: EMA(50) on close
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volatility: sum of absolute changes over 10 periods
-    volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.nansum(np.abs(np.diff(close[i-9:i+1])))
+    # Volume confirmation: current volume > 2.0x 24-period average (6 days on 4h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (2.0 * vol_ma)
     
-    # Avoid division by zero
-    er = np.where(volatility > 0, change / volatility, 0)
-    er[0:10] = 0  # Not enough data
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Align KAMA to daily timeframe (no alignment needed as we're already on 1d)
-    # But we need to ensure we don't use future data, so we'll use shift(1) for signals
-    
-    # Weekly trend filter: EMA(34) on weekly close
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Keltner Channel: 20-period EMA with 2*ATR bands
-    # ATR calculation
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner bands
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    keltner_upper = ema20 + 2 * atr
-    keltner_lower = ema20 - 2 * atr
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Donchian channel (20-period) on 4h
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):  # Start after warmup
         if position == 0:
-            # LONG: Price above Keltner upper, KAMA rising, weekly uptrend, volume confirmation
-            if (close[i] > keltner_upper[i] and 
-                kama[i] > kama[i-1] and 
-                close[i] > ema34_1w_aligned[i] and 
-                volume_filter[i]):
+            # LONG: Breakout above Donchian high with volume confirmation and uptrend
+            if (close[i] > high_roll[i] and 
+                volume_filter[i] and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below Keltner lower, KAMA falling, weekly downtrend, volume confirmation
-            elif (close[i] < keltner_lower[i] and 
-                  kama[i] < kama[i-1] and 
-                  close[i] < ema34_1w_aligned[i] and 
-                  volume_filter[i]):
+            # SHORT: Breakdown below Donchian low with volume confirmation and downtrend
+            elif (close[i] < low_roll[i] and 
+                  volume_filter[i] and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price below Keltner middle or KAMA turns down
-            if (close[i] < ema20[i]) or (kama[i] < kama[i-1]):
+            # EXIT LONG: Price re-enters below Donchian high or trend reverses
+            if (close[i] < high_roll[i]) or \
+               (close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above Keltner middle or KAMA turns up
-            if (close[i] > ema20[i]) or (kama[i] > kama[i-1]):
+            # EXIT SHORT: Price re-enters above Donchian low or trend reverses
+            if (close[i] > low_roll[i]) or \
+               (close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
