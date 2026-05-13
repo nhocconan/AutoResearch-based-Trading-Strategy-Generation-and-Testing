@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 6h_Engulfing_BullBear_Momentum
-# Hypothesis: Use bullish/bearish engulfing candles on 6h with 1d EMA trend filter and volume confirmation.
-# Engulfing candles signal strong momentum reversals; EMA filter ensures trades align with higher-timeframe trend.
-# Works in bull (follows bullish engulfing in bullish 1d trend) and bear (avoids bullish engulfing in bearish 1d trend, takes bearish engulfing).
+# 12h_Camarilla_R3_S3_Breakout_1wTrend_Volume
+# Hypothesis: Use 12h Camarilla R3/S3 level breakouts with 1w EMA trend filter and volume confirmation.
+# Camarilla levels act as support/resistance in ranging markets and breakout triggers in trends.
+# The 1w EMA ensures trades align with long-term trend, reducing whipsaws in sideways markets.
+# Volume confirmation ensures breakouts have institutional participation.
+# Works in bull (follows breaks with bullish 1w trend) and bear (avoids bullish breaks in bearish 1w trend).
 # Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "6h_Engulfing_BullBear_Momentum"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,28 +20,38 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
 
     # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
+    # Calculate Camarilla levels from previous 12h bar
+    # R3 = Close + 1.1*(High - Low)
+    # S3 = Close - 1.1*(High - Low)
+    camarilla_high = close + 1.1 * (high - low)
+    camarilla_low = close - 1.1 * (high - low)
+    camarilla_high_prev = np.roll(camarilla_high, 1)
+    camarilla_low_prev = np.roll(camarilla_low, 1)
+    camarilla_high_prev[0] = np.nan
+    camarilla_low_prev[0] = np.nan
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(1, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_avg_20[i]) or 
+            np.isnan(camarilla_high_prev[i]) or np.isnan(camarilla_low_prev[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -47,36 +59,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Detect bullish engulfing: current bullish candle engulfs previous bearish candle
-        bullish_engulfing = (close[i] > open_[i]) and (open_[i] < close[i-1]) and (close[i] > open_[i-1]) and (open_[i-1] > close[i-1])
-        # Detect bearish engulfing: current bearish candle engulfs previous bullish candle
-        bearish_engulfing = (close[i] < open_[i]) and (open_[i] > close[i-1]) and (close[i] < open_[i-1]) and (open_[i-1] < close[i-1])
-
         if position == 0:
-            # LONG: bullish engulfing + price above 1d EMA (bullish trend) + volume spike
-            if (bullish_engulfing and 
-                close[i] > ema_34_aligned[i] and
+            # LONG: price breaks above Camarilla R3 + price above 1w EMA (bullish trend) + volume spike
+            if (close[i] > camarilla_high_prev[i] and 
+                close[i] > ema_34_1w_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: bearish engulfing + price below 1d EMA (bearish trend) + volume spike
-            elif (bearish_engulfing and 
-                  close[i] < ema_34_aligned[i] and
+            # SHORT: price breaks below Camarilla S3 + price below 1w EMA (bearish trend) + volume spike
+            elif (close[i] < camarilla_low_prev[i] and 
+                  close[i] < ema_34_1w_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: bearish engulfing or price below 1d EMA
-            if (bearish_engulfing or close[i] < ema_34_aligned[i]):
+            # EXIT LONG: price breaks below Camarilla S3 or price below 1w EMA
+            if (close[i] < camarilla_low_prev[i] or close[i] < ema_34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: bullish engulfing or price above 1d EMA
-            if (bullish_engulfing or close[i] > ema_34_aligned[i]):
+            # EXIT SHORT: price breaks above Camarilla R3 or price above 1w EMA
+            if (close[i] > camarilla_high_prev[i] or close[i] > ema_34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
