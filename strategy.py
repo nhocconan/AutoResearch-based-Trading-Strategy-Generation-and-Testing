@@ -1,13 +1,10 @@
-#!/usr/bin/env python3
-"""
-4h_Donchian_Breakout_Volume_Signal_Confluence
-Hypothesis: Donchian breakouts with volume confirmation and 1d trend filter yield high-probability entries in both bull and bear markets.
-Only takes trades when price breaks Donchian(20) with volume spike and 1d EMA50 alignment.
-Exit on opposite Donchian touch or trend reversal. Target: 20-40 trades/year.
-"""
+#164659 - 6h_Camarilla_R3_S3_Fade_1dTrend_Volume
+# Hypothesis: Fade at Camarilla R3/S3 levels with 1d trend filter and volume confirmation.
+# In ranging markets, price reverses at R3/S3; in trending markets, 1d trend filter avoids counter-trend fades.
+# Target: 15-30 trades/year per symbol. Works in bull/bear via trend filter.
 
-name = "4h_Donchian_Breakout_Volume_Signal_Confluence"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Fade_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,16 +21,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel: 20-period high/low
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day
+    # Typical price = (H + L + C) / 3
+    typical_price = (high + low + close) / 3.0
+    # Use previous day's typical price for calculation
+    prev_typical = np.concatenate([[typical_price[0]], typical_price[:-1]])
+    # Daily range from previous day
+    prev_high = np.concatenate([[high[0]], high[:-1]])
+    prev_low = np.concatenate([[low[0]], low[:-1]])
+    range_prev = prev_high - prev_low
     
-    # 4h trend filter: EMA50
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_4h = close > ema_50
-    downtrend_4h = close < ema_50
+    # Camarilla levels
+    R3 = prev_typical + range_prev * 1.1 / 4
+    S3 = prev_typical - range_prev * 1.1 / 4
     
-    # 1d trend filter (HTF)
+    # 1d trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -43,46 +45,38 @@ def generate_signals(prices):
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 1.8 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.8 * vol_ma
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Get values
-        upper = donchian_high[i]
-        lower = donchian_low[i]
-        uptrend = uptrend_4h[i]
-        downtrend = downtrend_4h[i]
-        uptrend_htf = uptrend_1d_aligned[i]
-        downtrend_htf = downtrend_1d_aligned[i]
-        vol_conf = volume_conf[i]
-        
+    for i in range(20, n):
+        # Fade at R3/S3 with 1d trend filter
         if position == 0:
-            # LONG: break above upper band, 4h uptrend, 1d uptrend filter, volume confirmation
-            if close[i] > upper and uptrend and uptrend_htf and vol_conf:
+            # LONG: price at S3, 1d uptrend, volume confirmation
+            if close[i] <= S3[i] and uptrend_1d_aligned[i] and volume_conf[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below lower band, 4h downtrend, 1d downtrend filter, volume confirmation
-            elif close[i] < lower and downtrend and downtrend_htf and vol_conf:
+            # SHORT: price at R3, 1d downtrend, volume confirmation
+            elif close[i] >= R3[i] and downtrend_1d_aligned[i] and volume_conf[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch lower band or 4h trend turns down
-            if close[i] < lower or not uptrend:
+            # EXIT LONG: price at typical price or 1d trend turns down
+            if close[i] >= prev_typical[i] or not uptrend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch upper band or 4h trend turns up
-            if close[i] > upper or not downtrend:
+            # EXIT SHORT: price at typical price or 1d trend turns up
+            if close[i] <= prev_typical[i] or not downtrend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
