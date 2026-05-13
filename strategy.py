@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Camarilla pivot levels (R1/S1) from daily pivots act as strong support/resistance.
-# Breakout above R1 with uptrend (price > EMA50) and volume spike triggers long.
-# Breakdown below S1 with downtrend (price < EMA50) and volume spike triggers short.
-# Uses EMA50 for trend filter and volume spike for institutional confirmation.
-# Designed to work in both bull and bear markets by following daily trend direction.
-# Targets low-frequency, high-quality setups to minimize fee drag.
+# 4h_Engulfing_Signal_With_Volume_Confirmation
+# Hypothesis: Bullish/bearish engulfing candles on 4h timeframe indicate strong momentum reversals.
+# Combined with volume confirmation (>1.5x 20-bar average) and trend filter (price vs EMA50),
+# this strategy captures high-probability reversals in both bull and bear markets.
+# Engulfing patterns are reliable reversal signals that work across market regimes.
+# Uses 4h timeframe with 12h trend filter to reduce noise and improve signal quality.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Engulfing_Signal_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,40 +24,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
 
-    # Calculate Camarilla pivot levels for each day
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
 
-    # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # Volume spike: volume > 2.0 * 20-period average (~10 days at 12h)
+    # Volume confirmation: volume > 1.5 * 20-period average (~2.5 days at 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    volume_confirm = volume > 1.5 * vol_ma_20
+
+    # Detect bullish and bearish engulfing patterns
+    bullish_engulf = (close > open_) & (open_ < close) & (close > open_.shift(1)) & (open_ < close.shift(1))
+    bearish_engulf = (close < open_) & (open_ > close) & (close < open_.shift(1)) & (open_ > close.shift(1))
+    # Fix: define open_ variable
+    open_ = prices['open'].values
+    bullish_engulf = (close > open_) & (open_ < close) & (close > np.roll(open_, 1)) & (open_ < np.roll(close, 1))
+    bearish_engulf = (close < open_) & (open_ > close) & (close < np.roll(open_, 1)) & (open_ > np.roll(close, 1))
+    # Handle first bar
+    bullish_engulf[0] = False
+    bearish_engulf[0] = False
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema50_aligned[i])):
+        if np.isnan(ema50_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,26 +63,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Uptrend + breakout above R1 + volume spike
-            if close[i] > ema50_aligned[i] and close[i] > r1_aligned[i] and volume_spike[i]:
+            # LONG: Bullish engulfing + uptrend (price > EMA50) + volume confirmation
+            if bullish_engulf[i] and close[i] > ema50_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend + breakdown below S1 + volume spike
-            elif close[i] < ema50_aligned[i] and close[i] < s1_aligned[i] and volume_spike[i]:
+            # SHORT: Bearish engulfing + downtrend (price < EMA50) + volume confirmation
+            elif bearish_engulf[i] and close[i] < ema50_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or trend turns bearish
-            if close[i] < s1_aligned[i] or close[i] < ema50_aligned[i]:
+            # EXIT LONG: Bearish engulfing or price breaks below EMA50
+            if bearish_engulf[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or trend turns bullish
-            if close[i] > r1_aligned[i] or close[i] > ema50_aligned[i]:
+            # EXIT SHORT: Bullish engulfing or price breaks above EMA50
+            if bullish_engulf[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
