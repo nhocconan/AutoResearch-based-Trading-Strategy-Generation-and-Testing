@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg volume).
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg volume).
 # Uses Camarilla pivot levels from daily timeframe for precise entry/exit, 1d EMA34 for trend alignment,
-# and volume confirmation to reduce false signals. Designed for low trade frequency (target 50-150 total over 4 years)
+# and volume confirmation to reduce false signals. Designed for low trade frequency (target 75-200 total over 4 years)
 # to minimize fee drag while capturing strong momentum moves in both bull and bear markets via trend-following logic.
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeConfirm_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
