@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when price breaks above Camarilla R3 (1d) AND close > 1d EMA34 AND volume > 2.0x 20-period average.
 # Short when price breaks below Camarilla S3 (1d) AND close < 1d EMA34 AND volume > 2.0x 20-period average.
 # Uses ATR-based trailing stop (2.5x) for risk control.
 # Camarilla levels from 1d provide institutional structure, 1d EMA34 filters daily trend, volume spike confirms participation.
-# Target: 25-40 trades/year (100-160 total over 4 years) on 4h timeframe.
+# Target: 12-37 trades/year (50-150 total over 4 years) on 12h timeframe.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -45,7 +45,7 @@ def generate_signals(prices):
     # Calculate EMA34 on 1d close
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to LTF (4h)
+    # Align HTF indicators to LTF (12h)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
