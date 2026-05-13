@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 1D_Weekly_Pivot_Breakout_1wTrend_Volume
-# Hypothesis: Use weekly pivot points (from 1w data) for breakout entries on 1d timeframe.
-# Long when price breaks above weekly R1 in uptrend (price > 1w EMA20) with volume spike.
-# Short when price breaks below weekly S1 in downtrend (price < 1w EMA20) with volume spike.
-# Exit when price returns to weekly pivot point (PP) or trend changes.
-# Weekly pivots provide strong support/resistance; EMA20 filters trend; volume confirms breakout.
-# Designed for low trade frequency (30-100 total over 4 years) to avoid fee drag.
+# 1h_SwingReversal_4hTrend_Filter
+# Hypothesis: Trade 1-hour reversals from intraday swing points, filtered by 4-hour trend direction.
+# Long when price rejects a 1-hour swing low during 4h uptrend with volume confirmation.
+# Short when price rejects a 1-hour swing high during 4h downtrend with volume confirmation.
+# Exit on opposite swing rejection or trend flip.
+# Uses 4h trend filter to avoid counter-trend whipsaws, targeting 15-35 trades/year per symbol.
+# Designed to work in both bull (trend-following reversals) and bear (counter-trend bounces) markets.
 
-name = "1D_Weekly_Pivot_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "1h_SwingReversal_4hTrend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -25,41 +25,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot calculation and trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate weekly pivot points (based on previous week's OHLC)
-    high_1w = df_1w['high']
-    low_1w = df_1w['low']
-    close_1w = df_1w['close']
-    
-    # Weekly Pivot Point: PP = (H + L + C) / 3
-    pp_1w = (high_1w + low_1w + close_1w) / 3
-    # Weekly Resistance 1: R1 = (2 * PP) - L
-    r1_1w = (2 * pp_1w) - low_1w
-    # Weekly Support 1: S1 = (2 * PP) - H
-    s1_1w = (2 * pp_1w) - high_1w
-    
-    # Align weekly pivot points to daily timeframe
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w.values)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w.values)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w.values)
+    # 4h EMA50 for trend direction
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
 
-    # Get weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # 1-hour swing points: swing high = high > prev 3 and next 3 highs
+    # swing low = low < prev 3 and next 3 lows
+    swing_high = np.zeros(n, dtype=bool)
+    swing_low = np.zeros(n, dtype=bool)
+    for i in range(3, n - 3):
+        if (high[i] > high[i-1] and high[i] > high[i-2] and high[i] > high[i-3] and
+            high[i] > high[i+1] and high[i] > high[i+2] and high[i] > high[i+3]):
+            swing_high[i] = True
+        if (low[i] < low[i-1] and low[i] < low[i-2] and low[i] < low[i-3] and
+            low[i] < low[i+1] and low[i] < low[i+2] and low[i] < low[i+3]):
+            swing_low[i] = True
 
-    # Volume filter: >1.5x 20-period average
+    # Volume filter: >1.3x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(10, n):
         # Skip if any required value is NaN
-        if (np.isnan(pp_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,33 +61,37 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + price above 1w EMA20 (uptrend) + volume spike
-            if (close[i] > r1_1w_aligned[i] and 
-                close[i] > ema_20_1w_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Price breaks below S1 + price below 1w EMA20 (downtrend) + volume spike
-            elif (close[i] < s1_1w_aligned[i] and 
-                  close[i] < ema_20_1w_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = -0.25
-                position = -1
+            # LONG: Price rejects swing low (close > swing low high) in 4h uptrend + volume spike
+            if swing_low[i] and close[i] > low[i]:  # rejected swing low
+                if close[i] > ema_50_4h_aligned[i] and volume[i] > vol_avg_20[i] * 1.3:
+                    signals[i] = 0.20
+                    position = 1
+            # SHORT: Price rejects swing high (close < swing high low) in 4h downtrend + volume spike
+            elif swing_high[i] and close[i] < high[i]:  # rejected swing high
+                if close[i] < ema_50_4h_aligned[i] and volume[i] > vol_avg_20[i] * 1.3:
+                    signals[i] = -0.20
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to pivot point (PP) or trend changes (price below EMA20)
-            if (close[i] <= pp_1w_aligned[i] or close[i] < ema_20_1w_aligned[i]):
+            # EXIT LONG: Price rejects swing high or trend turns down
+            if swing_high[i] and close[i] < high[i]:  # rejected swing high
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < ema_50_4h_aligned[i]:  # trend turned down
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot point (PP) or trend changes (price above EMA20)
-            if (close[i] >= pp_1w_aligned[i] or close[i] > ema_20_1w_aligned[i]):
+            # EXIT SHORT: Price rejects swing low or trend turns up
+            if swing_low[i] and close[i] > low[i]:  # rejected swing low
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > ema_50_4h_aligned[i]:  # trend turned up
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
