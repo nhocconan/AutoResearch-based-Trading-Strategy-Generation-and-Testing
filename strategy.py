@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
-# Short when price breaks below S3 AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
+# Long when price breaks above R3 AND 1d EMA34 is rising AND volume > 1.8x 20-period average.
+# Short when price breaks below S3 AND 1d EMA34 is falling AND volume > 1.8x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
 # Uses discrete position sizing (0.25) to minimize fee churn.
 # Target: 75-200 total trades over 4 years (19-50/year) on 4h.
-# Uses 1d HTF for trend alignment to ensure trades follow higher timeframe direction.
 
 name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeConfirm_v1"
 timeframe = "4h"
@@ -34,7 +33,6 @@ def generate_signals(prices):
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate Camarilla pivot levels from previous day
-    # R3 = close + 1.0*(high-low), S3 = close - 1.0*(high-low)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -55,9 +53,9 @@ def generate_signals(prices):
     # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
