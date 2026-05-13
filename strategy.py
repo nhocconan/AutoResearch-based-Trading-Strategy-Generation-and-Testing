@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 1d_WeeklyPivot_Breakout_1wTrend_Volume
-# Hypothesis: Price reacts to weekly pivot points (R1/S1) derived from weekly timeframe.
-# Go long when price breaks above weekly R1 with weekly uptrend and volume confirmation.
-# Go short when price breaks below weekly S1 with weekly downtrend and volume confirmation.
-# Weekly pivot levels provide strong support/resistance in ranging markets, while weekly trend filter ensures alignment with higher timeframe momentum.
-# Volume spike confirms institutional participation, reducing false breakouts.
-# Works in bull markets (breakouts above R1 in weekly uptrend) and bear markets (breakdowns below S1 in weekly downtrend).
-# Target: 7-25 trades/year per symbol to minimize fee drag.
+# 4h_KAMA_Trend_RSI_Pullback
+# Hypothesis: Price retraces to KAMA during strong trends, with RSI confirming momentum exhaustion.
+# In uptrends: go long when price pulls back to KAMA with RSI < 40.
+# In downtrends: go short when price pulls back to KAMA with RSI > 60.
+# Uses 1d trend filter to align with higher timeframe momentum. Works in both bull and bear markets.
+# Target: 20-50 trades/year per symbol to minimize fee drag.
 
-name = "1d_WeeklyPivot_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_KAMA_Trend_RSI_Pullback"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,40 +24,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points (R1, S1) from previous weekly bar
-    # R1 = C + (H-L) * 1.1/12
-    # S1 = C - (H-L) * 1.1/12
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # 1d trend: EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    pivot_width = (high_1w - low_1w) * 1.1 / 12
-    r1 = close_1w + pivot_width
-    s1 = close_1w - pivot_width
+    # KAMA on 4h
+    def calculate_kama(close, length=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.abs(np.diff(close, prepend=close[0])).rolling(window=length, min_periods=1).sum()
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Weekly trend: EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    kama = calculate_kama(close, length=10, fast=2, slow=30)
     
-    # Align weekly indicators to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # RSI on 4h
+    def calculate_rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
+        avg_loss = pd.Series(loss).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Volume spike: volume > 2.0 * 3-period average (3 days worth at daily)
-    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
-    volume_spike = volume > 2.0 * vol_ma_3
+    rsi = calculate_rsi(close, length=14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(kama[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,26 +74,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R1 + weekly uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema50_1w_aligned[i] and volume_spike[i]:
+            # LONG: Price at KAMA + 1d uptrend + RSI oversold
+            if close[i] >= kama[i] * 0.998 and close[i] <= kama[i] * 1.002 and close[i] > ema34_1d_aligned[i] and rsi[i] < 40:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S1 + weekly downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema50_1w_aligned[i] and volume_spike[i]:
+            # SHORT: Price at KAMA + 1d downtrend + RSI overbought
+            elif close[i] >= kama[i] * 0.998 and close[i] <= kama[i] * 1.002 and close[i] < ema34_1d_aligned[i] and rsi[i] > 60:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S1 or trend reversal
-            if close[i] < s1_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Price crosses above KAMA or trend reversal
+            if close[i] > kama[i] * 1.005 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R1 or trend reversal
-            if close[i] > r1_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Price crosses below KAMA or trend reversal
+            if close[i] < kama[i] * 0.995 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
