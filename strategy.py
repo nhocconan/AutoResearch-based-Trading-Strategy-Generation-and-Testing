@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike (>2x 20-bar avg), and chop regime filter (CHOP(14) < 38.2 = trending). Uses discrete position sizing (0.30) to minimize fee churn. Designed for BTC/ETH robustness in both bull and bear markets via confluence of price structure, trend, volume, and regime filters. Targets 50-150 total trades over 4 years on 12h timeframe.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike (>2x 20-bar avg), and chop regime filter (CHOP(14) < 38.2 = trending). Uses discrete position sizing (0.30) to minimize fee churn. Designed for BTC/ETH robustness in both bull and bear markets via confluence of price structure, trend, volume, and regime filters. Targets 50-150 total trades over 4 years on 4h timeframe.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
