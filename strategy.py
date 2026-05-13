@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 6h_Keltner_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Keltner channel breakouts capture momentum with less whipsaw than Bollinger Bands.
-# Enter long when price breaks above upper Keltner band with volume spike and 1d EMA50 uptrend.
-# Enter short when price breaks below lower Keltner band with volume spike and 1d EMA50 downtrend.
-# Exit when price re-enters the Keltner channel.
-# Uses 6h timeframe with 1d trend filter to balance trade frequency and win rate.
-# Designed to work in both bull (buy in uptrend) and bear (sell in downtrend).
-# Target: 15-30 trades/year per symbol.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Camarilla R1/S1 breakout with 1d trend filter and volume spike.
+# Long: Close breaks above R1 with volume spike and 1d EMA34 uptrend.
+# Short: Close breaks below S1 with volume spike and 1d EMA34 downtrend.
+# Exit when price crosses back below R1 (long) or above S1 (short).
+# Uses 12h timeframe to reduce trade frequency, targeting 12-37 trades/year.
+# Works in bull (buy uptrend) and bear (sell downtrend) via 1d trend filter.
 
-name = "6h_Keltner_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -35,46 +34,43 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Keltner Channel (20, 2) on 6h data
-    # Typical Price
-    tp = (high + low + close) / 3
-    # ATR (10)
-    tr0 = np.abs(high - low)
-    tr1 = np.abs(high - np.roll(close, 1))
-    tr2 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr0, np.maximum(tr1, tr2))
-    tr[0] = tr0[0]
-    atr = np.zeros(n)
-    for i in range(10, n):
-        atr[i] = np.mean(tr[i-10:i])
-    # EMA of Typical Price (20)
-    ema_tp = pd.Series(tp).ewm(span=20, adjust=False, min_periods=20).mean().values
-    # Keltner Bands
-    keltner_up = ema_tp + 2 * atr
-    keltner_low = ema_tp - 2 * atr
+    # Calculate Camarilla levels from previous 1d bar
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_r1 = np.zeros(n)
+    camarilla_s1 = np.zeros(n)
+    
+    # Use previous day's OHLC (shifted by 1 to avoid look-ahead)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = close_1d[0]  # First value
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
+    
+    camarilla_r1_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
+    camarilla_s1_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    camarilla_r1 = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1 = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
 
-    # Breakout signals
-    buy_signal = close > keltner_up
-    sell_signal = close < keltner_low
-    reentry_signal = (close >= keltner_low) & (close <= keltner_up)
-
-    # Volume confirmation: current volume > 2.0 x 20-period average
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
 
-    # Get 1d EMA50 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Get 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if data is not ready
-        if (np.isnan(keltner_up[i]) or np.isnan(keltner_low[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema_34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,26 +79,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above upper Keltner band with volume spike and 1d EMA uptrend
-            if buy_signal[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+            # LONG: Close breaks above R1 with volume spike and 1d EMA uptrend
+            if close[i] > camarilla_r1[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Keltner band with volume spike and 1d EMA downtrend
-            elif sell_signal[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+            # SHORT: Close breaks below S1 with volume spike and 1d EMA downtrend
+            elif close[i] < camarilla_s1[i] and volume_spike[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters Keltner channel
-            if reentry_signal[i]:
+            # EXIT LONG: Price crosses back below R1
+            if close[i] < camarilla_r1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters Keltner channel
-            if reentry_signal[i]:
+            # EXIT SHORT: Price crosses back above S1
+            if close[i] > camarilla_s1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
