@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Price_Action_Structure_Strategy
-Hypothesis: Uses 12h price action structure (higher highs/lows) combined with 1w trend filter and volume confirmation for high-probability entries.
-Designed for low trade frequency (15-25/year) with strong trend-following logic that works in both bull and bear markets.
-Uses volume confirmation and ATR-based stoploss to reduce false signals and manage risk.
+4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
+Hypothesis: Combines Camarilla pivot levels (R1/S1) with 12h EMA trend and volume confirmation for high-probability breakout trades.
+Designed for low trade frequency (20-40/year) with clear entry/exit rules. Works in both bull and bear markets by trading breakouts in the direction of higher timeframe trend.
 """
 
-name = "12h_Price_Action_Structure_Strategy"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,73 +23,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate price action structure: higher highs and higher lows (uptrend)
-    # Lower highs and lower lows (downtrend)
-    # Using 5-period lookback for swing points
-    lookback = 5
-    
-    # Calculate swing highs and lows
-    swing_high = np.zeros(n)
-    swing_low = np.zeros(n)
-    
-    for i in range(lookback, n - lookback):
-        # Swing high: highest high in the window
-        if high[i] == np.max(high[i-lookback:i+lookback+1]):
-            swing_high[i] = high[i]
-        # Swing low: lowest low in the window
-        if low[i] == np.min(low[i-lookback:i+lookback+1]):
-            swing_low[i] = low[i]
-    
-    # Forward fill swing points to use as structure reference
-    swing_high_series = pd.Series(swing_high)
-    swing_low_series = pd.Series(swing_low)
-    swing_high_ffill = swing_high_series.replace(0, np.nan).ffill().fillna(0).values
-    swing_low_ffill = swing_low_series.replace(0, np.nan).ffill().fillna(0).values
-    
-    # Calculate 1-week trend filter (EMA 34)
-    df_1w = get_htf_data(prices, '1w')
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h EMA trend (EMA 50)
+    df_12h = get_htf_data(prices, '12h')
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation: > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.3 * vol_ma)
     
+    # Calculate daily Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    # Typical price for pivot calculation
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Pivot point
+    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Range
+    range_hl = df_1d['high'] - df_1d['low']
+    # Camarilla levels
+    r1 = pivot + (range_hl * 1.0 / 12)
+    s1 = pivot - (range_hl * 1.0 / 12)
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         if position == 0:
-            # LONG: Price above recent swing low, 1w uptrend, and volume confirmation
-            if (swing_low_ffill[i] > 0 and 
-                close[i] > swing_low_ffill[i] and
-                ema_34_1w_aligned[i] > 0 and 
-                close[i] > ema_34_1w_aligned[i] and
-                volume_confirm[i]):
+            # LONG: Price breaks above R1, 12h uptrend, volume confirmation
+            if close[i] > r1_aligned[i] and ema_50_12h_aligned[i] > 0 and close[i] > ema_50_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below recent swing high, 1w downtrend, and volume confirmation
-            elif (swing_high_ffill[i] > 0 and 
-                  close[i] < swing_high_ffill[i] and
-                  ema_34_1w_aligned[i] > 0 and 
-                  close[i] < ema_34_1w_aligned[i] and
-                  volume_confirm[i]):
+            # SHORT: Price breaks below S1, 12h downtrend, volume confirmation
+            elif close[i] < s1_aligned[i] and ema_50_12h_aligned[i] > 0 and close[i] < ema_50_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below recent swing low or 1w trend turns down
-            if (swing_low_ffill[i] > 0 and close[i] < swing_low_ffill[i]) or \
-               (ema_34_1w_aligned[i] > 0 and close[i] < ema_34_1w_aligned[i]):
+            # EXIT LONG: Price breaks below S1 or 12h trend turns down
+            if close[i] < s1_aligned[i] or (ema_50_12h_aligned[i] > 0 and close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above recent swing high or 1w trend turns up
-            if (swing_high_ffill[i] > 0 and close[i] > swing_high_ffill[i]) or \
-               (ema_34_1w_aligned[i] > 0 and close[i] > ema_34_1w_aligned[i]):
+            # EXIT SHORT: Price breaks above R1 or 12h trend turns up
+            if close[i] > r1_aligned[i] or (ema_50_12h_aligned[i] > 0 and close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
