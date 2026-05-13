@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA200 > EMA50 trend filter and volume confirmation (>1.5x avg volume).
-# Uses ATR(20) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
-# EMA trend filter ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Camarilla R3/S3 levels provide stronger breakout/breakdown points than R1/S1, reducing false signals.
-# Volume spike confirmation (>1.5x) ensures breakouts have institutional participation.
-# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
+# Hypothesis: 6h Williams %R mean reversion with 12h ADX trend filter and volume confirmation.
+# Long: Williams %R < -80 (oversold) + 12h ADX > 25 (trending) + volume > 1.5x average
+# Short: Williams %R > -20 (overbought) + 12h ADX > 25 (trending) + volume > 1.5x average
+# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
+# Williams %R identifies exhaustion points in trends; ADX ensures we only trade during strong trends to avoid false reversals in ranging markets.
+# Volume confirmation ensures institutional participation. Works in bull markets (buy pullbacks in uptrend) and bear markets (sell rallies in downtrend).
 
-name = "1d_Camarilla_R3_S3_Breakout_1wEMATrend_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_MeanReversion_12hADXTrend_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,54 +24,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(20) for trailing stop
+    # Calculate ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r[highest_high == lowest_low] = -50
     
-    # Calculate 1w EMA200 and EMA50 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align 1w EMAs to 1d timeframe (wait for weekly bar to close)
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate ADX(14) on 12h data
+    # True Range
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Directional Movement
+    up_move = high_12h - np.roll(high_12h, 1)
+    down_move = np.roll(low_12h, 1) - low_12h
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate Camarilla pivot levels from previous day
-    # R3 = close + ((high - low) * 1.1 / 4)
-    # S3 = close - ((high - low) * 1.1 / 4)
-    camarilla_r3 = np.full(len(close_1d), np.nan)
-    camarilla_s3 = np.full(len(close_1d), np.nan)
+    # Smoothed TR, +DM, -DM (using Wilder's smoothing = EMA with alpha=1/period)
+    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_12h = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_12h = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    for i in range(1, len(close_1d)):
-        # Use previous day's data to calculate today's levels
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        
-        camarilla_r3[i] = prev_close + ((prev_high - prev_low) * 1.1 / 4)
-        camarilla_s3[i] = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    # Directional Indicators
+    plus_di_12h = 100 * plus_dm_12h / atr_12h
+    minus_di_12h = 100 * minus_dm_12h / atr_12h
+    # Avoid division by zero
+    dx_denom = plus_di_12h + minus_di_12h
+    dx_denom = np.where(dx_denom == 0, 1, dx_denom)  # Prevent division by zero
+    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / dx_denom
     
-    # Align Camarilla levels to 1d timeframe (wait for daily bar to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # ADX = EMA of DX
+    adx_12h = pd.Series(dx_12h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align 12h ADX to 6h timeframe (wait for 12h bar to close)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,23 +88,22 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(adx_12h_aligned[i]) or 
             np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R3 AND 1w EMA200 > EMA50 AND volume > 1.5x average
-            if (close[i] > camarilla_r3_aligned[i] and 
-                ema200_1w_aligned[i] > ema50_1w_aligned[i] and 
+            # LONG: Williams %R < -80 (oversold) AND 12h ADX > 25 (trending) AND volume > 1.5x average
+            if (williams_r[i] < -80 and 
+                adx_12h_aligned[i] > 25 and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Camarilla S3 AND 1w EMA200 < EMA50 AND volume > 1.5x average
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  ema200_1w_aligned[i] < ema50_1w_aligned[i] and 
+            # SHORT: Williams %R > -20 (overbought) AND 12h ADX > 25 (trending) AND volume > 1.5x average
+            elif (williams_r[i] > -20 and 
+                  adx_12h_aligned[i] > 25 and 
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
