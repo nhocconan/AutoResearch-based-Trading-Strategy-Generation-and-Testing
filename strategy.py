@@ -1,12 +1,11 @@
-# 165152
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Camarilla pivot levels (R1/S1) on 1d act as strong support/resistance. A breakout above R1 or below S1 with volume confirmation and aligned 1d trend (close > EMA20) signals continuation. Designed for low trade frequency (~15-25/year) on 12h bars to minimize fee drag. Works in both bull and bear markets by following the 1d trend direction.
+4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
+Hypothesis: Camarilla pivot levels (R1/S1) on 1d act as support/resistance. A breakout above R1 or below S1 with volume confirmation and aligned 12h trend (close > EMA50) signals continuation. Designed for 4h timeframe with low trade frequency (~20-50/year) to minimize fee drag. Uses 12h trend filter for multi-timeframe alignment and volume confirmation to avoid false breakouts. Works in both bull and bear markets by following the higher timeframe trend.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,48 +22,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter (once before loop)
+    # Get 1d data for Camarilla pivots (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate Camarilla pivot levels from previous 1d bar
-    # Typical Price = (H + L + C) / 3
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Range = H - L
     range_ = df_1d['high'] - df_1d['low']
     
-    # Camarilla levels
-    # R1 = Close + (Range * 1.1/12)
-    # S1 = Close - (Range * 1.1/12)
+    # Camarilla levels R1 and S1
     camarilla_r1 = df_1d['close'] + (range_ * 1.1 / 12)
     camarilla_s1 = df_1d['close'] - (range_ * 1.1 / 12)
     
-    # Align to 12h - use previous day's levels (available at 12h open)
+    # Align to 4h - use previous day's levels (available at 4h open)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
     
-    # 1d trend filter: EMA(20) on close
-    ema20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Get 12h data for trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Volume confirmation: current volume > 1.5x 24-period average (12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # 12h trend filter: EMA(50) on close
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
+    for i in range(20, n):
         if position == 0:
-            # LONG: Price breaks above R1, volume confirmation, price above 1d EMA20 (uptrend)
+            # LONG: Price breaks above R1, volume confirmation, price above 12h EMA50 (uptrend)
             if (close[i] > camarilla_r1_aligned[i] and 
                 volume_filter[i] and 
-                close[i] > ema20_1d_aligned[i]):
+                close[i] > ema50_12h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1, volume confirmation, price below 1d EMA20 (downtrend)
+            # SHORT: Price breaks below S1, volume confirmation, price below 12h EMA50 (downtrend)
             elif (close[i] < camarilla_s1_aligned[i] and 
                   volume_filter[i] and 
-                  close[i] < ema20_1d_aligned[i]):
+                  close[i] < ema50_12h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
