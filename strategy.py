@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Keltner_Channel_Breakout_4hTrend_1dVolFilter
-Hypothesis: Price breaking above Keltner upper band in 4h uptrend (price > 4h EMA50) with 1d volume spike triggers long; breaking below lower band in 4h downtrend (price < 4h EMA50) with volume spike triggers short. Uses 1h for entry timing with 4h trend filter and 1d volume confirmation. Designed to capture trend moves with controlled frequency.
+4h_Phase_Accumulation_Distribution_1dTrend_Volume
+Hypothesis: Accumulation/distribution phases identified by price closing in upper/lower third of daily range combined with volume surge. In uptrend (price > 1d EMA50), go long on accumulation; in downtrend (price < 1d EMA50), go short on distribution. Volume confirmation filters low-quality signals. Designed for 4h timeframe to capture institutional accumulation/distribution phases in both bull and bear markets with low trade frequency.
 """
 
-name = "1h_Keltner_Channel_Breakout_4hTrend_1dVolFilter"
-timeframe = "1h"
+name = "4h_Phase_Accumulation_Distribution_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,80 +22,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Get 1d data for volume filter (20-period average)
+    # Get 1d data for accumulation/distribution phases
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    vol_ma_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate Keltner Channel on 1h data (20-period EMA, ATR(10)*2)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    kc_upper = ema_20 + 2 * atr
-    kc_lower = ema_20 - 2 * atr
+    # Calculate daily range and close position
+    daily_range = df_1d['high'] - df_1d['low']
+    close_position = (df_1d['close'] - df_1d['low']) / daily_range  # 0=low, 0.5=middle, 1=high
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    # Accumulation: close in upper third (>0.67), Distribution: close in lower third (<0.33)
+    accumulation = close_position > 0.67
+    distribution = close_position < 0.33
+    
+    # Align accumulation/distribution signals to 4h timeframe
+    accumulation_aligned = align_htf_to_ltf(prices, df_1d, accumulation.values.astype(float))
+    distribution_aligned = align_htf_to_ltf(prices, df_1d, distribution.values.astype(float))
+    
+    # Get 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
-    for i in range(20, n):
-        # Apply session filter: only trade between 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+    for i in range(50, n):
+        # Decrease cooldown if active
+        if cooldown > 0:
+            cooldown -= 1
         
-        if not in_session:
-            signals[i] = 0.0
-            continue
-            
-        # LONG: Price breaks above Keltner upper band in 4h uptrend with volume spike
-        if (ema_50_4h_aligned[i] > 0 and not np.isnan(ema_50_4h_aligned[i]) and
-            kc_upper[i] > 0 and not np.isnan(kc_upper[i]) and
-            close[i] > kc_upper[i] and
-            close[i] > ema_50_4h_aligned[i] and
-            vol_ma_20_1d_aligned[i] > 0 and not np.isnan(vol_ma_20_1d_aligned[i]) and
-            volume[i] > 2.0 * vol_ma_20_1d_aligned[i]):
-            if position != 1:
-                signals[i] = 0.20
+        if position == 0 and cooldown == 0:
+            # LONG: Accumulation phase with volume confirmation in uptrend
+            if accumulation_aligned[i] > 0.5 and volume_confirmed[i] and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            else:
-                signals[i] = 0.20
-        # SHORT: Price breaks below Keltner lower band in 4h downtrend with volume spike
-        elif (ema_50_4h_aligned[i] > 0 and not np.isnan(ema_50_4h_aligned[i]) and
-              kc_lower[i] > 0 and not np.isnan(kc_lower[i]) and
-              close[i] < kc_lower[i] and
-              close[i] < ema_50_4h_aligned[i] and
-              vol_ma_20_1d_aligned[i] > 0 and not np.isnan(vol_ma_20_1d_aligned[i]) and
-              volume[i] > 2.0 * vol_ma_20_1d_aligned[i]):
-            if position != -1:
-                signals[i] = -0.20
+            # SHORT: Distribution phase with volume confirmation in downtrend
+            elif distribution_aligned[i] > 0.5 and volume_confirmed[i] and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
             else:
-                signals[i] = -0.20
-        # EXIT: Price crosses back through EMA20 (middle of Keltner Channel)
-        elif position == 1 and close[i] < ema_20[i]:
-            signals[i] = 0.0
-            position = 0
-        elif position == -1 and close[i] > ema_20[i]:
-            signals[i] = 0.0
-            position = 0
-        else:
-            signals[i] = 0.0
+                signals[i] = 0.0
+        elif position == 1:
+            # EXIT LONG: Distribution phase appears or trend weakens
+            if distribution_aligned[i] > 0.5 or close[i] < ema_50_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+                cooldown = 2  # 2-bar cooldown after exit
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: Accumulation phase appears or trend weakens
+            if accumulation_aligned[i] > 0.5 or close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+                cooldown = 2  # 2-bar cooldown after exit
+            else:
+                signals[i] = -0.25
     
     return signals
