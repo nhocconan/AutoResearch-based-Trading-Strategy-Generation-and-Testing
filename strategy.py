@@ -1,88 +1,92 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_With_Volume_Filter_v1
-# Hypothesis: KAMA identifies adaptive trend direction; long when price > KAMA, short when price < KAMA.
-# Volume filter (volume > 1.5x 20-period average) ensures momentum confirmation.
-# Uses 4h timeframe to balance trade frequency and capture sustained moves.
-# Designed for both bull and bear markets by following adaptive trend with volume confirmation.
+# 1d_1W_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Breakouts above weekly Camarilla R1 in uptrend (price > EMA34 weekly) and breakdowns below S1 in downtrend (price < EMA34 weekly), with volume confirmation (volume > 1.8x 20-period average). Uses 1d timeframe to capture longer-term moves, reducing trade frequency and fee drag. Weekly trend filter ensures alignment with higher timeframe momentum, working in both bull and bear markets by avoiding counter-trend entries.
 
-name = "4h_KAMA_Trend_With_Volume_Filter_v1"
-timeframe = "4h"
+name = "1d_1W_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-
-def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
-    """Calculate Kaufman's Adaptive Moving Average."""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    
-    # Calculate efficiency ratio
-    er = np.zeros_like(close)
-    for i in range(len(close)):
-        if i >= er_length:
-            price_change = np.abs(close[i] - close[i-er_length])
-            sum_volatility = np.sum(volatility[i-er_length+1:i+1])
-            if sum_volatility > 0:
-                er[i] = price_change / sum_volatility
-            else:
-                er[i] = 0
-    
-    # Calculate smoothing constant
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1))**2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA for trend identification
-    kama = calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30)
+    # Get weekly data for Camarilla levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Calculate Camarilla levels for each weekly bar (based on previous week's range)
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
+    
+    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
+    camarilla_r1 = np.full_like(prev_close, np.nan)
+    camarilla_s1 = np.full_like(prev_close, np.nan)
+    
+    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    
+    # Align Camarilla levels to 1d timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    
+    # Get weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume confirmation: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_confirmed = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
-    for i in range(30, n):
-        if position == 0:
-            # LONG: Price above KAMA with volume confirmation
-            if close[i] > kama[i] and volume_filter[i]:
+    for i in range(50, n):
+        # Decrease cooldown if active
+        if cooldown > 0:
+            cooldown -= 1
+        
+        if position == 0 and cooldown == 0:
+            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34 weekly)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA with volume confirmation
-            elif close[i] < kama[i] and volume_filter[i]:
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34 weekly)
+            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA
-            if close[i] < kama[i]:
+            # EXIT LONG: Price crosses back below R1 or trend weakens (price < EMA34 weekly)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                cooldown = 3  # 3-bar cooldown after exit
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA
-            if close[i] > kama[i]:
+            # EXIT SHORT: Price crosses back above S1 or trend weakens (price > EMA34 weekly)
+            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+               high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+                cooldown = 3  # 3-bar cooldown after exit
             else:
                 signals[i] = -0.25
     
