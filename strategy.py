@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels on 1d with trend filter from 1d EMA and volume confirmation.
-# In bull markets: buy at S3 breakout with bullish 1d trend and volume spike.
-# In bear markets: sell at R3 breakdown with bearish 1d trend and volume spike.
-# Uses 1h only for entry timing precision, reducing false breakouts.
-# Target: 60-150 total trades over 4 years = 15-37/year.
+# 6h_WeeklyPivot_Trend_Follow_Volume
+# Hypothesis: Use weekly pivot levels (calculated from prior week's OHLC) as support/resistance.
+# Go long when price breaks above weekly R1 with bullish daily trend and volume spike.
+# Go short when price breaks below weekly S1 with bearish daily trend and volume spike.
+# Weekly pivots provide structure that works in both bull (breakouts) and bear (reversals at S1).
+# Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "1h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Trend_Follow_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,20 +24,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla calculation and EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
 
-    # Calculate Camarilla levels (R3, S3) from previous 1d OHLC
-    # R3 = close + 1.1*(high - low)
-    # S3 = close - 1.1*(high - low)
-    camarilla_r3 = df_1d['close'] + 1.1 * (df_1d['high'] - df_1d['low'])
-    camarilla_s3 = df_1d['close'] - 1.1 * (df_1d['high'] - df_1d['low'])
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
+    # Align weekly pivot levels to 6h timeframe (already delayed by weekly close)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+
+    # Get daily data for EMA trend filter
+    df_daily = get_htf_data(prices, '1d')
+    ema_50_daily = pd.Series(df_daily['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_daily, ema_50_daily)
 
     # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,10 +51,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,33 +63,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above S3 (bullish breakout) + price above 1d EMA (bullish trend) + volume spike
-            if (close[i] > camarilla_s3_aligned[i] and 
-                close[i] > ema_34_aligned[i] and
+            # LONG: price breaks above weekly R1 + price above daily EMA50 (bullish trend) + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below R3 (bearish breakdown) + price below 1d EMA (bearish trend) + volume spike
-            elif (close[i] < camarilla_r3_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and
+            # SHORT: price breaks below weekly S1 + price below daily EMA50 (bearish trend) + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below S3 or price below 1d EMA
-            if (close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_aligned[i]):
+            # EXIT LONG: price breaks below weekly pivot or price below daily EMA50
+            if (close[i] < pivot_aligned[i] or close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above R3 or price above 1d EMA
-            if (close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_aligned[i]):
+            # EXIT SHORT: price breaks above weekly pivot or price above daily EMA50
+            if (close[i] > pivot_aligned[i] or close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
