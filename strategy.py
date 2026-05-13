@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1D_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_R1_S1_Breakout_1D_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -34,7 +34,7 @@ def generate_signals(prices):
     R1 = close_1d + (range_1d * 1.1 / 12)
     S1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Align pivot levels to 12h timeframe (using previous day's levels)
+    # Align pivot levels to 4h timeframe (using previous day's levels)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
