@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above Camarilla R1 AND price > 1d EMA34 AND volume > 1.5x average
-# Short when price breaks below Camarilla S1 AND price < 1d EMA34 AND volume > 1.5x average
-# Exit when price returns to Camarilla pivot point (PP) OR trend reversal
-# Uses 4h timeframe for optimal trade frequency, Camarilla levels from 1d for structure,
-# 1d EMA for trend filter, volume for confirmation. Target: 75-200 total trades over 4 years.
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation.
+# Long when price breaks above Donchian(20) high AND price > 1d EMA50 AND volume > 1.5x average.
+# Short when price breaks below Donchian(20) low AND price < 1d EMA50 AND volume > 1.5x average.
+# Exit on opposite Donchian breakout or trend reversal (price crosses 1d EMA50).
+# Uses 4h timeframe for optimal trade frequency (target: 75-200 trades over 4 years).
+# Donchian provides clear structure, EMA50 filters for trend alignment, volume confirms conviction.
+# Works in bull via breakout continuation, bear via faded rallies and short breakdowns.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+name = "4h_Donchian20_1dEMA50_Volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,63 +25,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and EMA34
+    # Get 4h data for Donchian calculation
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
+    
+    # Calculate Donchian(20) on 4h: highest high and lowest low over 20 periods
+    high_roll = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous 1d bar
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12, PP = (H+L+C)/3
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    camarilla_pp = (high_1d + low_1d + close_1d) / 3
-    
-    # Align 1d indicators to 4h timeframe (wait for completed 1d bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
-    
-    # Calculate EMA(34) on 1d close for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate EMA(50) on 1d close for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume filter: current 4h volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    volume_filter_4h = volume_4h > (1.5 * vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(camarilla_pp_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above R1 AND price > 1d EMA34 AND volume confirmation
-            if close[i] > camarilla_r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
+            # LONG: price breaks above Donchian high AND price > 1d EMA50 AND volume confirmation
+            if close_4h[i] > high_roll[i] and close[i] > ema50_1d_aligned[i] and volume_filter_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1 AND price < 1d EMA34 AND volume confirmation
-            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
+            # SHORT: price breaks below Donchian low AND price < 1d EMA50 AND volume confirmation
+            elif close_4h[i] < low_roll[i] and close[i] < ema50_1d_aligned[i] and volume_filter_4h[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to pivot point OR trend reversal (price < 1d EMA34)
-            if close[i] <= camarilla_pp_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: price breaks below Donchian low OR trend reversal (price < 1d EMA50)
+            if close_4h[i] < low_roll[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to pivot point OR trend reversal (price > 1d EMA34)
-            if close[i] >= camarilla_pp_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: price breaks above Donchian high OR trend reversal (price > 1d EMA50)
+            if close_4h[i] > high_roll[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
