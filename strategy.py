@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h mean reversion with 4h Donchian breakout alignment and volume confirmation. Uses 4h Donchian channels to establish trend bias, 1h RSI for oversold/overbought entries, and volume spike confirmation to filter false signals. Designed to work in both bull and bear regimes by trading mean reversions within the dominant 4h trend. Targets 15-35 trades/year on 1h timeframe with session filter (08-20 UTC) to reduce noise.
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d ADX trend filter and volume confirmation. Uses 1d Camarilla R4/S4 levels for breakout confirmation and profit targets. Designed for low-volatility breakouts in both bull and bear markets: Bollinger Band width < 20th percentile identifies squeeze, ADX > 25 confirms trend readiness, volume > 2x 20-bar average validates breakout, and Camarilla R4/S4 levels provide structured entries and exits. Targets 12-37 trades/year on 6h timeframe.
 
-name = "1h_DonchianTrend_RSI_MeanRev_v1"
-timeframe = "1h"
+name = "6h_BBandSqueeze_Breakout_1dADX_VolumeConfirm_CamarillaExits_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -11,89 +11,109 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 20-period Bollinger Bands on 6h data
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
+    bb_width = (bb_upper - bb_lower) / sma_20
     
-    # Load 4h data ONCE before loop for HTF trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate Bollinger Band width percentile (lookback 100 periods)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=100, min_periods=100).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    
+    # Calculate 1d ADX for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    # True Range
+    tr1 = pd.Series(high_1d).shift(1) - pd.Series(low_1d)
+    tr2 = pd.Series(high_1d) - pd.Series(close_1d).shift(1)
+    tr3 = pd.Series(close_1d).shift(1) - pd.Series(low_1d)
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 1h RSI (14-period) for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = pd.Series(low_1d).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate 1h average volume for confirmation (20-period)
+    # Smoothed DM and ADX
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    dx = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
+    
+    # Calculate 1d Camarilla levels for breakout confirmation and exits
+    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after lookback period
-        # Skip if not in trading session or missing data
-        if not in_session[i] or \
-           np.isnan(donchian_high_aligned[i]) or \
-           np.isnan(donchian_low_aligned[i]) or \
-           np.isnan(rsi[i]) or \
-           np.isnan(avg_volume[i]):
+    for i in range(100, n):  # start after lookback for percentile
+        # Skip if any required data is NaN
+        if (np.isnan(bb_width_percentile[i]) or 
+            np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(avg_volume[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price near 4h Donchian lower band + 1h RSI oversold + volume spike
-            if (close[i] <= donchian_low_aligned[i] * 1.005 and  # within 0.5% of lower band
-                rsi[i] < 30 and 
-                volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = 0.20
+            # LONG: Bollinger Band squeeze (width < 20th percentile), ADX > 25, volume spike (>2x avg), close above Camarilla R4
+            if (bb_width_percentile[i] < 20 and 
+                adx_1d_aligned[i] > 25 and 
+                volume[i] > 2.0 * avg_volume[i] and 
+                close[i] > camarilla_r4_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price near 4h Donchian upper band + 1h RSI overbought + volume spike
-            elif (close[i] >= donchian_high_aligned[i] * 0.995 and  # within 0.5% of upper band
-                  rsi[i] > 70 and 
-                  volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = -0.20
+            # SHORT: Bollinger Band squeeze (width < 20th percentile), ADX > 25, volume spike (>2x avg), close below Camarilla S4
+            elif (bb_width_percentile[i] < 20 and 
+                  adx_1d_aligned[i] > 25 and 
+                  volume[i] > 2.0 * avg_volume[i] and 
+                  close[i] < camarilla_s4_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches 4h Donchian middle OR RSI returns to neutral
-            donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
-            if (close[i] >= donchian_mid or 
-                rsi[i] > 50):
+            # EXIT LONG: Price reaches Camarilla R4 again (mean reversion) OR Bollinger Band width expands (> 80th percentile)
+            if (close[i] <= camarilla_r4_aligned[i] or 
+                bb_width_percentile[i] > 80):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches 4h Donchian middle OR RSI returns to neutral
-            donchian_mid = (donchian_high_aligned[i] + donchian_low_aligned[i]) / 2
-            if (close[i] <= donchian_mid or 
-                rsi[i] < 50):
+            # EXIT SHORT: Price reaches Camarilla S4 again (mean reversion) OR Bollinger Band width expands (> 80th percentile)
+            if (close[i] >= camarilla_s4_aligned[i] or 
+                bb_width_percentile[i] > 80):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
