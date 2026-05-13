@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above 20-period Donchian high AND close > 1d EMA50 AND volume > 1.8x 20-period average.
-# Short when price breaks below 20-period Donchian low AND close < 1d EMA50 AND volume > 1.8x 20-period average.
-# Uses ATR(14) trailing stop (2.5x) for risk control.
-# Donchian channels provide clear structure, 1d EMA50 filters major trend, volume spike confirms breakout strength.
-# Target: 30-60 trades/year (120-240 total over 4 years) on 4h timeframe for BTC/ETH/SOL.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high AND close > 1d EMA50 AND volume > 1.5x 20-period average.
+# Short when price breaks below 20-period Donchian low AND close < 1d EMA50 AND volume > 1.5x 20-period average.
+# Uses ATR-based trailing stop (2.5x) for risk control.
+# Donchian channels provide clear trend-following structure, 1d EMA50 filters major trend direction, volume confirmation ensures participation.
+# Target: 25-40 trades/year (100-160 total over 4 years) on 4h timeframe.
 
 name = "4h_Donchian20_EMA50_VolumeSpike_v1"
 timeframe = "4h"
@@ -32,7 +32,7 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian(20) channels
+    # Calculate 20-period Donchian channels
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -46,9 +46,9 @@ def generate_signals(prices):
     # Align HTF indicators to LTF
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate volume confirmation: volume > 1.8x 20-period average
+    # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,12 +63,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price > Donchian(20) high AND close > 1d EMA50 AND volume confirmation
+            # LONG: Price > 20-period Donchian high AND close > 1d EMA50 AND volume confirmation
             if close[i] > donchian_high[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Donchian(20) low AND close < 1d EMA50 AND volume confirmation
+            # SHORT: Price < 20-period Donchian low AND close < 1d EMA50 AND volume confirmation
             elif close[i] < donchian_low[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
