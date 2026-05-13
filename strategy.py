@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and ATR(14) trailing stop (2.0x).
-# Long when price breaks above upper Donchian channel AND close > 1d EMA34.
-# Short when price breaks below lower Donchian channel AND close < 1d EMA34.
-# Exit on ATR(14) trailing stop (2.0x). Uses 4h primary timeframe and 1d HTF for trend alignment.
-# Donchian channels provide objective breakout levels; 1d EMA34 filters to trade with higher timeframe trend;
-# ATR trailing stop manages risk and allows trends to run. Designed for BTC/ETH with strict entry to avoid overtrading (target: 20-50 trades/year).
+# Hypothesis: 1d KAMA trend with RSI mean reversion and chop regime filter.
+# Long when KAMA rising (bullish trend), RSI < 30 (oversold), and choppy market (CHOP > 61.8).
+# Short when KAMA falling (bearish trend), RSI > 70 (overbought), and choppy market (CHOP > 61.8).
+# Exit on opposite RSI extreme (RSI > 70 for longs, RSI < 30 for shorts) or chop regime ends (CHOP < 38.2).
+# Uses 1d primary timeframe and 1w HTF for trend alignment via EMA34.
+# Designed for BTC/ETH with mean reversion in choppy markets, targeting 15-25 trades/year.
 
-name = "4h_Donchian20_1dEMA34_ATR_Trail_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,87 +22,97 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate ATR(14) for trailing stop
+    # Calculate ER (Efficiency Ratio) for KAMA over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    change = np.concatenate([[np.nan] * 10, change])  # align length
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # sum of |close[t] - close[t-1]| over 10 periods
+    volatility = pd.Series(volatility).rolling(window=10, min_periods=1).sum().values
+    er = np.where(volatility > 0, change / volatility, 0)
+    
+    # Calculate Smoothing Constants (SC) for KAMA
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # seed at index 9 (after 10 periods)
+    for i in range(10, n):
+        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])  # align length
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Calculate Choppiness Index (CHOP) over 14 periods
+    # True Range (TR)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]  # first bar
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Max/Min close over 14 periods
+    max_close = pd.Series(close).rolling(window=14, min_periods=14).max().values
+    min_close = pd.Series(close).rolling(window=14, min_periods=14).min().values
+    chop = np.where(atr_sum > 0, 100 * np.log10(atr_sum / (max_close - min_close)) / np.log10(14), 50)
+    chop = np.where((max_close - min_close) == 0, 50, chop)  # avoid division by zero
     
-    # Calculate Donchian(20) channels on 4h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1w data for EMA34 trend filter (MTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for EMA34 trend filter (MTF)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Calculate EMA34 on 1w close
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate EMA34 on 1d close
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align HTF arrays to 4h timeframe (wait for completed 1d bar)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align HTF arrays to 1d timeframe (wait for completed 1w bar)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
-    lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(ema34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above upper Donchian AND close > 1d EMA34
-            if close[i] > highest_high[i] and close[i] > ema34_1d_aligned[i]:
-                signals[i] = 0.30
+            # LONG: KAMA rising (bullish trend), RSI < 30 (oversold), choppy market (CHOP > 61.8)
+            if kama[i] > kama[i-1] and rsi[i] < 30 and chop[i] > 61.8:
+                signals[i] = 0.25
                 position = 1
-                highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price breaks below lower Donchian AND close < 1d EMA34
-            elif close[i] < lowest_low[i] and close[i] < ema34_1d_aligned[i]:
-                signals[i] = -0.30
+            # SHORT: KAMA falling (bearish trend), RSI > 70 (overbought), choppy market (CHOP > 61.8)
+            elif kama[i] < kama[i-1] and rsi[i] > 70 and chop[i] > 61.8:
+                signals[i] = -0.25
                 position = -1
-                lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
                 signals[i] = 0.0
-                # Carry forward tracking values when flat
-                if i > 0:
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:
-            # Update highest high since entry
-            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
-            if trailing_stop:
+            # EXIT LONG: RSI > 70 (overbought) OR chop regime ends (CHOP < 38.2)
+            if rsi[i] > 70 or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
-                # Reset tracking when flat
-                highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.30
-                # Carry forward tracking
-                if i > 0:
-                    highest_since_entry[i] = highest_since_entry[i-1]
+                signals[i] = 0.25
         elif position == -1:
-            # Update lowest low since entry
-            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
-            if trailing_stop:
+            # EXIT SHORT: RSI < 30 (oversold) OR chop regime ends (CHOP < 38.2)
+            if rsi[i] < 30 or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
-                # Reset tracking when flat
-                lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.30
-                # Carry forward tracking
-                if i > 0:
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
+                signals[i] = -0.25
     
     return signals
