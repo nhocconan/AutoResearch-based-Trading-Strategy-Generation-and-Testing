@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1d_Weekly_Camarilla_R1_S1_Breakout_WeeklyTrend
-# Hypothesis: Price breaks above/below weekly Camarilla R1/S1 levels with
-# weekly EMA34 trend confirmation and volume spike. Works in bull (buy R1 breaks in uptrend) 
-# and bear (sell S1 breaks in downtrend). Low frequency due to weekly timeframe and
-# strict volume confirmation, targeting 30-100 trades over 4 years.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Price breaks Camarilla R1/S1 levels derived from previous day's range,
+# in the direction of the 1d EMA34 trend, with volume spike confirmation.
+# Works in bull (buy R1 breakout in uptrend) and bear (sell S1 breakdown in downtrend).
+# Low frequency due to daily pivot calculation and strict volume confirmation.
 
-name = "1d_Weekly_Camarilla_R1_S1_Breakout_WeeklyTrend"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -23,40 +23,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Camarilla pivot calculation and trend
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla calculation and trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Camarilla pivot levels
-    # Typical price = (H + L + C) / 3
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    # Pivot point
-    pivot = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    # Range
-    range_ = df_1w['high'] - df_1w['low']
-    # Camarilla levels
-    r1 = pivot + (range_ * 1.1 / 12)
-    s1 = pivot - (range_ * 1.1 / 12)
+    # Calculate Camarilla levels from previous day's range
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C, H, L are from previous completed day
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly trend filter: EMA34
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Camarilla levels for each day
+    camarilla_R1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_S1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align all weekly indicators to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1.values)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 1d trend filter: EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume spike: volume > 2.0 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Align all 1d indicators to 12h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume spike: volume > 2.0 * 24-period average (24*12h = 12d)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 2.0 * vol_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i])):
+        if (np.isnan(camarilla_R1_aligned[i]) or 
+            np.isnan(camarilla_S1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,37 +64,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Price levels
-        price = close[i]
-        
         # Trend conditions
-        uptrend = price > ema34_1w_aligned[i]
-        downtrend = price < ema34_1w_aligned[i]
+        uptrend = close[i] > ema34_1d_aligned[i]
+        downtrend = close[i] < ema34_1d_aligned[i]
         
         # Volume confirmation
         vol_spike = volume_spike[i]
 
         if position == 0:
-            # LONG: Price breaks above R1 + uptrend + volume spike
-            if price > r1_aligned[i] and uptrend and vol_spike:
+            # LONG: Price breaks above Camarilla R1 + uptrend + volume spike
+            if close[i] > camarilla_R1_aligned[i] and uptrend and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + downtrend + volume spike
-            elif price < s1_aligned[i] and downtrend and vol_spike:
+            # SHORT: Price breaks below Camarilla S1 + downtrend + volume spike
+            elif close[i] < camarilla_S1_aligned[i] and downtrend and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 OR trend reversal
-            if price < s1_aligned[i] or not uptrend:
+            # EXIT LONG: Price crosses below Camarilla S1 OR trend reversal
+            if close[i] < camarilla_S1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 OR trend reversal
-            if price > r1_aligned[i] or not downtrend:
+            # EXIT SHORT: Price crosses above Camarilla R1 OR trend reversal
+            if close[i] > camarilla_R1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
