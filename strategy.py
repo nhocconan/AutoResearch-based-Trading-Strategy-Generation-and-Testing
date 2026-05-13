@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Choppiness_Index_MeanReversion
-Hypothesis: Mean-reversion on 4h timeframe using Choppiness Index to identify range-bound markets (chop > 61.8).
-Enter long at lower Bollinger Band with RSI < 30, short at upper Bollinger Band with RSI > 70.
-Exit when price crosses Bollinger middle band or RSI reverts to neutral.
-Designed for low trade frequency in both bull and bear markets by combining regime filter with mean reversion.
+6h_Pivot_Volume_Reversal
+Hypothesis: In both bull and bear markets, price often reverses at daily Camarilla pivot levels (S3/R3) with volume exhaustion. 
+We fade extreme touches of S3/R3 when volume is below average, expecting mean reversion. 
+Trades only when price is near the 1-day VWAP to avoid strong trends. 
+Designed for low frequency (15-25 trades/year) with clear reversal logic.
 """
 
-name = "4h_Choppiness_Index_MeanReversion"
-timeframe = "4h"
+name = "6h_Pivot_Volume_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,77 +25,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Choppiness Index (14-period)
-    atr = pd.Series(high - low).rolling(window=14, min_periods=14).mean()
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr.sum() / (highest_high - lowest_low)) / np.log10(14)
-    chop_values = chop.fillna(50).values  # neutral when undefined
+    # Calculate 1-day VWAP for trend filter
+    typical_price = (high + low + close) / 3.0
+    vwap_num = (typical_price * volume).cumsum()
+    vwap_den = volume.cumsum()
+    vwap = vwap_num / vwap_den.replace(0, np.nan)
     
-    # Bollinger Bands (20, 2.0)
-    sma = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_bb = sma + 2.0 * std
-    lower_bb = sma - 2.0 * std
-    middle_bb = sma
-    upper_bb_values = upper_bb.fillna(0).values
-    lower_bb_values = lower_bb.fillna(0).values
-    middle_bb_values = middle_bb.fillna(0).values
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = (100 - (100 / (1 + rs))).fillna(50).values
+    # Calculate Camarilla levels from previous day
+    # Using formula: 
+    # R4 = C + ((H-L)*1.1/2)
+    # R3 = C + ((H-L)*1.1/4)
+    # R2 = C + ((H-L)*1.1/6)
+    # R1 = C + ((H-L)*1.1/12)
+    # PP = (H+L+C)/3
+    # S1 = C - ((H-L)*1.1/12)
+    # S2 = C - ((H-L)*1.1/6)
+    # S3 = C - ((H-L)*1.1/4)
+    # S4 = C - ((H-L)*1.1/2)
+    # where C, H, L are from previous day
     
-    # Volume confirmation: > 1.5x 20-period average
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate Camarilla S3 and R3 levels
+    rang = prev_high - prev_low
+    r3 = prev_close + (rang * 1.1 / 4)
+    s3 = prev_close - (rang * 1.1 / 4)
+    
+    # Align to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume confirmation: below average suggests exhaustion
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_exhausted = volume < (0.7 * vol_ma)  # Volume below 70% of average
+    
+    # Price near VWAP filter: avoid strong trends
+    vwap_diff_pct = np.abs((close - vwap) / vwap)
+    near_vwap = vwap_diff_pct < 0.015  # Within 1.5% of VWAP
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Only trade in ranging markets (chop > 61.8)
-        if chop_values[i] <= 61.8:
-            # Exit any position when market starts trending
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
+        # Skip if VWAP or Camarilla levels not available
+        if np.isnan(vwap[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+            signals[i] = 0.0
             continue
             
-        if position == 0:
-            # LONG: Price at lower BB with oversold RSI and volume confirmation
-            if close[i] <= lower_bb_values[i] and rsi[i] < 30 and volume_confirm[i]:
+        # LONG: Price touches or goes below S3 with volume exhaustion, near VWAP
+        if low[i] <= s3_aligned[i] and volume_exhausted[i] and near_vwap[i]:
+            # Additional confirmation: price closing back above S3 suggests reversal
+            if close[i] > s3_aligned[i]:
                 signals[i] = 0.25
-                position = 1
-            # SHORT: Price at upper BB with overbought RSI and volume confirmation
-            elif close[i] >= upper_bb_values[i] and rsi[i] > 70 and volume_confirm[i]:
+        # SHORT: Price touches or goes above R3 with volume exhaustion, near VWAP
+        elif high[i] >= r3_aligned[i] and volume_exhausted[i] and near_vwap[i]:
+            # Additional confirmation: price closing back below R3 suggests reversal
+            if close[i] < r3_aligned[i]:
                 signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # EXIT LONG: Price crosses above middle BB or RSI > 50
-            if close[i] >= middle_bb_values[i] or rsi[i] > 50:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # EXIT SHORT: Price crosses below middle BB or RSI < 50
-            if close[i] <= middle_bb_values[i] or rsi[i] < 50:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        else:
+            signals[i] = 0.0
     
     return signals
