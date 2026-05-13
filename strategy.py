@@ -1,8 +1,12 @@
-# 4H_CAMARILLA_R1_S1_BREAKOUT_1D_TREND_REDUCTION_v1
-# Hypothesis: Breakouts above daily Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34), with volume confirmation (volume > 2.0x 30-period average). Reduces trade frequency by increasing volume threshold and using EMA for trend filter. Designed to work in both bull and bear markets by requiring trend alignment and avoiding whipsaw through volume confirmation. Focus on BTC/ETH with robust risk controls.
+# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
+"""
+12H_CAMARILLA_R1_S1_BREAKOUT_1D_TREND_REDUCTION_v1
+Hypothesis: Breakouts above daily Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34), with volume confirmation (volume > 2.0x 30-period average). Reduces trade frequency by increasing volume threshold and using EMA for trend filter. Designed to work in both bull and bear markets by requiring trend alignment and avoiding whipsaw through volume confirmation. Focus on BTC/ETH with robust risk controls. Uses 12h primary timeframe for lower trade frequency and better test generalization.
+"""
 
-name = "4H_CAMARILLA_R1_S1_BREAKOUT_1D_TREND_REDUCTION_v1"
-timeframe = "4h"
+name = "12H_CAMARILLA_R1_S1_BREAKOUT_1D_TREND_REDUCTION_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -36,7 +40,7 @@ def generate_signals(prices):
     camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
