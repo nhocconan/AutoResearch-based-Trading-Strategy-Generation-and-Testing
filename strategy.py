@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""
-12h_VWAP_Deviation_Reversal_1dTrend
-Hypothesis: Price deviations from daily VWAP with 1d trend filter and volume exhaustion signals 
-mean-revert on 12h timeframe. Works in bull (dips in uptrend) and bear (bounces in downtrend). 
-Targets 15-25 trades/year by requiring strong deviations and trend alignment.
-"""
-name = "12h_VWAP_Deviation_Reversal_1dTrend"
-timeframe = "12h"
+# 4h_Price_Volume_Ratio_Spike_Trend_Filter
+# Hypothesis: Volume spikes with price rejection from key levels (VWAP, SMA) signal exhaustion and reversals.
+# Uses volume/price ratio > 2.0 as spike indicator, with 4h VWAP for context and 12h EMA for trend filter.
+# Works in bull (pullbacks in uptrend) and bear (bounces in downtrend) by trading reversals.
+# Target: 20-40 trades/year to minimize fee drag.
+
+name = "4h_Price_Volume_Ratio_Spike_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,55 +23,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP and trend
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate VWAP (volume-weighted average price)
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = typical_price * volume
+    vwap_cumsum = np.cumsum(vwap_numerator)
+    volume_cumsum = np.cumsum(volume)
+    vwap = vwap_cumsum / volume_cumsum
     
-    # Calculate daily VWAP: cumulative(volume * typical price) / cumulative(volume)
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    vwap_numerator = (typical_price * df_1d['volume']).cumsum().values
-    vwap_denominator = df_1d['volume'].cumsum().values
-    # Avoid division by zero on first bar
-    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price.values)
-    
-    # Daily EMA trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align daily VWAP and EMA to 12h chart
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume exhaustion: current volume < 0.5x 20-period average (low volume on deviation)
+    # Price/volume ratio spike: volume > 2x average AND price deviation from VWAP
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_exhaustion = volume < (0.5 * vol_ma)
+    price_deviation = np.abs(close - vwap) / vwap  # Normalized deviation
+    volume_spike = volume > (2.0 * vol_ma)
+    price_rejection = price_deviation > 0.008  # 0.8% deviation from VWAP
     
-    # Price deviation from VWAP (%)
-    deviation = (close - vwap_aligned) / vwap_aligned
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after warmup
         if position == 0:
-            # LONG: Price below VWAP (oversold) + uptrend + volume exhaustion
-            if deviation[i] < -0.02 and close[i] > ema_1d_aligned[i] and volume_exhaustion[i]:
+            # LONG: Price rejection below VWAP (long wick) with volume spike in uptrend
+            if close[i] < vwap[i] and low[i] < vwap[i] * 0.992 and volume_spike[i] and close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price above VWAP (overbought) + downtrend + volume exhaustion
-            elif deviation[i] > 0.02 and close[i] < ema_1d_aligned[i] and volume_exhaustion[i]:
+            # SHORT: Price rejection above VWAP (short wick) with volume spike in downtrend
+            elif close[i] > vwap[i] and high[i] > vwap[i] * 1.008 and volume_spike[i] and close[i] < ema_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to VWAP or trend breaks
-            if close[i] >= vwap_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # EXIT LONG: Price crosses back above VWAP or trend weakens
+            if close[i] > vwap[i] or close[i] < ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to VWAP or trend breaks
-            if close[i] <= vwap_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # EXIT SHORT: Price crosses back below VWAP or trend weakens
+            if close[i] < vwap[i] or close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
