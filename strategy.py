@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1D_Trend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1D_Trend_Volume_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -40,7 +40,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current volume > 1.5 x 20-period average
+    # Volume filter: current volume > 2.0 x 20-period average (stricter to reduce trades)
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -55,8 +55,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume condition
-        vol_condition = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume condition: volume > 2.0 x average (stricter)
+        vol_condition = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
             # LONG: Break above R3 with daily uptrend and volume
