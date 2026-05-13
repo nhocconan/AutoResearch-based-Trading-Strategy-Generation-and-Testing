@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R1 and close > 4h EMA50 with volume > 1.8x 24-bar average.
-# Short when price breaks below Camarilla S1 and close < 4h EMA50 with volume > 1.8x 24-bar average.
-# Uses discrete sizing 0.20 to target 60-150 total trades over 4 years on 1h timeframe.
-# Camarilla levels from prior 1h candle provide intraday structure; 4h EMA50 filters counter-trend noise; volume confirms momentum.
-# Session filter (08-20 UTC) reduces noise trades outside active market hours.
-# Designed for fewer, higher-quality trades to avoid fee drag while working in both bull and bear markets.
+# Hypothesis: 6h Elder Ray + ADX regime filter with 1d EMA50 trend alignment.
+# Bull Power (high - EMA13) and Bear Power (EMA13 - low) measure buying/selling pressure.
+# ADX > 25 indicates trending market; we trade only in the direction of the 1d EMA50 trend.
+# Long when Bull Power > 0, ADX > 25, and close > 1d EMA50.
+# Short when Bear Power > 0, ADX > 25, and close < 1d EMA50.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 6h timeframe.
+# Designed to capture strong trending moves while avoiding choppy markets, working in both bull and bear regimes.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hEMA50_Trend_VolumeConfirm"
-timeframe = "1h"
+name = "6h_ElderRay_ADX_Regime_1dEMA50_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,80 +23,79 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from prior 1h candle only
-    lookback_1h = 1
-    prior_high = pd.Series(high).rolling(window=lookback_1h, min_periods=lookback_1h).max().shift(1).values
-    prior_low = pd.Series(low).rolling(window=lookback_1h, min_periods=lookback_1h).min().shift(1).values
-    prior_close = pd.Series(close).rolling(window=lookback_1h, min_periods=lookback_1h).mean().shift(1).values
+    # Calculate 6h EMA13 for Elder Ray
+    lookback_ema = 13
+    ema_13 = pd.Series(close).ewm(span=lookback_ema, adjust=False, min_periods=lookback_ema).mean().values
     
-    # Camarilla R1 and S1 levels
-    camarilla_range = prior_high - prior_low
-    camarilla_r1 = prior_close + camarilla_range * 1.1 / 12
-    camarilla_s1 = prior_close - camarilla_range * 1.1 / 12
+    # Elder Ray components
+    bull_power = high - ema_13  # Buying pressure
+    bear_power = ema_13 - low   # Selling pressure
     
-    # Calculate average volume for confirmation (24-period)
-    lookback_vol = 24
-    avg_volume = pd.Series(volume).rolling(window=lookback_vol, min_periods=lookback_vol).mean().shift(1).values
+    # Calculate ADX (14) for regime filter
+    lookback_adx = 14
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    minus_dm = np.concatenate([[0], minus_dm])
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    
+    atr = pd.Series(tr).ewm(span=lookback_adx, adjust=False, min_periods=lookback_adx).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=lookback_adx, adjust=False, min_periods=lookback_adx).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=lookback_adx, adjust=False, min_periods=lookback_adx).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=lookback_adx, adjust=False, min_periods=lookback_adx).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(lookback_vol, 1), n):  # Start after sufficient data
+    for i in range(max(lookback_ema, lookback_adx, 1), n):
         # Skip if any required data is NaN
-        if (np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or np.isnan(prior_close[i]) or
-            np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or
-            np.isnan(ema_50_4h_aligned[i]) or np.isnan(avg_volume[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Skip if outside trading session
-        if not in_session[i]:
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R1, close > 4h EMA50, volume spike
-            if (high[i] > camarilla_r1[i] and 
-                close[i] > ema_50_4h_aligned[i] and 
-                volume[i] > 1.8 * avg_volume[i]):
-                signals[i] = 0.20
+            # LONG: Bull Power > 0 (buying pressure), ADX > 25 (trending), close > 1d EMA50 (uptrend)
+            if (bull_power[i] > 0 and 
+                adx[i] > 25 and 
+                close[i] > ema_50_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S1, close < 4h EMA50, volume spike
-            elif (low[i] < camarilla_s1[i] and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  volume[i] > 1.8 * avg_volume[i]):
-                signals[i] = -0.20
+            # SHORT: Bear Power > 0 (selling pressure), ADX > 25 (trending), close < 1d EMA50 (downtrend)
+            elif (bear_power[i] > 0 and 
+                  adx[i] > 25 and 
+                  close[i] < ema_50_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S1 OR volume drops below average
-            if (low[i] < camarilla_s1[i] or 
-                volume[i] < avg_volume[i]):
+            # EXIT LONG: Bull Power <= 0 (loss of buying pressure) OR ADX <= 25 (losing trend)
+            if (bull_power[i] <= 0 or adx[i] <= 25):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R1 OR volume drops below average
-            if (high[i] > camarilla_r1[i] or 
-                volume[i] < avg_volume[i]):
+            # EXIT SHORT: Bear Power <= 0 (loss of selling pressure) OR ADX <= 25 (losing trend)
+            if (bear_power[i] <= 0 or adx[i] <= 25):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
