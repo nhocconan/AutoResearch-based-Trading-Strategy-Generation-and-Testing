@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Direction_RSI_ChopFilter
-# Hypothesis: Use Kaufman's Adaptive Moving Average (KAMA) on 1d for trend direction,
-# RSI(14) on 4h for momentum confirmation, and Choppiness Index on 4h to avoid ranging markets.
-# Enter long when KAMA trending up, RSI > 50, and Chop < 38.2 (trending).
-# Enter short when KAMA trending down, RSI < 50, and Chop < 38.2.
-# Exit when KAMA changes direction or Chop > 61.8 (ranging).
-# Designed to work in both bull (trend following) and bear (trend following short).
-# Target: 20-30 trades/year per symbol.
+# 1h_4H_Donchian_Breakout_20_1dTrend_VolumeSpike_v2
+# Hypothesis: Use 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike.
+# Enter long when price breaks above 4h upper band with volume spike and 1d EMA50 uptrend.
+# Enter short when price breaks below 4h lower band with volume spike and 1d EMA50 downtrend.
+# Exit when price returns to 4h midline (average of upper/lower band).
+# Uses 1h timeframe for entry timing, 4h for structure, 1d for trend filter.
+# Designed to work in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
+# Target: 15-30 trades/year per symbol.
 
-name = "4h_KAMA_Direction_RSI_ChopFilter"
-timeframe = "4h"
+name = "1h_4H_Donchian_Breakout_20_1dTrend_VolumeSpike_v2"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -18,107 +18,60 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
 
-    # Get 1d data for KAMA trend filter
+    # Get 4h data for Donchian channel
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+
+    # Calculate 4h Donchian(20) channels
+    upper_4h = np.full(len(high_4h), np.nan)
+    lower_4h = np.full(len(low_4h), np.nan)
+    for i in range(20, len(high_4h)):
+        upper_4h[i] = np.max(high_4h[i-20:i])
+        lower_4h[i] = np.min(low_4h[i-20:i])
+    mid_4h = (upper_4h + lower_4h) / 2.0
+
+    # Align Donchian levels to 1h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
+    mid_aligned = align_htf_to_ltf(prices, df_4h, mid_4h)
+
+    # Volume confirmation: current volume > 2.0 x 24-period average (4h equivalent)
+    vol_ma = np.full(n, np.nan)
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
+    volume_spike = volume > (2.0 * vol_ma)
+
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
     close_1d = df_1d['close'].values
 
-    # Calculate KAMA on 1d
-    # ER = |Close - Close(10)| / Sum(|Close - Close(1)|, 9)
-    # SC = [ER * (2/(2+1) - 2/(30+1)) + 2/(30+1)]^2
-    # KAMA = KAMA(1) + SC * (Close - KAMA(1))
-    change = np.abs(np.diff(close_1d, 10))  # |Close - Close(10)|
-    volatility = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        volatility[i] = volatility[i-1] + np.abs(close_1d[i] - close_1d[i-1])
-    # For first 9 periods, volatility is not defined, so we'll handle with slicing
-    er = np.full_like(close_1d, np.nan)
-    for i in range(10, len(close_1d)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    # Smooth constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = np.full_like(close_1d, np.nan)
-    for i in range(10, len(close_1d)):
-        sc[i] = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # Start with close at period 9
-    for i in range(10, len(close_1d)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    kama_1d = kama
-
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-
-    # RSI(14) on 4h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    # For first 14 periods, RSI is not defined, but we'll use 50 as neutral
-    rsi[:14] = 50
-
-    # Choppiness Index on 4h (14-period)
-    # TR = max(H-L, abs(H-PC), abs(L-PC))
-    # ATR = average TR over 14 periods
-    # Chop = 100 * log10(sum(TR, 14) / (ATR * 14)) / log10(14)
-    tr = np.zeros(n)
-    for i in range(n):
-        hl = high[i] - low[i]
-        hc = abs(high[i] - close[i-1]) if i > 0 else 0
-        lc = abs(low[i] - close[i-1]) if i > 0 else 0
-        tr[i] = max(hl, hc, lc)
-    atr = np.zeros(n)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    sum_tr = np.zeros(n)
-    for i in range(14, n):
-        if i == 14:
-            sum_tr[i] = np.sum(tr[1:15])
-        else:
-            sum_tr[i] = sum_tr[i-1] + tr[i] - tr[i-14]
-    chop = np.full(n, np.nan)
-    for i in range(14, n):
-        if atr[i] > 0:
-            chop[i] = 100 * np.log10(sum_tr[i] / (atr[i] * 14)) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral if no volatility
+    # Calculate 1d EMA50
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
+    for i in range(50, n):
         # Skip if data is not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(mid_aligned[i]) or np.isnan(volume_spike[i]) or
+            np.isnan(ema_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -127,29 +80,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: KAMA up, RSI > 50, Chop < 38.2 (trending)
-            if close[i] > kama_aligned[i] and rsi[i] > 50 and chop[i] < 38.2:
-                signals[i] = 0.25
+            # LONG: break above 4h upper band with volume spike and 1d EMA50 uptrend
+            if close[i] > upper_aligned[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: KAMA down, RSI < 50, Chop < 38.2 (trending)
-            elif close[i] < kama_aligned[i] and rsi[i] < 50 and chop[i] < 38.2:
-                signals[i] = -0.25
+            # SHORT: break below 4h lower band with volume spike and 1d EMA50 downtrend
+            elif close[i] < lower_aligned[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA down OR Chop > 61.8 (ranging)
-            if close[i] < kama_aligned[i] or chop[i] > 61.8:
+            # EXIT LONG: price returns to 4h midline
+            if close[i] <= mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: KAMA up OR Chop > 61.8 (ranging)
-            if close[i] > kama_aligned[i] or chop[i] > 61.8:
+            # EXIT SHORT: price returns to 4h midline
+            if close[i] >= mid_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
