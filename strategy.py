@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Chaikin_Oscillator_Volume_Trend
-Hypothesis: Chaikin Oscillator crossing zero with volume confirmation and 4h trend filter captures
-institutional flow shifts in both bull and bear markets. Uses 1d trend as higher timeframe filter.
-Target: 20-40 trades/year per signal to avoid fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot R1/S1 breakouts with 1d trend filter and volume spikes work in both bull and bear markets.
+Breakout above R1 with uptrend and volume spike = long.
+Breakdown below S1 with downtrend and volume spike = short.
+Exit on opposite pivot touch or trend reversal. Target: 20-50 trades/year per symbol.
 """
 
-name = "4h_Chaikin_Oscillator_Volume_Trend"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -16,40 +17,42 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Money Flow Multiplier
-    mfm = np.where((high - low) != 0, ((close - low) - (high - close)) / (high - low), 0)
-    # Money Flow Volume
-    mfv = mfm * volume
-    
-    # Chaikin Oscillator: (3-period EMA of MFV) - (10-period EMA of MFV)
-    ema3 = pd.Series(mfv).ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10 = pd.Series(mfv).ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin = ema3 - ema10
-    
-    # 4h trend: EMA34
-    ema34_4h = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_4h = close > ema34_4h
-    downtrend_4h = close < ema34_4h
-    
-    # 1d trend filter (HTF)
+    # Calculate Camarilla pivot levels from previous day
+    # We need daily OHLC to calculate pivots
+    # Use 1d data to get previous day's OHLC
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = df_1d['close'].values > ema34_1d
-    downtrend_1d = df_1d['close'].values < ema34_1d
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values  # Shift to get previous day
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate Camarilla levels
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # 1d trend filter: EMA50 on daily
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (avoid excessive signals)
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -58,37 +61,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(50, n):
         # Get values
-        chaikin_now = chaikin[i]
-        chaikin_prev = chaikin[i-1]
-        uptrend = uptrend_4h[i]
-        downtrend = downtrend_4h[i]
-        uptrend_htf = uptrend_1d_aligned[i]
-        downtrend_htf = downtrend_1d_aligned[i]
+        r1 = R1_aligned[i]
+        s1 = S1_aligned[i]
+        uptrend = uptrend_1d_aligned[i]
+        downtrend = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: Chaikin crosses above zero, 4h uptrend, 1d uptrend filter, volume confirmation
-            if chaikin_now > 0 and chaikin_prev <= 0 and uptrend and uptrend_htf and vol_conf:
+            # LONG: break above R1, 1d uptrend, volume confirmation
+            if close[i] > r1 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Chaikin crosses below zero, 4h downtrend, 1d downtrend filter, volume confirmation
-            elif chaikin_now < 0 and chaikin_prev >= 0 and downtrend and downtrend_htf and vol_conf:
+            # SHORT: break below S1, 1d downtrend, volume confirmation
+            elif close[i] < s1 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Chaikin crosses below zero or 4h trend turns down
-            if chaikin_now < 0 and chaikin_prev >= 0 or not uptrend:
+            # EXIT LONG: touch S1 or 1d trend turns down
+            if close[i] < s1 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Chaikin crosses above zero or 4h trend turns up
-            if chaikin_now > 0 and chaikin_prev <= 0 or not downtrend:
+            # EXIT SHORT: touch R1 or 1d trend turns up
+            if close[i] > r1 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
