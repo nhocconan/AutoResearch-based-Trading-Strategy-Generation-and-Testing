@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Ichimoku Cloud breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above Kumo (cloud) AND Tenkan > Kijun AND 1d EMA50 rising AND volume > 1.5x average.
-# Short when price breaks below Kumo AND Tenkan < Kijun AND 1d EMA50 falling AND volume > 1.5x average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 AND 1d EMA34 rising AND volume > 2.0x average.
+# Short when price breaks below S3 AND 1d EMA34 falling AND volume > 2.0x average.
 # Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Ichimoku provides dynamic support/resistance, EMA50 filters higher timeframe trend, volume confirms breakout strength.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
+# Camarilla levels provide precise support/resistance, 1d EMA34 filters primary trend, volume spike confirms breakout strength.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
-name = "6h_Ichimoku_Cloud_Breakout_1dEMA50_Volume_ATRStop_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,34 +35,27 @@ def generate_signals(prices):
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Ichimoku components on 6h data
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for Camarilla pivot levels (based on previous day)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d data
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels for each 1d bar
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
+    camarilla_range = high_1d - low_1d
+    r3 = close_1d + 1.1 * camarilla_range
+    s3 = close_1d - 1.1 * camarilla_range
     
-    # Align 1d EMA50 to 6h timeframe (wait for 1d bar to close)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1d Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Get 1d data for EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,31 +64,24 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        upper_cloud = max(senkou_a[i], senkou_b[i])
-        lower_cloud = min(senkou_a[i], senkou_b[i])
-        
         if position == 0:
-            # LONG: Price breaks above cloud AND Tenkan > Kijun AND 1d EMA50 rising AND volume > 1.5x average
-            if (close[i] > upper_cloud and 
-                tenkan[i] > kijun[i] and 
-                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and 
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Price breaks above R3 AND 1d EMA34 rising AND volume > 2.0x average
+            if (close[i] > r3_aligned[i] and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below cloud AND Tenkan < Kijun AND 1d EMA50 falling AND volume > 1.5x average
-            elif (close[i] < lower_cloud and 
-                  tenkan[i] < kijun[i] and 
-                  ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and 
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Price breaks below S3 AND 1d EMA34 falling AND volume > 2.0x average
+            elif (close[i] < s3_aligned[i] and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
