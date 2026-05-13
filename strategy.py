@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Price breaking out of Camarilla R3/S3 levels on 12h with 1d trend and volume confirmation captures strong momentum moves while avoiding false breakouts.
-# Uses daily EMA34 trend filter and volume spike confirmation to filter noise.
-# Entry: Long when close > R3 + daily EMA34 uptrend + volume spike; Short when close < S3 + daily EMA34 downtrend + volume spike.
-# Exit: Mean reversion to daily EMA34 to avoid overstaying in extended moves.
-# Target: 12-30 trades/year on 12h to stay within optimal range.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels from daily timeframe combined with 1d EMA trend and volume spike provides high-probability entries in both bull and bear markets. Uses proven structure with controlled trade frequency.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,35 +20,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter and Camarilla calculation
+    # Get 1d data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
-        return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    daily_close = df_1d['close'].values
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate Camarilla levels from previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate previous day's Camarilla levels (R3, S3)
-    # Camarilla formula: R3 = close + (high - low) * 1.1/2, S3 = close - (high - low) * 1.1/2
-    prev_daily_close = df_1d['close'].shift(1).values
-    prev_daily_high = df_1d['high'].shift(1).values
-    prev_daily_low = df_1d['low'].shift(1).values
-    camarilla_r3 = prev_daily_close + (prev_daily_high - prev_daily_low) * 1.1 / 2
-    camarilla_s3 = prev_daily_close - (prev_daily_high - prev_daily_low) * 1.1 / 2
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(34, n):  # Start after EMA34 warmup
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,30 +58,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above R3 + daily EMA34 uptrend + volume spike
-            if (close[i] > r3_aligned[i] and 
+            # LONG: Close above Camarilla R1 + 1d EMA34 uptrend + volume spike
+            if (close[i] > camarilla_r1_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.8):
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below S3 + daily EMA34 downtrend + volume spike
-            elif (close[i] < s3_aligned[i] and 
+            # SHORT: Close below Camarilla S1 + 1d EMA34 downtrend + volume spike
+            elif (close[i] < camarilla_s1_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.8):
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Mean reversion to daily EMA34
-            if close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Mean reversion to Camarilla S1 (support)
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Mean reversion to daily EMA34
-            if close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Mean reversion to Camarilla R1 (resistance)
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
