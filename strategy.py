@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R3 and close > 1d EMA34 with volume > 2.0x 20-bar average.
-# Short when price breaks below S3 and close < 1d EMA34 with volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 4h timeframe.
-# R3/S3 are stronger reversal/breakout levels than R1/S1, reducing false breakouts.
-# Volume spike >2.0x average ensures institutional participation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above R3 and close > 1d EMA34 with volume > 1.5x 20-bar average.
+# Short when price breaks below S3 and close < 1d EMA34 with volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to target 12-37 trades/year on 12h timeframe.
+# Camarilla R3/S3 act as strong breakout levels; combined with daily trend and volume spike filters.
 # Works in bull markets via breakouts and in bear markets via mean-reversion at extreme levels.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -42,7 +41,7 @@ def generate_signals(prices):
     R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
@@ -64,32 +63,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3, close > 1d EMA34, volume spike >2.0x
+            # LONG: Price breaks above R3, close > 1d EMA34, volume spike
             if (high[i] > R3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 2.0 * avg_volume[i]):
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3, close < 1d EMA34, volume spike >2.0x
+            # SHORT: Price breaks below S3, close < 1d EMA34, volume spike
             elif (low[i] < S3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 2.0 * avg_volume[i]):
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 OR volume drops below average
+            # EXIT LONG: Price breaks below S3 OR volume dries up (< 0.8x average)
             if (low[i] < S3_aligned[i] or 
-                volume[i] < avg_volume[i]):
+                volume[i] < 0.8 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 OR volume drops below average
+            # EXIT SHORT: Price breaks above R3 OR volume dries up (< 0.8x average)
             if (high[i] > R3_aligned[i] or 
-                volume[i] < avg_volume[i]):
+                volume[i] < 0.8 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
