@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1d_Weekly_Pivot_Reversal_1wTrend_Filter
-# Hypothesis: Buy when price touches weekly S1 support in uptrend, sell when touches weekly R1 resistance in downtrend.
-# Uses weekly pivot levels for mean reversion within the trend, filtering counter-trend trades.
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
-# Low frequency: only 1-2 signals per week, avoiding overtrading.
+# 6h_Pivot_Reversal_12hTrend_Filter
+# Hypothesis: Use daily pivot points for mean-reversion entries when price deviates significantly from the pivot,
+# filtered by 12h trend direction to align with higher timeframe momentum. Works in both bull and bear markets
+# by fading extremes in ranging markets and avoiding counter-trend trades during strong trends.
 
-name = "1d_Weekly_Pivot_Reversal_1wTrend_Filter"
-timeframe = "1d"
+name = "6h_Pivot_Reversal_12hTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,42 +14,59 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
 
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    # Use previous week's data to avoid look-ahead (current week still forming)
-    p_high = np.roll(df_1w['high'].values, 1)
-    p_low = np.roll(df_1w['low'].values, 1)
-    p_close = np.roll(df_1w['close'].values, 1)
+    # Get daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate daily pivot points (standard formula)
+    # Pivot = (H + L + C) / 3
+    # Support 1 = (2 * Pivot) - High
+    # Resistance 1 = (2 * Pivot) - Low
+    phigh = df_1d['high'].values
+    plow = df_1d['low'].values
+    pclose = df_1d['close'].values
+    
+    pivot = (phigh + plow + pclose) / 3.0
+    r1 = (2 * pivot) - phigh
+    s1 = (2 * pivot) - plow
+    
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Calculate weekly pivot points
-    pivot = (p_high + p_low + p_close) / 3.0
-    range_val = p_high - p_low
-    R1 = pivot + (range_val * 1.1 / 4)
-    S1 = pivot - (range_val * 1.1 / 4)
+    # Get 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
 
-    # Align weekly pivot levels to daily timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-
-    # Get weekly EMA20 for trend filter (longer-term trend)
-    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Deviation from pivot as percentage of daily range
+    daily_range = phigh - plow
+    # Avoid division by zero
+    daily_range_safe = np.where(daily_range == 0, 1e-10, daily_range)
+    deviation_pct = np.abs(close - pivot_aligned) / daily_range_safe
+    
+    # Entry when price deviates > 1.5x daily range from pivot (extreme deviation)
+    # This captures mean reversion from overextended levels
+    extreme_deviation = deviation_pct > 1.5
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after sufficient warmup for weekly indicators
+    for i in range(50, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(ema20_1w_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(extreme_deviation[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,26 +75,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price touches or goes below S1 support in weekly uptrend
-            if low[i] <= S1_aligned[i] and close[i] > ema20_1w_aligned[i]:
+            # LONG: Price significantly below pivot (oversold) and uptrend on 12h
+            if close[i] < pivot_aligned[i] and extreme_deviation[i] and close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price touches or goes above R1 resistance in weekly downtrend
-            elif high[i] >= R1_aligned[i] and close[i] < ema20_1w_aligned[i]:
+            # SHORT: Price significantly above pivot (overbought) and downtrend on 12h
+            elif close[i] > pivot_aligned[i] and extreme_deviation[i] and close[i] < ema50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches weekly pivot or trend turns down
-            if high[i] >= pivot[i] or close[i] < ema20_1w_aligned[i]:
+            # EXIT LONG: Price returns to pivot or trend turns down
+            if close[i] >= pivot_aligned[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches weekly pivot or trend turns up
-            if low[i] <= pivot[i] or close[i] > ema20_1w_aligned[i]:
+            # EXIT SHORT: Price returns to pivot or trend turns up
+            if close[i] <= pivot_aligned[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
