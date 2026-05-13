@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1d_WeeklyPivot_R1_S1_Breakout_Trend_Filter_Volume
-# Hypothesis: Use weekly pivot levels (R1/S1) on 1d chart with 1w EMA trend filter and volume confirmation.
-# Weekly pivots provide strong support/resistance; EMA filter ensures trend alignment; volume confirms breakout strength.
-# Works in bull (buy R1 breakout in uptrend) and bear (sell S1 breakdown in downtrend).
-# Target: 30-100 total trades over 4 years = 7-25/year.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Use 12h price action near Camarilla R1/S1 levels with 1d EMA trend filter and volume confirmation.
+# Camarilla levels provide high-probability intraday support/resistance; EMA filter ensures trades align with higher-timeframe trend.
+# Works in bull (buys dips to S1 in uptrend, sells rallies to R1) and bear (sells rallies to R1 in downtrend, buys dips to S1).
+# Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "1d_WeeklyPivot_R1_S1_Breakout_Trend_Filter_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,40 +23,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot calculation and EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points (using previous week's OHLC)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*Pivot - L
-    # S1 = 2*Pivot - H
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    
-    # Align weekly pivot levels to daily timeframe (with proper delay for completed weekly bar)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
     # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
+    # Calculate Camarilla levels from previous day (using 1d data)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous day's close, high, low
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Start after EMA warmup
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,30 +59,36 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above R1 + price above weekly EMA50 (bullish trend) + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_aligned[i] and
+            # LONG: price near S1 support + price above 1d EMA (bullish trend) + volume spike
+            if (low[i] <= camarilla_s1_aligned[i] * 1.002 and  # Allow small slippage
+                close[i] > camarilla_s1_aligned[i] and
+                close[i] > ema_34_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1 + price below weekly EMA50 (bearish trend) + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_aligned[i] and
+            # SHORT: price near R1 resistance + price below 1d EMA (bearish trend) + volume spike
+            elif (high[i] >= camarilla_r1_aligned[i] * 0.998 and  # Allow small slippage
+                  close[i] < camarilla_r1_aligned[i] and
+                  close[i] < ema_34_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below pivot or price below weekly EMA50
-            if (close[i] < pivot_aligned[i] or close[i] < ema_50_aligned[i]):
+            # EXIT LONG: price rises to R1 or breaks below S1 or trend turns bearish
+            if (high[i] >= camarilla_r1_aligned[i] * 0.998 or 
+                low[i] <= camarilla_s1_aligned[i] * 1.002 or
+                close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above pivot or price above weekly EMA50
-            if (close[i] > pivot_aligned[i] or close[i] > ema_50_aligned[i]):
+            # EXIT SHORT: price falls to S1 or breaks above R1 or trend turns bullish
+            if (low[i] <= camarilla_s1_aligned[i] * 1.002 or 
+                high[i] >= camarilla_r1_aligned[i] * 0.998 or
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
