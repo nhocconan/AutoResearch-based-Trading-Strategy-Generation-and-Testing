@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_Pivot_Support_Resistance_Momentum
-Hypothesis: Camarilla pivot levels (S3, S4, R3, R4) act as strong support/resistance in ranging markets, with momentum confirmation (RSI) and trend filter (4h EMA50) to avoid whipsaws. Enter long at S3/S4 with bullish momentum and 4h uptrend; enter short at R3/R4 with bearish momentum and 4h downtrend. Exit on opposite S1/R1 touch or momentum reversal. Uses 1d trend filter for higher timeframe bias. Session filter (08-20 UTC) reduces noise. Target: 20-40 trades/year per symbol.
+6h_WeeklyPivot_Rotation_Filter
+Hypothesis: Weekly pivot points act as strong support/resistance. Price tends to rotate between S1-R1 in ranging markets and break through R2/S2 in trending markets. 
+In bull/bear markets, we fade at R1/S1 when price is outside weekly CPR (central pivot range), and breakout at R2/S2 when inside CPR. Uses 1d trend filter to avoid counter-trend trades.
+Target: 15-30 trades/year per symbol. Works in both bull (breakouts) and bear (mean reversion at extremes).
 """
 
-name = "1h_Camarilla_Pivot_Support_Resistance_Momentum"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Rotation_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,117 +19,88 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day's range
-    # Requires daily OHLC; we'll approximate using rolling window
-    # For simplicity, we use previous 24h high/low (since 1h timeframe)
-    prev_high = np.roll(high, 24)  # Previous day's high (24 periods back)
-    prev_low = np.roll(low, 24)    # Previous day's low
-    prev_close = np.roll(close, 24) # Previous day's close
+    # Weekly pivot points (using prior week's OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
     
-    # Handle first 24 bars
-    prev_high[:24] = high[:24]
-    prev_low[:24] = low[:24]
-    prev_close[:24] = close[:24]
+    # Calculate weekly pivot from prior week's data
+    # We use shift(1) to ensure we only use completed weekly data
+    weekly_high = df_1w['high'].shift(1).values
+    weekly_low = df_1w['low'].shift(1).values
+    weekly_close = df_1w['close'].shift(1).values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
     
-    range_hl = prev_high - prev_low
-    camarilla_mult = 1.1 / 12  # Camarilla multiplier
+    # Support and resistance levels
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
-    # Calculate S1, S2, S3, S4 and R1, R2, R3, R4
-    S4 = close - (range_hl * camarilla_mult * 6)
-    S3 = close - (range_hl * camarilla_mult * 4)
-    S2 = close - (range_hl * camarilla_mult * 2)
-    S1 = close - (range_hl * camarilla_mult * 1)
-    R1 = close + (range_hl * camarilla_mult * 1)
-    R2 = close + (range_hl * camarilla_mult * 2)
-    R3 = close + (range_hl * camarilla_mult * 4)
-    R4 = close + (range_hl * camarilla_mult * 6)
+    # Align weekly levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
     
-    # RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 4h trend: EMA50
-    df_4h = get_htf_data(prices, '4h')
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    uptrend_4h = close > ema_50_4h_aligned
-    downtrend_4h = close < ema_50_4h_aligned
-    
-    # 1d trend filter (HTF)
+    # 1d trend filter (to avoid counter-trend trades)
     df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    uptrend_1d = close > ema_50_1d_aligned
-    downtrend_1d = close < ema_50_1d_aligned
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 1.5 * 24-period average
-    vol_ma = np.zeros(n)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
-    volume_conf = volume > 1.5 * vol_ma
+    # CPR (Central Pivot Range) - area between (H+L+C)/3 and (H+L)/2
+    weekly_cpr_top = (weekly_high + weekly_low) / 2
+    weekly_cpr_bottom = (weekly_high + weekly_low + weekly_close) / 3  # same as pivot
+    weekly_cpr_top_aligned = align_htf_to_ltf(prices, df_1w, weekly_cpr_top)
+    weekly_cpr_bottom_aligned = align_htf_to_ltf(prices, df_1w, weekly_cpr_bottom)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Determine if price is inside CPR (range) or outside (trend)
+    in_cpr = (close >= weekly_cpr_bottom_aligned) & (close <= weekly_cpr_top_aligned)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        if not session_filter[i]:
+        # Skip if weekly data not available yet
+        if np.isnan(weekly_pivot_aligned[i]):
             signals[i] = 0.0
             continue
             
-        # Get values
-        rsi_val = rsi[i]
-        vol_conf = volume_conf[i]
-        uptrend_htf = uptrend_1d[i]
-        downtrend_htf = downtrend_1d[i]
-        uptrend_4h_val = uptrend_4h[i]
-        downtrend_4h_val = downtrend_4h[i]
+        price = close[i]
+        in_cpr_now = in_cpr[i]
         
-        if position == 0:
-            # LONG: price at S3/S4, bullish momentum (RSI > 50), 4h uptrend, 1d uptrend filter, volume
-            if ((close[i] <= S3[i] or close[i] <= S4[i]) and 
-                rsi_val > 50 and 
-                uptrend_4h_val and 
-                uptrend_htf and 
-                vol_conf):
-                signals[i] = 0.20
-                position = 1
-            # SHORT: price at R3/R4, bearish momentum (RSI < 50), 4h downtrend, 1d downtrend filter, volume
-            elif ((close[i] >= R3[i] or close[i] >= R4[i]) and 
-                  rsi_val < 50 and 
-                  downtrend_4h_val and 
-                  downtrend_htf and 
-                  vol_conf):
-                signals[i] = -0.20
-                position = -1
+        # Fade at extremes when outside CPR (range behavior)
+        if not in_cpr_now:
+            # Price above CPR - look to fade at R1
+            if price <= weekly_r1_aligned[i] and uptrend_1d_aligned[i]:
+                # Potential sell at R1 in uptrend
+                signals[i] = -0.25
+            # Price below CPR - look to fade at S1
+            elif price >= weekly_s1_aligned[i] and downtrend_1d_aligned[i]:
+                # Potential buy at S1 in downtrend
+                signals[i] = 0.25
             else:
                 signals[i] = 0.0
-        elif position == 1:
-            # EXIT LONG: touch S1 or RSI < 40 (momentum loss) or 4h trend turns down
-            if (close[i] >= S1[i] or rsi_val < 40 or not uptrend_4h_val):
-                signals[i] = 0.0
-                position = 0
+        else:
+            # Inside CPR - look for breakouts at R2/S2 (trend behavior)
+            # Breakout above R2
+            if price >= weekly_r2_aligned[i] and uptrend_1d_aligned[i]:
+                signals[i] = 0.25
+            # Breakdown below S2
+            elif price <= weekly_s2_aligned[i] and downtrend_1d_aligned[i]:
+                signals[i] = -0.25
             else:
-                signals[i] = 0.20
-        elif position == -1:
-            # EXIT SHORT: touch R1 or RSI > 60 (momentum loss) or 4h trend turns up
-            if (close[i] <= R1[i] or rsi_val > 60 or not downtrend_4h_val):
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
     
     return signals
