@@ -1,11 +1,11 @@
-# Investigate 1d_RSI_Reversal_With_Weekly_Trend_Filter
-# Hypothesis: Weekly trend (1w EMA50) filters RSI(14) reversals on daily timeframe.
-# Long: RSI < 30 and close > weekly EMA50 (uptrend). Short: RSI > 70 and close < weekly EMA50 (downtrend).
-# Uses 25% position size to limit risk. Targets 10-25 trades/year to avoid fee drag.
-# Works in bull/bear: Weekly trend filters counter-trend trades in strong trends, RSI captures mean reversion in ranges.
+#!/usr/bin/env python3
+"""
+6h_Donchian20_1dPivotDirection_Volume
+Hypothesis: On 6-hour bars, breakouts of 20-period Donchian channels with volume confirmation and aligned 1-day pivot direction (price above/below daily pivot) capture trending moves while avoiding whipsaws. Pivot direction filters breakouts to trade with higher-timeframe bias, improving win rate in both bull and bear markets. Target 25-35 trades/year per symbol.
+"""
 
-name = "1d_RSI_Reversal_With_Weekly_Trend_Filter"
-timeframe = "1d"
+name = "6h_Donchian20_1dPivotDirection_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,53 +14,63 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for pivot calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # Neutral when undefined
+    # Calculate 20-period Donchian channels
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly trend filter: EMA(50) on close
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate daily pivot points: P = (H + L + C)/3
+    pivot_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    pivot_1d_values = pivot_1d.values
+    
+    # Align daily pivot to 6h timeframe (wait for daily close)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d_values)
+    
+    # Volume confirmation: current volume > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
+    for i in range(20, n):
         if position == 0:
-            # LONG: RSI oversold (<30) and price above weekly EMA50 (uptrend filter)
-            if rsi[i] < 30 and close[i] > ema50_1w_aligned[i]:
+            # LONG: price breaks above Donchian high, volume confirmation, price above daily pivot (bullish bias)
+            if (close[i] > high_max[i] and 
+                volume_filter[i] and 
+                close[i] > pivot_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought (>70) and price below weekly EMA50 (downtrend filter)
-            elif rsi[i] > 70 and close[i] < ema50_1w_aligned[i]:
+            # SHORT: price breaks below Donchian low, volume confirmation, price below daily pivot (bearish bias)
+            elif (close[i] < low_min[i] and 
+                  volume_filter[i] and 
+                  close[i] < pivot_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought (>70) or trend flip (price < weekly EMA50)
-            if rsi[i] > 70 or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: price breaks below Donchian low OR volume drops
+            if (close[i] < low_min[i]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold (<30) or trend flip (price > weekly EMA50)
-            if rsi[i] < 30 or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: price breaks above Donchian high OR volume drops
+            if (close[i] > high_max[i]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
