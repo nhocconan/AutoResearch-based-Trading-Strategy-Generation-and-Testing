@@ -1,13 +1,8 @@
-#!/usr/bin/env python3
-# 1d_WeeklyPivot_PriceAction_Reversal
-# Hypothesis: Price reversals at weekly pivot levels with volume confirmation capture mean-reversion moves in both bull and bear markets.
-# Weekly pivots act as institutional support/resistance; price reacting off these levels with volume shows rejection.
-# Entry: Long when price bounces off weekly S1/S2/S3 with volume spike; Short when price rejects at weekly R1/R2/R3 with volume spike.
-# Exit: Mean reversion to weekly pivot point (PP) or opposite pivot level to avoid overstaying.
-# Target: 10-25 trades/year on 1d to stay within optimal range while capturing significant reversals.
+# 6h_WeeklyPivot_PriceAction_Reversal
+# Hypothesis: Price reverses at weekly pivot points (R3/S3, R4/S4) with volume confirmation and trend filter. Works in both bull and bear markets by fading extreme levels and capturing breakouts. Weekly pivots act as institutional support/resistance, especially effective during volatile periods.
 
-name = "1d_WeeklyPivot_PriceAction_Reversal"
-timeframe = "1d"
+name = "6h_WeeklyPivot_PriceAction_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,44 +19,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
-
-    # Calculate weekly pivot points: PP = (H+L+C)/3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Calculate weekly pivot points (based on previous week)
+    # Load weekly data once before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Weekly support and resistance levels
-    weekly_r1 = 2 * weekly_pp - weekly_low
-    weekly_r2 = weekly_pp + (weekly_high - weekly_low)
-    weekly_r3 = weekly_high + 2 * (weekly_pp - weekly_low)
-    weekly_s1 = 2 * weekly_pp - weekly_high
-    weekly_s2 = weekly_pp - (weekly_high - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pp)
-
-    # Align weekly pivot levels to daily timeframe (wait for weekly close)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
-
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Weekly pivot calculation: (H + L + C) / 3
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    
+    # Calculate pivot and support/resistance levels
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pp)
+    r4 = r3 + (r3 - r2)
+    s4 = s3 - (s2 - s3)
+    
+    # Align weekly pivot levels to 6h timeframe (with 1-bar delay for weekly close)
+    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
+    
+    # EMA50 for trend filter (6h timeframe)
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema50[i]) or np.isnan(vol_avg_20[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,32 +69,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price bounces off weekly support with volume spike
-            if ((close[i] >= s1_aligned[i] * 0.995 and close[i] <= s1_aligned[i] * 1.005) or
-                (close[i] >= s2_aligned[i] * 0.995 and close[i] <= s2_aligned[i] * 1.005) or
-                (close[i] >= s3_aligned[i] * 0.995 and close[i] <= s3_aligned[i] * 1.005)) and \
-               volume[i] > vol_avg_20[i] * 1.5:
+            # LONG ENTRY: Price at S3/S4 with rejection + volume + above EMA50
+            if ((abs(close[i] - s3_aligned[i]) < 0.001 * close[i] or 
+                 abs(close[i] - s4_aligned[i]) < 0.001 * close[i]) and
+                volume[i] > vol_avg_20[i] * 1.5 and
+                close[i] > ema50[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price rejects at weekly resistance with volume spike
-            elif ((close[i] >= r1_aligned[i] * 0.995 and close[i] <= r1_aligned[i] * 1.005) or
-                  (close[i] >= r2_aligned[i] * 0.995 and close[i] <= r2_aligned[i] * 1.005) or
-                  (close[i] >= r3_aligned[i] * 0.995 and close[i] <= r3_aligned[i] * 1.005)) and \
-                 volume[i] > vol_avg_20[i] * 1.5:
+            # SHORT ENTRY: Price at R3/R4 with rejection + volume + below EMA50
+            elif ((abs(close[i] - r3_aligned[i]) < 0.001 * close[i] or 
+                   abs(close[i] - r4_aligned[i]) < 0.001 * close[i]) and
+                  volume[i] > vol_avg_20[i] * 1.5 and
+                  close[i] < ema50[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Mean reversion to weekly pivot or resistance
-            if close[i] >= pp_aligned[i] or close[i] >= r1_aligned[i] * 0.995:
+            # EXIT LONG: Price reaches pivot point or shows weakness
+            if close[i] >= pp_aligned[i] or close[i] < ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Mean reversion to weekly pivot or support
-            if close[i] <= pp_aligned[i] or close[i] <= s1_aligned[i] * 1.005:
+            # EXIT SHORT: Price reaches pivot point or shows strength
+            if close[i] <= pp_aligned[i] or close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
