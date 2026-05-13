@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_ZeroCross_1dTrend_Volume
-# Hypothesis: Elder Ray (Bull/Bear Power) crosses zero when bullish/bearish momentum shifts.
-# Enter long when Bull Power crosses above zero with 1d uptrend (EMA50) and volume confirmation.
-# Enter short when Bear Power crosses below zero with 1d downtrend and volume confirmation.
-# Exit on opposite cross or trend reversal. Works in bull/bear via trend filter.
-# Target: 15-35 trades/year per symbol.
+# 4h_Vortex_Trend_With_Volume_And_Chop_Filter
+# Hypothesis: Vortex Indicator identifies trend direction and strength, effective in both trending and ranging markets when combined with Chop filter to avoid false signals. 
+# Long when VI+ > VI- (uptrend) with Chop > 61.8 (ranging) and volume confirmation. Short when VI- > VI+ (downtrend) with Chop > 61.8 and volume confirmation.
+# Uses daily trend filter to ensure alignment with higher timeframe momentum. 
+# Vortex helps catch trend changes early, Chop filter avoids whipsaws in ranging markets, volume confirms institutional participation.
+# Target: 20-50 trades/year per symbol to minimize fee drag.
 
-name = "6h_ElderRay_ZeroCross_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Vortex_Trend_With_Volume_And_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,38 +24,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA trend filter
+    # Get daily data for Vortex and Chop calculation
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     
-    # 1d EMA50 trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Vortex Indicator components
+    # VM+ = |High - Prev Low|, VM- = |Low - Prev High|
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus[0] = 0  # First value has no previous
+    vm_minus[0] = 0
+    
+    # True Range for smoothing
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    
+    # Smooth over 14 periods (standard Vortex period)
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
+    
+    # Calculate Choppy Market Index (Chop) - using 14-period
+    # Chop = 100 * log10(sum(TR) / (max(HH) - min(LL))) / log10(n)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    range_hl = highest_high - lowest_low
+    # Avoid division by zero
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    chop = 100 * np.log10(sum_tr / range_hl) / np.log10(14)
+    
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align all indicators to 4h timeframe
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 13-period EMA on 6h)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Detect zero crosses
-    bull_cross_up = (bull_power[1:] > 0) & (bull_power[:-1] <= 0)
-    bear_cross_down = (bear_power[1:] < 0) & (bear_power[:-1] >= 0)
-    # Prepend False for index 0
-    bull_cross_up = np.concatenate([[False], bull_cross_up])
-    bear_cross_down = np.concatenate([[False], bear_cross_down])
-    
-    # Volume spike: volume > 2.0 * 20-period average (~6.7 hours)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Volume spike: volume > 2.0 * 4-period average (approx 1 day)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_spike = volume > 2.0 * vol_ma_4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(13, n):  # start after EMA13 warmup
+    for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i])):
+        if (np.isnan(vi_plus_aligned[i]) or 
+            np.isnan(vi_minus_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,26 +89,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Bull Power crosses above zero + 1d uptrend + volume spike
-            if bull_cross_up[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: VI+ > VI- (uptrend) + Chop > 61.8 (ranging) + volume spike
+            if vi_plus_aligned[i] > vi_minus_aligned[i] and chop_aligned[i] > 61.8 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power crosses below zero + 1d downtrend + volume spike
-            elif bear_cross_down[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: VI- > VI+ (downtrend) + Chop > 61.8 (ranging) + volume spike
+            elif vi_minus_aligned[i] > vi_plus_aligned[i] and chop_aligned[i] > 61.8 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bear Power crosses below zero or trend reversal
-            if bear_cross_down[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: VI- > VI+ (trend reversal) or Chop < 38.2 (strong trend - avoid whipsaw)
+            if vi_minus_aligned[i] > vi_plus_aligned[i] or chop_aligned[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bull Power crosses above zero or trend reversal
-            if bull_cross_up[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: VI+ > VI- (trend reversal) or Chop < 38.2 (strong trend - avoid whipsaw)
+            if vi_plus_aligned[i] > vi_minus_aligned[i] or chop_aligned[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
