@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_BullBearPower_1dTrend_VolumeFilter
-# Hypothesis: Combine weekly pivot levels with daily EMA trend and volume confirmation to capture
-# breakout moves in both bull and bear markets. Weekly pivot provides key support/resistance levels
-# from higher timeframe structure. Bull/Bear Power (Elder Ray) measures buying/selling pressure
-# relative to EMA. Volume confirms breakout strength. Target: 20-40 trades/year.
+# 12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily combined with weekly trend and volume spikes
+# capture institutional breakouts with low whipsaw. Works in bull (break above R1 in uptrend) and
+# bear (break below S1 in downtrend) markets. Weekly trend filters counter-trend moves.
+# Volume confirms institutional participation. Target: 12-37 trades/year.
 
-name = "6h_WeeklyPivot_BullBearPower_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -23,69 +23,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-
-    # Calculate weekly pivot points (using previous week's OHLC)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
-
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    r1_w = 2 * pivot_w - low_w
-    s1_w = 2 * pivot_w - high_w
-    r2_w = pivot_w + (high_w - low_w)
-    s2_w = pivot_w - (high_w - low_w)
-    r3_w = high_w + 2 * (pivot_w - low_w)
-    s3_w = low_w - 2 * (high_w - pivot_w)
-
-    # Align weekly pivot levels to 6s timeframe (use previous week's values)
-    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
-    r2_w_aligned = align_htf_to_ltf(prices, df_1w, r2_w)
-    s2_w_aligned = align_htf_to_ltf(prices, df_1w, s2_w)
-    r3_w_aligned = align_htf_to_ltf(prices, df_1w, r3_w)
-    s3_w_aligned = align_htf_to_ltf(prices, df_1w, s3_w)
-
-    # Get daily data for EMA trend filter
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
 
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate daily EMA20 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Camarilla R1 and S1 (require previous day close)
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align to 12h (previous day's levels available at 12:00 UTC next day)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1, additional_delay_bars=1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1, additional_delay_bars=1)
 
-    # Calculate Bull/Bear Power (Elder Ray) on 6h data
-    # Bull Power = High - EMA(13)
-    # Bear Power = Low - EMA(13)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
 
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+
+    # Volume confirmation: current volume > 1.8 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if data is not ready
-        if (np.isnan(pivot_w_aligned[i]) or np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]) or
-            np.isnan(r2_w_aligned[i]) or np.isnan(s2_w_aligned[i]) or np.isnan(r3_w_aligned[i]) or
-            np.isnan(s3_w_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -94,30 +71,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above S1 weekly pivot with bullish power and daily uptrend and volume spike
-            if (close[i] > s1_w_aligned[i] and bull_power[i] > 0 and 
-                close[i] > ema_1d_aligned[i] and volume_spike[i]):
+            # LONG: Price breaks above R1 with volume spike and weekly uptrend
+            if close[i] > r1_aligned[i] and volume_spike[i] and close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below R1 weekly pivot with bearish power and daily downtrend and volume spike
-            elif (close[i] < r1_w_aligned[i] and bear_power[i] < 0 and 
-                  close[i] < ema_1d_aligned[i] and volume_spike[i]):
+            # SHORT: Price breaks below S1 with volume spike and weekly downtrend
+            elif close[i] < s1_aligned[i] and volume_spike[i] and close[i] < ema_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price below S1 weekly pivot or bearish power or daily downtrend
-            if (close[i] < s1_w_aligned[i] or bear_power[i] < 0 or 
-                close[i] < ema_1d_aligned[i]):
+            # EXIT LONG: Price re-enters below R1 or weekly trend turns down
+            if close[i] < r1_aligned[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above R1 weekly pivot or bullish power or daily uptrend
-            if (close[i] > r1_w_aligned[i] or bull_power[i] > 0 or 
-                close[i] > ema_1d_aligned[i]):
+            # EXIT SHORT: Price re-enters above S1 or weekly trend turns up
+            if close[i] > s1_aligned[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
