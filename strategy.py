@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Williams Alligator trend filter with 1h KAMA entry timing and volume confirmation.
-# Uses 1w EMA13/8/5 for Alligator jaws/teeth/lips (HTF) to define trend direction.
-# Enters on 1h KAMA cross above/below price with volume > 1.5x 20-bar average.
-# Exits on Alligator reversal (jaws cross below/above lips) or opposite signal.
-# Designed for low frequency (target 30-100 trades over 4 years) to minimize fee drag.
-# Works in bull/bear by following Alligator trend and requiring volume confirmation.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike (>2.0x 20-bar avg) for confirmation.
+# Uses 1d EMA50 for trend alignment (HTF), 12h Donchian channels for breakout entry, and strict volume confirmation to avoid false breakouts.
+# Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee drag while capturing strong trends.
+# Works in both bull and bear markets by following the 1d trend direction and requiring high volume confirmation.
 
-name = "1d_WilliamsAlligator_1hKAMA_VolumeConfirm_v1"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_1dEMA50_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,94 +22,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1w Williams Alligator (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 1d EMA50 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    # Alligator: Jaw (13-period SMMA, 8 bars ahead), Teeth (8-period SMMA, 5 bars ahead), Lips (5-period SMMA, 3 bars ahead)
-    def smma(arr, period):
-        # Smoothed Moving Average: first value = SMA, then recursive
-        sma = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
-        smma_vals = np.full_like(arr, np.nan, dtype=float)
-        smma_vals[period-1] = sma[period-1]
-        for i in range(period, len(arr)):
-            smma_vals[i] = (smma_vals[i-1] * (period-1) + arr[i]) / period
-        return smma_vals
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    jaw = smma(close_1w, 13)
-    teeth = smma(close_1w, 8)
-    lips = smma(close_1w, 5)
+    # Calculate Donchian channels (20-period) for breakout (primary TF)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Align Alligator components to 1d timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
-    
-    # Calculate 1h KAMA for entry timing (MTF)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 50:
-        return np.zeros(n)
-    close_1h = df_1h['close'].values
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1h, n=10))
-    volatility = np.sum(np.abs(np.diff(close_1h, n=1)), axis=0)
-    er = np.divide(change, volatility, out=np.full_like(change, np.nan), where=volatility!=0)
-    # Smoothing constants
-    fastest = 2.0 / (2 + 1)
-    slowest = 2.0 / (30 + 1)
-    sc = (er * (fastest - slowest) + slowest) ** 2
-    # KAMA calculation
-    kama = np.full_like(close_1h, np.nan, dtype=float)
-    kama[9] = close_1h[9]  # start after 10 periods
-    for i in range(10, len(close_1h)):
-        if np.isnan(sc[i-10]) or np.isnan(kama[i-1]):
-            kama[i] = close_1h[i]
-        else:
-            kama[i] = kama[i-1] + sc[i-10] * (close_1h[i] - kama[i-1])
-    
-    kama_aligned = align_htf_to_ltf(prices, df_1h, kama)
-    
-    # Volume confirmation: 20-bar average
+    # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # start after warmup
+    for i in range(20, n):  # start after lookback
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(kama_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Alligator bullish (jaws > teeth > lips) AND price > KAMA AND volume spike
-            if (jaw_aligned[i] > teeth_aligned[i] and 
-                teeth_aligned[i] > lips_aligned[i] and
-                close[i] > kama_aligned[i] and
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Price breaks above Donchian upper channel, close > 1d EMA50, volume spike (>2.0x avg)
+            if (high[i] > highest_high[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Alligator bearish (jaws < teeth < lips) AND price < KAMA AND volume spike
-            elif (jaw_aligned[i] < teeth_aligned[i] and 
-                  teeth_aligned[i] < lips_aligned[i] and
-                  close[i] < kama_aligned[i] and
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Price breaks below Donchian lower channel, close < 1d EMA50, volume spike (>2.0x avg)
+            elif (low[i] < lowest_low[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alligator turns bearish (jaws < lips) OR opposite signal
-            if jaw_aligned[i] < lips_aligned[i]:
+            # EXIT LONG: Close position if price breaks below Donchian lower channel
+            if low[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator turns bullish (jaws > lips) OR opposite signal
-            if jaw_aligned[i] > lips_aligned[i]:
+            # EXIT SHORT: Close position if price breaks above Donchian upper channel
+            if high[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
