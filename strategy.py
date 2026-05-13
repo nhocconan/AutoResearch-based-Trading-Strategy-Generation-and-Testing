@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_Pivot_R1S1_Breakout_4hTrend_DailyVol
-Hypothesis: Use daily Camarilla pivot levels (R1/S1) for 1h breakout entries with 4h trend filter and daily volume confirmation. 
-This combines intraday precision with higher-timeframe structure to reduce false signals. 
-Target: 15-35 trades/year by requiring confluence of 1h breakout, 4h trend alignment, and elevated daily volume.
-Works in bull/bear by following 4h trend direction and using volume to confirm institutional participation.
+12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels (R3/S3) from 1-day chart act as significant support/resistance. 
+Breakouts above R3 or below S3 with volume confirmation and aligned 1-day trend (EMA 50) capture strong momentum moves. 
+Designed for low trade frequency (15-25/year) to avoid fee drag, with trend-following logic that works in both bull and bear markets.
 """
 
-name = "1h_Camarilla_Pivot_R1S1_Breakout_4hTrend_DailyVol"
-timeframe = "1h"
+name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,76 +24,54 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1-hour Camarilla pivot levels from previous day
-    # We'll use daily OHLC from previous day to calculate today's Camarilla levels
-    # For simplicity in 1h timeframe, we calculate daily pivot once per day and use it for all 1h bars of that day
+    # Calculate Camarilla pivot levels for 12h period
+    # R3 = close + (high - low) * 1.1/2
+    # S3 = close - (high - low) * 1.1/2
+    camarilla_range = (high - low) * 1.1
+    r3 = close + camarilla_range / 2
+    s3 = close - camarilla_range / 2
     
-    # Get daily data for pivot calculation
+    # Volume confirmation: > 1.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
+    
+    # Get 1-day trend filter (EMA 50)
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla levels for each day: R1, S1
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C, H, L are daily close, high, low
-    daily_close = df_1d['close'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_volume = df_1d['volume'].values
-    
-    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
-    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 1h timeframe (will use previous day's levels for current day)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Get 4h trend filter: EMA 50
-    df_4h = get_htf_data(prices, '4h')
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Daily volume confirmation: volume > 1.5x 20-day average
-    vol_ma_20d = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = daily_volume > (1.5 * vol_ma_20d)
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup for 4h EMA50
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
-            continue
-        
+    for i in range(30, n):
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 with 4h uptrend and high volume day
-            if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema_50_4h_aligned[i] and 
-                volume_confirm_aligned[i]):
-                signals[i] = 0.20
-                position = 1
-            # SHORT: Price breaks below Camarilla S1 with 4h downtrend and high volume day
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  volume_confirm_aligned[i]):
-                signals[i] = -0.20
-                position = -1
+            # LONG: Price breaks above R3 with volume confirmation and uptrend filter
+            if close[i] > r3[i] and volume_confirm[i]:
+                # Additional filter: only take long if price above 1-day EMA50 (uptrend filter)
+                if close[i] > ema_50_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # SHORT: Price breaks below S3 with volume confirmation and downtrend filter
+            elif close[i] < s3[i] and volume_confirm[i]:
+                # Additional filter: only take short if price below 1-day EMA50 (downtrend filter)
+                if close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below Camarilla R1 or 4h trend turns down
-            if close[i] < camarilla_r1_aligned[i] or close[i] < ema_50_4h_aligned[i]:
+            # EXIT LONG: Price crosses below S3 (reversion to mean) or volume drops
+            if close[i] < s3[i] or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above Camarilla S1 or 4h trend turns up
-            if close[i] > camarilla_s1_aligned[i] or close[i] > ema_50_4h_aligned[i]:
+            # EXIT SHORT: Price crosses above R3 (reversion to mean) or volume drops
+            if close[i] > r3[i] or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
