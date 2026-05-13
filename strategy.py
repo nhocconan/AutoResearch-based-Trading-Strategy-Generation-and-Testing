@@ -1,15 +1,14 @@
-# 165111
 #!/usr/bin/env python3
 """
-6h_Elder_Ray_BullPower_Force_With_Volume_Regime
-Hypothesis: Elder Ray Bull Power (High - EMA13) measures bullish force, Bear Power (Low - EMA13) measures bearish force.
-Combined with volume confirmation and regime filter (ADX < 25 for range, ADX > 25 for trend), 
-this captures momentum shifts in 6-hour bars. Works in bull markets via Bull Power breaks and 
-in bear markets via Bear Power breaks. Low turnover expected (~15-25 trades/year).
+12h_KAMA_Direction_RSI_ChopFilter
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets. 
+When combined with RSI momentum and a Choppiness regime filter (trend when CHOP < 38.2, range when > 61.8), 
+it filters false signals. Entry occurs when KAMA direction aligns with RSI > 50 (bullish) or < 50 (bearish) 
+in the correct regime, with volume confirmation. Designed for low trade frequency (~15-25/year) on 12h.
 """
 
-name = "6h_Elder_Ray_BullPower_Force_With_Volume_Regime"
-timeframe = "6h"
+name = "12h_KAMA_Direction_RSI_ChopFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,117 +20,106 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for regime filter (once before loop)
+    # === KAMA (adaptive trend) on 12h close ===
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum |close[t] - close[t-1]| over 10
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # start after 10 periods
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # === RSI (14) on 12h close ===
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Choppiness Index (14) on 1d HTF ===
     df_1d = get_htf_data(prices, '1d')
-    
-    # EMA13 for Elder Ray calculation (6-period EMA for 6h timeframe)
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
-    
-    # Volume confirmation: current volume > 1.8x 20-period average (~5 days)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
-    
-    # Regime filter: ADX from 1d to determine trend/range
-    # Calculate ADX components on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
     # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # ATR(14)
+    atr = np.full_like(tr, np.nan)
+    atr[13] = np.mean(tr[1:14])
+    for i in range(14, len(tr)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Sum of ATR over 14 periods
+    sum_atr = np.full_like(tr, np.nan)
+    for i in range(13, len(tr)):
+        sum_atr[i] = np.sum(tr[i-13:i+1])
+    # Choppiness
+    chop = np.full_like(tr, np.nan)
+    for i in range(13, len(tr)):
+        if sum_atr[i] > 0:
+            chop[i] = 100 * np.log10(atr[i] / sum_atr[i]) / np.log10(14)
+        else:
+            chop[i] = 50
+    # Align chop to 12h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smooth TR, DM+, DM- with Wilder's smoothing (alpha = 1/14)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            # First value is simple average
-            result[period-1] = np.nanmean(arr[1:period]) if np.any(~np.isnan(arr[1:period])) else 0
-            # Subsequent values: Wilder smoothing
-            for i in range(period, len(arr)):
-                if not np.isnan(result[i-1]):
-                    result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-                else:
-                    result[i] = np.nanmean(arr[i-period+1:i+1]) if np.any(~np.isnan(arr[i-period+1:i+1])) else 0
-        return result
-    
-    atr = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    # Align regime indicators to 6h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # === Volume confirmation: current > 1.5x 20-period average ===
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # start after warmup for indicators
-        # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(ema13[i])):
-            signals[i] = 0.0
-            continue
-            
+    # Start after warmup period
+    start_idx = max(20, 14, 13)  # KAMA(10) needs 10, RSI(14) needs 14, CHOP(14) needs 13
+    
+    for i in range(start_idx, n):
         if position == 0:
-            # LONG: Bull Power positive AND increasing, volume confirmation, not in strong trend (ADX < 30)
-            if (bull_power[i] > 0 and 
-                bull_power[i] > bull_power[i-1] and  # increasing bullish force
-                volume_filter[i] and 
-                adx_aligned[i] < 30):  # avoid whipsaw in strong trends
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Bear Power negative AND decreasing, volume confirmation, not in strong trend
-            elif (bear_power[i] < 0 and 
-                  bear_power[i] < bear_power[i-1] and  # increasing bearish force (more negative)
-                  volume_filter[i] and 
-                  adx_aligned[i] < 30):
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
+            # Determine regime: trending (CHOP < 38.2) or ranging (CHOP > 61.8)
+            # Only trade in trending regime for trend-following logic
+            if chop_aligned[i] < 38.2:  # Trending regime
+                # LONG: KAMA up (close > KAMA), RSI > 50, volume confirmation
+                if (close[i] > kama[i] and 
+                    rsi[i] > 50 and 
+                    volume_filter[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # SHORT: KAMA down (close < KAMA), RSI < 50, volume confirmation
+                elif (close[i] < kama[i] and 
+                      rsi[i] < 50 and 
+                      volume_filter[i]):
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # EXIT LONG: Bull Power turns negative OR volume drops OR ADX too high (trend exhaustion)
-            if (bull_power[i] <= 0 or 
-                not volume_filter[i] or 
-                adx_aligned[i] > 40):
+            # EXIT LONG: KAMA reverses down OR chop exits trending regime
+            if (close[i] < kama[i] or 
+                chop_aligned[i] >= 38.2):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power turns positive OR volume drops OR ADX too high
-            if (bear_power[i] >= 0 or 
-                not volume_filter[i] or 
-                adx_aligned[i] > 40):
+            # EXIT SHORT: KAMA reverses up OR chop exits trending regime
+            if (close[i] > kama[i] or 
+                chop_aligned[i] >= 38.2):
                 signals[i] = 0.0
                 position = 0
             else:
