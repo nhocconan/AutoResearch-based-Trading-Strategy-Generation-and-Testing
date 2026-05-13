@@ -1,45 +1,18 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d HMA21 trend filter and volume confirmation.
-# Long when price breaks above R3 with 1d HMA21 uptrend and volume > 1.5x average.
-# Short when price breaks below S3 with 1d HMA21 downtrend and volume > 1.5x average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above R3 with 1d EMA50 uptrend and volume > 1.8x average.
+# Short when price breaks below S3 with 1d EMA50 downtrend and volume > 1.8x average.
 # Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# R3/S3 levels provide strong reversal points; daily HMA21 filters for higher-timeframe trend.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# R3/S3 levels provide stronger reversal confirmation than inner levels while maintaining sufficient trade frequency.
+# Daily EMA50 filters for higher-timeframe trend alignment. Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
-name = "4h_Camarilla_R3S3_Breakout_1dHMA21_VolumeSpike_ATRStop_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_ATRStop_v2"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_hma(arr, period):
-    """Calculate Hull Moving Average."""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA for half period
-    weights_half = np.arange(1, half_period + 1)
-    wma_half = np.convolve(arr, weights_half, mode='full')[-len(arr):] / weights_half.sum()
-    wma_half[:half_period-1] = np.nan
-    
-    # WMA for full period
-    weights_full = np.arange(1, period + 1)
-    wma_full = np.convolve(arr, weights_full, mode='full')[-len(arr):] / weights_full.sum()
-    wma_full[:period-1] = np.nan
-    
-    # Raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # WMA of raw HMA with sqrt(period)
-    weights_sqrt = np.arange(1, sqrt_period + 1)
-    hma = np.convolve(raw_hma, weights_sqrt, mode='full')[-len(arr):] / weights_sqrt.sum()
-    hma[:sqrt_period-1] = np.nan
-    
-    return hma
 
 def generate_signals(prices):
     n = len(prices)
@@ -77,11 +50,11 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Get daily data for HMA21 trend filter
-    hma21_1d = calculate_hma(close_1d, 21)
+    # Get daily data for EMA50 trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d HMA21 to 4h timeframe (wait for daily bar to close)
-    hma21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma21_1d)
+    # Align 1d EMA50 to 4h timeframe (wait for daily bar to close)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -91,23 +64,23 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(hma21_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND 1d HMA21 uptrend AND volume > 1.5x average
+            # LONG: Price breaks above R3 AND 1d EMA50 uptrend AND volume > 1.8x average
             if (close[i] > r3_aligned[i] and 
-                close[i] > hma21_1d_aligned[i] and  # Price above HMA21 confirms uptrend
-                volume[i] > 1.5 * avg_volume[i]):
+                close[i] > ema50_1d_aligned[i] and  # Price above EMA50 confirms uptrend
+                volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below S3 AND 1d HMA21 downtrend AND volume > 1.5x average
+            # SHORT: Price breaks below S3 AND 1d EMA50 downtrend AND volume > 1.8x average
             elif (close[i] < s3_aligned[i] and 
-                  close[i] < hma21_1d_aligned[i] and  # Price below HMA21 confirms downtrend
-                  volume[i] > 1.5 * avg_volume[i]):
+                  close[i] < ema50_1d_aligned[i] and  # Price below EMA50 confirms downtrend
+                  volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
