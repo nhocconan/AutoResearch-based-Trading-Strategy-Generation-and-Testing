@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6H_ElderRay_1D_Trend_Volume"
-timeframe = "6h"
+name = "12H_Camarilla_R3_S3_Breakout_1dTrend_Force_v5"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,22 +17,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Elder Ray components on 6h data
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    ema13 = np.zeros_like(close)
-    ema13[:] = np.nan
-    alpha = 2 / (13 + 1)
-    for i in range(len(close)):
-        if i == 0:
-            ema13[i] = close[i]
-        elif np.isnan(ema13[i-1]):
-            ema13[i] = close[i]
+    # Calculate 12h period Camarilla levels (using previous 12h bar)
+    R3 = np.zeros(n)
+    S3 = np.zeros(n)
+    for i in range(1, n):
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        range_val = prev_high - prev_low
+        if range_val > 0:
+            R3[i] = prev_close + range_val * 1.1 / 2
+            S3[i] = prev_close - range_val * 1.1 / 2
         else:
-            ema13[i] = alpha * close[i] + (1 - alpha) * ema13[i-1]
-    
-    bull_power = high - ema13
-    bear_power = low - ema13
+            R3[i] = prev_close
+            S3[i] = prev_close
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -43,19 +41,19 @@ def generate_signals(prices):
     # Calculate EMA34 on daily close
     ema_34 = np.zeros_like(close_1d)
     ema_34[:] = np.nan
-    alpha_34 = 2 / (34 + 1)
+    alpha = 2 / (34 + 1)
     for i in range(len(close_1d)):
         if i == 0:
             ema_34[i] = close_1d[i]
         elif np.isnan(ema_34[i-1]):
             ema_34[i] = close_1d[i]
         else:
-            ema_34[i] = alpha_34 * close_1d[i] + (1 - alpha_34) * ema_34[i-1]
+            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
     
-    # Align 1d EMA34 to 6h timeframe
+    # Align 1d EMA34 to 12h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate volume average (20-period) for volume confirmation
+    # Calculate volume average (20-period) for volume spike filter
     vol_ma_20 = np.zeros_like(volume)
     vol_ma_20[:] = np.nan
     for i in range(19, len(volume)):
@@ -64,39 +62,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(ema_34_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume spike condition: current volume > 2.0x 20-period average
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Bull Power > 0 + Bear Power < 0 (Elder Ray bullish) + 1d uptrend + volume
-            if (bull_power[i] > 0 and bear_power[i] < 0 and 
-                close[i] > ema_34_aligned[i] and vol_confirm):
+            # LONG: Close > R3 + volume spike + 1d uptrend (close > EMA34)
+            if (close[i] > R3[i] and vol_spike and close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bull Power < 0 + Bear Power > 0 (Elder Ray bearish) + 1d downtrend + volume
-            elif (bull_power[i] < 0 and bear_power[i] > 0 and 
-                  close[i] < ema_34_aligned[i] and vol_confirm):
+            # SHORT: Close < S3 + volume spike + 1d downtrend (close < EMA34)
+            elif (close[i] < S3[i] and vol_spike and close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bear Power becomes positive (bullish momentum fading)
-            if bear_power[i] > 0:
+            # EXIT LONG: Close < S3 (reversal to opposite level)
+            if close[i] < S3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bull Power becomes negative (bearish momentum fading)
-            if bull_power[i] < 0:
+            # EXIT SHORT: Close > R3 (reversal to opposite level)
+            if close[i] > R3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
