@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_KAMA_Direction_With_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,29 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d high, low, close for Camarilla levels
+    # KAMA parameters
+    er_period = 10
+    fast_ema = 2
+    slow_ema = 30
+    
+    # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close, n=er_period))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    
+    # Pad arrays to match length
+    change = np.concatenate([np.full(er_period-1, np.nan), change])
+    volatility = np.concatenate([np.full(er_period-1, np.nan), volatility])
+    
+    er = np.divide(change, volatility, out=np.full_like(change, np.nan), where=volatility!=0)
+    
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[er_period-1] = close[er_period-1]
+    
+    for i in range(er_period, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Daily trend filter using EMA(34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 35:
         return np.zeros(n)
-    
-    # Get previous day's high, low, close for current day's Camarilla levels
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Calculate Camarilla levels for each day
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
-    
-    # Align to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # 1d EMA34 trend filter
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -52,36 +61,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+    for i in range(35, n):
+        if (np.isnan(kama[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_condition = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Break above R3 with bullish trend and volume
-            if close[i] > R3_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_condition:
+            # LONG: KAMA rising with bullish trend and volume
+            if kama[i] > kama[i-1] and close[i] > ema34_1d_aligned[i] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S3 with bearish trend and volume
-            elif close[i] < S3_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_condition:
+            # SHORT: KAMA falling with bearish trend and volume
+            elif kama[i] < kama[i-1] and close[i] < ema34_1d_aligned[i] and vol_condition:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S3 or trend reversal
-            if close[i] < S3_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: KAMA falling or trend reversal
+            if kama[i] < kama[i-1] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R3 or trend reversal
-            if close[i] > R3_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: KAMA rising or trend reversal
+            if kama[i] > kama[i-1] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
