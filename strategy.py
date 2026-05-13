@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Trix_Trend_With_Volume_Spike
-Hypothesis: TRIX on weekly timeframe acts as a strong trend filter for daily signals. A weekly TRIX crossover above/below zero with daily volume confirmation and daily price above/below weekly EMA50 signals continuation. Uses 0.30 position size to balance risk/return and limit trade frequency (~10-20/year) to minimize fee drag in daily bars.
+6h_Camarilla_R4_S4_Breakout_1dTrend
+Hypothesis: Camarilla pivot levels on 1d timeframe act as strong support/resistance. 
+Breakouts above R4 or below S4 with volume confirmation and aligned 1d trend (close > EMA34) 
+signal strong momentum continuation. Uses 0.25 position size to balance risk/return and 
+limit trade frequency (~15-30/year) to minimize fee drag in 6-hour bars.
+Works in bull markets via breakout continuation and in bear markets via breakdown continuation.
 """
 
-name = "1d_Weekly_Trix_Trend_With_Volume_Spike"
-timeframe = "1d"
+name = "6h_Camarilla_R4_S4_Breakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,60 +22,71 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla pivots and trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate TRIX (15,9,9) on weekly close
-    ema1 = pd.Series(df_weekly['close']).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
-    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
-    trix = ema3.pct_change(periods=1) * 100  # Percentage change
-    trix_values = trix.fillna(0).values
+    # Calculate Camarilla pivot levels for 1d
+    # R4 = C + ((H-L) * 1.1/2)
+    # S4 = C - ((H-L) * 1.1/2)
+    # Where C, H, L are from previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Weekly trend filter: EMA(50) on weekly close
-    ema50_weekly = pd.Series(df_weekly['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    # Calculate pivot levels
+    camarilla_r4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
+    camarilla_s4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
     
-    # Volume confirmation: current daily volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # 1d trend filter: EMA(34) on close
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: current volume > 2.0x 24-period average (4 days on 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after TRIX warmup
+    for i in range(24, n):  # Start after warmup
         if position == 0:
-            # LONG: Weekly TRIX crosses above zero, volume confirmation, daily price above weekly EMA50 (uptrend)
-            if (trix_values[i] > 0 and trix_values[i-1] <= 0 and 
+            # LONG: Breakout above R4 with volume confirmation and uptrend
+            if (close[i] > camarilla_r4_aligned[i] and 
                 volume_filter[i] and 
-                close[i] > ema50_weekly_aligned[i]):
-                signals[i] = 0.30
+                close[i] > ema34_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Weekly TRIX crosses below zero, volume confirmation, daily price below weekly EMA50 (downtrend)
-            elif (trix_values[i] < 0 and trix_values[i-1] >= 0 and 
+            # SHORT: Breakdown below S4 with volume confirmation and downtrend
+            elif (close[i] < camarilla_s4_aligned[i] and 
                   volume_filter[i] and 
-                  close[i] < ema50_weekly_aligned[i]):
-                signals[i] = -0.30
+                  close[i] < ema34_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Weekly TRIX crosses below zero OR volume drops
-            if (trix_values[i] < 0 and trix_values[i-1] >= 0) or \
-               not volume_filter[i]:
+            # EXIT LONG: Price re-enters below R4 or trend reverses
+            if (close[i] < camarilla_r4_aligned[i]) or \
+               (close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Weekly TRIX crosses above zero OR volume drops
-            if (trix_values[i] > 0 and trix_values[i-1] <= 0) or \
-               not volume_filter[i]:
+            # EXIT SHORT: Price re-enters above S4 or trend reverses
+            if (close[i] > camarilla_s4_aligned[i]) or \
+               (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
