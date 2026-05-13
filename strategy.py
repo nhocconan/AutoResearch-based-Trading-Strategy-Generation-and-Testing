@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_Breakout_1dTrend_Volume
-# Hypothesis: Price reacts to weekly pivot levels (R4/S4) derived from weekly timeframe.
-# Go long when price breaks above R4 with 1-day uptrend and volume confirmation.
-# Go short when price breaks below S4 with 1-day downtrend and volume confirmation.
-# Weekly pivots capture key institutional levels; daily trend ensures alignment with intermediate momentum.
-# Volume spike confirms institutional participation, reducing false breakouts.
-# Designed for 6h timeframe to balance trade frequency (~15-35/year) and capture meaningful moves.
-# Works in bull markets (breakouts above R4 in uptrend) and bear markets (breakdowns below S4 in downtrend).
+# 12h_Donchian_Breakout_20_Trend_Volume
+# Hypothesis: Price breaks out of 20-period Donchian channel on 12h timeframe with trend confirmation and volume spike.
+# Long when price breaks above upper Donchian band with 12h uptrend and volume spike.
+# Short when price breaks below lower Donchian band with 12h downtrend and volume spike.
+# Trend filter uses 12h EMA50 to ensure alignment with higher timeframe momentum.
+# Volume confirmation requires volume > 2.0 * 3-period average to reduce false breakouts.
+# Works in bull markets (breakouts above upper band in uptrend) and bear markets (breakdowns below lower band in downtrend).
+# Target: 15-30 trades/year per symbol to minimize fee drag.
 
-name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_20_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,42 +26,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot calculation (previous week's close)
-    df_weekly = get_htf_data(prices, '1w')
-    
-    # Calculate weekly pivot levels (using prior week's OHLC)
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    # R4 = Close + 3*(High - Low)  (aggressive breakout level)
-    # S4 = Close - 3*(High - Low)  (aggressive breakdown level)
-    weekly_close = df_weekly['close'].values
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    
-    weekly_range = weekly_high - weekly_low
-    r4 = weekly_close + 3 * weekly_range
-    s4 = weekly_close - 3 * weekly_range
-    
-    # 1-day trend: EMA34 (standard for trend identification)
+    # Get 1d data for Donchian channel calculation
     df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align weekly and daily indicators to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_weekly, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_weekly, s4)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Donchian channel (20-period) from 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Volume spike: volume > 2.5 * 20-period average (approx 5 days at 6h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.5 * vol_ma_20
+    # Upper band: highest high of last 20 days
+    upper_band = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 days
+    lower_band = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # 1d trend: EMA50
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1d indicators to 12h timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume spike: volume > 2.0 * 3-period average (1.5 days worth at 12h)
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    volume_spike = volume > 2.0 * vol_ma_3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(upper_band_aligned[i]) or 
+            np.isnan(lower_band_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,26 +66,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R4 + 1-day uptrend + volume spike
-            if close[i] > r4_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > upper band + 1d uptrend + volume spike
+            if close[i] > upper_band_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S4 + 1-day downtrend + volume spike
-            elif close[i] < s4_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < lower band + 1d downtrend + volume spike
+            elif close[i] < lower_band_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S4 or trend reversal
-            if close[i] < s4_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Close below lower band or trend reversal
+            if close[i] < lower_band_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R4 or trend reversal
-            if close[i] > r4_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Close above upper band or trend reversal
+            if close[i] > upper_band_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
