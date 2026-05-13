@@ -1,92 +1,103 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_Pivot_Breakout_WeeklyTrend_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) breakouts on daily chart with weekly trend filter and volume confirmation work in both bull and bear markets.
-Breakout above R1 with weekly uptrend and volume spike = long.
-Breakdown below S1 with weekly downtrend and volume spike = short.
-Exit when price touches opposite pivot level (S1 for longs, R1 for shorts) or weekly trend reverses.
-Uses weekly trend as higher timeframe filter to avoid counter-trend trades.
-Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+12h_HMA_Crossover_1DTrend_Volume
+Hypothesis: Hull Moving Average crossover (16/32) with 1d trend filter and volume confirmation works in both bull and bear markets.
+Long: HMA(16) crosses above HMA(32) with 1d uptrend and volume spike.
+Short: HMA(16) crosses below HMA(32) with 1d downtrend and volume spike.
+Exit on opposite crossover. Uses volume > 2x 20-period average for confirmation.
+Target: 15-30 trades/year per symbol to minimize fee drag.
 """
 
-name = "1d_Camarilla_Pivot_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_HMA_Crossover_1DTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def weighted_moving_average(array, window):
+    """Calculate weighted moving average with weights 1,2,3,...,window"""
+    weights = np.arange(1, window + 1)
+    return np.convolve(array, weights, 'full')[:len(array)] / weights.sum()
+
+def hull_moving_average(array, period):
+    """Calculate Hull Moving Average: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)"""
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    wma_half = weighted_moving_average(array, half_period)
+    wma_full = weighted_moving_average(array, period)
+    
+    raw_hma = 2 * wma_half - wma_full
+    hma = weighted_moving_average(raw_hma, sqrt_period)
+    
+    # Handle NaN values from convolution
+    hma = np.where(np.isnan(hma), 0, hma)
+    return hma
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate previous day's Camarilla pivot levels
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    # We use previous day's values to avoid look-ahead
-    prev_high = np.concatenate([[high[0]], high[:-1]])
-    prev_low = np.concatenate([[low[0]], low[:-1]])
-    prev_close = np.concatenate([[close[0]], close[:-1]])
+    # HMA indicators
+    hma_fast = hull_moving_average(close, 16)
+    hma_slow = hull_moving_average(close, 32)
     
-    pivot_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * pivot_range / 12
-    s1 = prev_close - 1.1 * pivot_range / 12
-    
-    # Weekly trend filter: EMA50 on weekly data
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1w = df_1w['close'].values > ema_50_1w
-    downtrend_1w = df_1w['close'].values < ema_50_1w
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 1.5 * 20-day average
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.5 * vol_ma
+    volume_conf = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(100, n):  # Start after HMA warmup
         # Get values
-        r1_level = r1[i]
-        s1_level = s1[i]
-        uptrend = uptrend_1w_aligned[i]
-        downtrend = downtrend_1w_aligned[i]
+        hma_f = hma_fast[i]
+        hma_s = hma_slow[i]
+        hma_f_prev = hma_fast[i-1]
+        hma_s_prev = hma_slow[i-1]
+        uptrend_htf = uptrend_1d_aligned[i]
+        downtrend_htf = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: break above R1, weekly uptrend, volume confirmation
-            if close[i] > r1_level and uptrend and vol_conf:
+            # LONG: HMA(16) crosses above HMA(32), 1d uptrend, volume confirmation
+            if hma_f > hma_s and hma_f_prev <= hma_s_prev and uptrend_htf and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1, weekly downtrend, volume confirmation
-            elif close[i] < s1_level and downtrend and vol_conf:
+            # SHORT: HMA(16) crosses below HMA(32), 1d downtrend, volume confirmation
+            elif hma_f < hma_s and hma_f_prev >= hma_s_prev and downtrend_htf and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch S1 or weekly trend turns down
-            if close[i] < s1_level or not uptrend:
+            # EXIT LONG: HMA(16) crosses below HMA(32)
+            if hma_f < hma_s and hma_f_prev >= hma_s_prev:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch R1 or weekly trend turns up
-            if close[i] > r1_level or not downtrend:
+            # EXIT SHORT: HMA(16) crosses above HMA(32)
+            if hma_f > hma_s and hma_f_prev <= hma_s_prev:
                 signals[i] = 0.0
                 position = 0
             else:
