@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 12h_Keltner_Squeeze_Breakout_1dTrend_Volume
-# Hypothesis: Price breaks out of Keltner Channel with low volatility squeeze, confirmed by 1d trend and volume spike.
-# Long: Close > upper Keltner + 1d uptrend + volume spike
-# Short: Close < lower Keltner + 1d downtrend + volume spike
-# Exit: Opposite Keltner band or trend reversal
-# Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend).
-# Target: 15-40 trades/year to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Price reacts to Camarilla pivot levels (R1/S1) derived from 1d timeframe.
+# Go long when price breaks above R1 with 1d uptrend and volume confirmation.
+# Go short when price breaks below S1 with 1d downtrend and volume confirmation.
+# Using 1d for Camarilla levels and trend provides more robust levels with fewer signals.
+# Volume spike confirms institutional participation, reducing false breakouts.
+# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
+# Target: 15-35 trades/year per symbol to minimize fee drag.
 
-name = "12h_Keltner_Squeeze_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,41 +26,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend and volatility
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA for trend (50-period)
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla pivot levels (R1, S1) from previous 1d bar
+    # R1 = C + (H-L) * 1.1/12
+    # S1 = C - (H-L) * 1.1/12
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # ATR for Keltner Channel (20-period)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first value
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    camarilla_width = (high_1d - low_1d) * 1.1 / 12
+    r1 = close_1d + camarilla_width
+    s1 = close_1d - camarilla_width
     
-    # 20-period EMA for Keltner basis
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 1d trend: EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Keltner Channels: upper = EMA20 + 2*ATR, lower = EMA20 - 2*ATR
-    keltner_upper = ema20 + 2.0 * atr
-    keltner_lower = ema20 - 2.0 * atr
-    
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume spike: volume > 2.5 * 5-period average
-    vol_ma_5 = pd.Series(volume).rolling(window=5, min_periods=5).mean().values
-    volume_spike = volume > 2.5 * vol_ma_5
+    # Volume spike: volume > 2.0 * 3-period average (1.5 days worth at 4h)
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    volume_spike = volume > 2.0 * vol_ma_3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(keltner_upper[i]) or 
-            np.isnan(keltner_lower[i]) or 
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
             np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,26 +68,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > upper Keltner + 1d uptrend + volume spike
-            if close[i] > keltner_upper[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > R1 + 1d uptrend + volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < lower Keltner + 1d downtrend + volume spike
-            elif close[i] < keltner_lower[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < S1 + 1d downtrend + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below lower Keltner or trend reversal
-            if close[i] < keltner_lower[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close below S1 or trend reversal
+            if close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above upper Keltner or trend reversal
-            if close[i] > keltner_upper[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close above R1 or trend reversal
+            if close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
