@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Camarilla R1/S1 breakout with 1d trend filter and volume spike.
-# Long: Close breaks above R1 with volume spike and 1d EMA34 uptrend.
-# Short: Close breaks below S1 with volume spike and 1d EMA34 downtrend.
-# Exit when price crosses back below R1 (long) or above S1 (short).
-# Uses 12h timeframe to reduce trade frequency, targeting 12-37 trades/year.
-# Works in bull (buy uptrend) and bear (sell downtrend) via 1d trend filter.
+# 6h_Price_Channel_Breakout_1wTrend_VolumeFilter
+# Hypothesis: Price channel breakouts (Donchian 20) combined with weekly trend filter and volume confirmation
+# capture trending moves with low whipsaw. Works in both bull (breakout above upper channel in uptrend) and
+# bear (breakdown below lower channel in downtrend) markets. Weekly trend ensures alignment with higher-timeframe
+# momentum, reducing false signals. Volume filter confirms breakout strength. Target: 15-30 trades/year.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_Price_Channel_Breakout_1wTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,52 +23,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate Camarilla levels from previous 1d bar
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = np.zeros(n)
-    camarilla_s1 = np.zeros(n)
-    
-    # Use previous day's OHLC (shifted by 1 to avoid look-ahead)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # First value
-    prev_high_1d[0] = high_1d[0]
-    prev_low_1d[0] = low_1d[0]
-    
-    camarilla_r1_1d = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
-    camarilla_s1_1d = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    camarilla_r1 = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-    camarilla_s1 = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    # Calculate weekly EMA20 for trend filter
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
 
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # Calculate Donchian channels (20-period) on 6h data
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
+
+    # Volume confirmation: current volume > 2.0 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
-
-    # Get 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if data is not ready
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,26 +62,28 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above R1 with volume spike and 1d EMA uptrend
-            if close[i] > camarilla_r1[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
+            # LONG: Price breaks above upper Donchian channel with volume spike and weekly uptrend
+            if close[i] > highest_high[i] and volume_spike[i] and close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S1 with volume spike and 1d EMA downtrend
-            elif close[i] < camarilla_s1[i] and volume_spike[i] and close[i] < ema_34_1d_aligned[i]:
+            # SHORT: Price breaks below lower Donchian channel with volume spike and weekly downtrend
+            elif close[i] < lowest_low[i] and volume_spike[i] and close[i] < ema_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below R1
-            if close[i] < camarilla_r1[i]:
+            # EXIT LONG: Price re-enters the channel (below midpoint) or weekly trend turns down
+            midpoint = (highest_high[i] + lowest_low[i]) / 2.0
+            if close[i] < midpoint or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above S1
-            if close[i] > camarilla_s1[i]:
+            # EXIT SHORT: Price re-enters the channel (above midpoint) or weekly trend turns up
+            midpoint = (highest_high[i] + lowest_low[i]) / 2.0
+            if close[i] > midpoint or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
