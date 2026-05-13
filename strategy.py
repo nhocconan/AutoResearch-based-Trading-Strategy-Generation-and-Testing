@@ -1,11 +1,12 @@
-#!/usr/bin/env python3
-"""
-6h_Liquidity_Grab_Reversal
-Hypothesis: In ranging markets, price often triggers liquidity sweeps (false breakouts) at prior session highs/lows before reversing. This strategy fades these moves using 1-day session extremes as liquidity zones, confirmed by RSI divergence and volume exhaustion. Works in bull/bear by capturing mean reversion at key levels.
-"""
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 levels provide strong support/resistance in 1d timeframe; breakout with volume confirmation and 1d trend alignment gives high-probability trades. Works in bull markets by catching breakouts and in bear markets by catching reversals at key levels.
+# Timeframe: 12h (as required). Uses 1d Camarilla levels and 1w trend filter.
+# Expected trades: ~20-40/year to stay within fee limits.
 
-name = "6h_Liquidity_Grab_Reversal"
-timeframe = "6h"
+#!/usr/bin/env python3
+
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,102 +23,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get 1d data for session high/low
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1-day RSI for divergence
-    delta_1d = np.diff(close_1d, prepend=close_1d[0])
-    gain_1d = np.where(delta_1d > 0, delta_1d, 0)
-    loss_1d = np.where(delta_1d < 0, -delta_1d, 0)
+    # Calculate Camarilla levels for each 1d bar (based on previous day)
+    # Camarilla R3 = close + (high - low) * 1.1/2
+    # Camarilla S3 = close - (high - low) * 1.1/2
+    camarilla_r3 = np.full_like(close_1d, np.nan)
+    camarilla_s3 = np.full_like(close_1d, np.nan)
     
-    avg_gain_1d = np.zeros_like(gain_1d)
-    avg_loss_1d = np.zeros_like(loss_1d)
-    if len(gain_1d) >= 14:
-        avg_gain_1d[13] = np.mean(gain_1d[1:14])
-        avg_loss_1d[13] = np.mean(loss_1d[1:14])
-        for i in range(14, len(gain_1d)):
-            avg_gain_1d[i] = (avg_gain_1d[i-1] * 13 + gain_1d[i]) / 14
-            avg_loss_1d[i] = (avg_loss_1d[i-1] * 13 + loss_1d[i]) / 14
+    for i in range(1, len(close_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        rang = prev_high - prev_low
+        camarilla_r3[i] = prev_close + rang * 1.1 / 2
+        camarilla_s3[i] = prev_close - rang * 1.1 / 2
     
-    rs_1d = np.divide(avg_gain_1d, avg_loss_1d, out=np.zeros_like(avg_gain_1d), where=avg_loss_1d!=0)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
+    # Get 1w data for trend filter (use EMA34 on weekly close)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # Align 1d data to 6h
-    session_high_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    session_low_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    close_1w = df_1w['close'].values
+    ema_34_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 34:
+        ema_34_1w[33] = np.mean(close_1w[:34])
+        for i in range(34, len(close_1w)):
+            ema_34_1w[i] = (close_1w[i] * 2/35) + (ema_34_1w[i-1] * 33/35)
     
-    # Calculate volume exhaustion (decreasing volume on move)
-    vol_ma_10 = np.zeros_like(volume)
-    for i in range(9, len(volume)):
-        vol_ma_10[i] = np.mean(volume[i-9:i+1])
+    # Align 1d Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Align 1w EMA34 to 12h timeframe
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate volume average (24-period ~ 12 days) for volume spike filter
+    vol_ma_24 = np.full_like(volume, np.nan)
+    for i in range(23, len(volume)):
+        vol_ma_24[i] = np.mean(volume[i-23:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):  # Warmup period
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(session_high_aligned[i]) or 
-            np.isnan(session_low_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(vol_ma_10[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_24[i])):
             signals[i] = 0.0
             continue
         
-        # Liquidity grab conditions
-        near_session_high = high[i] >= session_high_aligned[i] * 0.999  # Within 0.1% of session high
-        near_session_low = low[i] <= session_low_aligned[i] * 1.001   # Within 0.1% of session low
-        
-        # RSI divergence: price makes new high/low but RSI doesn't
-        rsi_divergence_high = near_session_high and rsi[i] < rsi[i-1] and close[i] > close[i-1]
-        rsi_divergence_low = near_session_low and rsi[i] > rsi[i-1] and close[i] < close[i-1]
-        
-        # Volume exhaustion: current volume < average volume
-        volume_exhaustion = volume[i] < vol_ma_10[i]
+        # Volume spike condition: current volume > 2.0x 24-period average
+        vol_spike = volume[i] > 2.0 * vol_ma_24[i]
         
         if position == 0:
-            # LONG: liquidity grab at session low + RSI bearish divergence + volume exhaustion
-            if near_session_low and rsi_divergence_low and volume_exhaustion:
+            # LONG: Price breaks above Camarilla R3 + volume spike + 1w uptrend (close > EMA34)
+            if (close[i] > camarilla_r3_aligned[i] and vol_spike and 
+                close_1w[-1] > ema_34_1w_aligned[i] if len(close_1w) > 0 else False):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: liquidity grab at session high + RSI bullish divergence + volume exhaustion
-            elif near_session_high and rsi_divergence_high and volume_exhaustion:
+            # SHORT: Price breaks below Camarilla S3 + volume spike + 1w downtrend (close < EMA34)
+            elif (close[i] < camarilla_s3_aligned[i] and vol_spike and 
+                  close_1w[-1] < ema_34_1w_aligned[i] if len(close_1w) > 0 else False):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to session low or RSI recovers
-            if close[i] <= session_low_aligned[i] * 1.002 or rsi[i] > 50:
+            # EXIT LONG: Price re-enters below Camarilla R3 or loss of volume/spike
+            if (close[i] < camarilla_r3_aligned[i] or not vol_spike):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to session high or RSI recovers
-            if close[i] >= session_high_aligned[i] * 0.998 or rsi[i] < 50:
+            # EXIT SHORT: Price re-enters above Camarilla S3 or loss of volume/spike
+            if (close[i] > camarilla_s3_aligned[i] or not vol_spike):
                 signals[i] = 0.0
                 position = 0
             else:
