@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 1d_Trix_13_Trend_Filter_Volume_Spike
-# Hypothesis: Use TRIX(13) for momentum with 1w EMA13 trend filter and volume spike confirmation.
-# Long when TRIX crosses above zero and price is above weekly EMA13 and volume spikes.
-# Short when TRIX crosses below zero and price is below weekly EMA13 and volume spikes.
-# Exit when TRIX crosses back through zero or volume drops.
-# Works in bull markets (momentum continuation) and bear markets (counter-trend spikes during panic/reversal).
-# Low frequency due to strict TRIX crossover and volume confirmation requirements.
+# 6h_TurtleSoup_Reversal_1dTrend
+# Hypothesis: Turtle Soup pattern (false breakout reversal) on 6h timeframe filtered by 1d trend direction.
+# In uptrend: wait for false breakdown below prior 3-bar low, then go long on reversal above that low.
+# In downtrend: wait for false breakout above prior 3-bar high, then go short on reversal below that high.
+# This captures liquidity hunts where stops are hunted before real moves resume.
+# Works in bull (buy false breakdowns) and bear (sell false breakouts).
+# Low frequency due to pattern specificity and trend filter.
 
-name = "1d_Trix_13_Trend_Filter_Volume_Spike"
-timeframe = "1d"
+name = "6h_TurtleSoup_Reversal_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,40 +20,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
 
-    # TRIX(13): triple-smoothed EMA of log returns
-    # Calculate once on daily close
-    roc = np.diff(np.log(close), prepend=np.log(close[0]))  # log returns
-    ema1 = pd.Series(roc).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema2 = pd.Series(ema1).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema3 = pd.Series(ema2).ewm(span=13, adjust=False, min_periods=13).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)  # percentage change
-    trix[0] = 0  # first value undefined
-
-    # Weekly EMA13 for trend filter
-    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-
-    # Volume spike: volume > 2.0 * 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
-
-    # Align weekly EMA13 to daily
-    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
+    # Daily trend: EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        # Skip if any required value is NaN
-        if (np.isnan(trix[i]) or 
-            np.isnan(ema13_1w_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+    for i in range(10, n):
+        # Skip if trend value is NaN
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,28 +47,53 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX crosses above zero + weekly uptrend + volume spike
-            if trix[i] > 0 and trix[i-1] <= 0 and close[i] > ema13_1w_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: TRIX crosses below zero + weekly downtrend + volume spike
-            elif trix[i] < 0 and trix[i-1] >= 0 and close[i] < ema13_1w_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
-                position = -1
+            # Need at least 3 bars of history for pattern
+            if i >= 3:
+                # Calculate prior 3-bar low and high (excluding current bar)
+                prior_low = min(low[i-3], low[i-2], low[i-1])
+                prior_high = max(high[i-3], high[i-2], high[i-1])
+
+                # Turtle Soup Long: false breakdown below 3-bar low, then reversal above it
+                # Only in uptrend (price above daily EMA50)
+                if (low[i] < prior_low and  # false breakdown
+                    close[i] > prior_low and  # reversal back above
+                    close[i] > ema50_1d_aligned[i]):  # uptrend filter
+                    signals[i] = 0.25
+                    position = 1
+
+                # Turtle Soup Short: false breakout above 3-bar high, then reversal below it
+                # Only in downtrend (price below daily EMA50)
+                elif (high[i] > prior_high and  # false breakout
+                      close[i] < prior_high and  # reversal back below
+                      close[i] < ema50_1d_aligned[i]):  # downtrend filter
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
+
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero OR volume drops
-            if trix[i] < 0 and trix[i-1] >= 0 or not volume_spike[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit long: close below 3-bar low (pattern failed) or trend reversal
+            if i >= 3:
+                prior_low = min(low[i-3], low[i-2], low[i-1])
+                if close[i] < prior_low or close[i] < ema50_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
                 signals[i] = 0.25
+
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero OR volume drops
-            if trix[i] > 0 and trix[i-1] <= 0 or not volume_spike[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit short: close above 3-bar high (pattern failed) or trend reversal
+            if i >= 3:
+                prior_high = max(high[i-3], high[i-2], high[i-1])
+                if close[i] > prior_high or close[i] > ema50_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
                 signals[i] = -0.25
 
