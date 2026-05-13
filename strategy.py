@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# 1d_Donchian_Breakout_TRIX_Trend
-# Hypothesis: Enter long when price breaks above Donchian upper channel with TRIX > 0 on weekly timeframe (bullish momentum). 
-# Enter short when price breaks below Donchian lower channel with TRIX < 0 on weekly timeframe (bearish momentum).
-# Donchian channels provide clear breakout levels. TRIX filters for momentum direction on higher timeframe.
-# Works in bull markets (breakouts above upper channel with bullish TRIX) and bear markets (breakdowns below lower channel with bearish TRIX).
-# Low frequency due to combined breakout and momentum conditions.
+# 6h_WilliamsFractal_1dTrend_VolumeBreakout
+# Hypothesis: Enter long when Williams bearish fractal breaks (price > bearish fractal level) in the direction of 1d EMA50 trend with volume spike.
+# Enter short when bullish fractal breaks (price < bullish fractal level) in the direction of 1d EMA50 trend with volume spike.
+# Williams fractals identify potential reversal points. A break of the fractal level indicates continuation with momentum.
+# Volume surge confirms institutional participation. Trend filter ensures alignment with higher timeframe momentum.
+# Works in bull (breakouts above fractal in uptrend) and bear (breakdowns below fractal in downtrend).
+# Low frequency due to fractal break requirement and strict volume confirmation.
 
-name = "1d_Donchian_Breakout_TRIX_Trend"
-timeframe = "1d"
+name = "6h_WilliamsFractal_1dTrend_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,36 +25,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for TRIX
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Williams fractals and trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Donchian Channel (20-day) on daily timeframe
-    donchian_window = 20
-    upper_dc = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower_dc = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Williams fractals on daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
     
-    # TRIX on weekly close (15,9,9)
-    close_1w = df_1w['close'].values
-    ema1 = pd.Series(close_1w).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix_raw = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix_raw[0] = 0  # First value has no previous
-    trix = trix_raw * 100  # Convert to percentage
+    # Daily trend: EMA50
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align indicators to daily timeframe
-    upper_dc_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), upper_dc)
-    lower_dc_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low}), lower_dc)
-    trix_aligned = align_htf_to_ltf(prices, df_1w, trix)
+    # Align daily indicators to 6h timeframe
+    # Williams fractals need 2 extra bars for confirmation (formed 2 days ago)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume spike: volume > 2.0 * 4-period average (1 day worth at 6h)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_spike = volume > 2.0 * vol_ma_4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(upper_dc_aligned[i]) or 
-            np.isnan(lower_dc_aligned[i]) or 
-            np.isnan(trix_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,26 +63,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above upper Donchian + weekly TRIX > 0
-            if close[i] > upper_dc_aligned[i] and trix_aligned[i] > 0:
+            # LONG: Price > bearish fractal level + daily uptrend + volume spike
+            if close[i] > bearish_fractal_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian + weekly TRIX < 0
-            elif close[i] < lower_dc_aligned[i] and trix_aligned[i] < 0:
+            # SHORT: Price < bullish fractal level + daily downtrend + volume spike
+            elif close[i] < bullish_fractal_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below lower Donchian channel
-            if close[i] < lower_dc_aligned[i]:
+            # EXIT LONG: Price < bullish fractal level OR trend reversal
+            if close[i] < bullish_fractal_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above upper Donchian channel
-            if close[i] > upper_dc_aligned[i]:
+            # EXIT SHORT: Price > bearish fractal level OR trend reversal
+            if close[i] > bearish_fractal_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
