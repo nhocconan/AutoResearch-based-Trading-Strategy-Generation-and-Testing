@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Camarilla R3/S3 breakout on 4h with daily trend filter (price > EMA50 for longs, < EMA50 for shorts) and volume spike confirmation. Works in bull markets by catching breakouts and in bear markets by fading false breaks via trend filter. Volume confirms institutional participation. Designed for 4h timeframe to target 25-50 trades/year.
+6h_EMA_Ribbon_Retest_Trend
+Hypothesis: Trade EMA ribbon retests in the direction of weekly trend. Uses 8/21/55 EMA ribbon on 6h. When price pulls back to the ribbon (within 0.5% of the 21 EMA) and the weekly trend is up (price > weekly EMA200), go long. When price pulls back to the ribbon and weekly trend is down (price < weekly EMA200), go short. This strategy aims to catch trend continuations with low-risk entries during pullbacks, working in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets. Designed for 6h timeframe to target 15-35 trades/year.
 """
 
-name = "4h_Camarilla_Pivot_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_EMA_Ribbon_Retest_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,75 +14,69 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate 6h EMA ribbon: 8, 21, 55
+    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels from previous day
-    # R3 = close + 1.1 * (high - low) / 2
-    # S3 = close - 1.1 * (high - low) / 2
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + 1.1 * camarilla_range / 2
-    s3 = close_1d - 1.1 * camarilla_range / 2
-    
-    # Align Camarilla levels to 4h timeframe (wait for daily close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(55, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema8[i]) or np.isnan(ema21[i]) or np.isnan(ema55[i]) or 
+            np.isnan(ema200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Define ribbon area: between 8 and 55 EMA
+        ribbon_top = max(ema8[i], ema55[i])
+        ribbon_bottom = min(ema8[i], ema55[i])
+        
+        # Price near 21 EMA (within 0.5%)
+        near_ema21 = abs(close[i] - ema21[i]) / ema21[i] < 0.005
+        
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema200_1w_aligned[i]
+        weekly_downtrend = close[i] < ema200_1w_aligned[i]
         
         if position == 0:
-            # LONG: Price breaks above R3 with volume spike and above daily EMA50
-            if close[i] > r3_aligned[i] and vol_spike and close[i] > ema_50_1d_aligned[i]:
+            # LONG: Price near 21 EMA from below AND weekly uptrend
+            if near_ema21 and weekly_uptrend and low[i] <= ribbon_top and high[i] >= ribbon_bottom:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with volume spike and below daily EMA50
-            elif close[i] < s3_aligned[i] and vol_spike and close[i] < ema_50_1d_aligned[i]:
+            # SHORT: Price near 21 EMA from above AND weekly downtrend
+            elif near_ema21 and weekly_downtrend and low[i] <= ribbon_top and high[i] >= ribbon_bottom:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 or volume drops
-            if close[i] < s3_aligned[i] or not vol_spike:
+            # EXIT LONG: Price crosses below 8 EMA or weekly trend turns down
+            if close[i] < ema8[i] or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 or volume drops
-            if close[i] > r3_aligned[i] or not vol_spike:
+            # EXIT SHORT: Price crosses above 55 EMA or weekly trend turns up
+            if close[i] > ema55[i] or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
