@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 12h_PreviousDayCloseBreakout_VolumeTrend
-# Hypothesis: Breakout above previous day's high or below previous day's low on 12h timeframe,
-# confirmed by 1d EMA trend and volume spike (>2x 20-period average). Enter long when price
-# breaks above prior day's high with uptrend, short when breaks below prior day's low with downtrend.
-# Exit when price crosses back below/above the 1d EMA. Uses previous day's levels to avoid look-ahead.
-# Targets 15-25 trades/year on 12h to minimize fee drag and work in both bull/bear via trend filter.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Use Camarilla pivot levels (R3/S3) from 1d for breakout entries, confirmed by 1d EMA trend and volume spikes (>2x 20-period average). Enter long at R3 break with uptrend, short at S3 break with downtrend. Exit at close crossing 1d EMA. Targets 15-25 trades/year on 4h to minimize fee drag and work in both bull/bear via trend filter. R3/S3 are stronger breakout levels than R1/S1, reducing false signals.
 
-name = "12h_PreviousDayCloseBreakout_VolumeTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,7 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for prior day's high/low and EMA trend
+    # Get 1d data for Camarilla pivot and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -32,15 +28,17 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Previous day's high and low (not current day's)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_high_1d[0] = np.nan  # First day has no previous
-    prev_low_1d[0] = np.nan
+    # Calculate Camarilla pivot levels (R3, S3) from previous 1d candle
+    # PP = (H + L + C) / 3
+    # R3 = C + (H - L) * 1.1 / 4
+    # S3 = C - (H - L) * 1.1 / 4
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    r3 = close_1d + (high_1d - low_1d) * 1.1 / 4.0
+    s3 = close_1d - (high_1d - low_1d) * 1.1 / 4.0
 
-    # Align previous day's levels to 12h timeframe (available after 1d candle closes)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high_1d)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low_1d)
+    # Align Camarilla levels to 4h timeframe (available after 1d candle closes)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
 
     # 1d EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -54,7 +52,7 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,14 +62,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above previous day's high + price > 1d EMA50 + volume spike
-            if (close[i] > prev_high_aligned[i] and 
+            # LONG: Close breaks above R3 + price > 1d EMA50 + volume spike
+            if (close[i] > r3_aligned[i] and 
                 close[i] > ema50_1d_aligned[i] and
                 volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below previous day's low + price < 1d EMA50 + volume spike
-            elif (close[i] < prev_low_aligned[i] and 
+            # SHORT: Close breaks below S3 + price < 1d EMA50 + volume spike
+            elif (close[i] < s3_aligned[i] and 
                   close[i] < ema50_1d_aligned[i] and
                   volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
