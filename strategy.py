@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
+# 1d_1W_Aggressive_Momentum_With_Trend_Filter
+# Hypothesis: Strong momentum bursts on daily timeframe, confirmed by weekly trend and volume spikes,
+# capture explosive moves in both bull and bear markets. Uses weekly EMA for trend filter and
+# daily RSI for momentum exhaustion. Designed for low frequency (10-25 trades/year) to minimize
+# fee drag while capturing major trends.
 
-# 12h_WeeklyPivot_R1_S1_Breakout_TrendVolume
-# Hypothesis: Price reactions at weekly Camarilla pivot levels (R1, S1) provide high-probability breakout/reversal signals.
-# Uses 1d trend filter (price above/below 200 EMA) to align with higher timeframe momentum.
-# Volume spike confirms institutional participation. Designed for low-frequency, high-quality setups to minimize fee drag.
-# Works in both bull and bear markets by following the 1d trend direction.
-
-name = "12h_WeeklyPivot_R1_S1_Breakout_TrendVolume"
-timeframe = "12h"
+name = "1d_1W_Aggressive_Momentum_With_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,40 +23,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot calculation
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
 
-    # Calculate weekly pivot points and R1/S1 levels
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
+    # Weekly EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
 
-    # Align weekly pivot levels to 12h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Daily RSI for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
 
-    # 1d EMA200 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-
-    # Volume spike: volume > 2.0 * 24-period average (~12 days at 12h)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > 2.0 * vol_ma_24
+    # Volume spike: volume > 2.0 * 20-day average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * vol_ma_20
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema200_aligned[i])):
+        if np.isnan(ema34_1w_aligned[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,29 +59,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Uptrend + price breaks above R1 + volume spike
-            if close[i] > ema200_aligned[i] and close[i] > r1_aligned[i] * 1.001 and volume_spike[i]:
-                signals[i] = 0.25
+            # LONG: Uptrend + RSI > 60 (momentum) + volume spike
+            if close[i] > ema34_1w_aligned[i] and rsi[i] > 60 and volume_spike[i]:
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Downtrend + price breaks below S1 + volume spike
-            elif close[i] < ema200_aligned[i] and close[i] < s1_aligned[i] * 0.999 and volume_spike[i]:
-                signals[i] = -0.25
+            # SHORT: Downtrend + RSI < 40 (momentum) + volume spike
+            elif close[i] < ema34_1w_aligned[i] and rsi[i] < 40 and volume_spike[i]:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below pivot or trend turns bearish
-            if close[i] < pivot_aligned[i] * 0.999 or close[i] < ema200_aligned[i]:
+            # EXIT LONG: RSI < 50 (momentum fade) or trend turns bearish
+            if rsi[i] < 50 or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Price rises above pivot or trend turns bullish
-            if close[i] > pivot_aligned[i] * 1.001 or close[i] > ema200_aligned[i]:
+            # EXIT SHORT: RSI > 50 (momentum fade) or trend turns bullish
+            if rsi[i] > 50 or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
 
     return signals
