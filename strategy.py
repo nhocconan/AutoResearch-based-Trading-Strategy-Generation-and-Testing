@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_1wATR_Filter"
-timeframe = "1d"
+name = "6h_DonchianBreakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,107 +15,68 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Load 1W data ONCE for ATR filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:  # Need enough for ATR(14)
+    # Load 1D data ONCE for trend filter and volume context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1D EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate ATR(14) on 1W
-    def calculate_atr(high, low, close, period=14):
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        
-        atr = np.full_like(tr, np.nan)
-        if len(tr) >= period:
-            atr[period-1] = np.nanmean(tr[1:period])
-            for i in range(period, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
+    # Calculate 1D average volume for volume filter
+    volume_1d = df_1d['volume'].values
+    volume_1d_series = pd.Series(volume_1d)
+    vol_avg_1d = volume_1d_series.rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    atr_1w = calculate_atr(high_1w, low_1w, close_1w, 14)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
-    
-    # Calculate KAMA on 1D
-    def kama(close, er_period=10, fast_sc=2, slow_sc=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=er_period))
-        change = np.concatenate([[np.nan] * er_period, change])
-        volatility = np.abs(np.diff(close))
-        volatility = np.concatenate([[np.nan], volatility])
-        
-        er = np.full_like(close, np.nan)
-        if len(volatility) >= er_period:
-            vol_sum = np.nansum(volatility[1:er_period+1]) if er_period > 0 else 0
-            if vol_sum > 0:
-                er[er_period] = change[er_period] / vol_sum
-            for i in range(er_period+1, len(close)):
-                vol_sum = vol_sum - volatility[i-er_period] + volatility[i]
-                if vol_sum > 0:
-                    er[i] = change[i] / vol_sum
-        
-        # Smoothing Constants
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        
-        # KAMA
-        kama_val = np.full_like(close, np.nan)
-        kama_val[0] = close[0]
-        for i in range(1, len(close)):
-            if not np.isnan(sc[i]):
-                kama_val[i] = kama_val[i-1] + sc[i] * (close[i] - kama_val[i-1])
-            else:
-                kama_val[i] = kama_val[i-1]
-        return kama_val
-    
-    kama_val = kama(close)
+    # Calculate 6H Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after sufficient data
-        if (np.isnan(kama_val[i]) or np.isnan(atr_1w_aligned[i])):
+    for i in range(50, n):  # Start after sufficient data
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to KAMA
-        price_above_kama = close[i] > kama_val[i]
-        price_below_kama = close[i] < kama_val[i]
+        # Trend filter: price above/below 1D EMA50
+        price_above_ema = close[i] > ema50_1d_aligned[i]
+        price_below_ema = close[i] < ema50_1d_aligned[i]
         
-        # ATR filter: only trade when volatility is elevated (above average)
-        # Using 50-period average of ATR as threshold
-        if i >= 50:
-            atr_avg = np.nanmean(atr_1w_aligned[i-50:i])
-            high_volatility = atr_1w_aligned[i] > atr_avg
-        else:
-            high_volatility = True  # Allow trading until we have enough data for average
+        # Volume filter: current volume above 1D average
+        volume_filter = volume[i] > vol_avg_1d_aligned[i]
         
         if position == 0:
-            # LONG: price above KAMA + high volatility
-            if price_above_kama and high_volatility:
+            # LONG: Donchian breakout above upper band + uptrend + volume
+            if close[i] > donchian_high[i] and price_above_ema and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price below KAMA + high volatility
-            elif price_below_kama and high_volatility:
+            # SHORT: Donchian breakdown below lower band + downtrend + volume
+            elif close[i] < donchian_low[i] and price_below_ema and volume_filter:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below KAMA or volatility drops
-            if not price_above_kama or not high_volatility:
+            # EXIT LONG: Price crosses below Donchian lower band or trend reversal
+            if close[i] < donchian_low[i] or not price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above KAMA or volatility drops
-            if not price_below_kama or not high_volatility:
+            # EXIT SHORT: Price crosses above Donchian upper band or trend reversal
+            if close[i] > donchian_high[i] or not price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
