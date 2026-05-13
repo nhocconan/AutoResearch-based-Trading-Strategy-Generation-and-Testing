@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R mean reversion with 1d trend filter and volume spike confirmation.
-# Long when Williams %R(14) crosses above -80 (oversold), 1d close > 1d EMA50 (uptrend), and volume > 2x 20-period average.
-# Short when Williams %R(14) crosses below -20 (overbought), 1d close < 1d EMA50 (downtrend), and volume > 2x 20-period average.
-# Williams %R identifies short-term extremes; 1d EMA50 filters for intermediate trend alignment to avoid counter-trend trades.
-# Volume spike confirms participation in the reversal. Target: 50-150 total trades over 4 years (12-37/year) on 6h.
-# Works in bull/bear markets by trading mean reversion within the prevailing trend.
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter, volume confirmation, and ATR trailing stop.
+# Long when price breaks above Donchian upper (20-bar high), 1w EMA50 is rising (uptrend), and volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower (20-bar low), 1w EMA50 is falling (downtrend), and volume > 1.5x 20-period average.
+# Uses ATR(14) trailing stop (2.0x) for risk control.
+# Donchian channels provide clear trend-following structure that works in both bull and bear markets via breakouts.
+# 1w EMA50 trend filter ensures we trade with the long-term trend, reducing whipsaws in ranging markets.
+# Volume confirmation adds validity to breakouts. Target: 50-150 total trades over 4 years (12-37/year) on 12h.
 
-name = "6h_WilliamsR_MeanReversion_1dEMA50_Trend_Volume_v1"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1wEMA50_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,63 +25,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1d data for trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Calculate Donchian channels (20-period) on 12h timeframe
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate EMA(50) on 1d data
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Donchian upper = 20-period high, lower = 20-period low
+    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d EMA50 to 6h timeframe (wait for 1d bar to close)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Donchian levels to 12h timeframe (wait for 12h bar to close)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
     
-    # Calculate volume confirmation: volume > 2x 20-period average
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA(50) on 1w data
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1w EMA50 to 12h timeframe (wait for 1w bar to close)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
+    lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(50, n):  # Start after sufficient data for indicators
+    for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R crosses above -80 (from below) AND 1d EMA50 uptrend AND volume spike
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
-                close[i] > ema_50_1d_aligned[i] and volume_confirm[i]):
+            # LONG: Price > Donchian upper AND 1w EMA50 rising (trending up) AND volume confirmation
+            if close[i] > donchian_upper_aligned[i] and ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R crosses below -20 (from above) AND 1d EMA50 downtrend AND volume spike
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
-                  close[i] < ema_50_1d_aligned[i] and volume_confirm[i]):
+                highest_since_entry[i] = high[i]  # Initialize tracking
+            # SHORT: Price < Donchian lower AND 1w EMA50 falling (trending down) AND volume confirmation
+            elif close[i] < donchian_lower_aligned[i] and ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
+                lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
                 signals[i] = 0.0
+                # Carry forward tracking values when flat
+                if i > 0:
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:
-            # EXIT LONG: Williams %R crosses above -20 (overbought) OR loss of volume confirmation
-            if williams_r[i] > -20 and williams_r[i-1] <= -20:
+            # Update highest high since entry
+            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
+                # Reset tracking when flat
+                highest_since_entry[i] = np.nan
             else:
                 signals[i] = 0.25
+                # Carry forward tracking
+                if i > 0:
+                    highest_since_entry[i] = highest_since_entry[i-1]
         elif position == -1:
-            # EXIT SHORT: Williams %R crosses below -80 (oversold) OR loss of volume confirmation
-            if williams_r[i] < -80 and williams_r[i-1] >= -80:
+            # Update lowest low since entry
+            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
+                # Reset tracking when flat
+                lowest_since_entry[i] = np.nan
             else:
                 signals[i] = -0.25
+                # Carry forward tracking
+                if i > 0:
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
     
     return signals
