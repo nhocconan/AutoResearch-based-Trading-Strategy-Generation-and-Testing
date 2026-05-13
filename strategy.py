@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band with 1w EMA34 > price (bullish bias) and volume > 1.5x average.
-# Short when price breaks below Donchian lower band with 1w EMA34 < price (bearish bias) and volume > 1.5x average.
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and volume confirmation.
+# Long when Bull Power > 0, price > 1d EMA34, and volume > 1.5x average.
+# Short when Bear Power < 0, price < 1d EMA34, and volume > 1.5x average.
 # Uses ATR(20) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
-# 1w EMA34 filter ensures we trade with the weekly trend, reducing whipsaw.
-# Donchian(20) provides clear breakout/breakdown levels with proven edge on SOLUSDT.
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+# Elder Ray measures bull/bear strength relative to EMA13; combined with 1d EMA34 trend filter
+# to trade in direction of higher timeframe trend, reducing whipsaw in ranging markets.
 
-name = "1d_Donchian20_1wEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -36,19 +36,22 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA13 for Elder Ray (using close prices)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate Bull Power and Bear Power
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Calculate EMA34 on weekly close
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Align 1w EMA34 to daily timeframe (wait for weekly bar to close)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA34 to 6h timeframe (wait for daily bar to close)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,23 +60,23 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper band AND 1w EMA34 > price (bullish bias) AND volume > 1.5x average
-            if (close[i] > donchian_high[i] and 
-                ema_34_1w_aligned[i] > close[i] and 
+            # LONG: Bull Power > 0 AND price > 1d EMA34 AND volume > 1.5x average
+            if (bull_power[i] > 0 and 
+                close[i] > ema34_1d_aligned[i] and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian lower band AND 1w EMA34 < price (bearish bias) AND volume > 1.5x average
-            elif (close[i] < donchian_low[i] and 
-                  ema_34_1w_aligned[i] < close[i] and 
+            # SHORT: Bear Power < 0 AND price < 1d EMA34 AND volume > 1.5x average
+            elif (bear_power[i] < 0 and 
+                  close[i] < ema34_1d_aligned[i] and 
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
