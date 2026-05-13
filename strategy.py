@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Williams %R reversal with 1w EMA34 trend filter and volume spike (>1.8x 20-bar avg). Uses 1w Williams %R for regime filter (extreme readings = fading momentum). Designed for BTC/ETH robustness in both bull/bear regimes: Williams %R captures overextended moves, EMA34 filter ensures trend alignment, volume spike confirms institutional interest, and 1w Williams %R avoids counter-trend entries. Targets 7-25 trades/year on 1d timeframe.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike (>2.0x 20-bar avg) for BTC/ETH robustness. 
+# Donchian captures structure, EMA50 filters trend alignment on higher timeframe, volume spike confirms institutional participation.
+# Designed for low trade frequency (<40/year) to minimize fee drag while maintaining edge in bull/bear regimes via trend filter.
+# Uses discrete position sizing (0.25) and Camarilla R3/S3 from 1d for structured profit-taking/exits.
 
-name = "1d_WilliamsR_Reversal_1wEMA34_VolumeSpike_RegimeFilter_v1"
-timeframe = "1d"
+name = "4h_Donchian20_Breakout_1dEMA50_VolumeSpike_CamarillaExit_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,73 +22,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA34 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Calculate 1d EMA50 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1w Williams %R for regime filter (avoid counter-trend)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    highest_high_1w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    lowest_low_1w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
-    williams_r_1w = -100 * (highest_high_1w - close_1w) / (highest_high_1w - lowest_low_1w)
-    williams_r_1w = np.where((highest_high_1w - lowest_low_1w) == 0, -50, williams_r_1w)
-    williams_r_1w_aligned = align_htf_to_ltf(prices, df_1w, williams_r_1w)
-    
-    # Calculate Williams %R (14-period) on 1d data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate Donchian(20) channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     
+    # Calculate 1d Camarilla levels for exits
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after lookback
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(williams_r_1w_aligned[i]) or 
-            np.isnan(williams_r[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(avg_volume[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R oversold (< -80), price > 1w EMA34, volume spike (>1.8x avg), 1w Williams %R not extremely oversold (> -90) to avoid fading momentum
-            if (williams_r[i] < -80 and 
-                close[i] > ema_34_1w_aligned[i] and 
-                volume[i] > 1.8 * avg_volume[i] and
-                williams_r_1w_aligned[i] > -90):
+            # LONG: Price breaks above Donchian upper (> highest_high), price > 1d EMA50, volume spike (>2.0x avg)
+            if (close[i] > highest_high[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R overbought (> -20), price < 1w EMA34, volume spike (>1.8x avg), 1w Williams %R not extremely overbought (< -10) to avoid fading momentum
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema_34_1w_aligned[i] and 
-                  volume[i] > 1.8 * avg_volume[i] and
-                  williams_r_1w_aligned[i] < -10):
+            # SHORT: Price breaks below Donchian lower (< lowest_low), price < 1d EMA50, volume spike (>2.0x avg)
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches 1w EMA34 (trend invalidation) OR Williams %R becomes overbought (> -20)
-            if (close[i] <= ema_34_1w_aligned[i] or 
-                williams_r[i] > -20):
+            # EXIT LONG: Price reaches Camarilla R3 (profit target) OR breaks below Donchian lower (stop/reversal)
+            if (close[i] >= camarilla_r3_aligned[i] or 
+                close[i] < lowest_low[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches 1w EMA34 (trend invalidation) OR Williams %R becomes oversold (< -80)
-            if (close[i] >= ema_34_1w_aligned[i] or 
-                williams_r[i] < -80):
+            # EXIT SHORT: Price reaches Camarilla S3 (profit target) OR breaks above Donchian upper (stop/reversal)
+            if (close[i] <= camarilla_s3_aligned[i] or 
+                close[i] > highest_high[i]):
                 signals[i] = 0.0
                 position = 0
             else:
