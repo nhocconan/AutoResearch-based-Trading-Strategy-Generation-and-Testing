@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R mean reversion with 1d ADX trend filter and volume confirmation (>1.5x avg volume).
-# Williams %R < -80 for long, > -20 for short. Only trade counter to 1d ADX trend (ADX < 25 = range, fade extremes).
-# In ranging markets (ADX < 25), Williams %R extremes provide high-probability mean reversion entries.
-# Volume confirmation ensures institutional participation at reversal points.
-# Discrete sizing 0.25, ATR(14) trailing stop (2.5x) for risk control.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation (>1.5x avg volume). Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# EMA trend filter on 1w ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw in both bull and bear markets.
+# Donchian breakouts capture strong momentum moves, volume confirmation ensures institutional participation.
+# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
 
-name = "6h_WilliamsR_MeanReversion_1dADXTrend_VolumeConfirm_ATRStop_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA200_VolumeConfirm_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -35,50 +34,20 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when highest_high == lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w EMA200 for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate 1d ADX(14)
-    # True Range
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Align 1w EMA200 to 12h timeframe (wait for 1w bar to close)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed DM and ATR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_1d_smooth = pd.Series(atr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr_1d_smooth
-    minus_di = 100 * minus_dm_smooth / atr_1d_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d ADX to 6h timeframe (wait for 1d bar to close)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Get 12h data for Donchian channel (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -87,22 +56,22 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) AND 1d ADX < 25 (ranging market) AND volume > 1.5x average
-            if (williams_r[i] < -80 and 
-                adx_aligned[i] < 25 and 
+            # LONG: Price breaks above Donchian upper band AND 1w EMA200 > 0 (rising trend) AND volume > 1.5x average
+            if (close[i] > highest_20[i] and 
+                ema200_1w_aligned[i] > np.roll(ema200_1w_aligned, 1)[i] and  # EMA200 rising
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Williams %R > -20 (overbought) AND 1d ADX < 25 (ranging market) AND volume > 1.5x average
-            elif (williams_r[i] > -20 and 
-                  adx_aligned[i] < 25 and 
+            # SHORT: Price breaks below Donchian lower band AND 1w EMA200 < 0 (falling trend) AND volume > 1.5x average
+            elif (close[i] < lowest_20[i] and 
+                  ema200_1w_aligned[i] < np.roll(ema200_1w_aligned, 1)[i] and  # EMA200 falling
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
