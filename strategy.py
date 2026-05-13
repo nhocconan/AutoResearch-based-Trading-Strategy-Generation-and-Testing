@@ -1,15 +1,13 @@
-#/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Price reacts to Camarilla pivot levels (R1/S1) derived from 1w timeframe.
-# Go long when price breaks above R1 with 1w uptrend and volume confirmation.
-# Go short when price breaks below S1 with 1w downtrend and volume confirmation.
-# Weekly trend filter ensures alignment with higher timeframe momentum.
-# Volume spike confirms institutional participation, reducing false breakouts.
-# Designed for 12h timeframe to target 12-37 trades per year per symbol.
-# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
+#!/usr/bin/env python3
+# 4h_Trix_VolumeRegime
+# Hypothesis: TRIX (1-period smoothed triple EMA) + volume spike + chop regime (ADX < 25) identifies momentum bursts in low-volatility environments.
+# Long: TRIX crosses above zero, volume spike, ADX < 25. Short: TRIX crosses below zero, volume spike, ADX < 25.
+# Exit: TRIX crosses back through zero or ADX rises above 25 (trending regime).
+# Works in both bull and bear markets by capturing momentum bursts during consolidation.
+# Target: 20-50 trades/year per symbol.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Trix_VolumeRegime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,45 +19,54 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
 
-    # Get 1w data for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate Camarilla pivot levels (R1, S1) from previous 1w bar
-    # R1 = C + (H-L) * 1.1/12
-    # S1 = C - (H-L) * 1.1/12
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    camarilla_width = (high_1w - low_1w) * 1.1 / 12
-    r1 = close_1w + camarilla_width
-    s1 = close_1w - camarilla_width
-    
-    # 1w trend: EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1w indicators to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Volume spike: volume > 2.0 * 3-period average (4.5 days worth at 12h)
-    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
-    volume_spike = volume > 2.0 * vol_ma_3
-    
+    # TRIX: 1-period smoothed triple EMA (15-period EMA applied 3 times)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3 / ema3.shift(1) - 1)
+    trix = trix.values
+
+    # ADX for chop regime (ADX < 25 = ranging/choppy)
+    # Calculate +DI, -DI, DX
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar has no previous close
+
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx[:13] = np.nan  # not enough data for first 14 periods
+
+    # Chop regime: ADX < 25
+    chop_regime = adx < 25
+
+    # Volume spike: volume > 2.0 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * vol_ma_20
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(15, n):  # start after TRIX warmup
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(trix[i]) or 
+            np.isnan(trix[i-1]) or 
+            np.isnan(chop_regime[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,26 +75,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R1 + 1w uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema50_1w_aligned[i] and volume_spike[i]:
+            # LONG: TRIX crosses above zero, volume spike, chop regime
+            if trix[i] > 0 and trix[i-1] <= 0 and volume_spike[i] and chop_regime[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S1 + 1w downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema50_1w_aligned[i] and volume_spike[i]:
+            # SHORT: TRIX crosses below zero, volume spike, chop regime
+            elif trix[i] < 0 and trix[i-1] >= 0 and volume_spike[i] and chop_regime[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S1 or trend reversal
-            if close[i] < s1_aligned[i] or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: TRIX crosses below zero or regime changes (ADX >= 25)
+            if trix[i] < 0 or not chop_regime[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R1 or trend reversal
-            if close[i] > r1_aligned[i] or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: TRIX crosses above zero or regime changes (ADX >= 25)
+            if trix[i] > 0 or not chop_regime[i]:
                 signals[i] = 0.0
                 position = 0
             else:
