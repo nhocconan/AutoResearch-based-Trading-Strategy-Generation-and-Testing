@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Bollinger Band breakout with 1d ADX trend filter and volume confirmation (>1.5x 20-bar avg). Uses 1w Camarilla pivot levels for dynamic profit targets. Designed for BTC/ETH robustness: Bollinger breakouts capture volatility expansion, 1d ADX>25 ensures trend alignment, volume spike confirms participation, and weekly Camarilla levels provide structured exits. Targets 12-37 trades/year on 6h timeframe.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation. Uses 1h Williams %R for precise entry timing. Designed for BTC/ETH robustness: Camarilla breakouts capture institutional order flow, EMA34 filter ensures alignment with higher timeframe trend, volume spike confirms participation, and Williams %R on 1h provides mean-reversion entry within the breakout direction. Targets 20-50 trades/year on 4h timeframe.
 
-name = "6h_BBand_Breakout_1dADX_VolumeSpike_1wCamarillaExits_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_1hWMR_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,111 +19,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ADX for trend filter (HTF)
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    # Smooth TR, DM+ and DM- with Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # first value is simple average
-        result[period-1] = np.nanmean(arr[1:period])
-        # subsequent values: Wilder's smoothing
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    atr = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr
-    di_minus = 100 * dm_minus_smooth / atr
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx = wilder_smooth(dx, 14)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Bollinger Bands (20, 2) on 6h data
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
+    # Calculate 1h Williams %R (14-period) for entry timing
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 14:
+        return np.zeros(n)
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
+    close_1h = df_1h['close'].values
+    highest_high_1h = pd.Series(high_1h).rolling(window=14, min_periods=14).max().values
+    lowest_low_1h = pd.Series(low_1h).rolling(window=14, min_periods=14).min().values
+    williams_r_1h = -100 * (highest_high_1h - close_1h) / (highest_high_1h - lowest_low_1h)
+    williams_r_1h = np.where((highest_high_1h - lowest_low_1h) == 0, -50, williams_r_1h)
+    williams_r_1h_aligned = align_htf_to_ltf(prices, df_1h, williams_r_1h)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
     
-    # Calculate 1w Camarilla levels for dynamic exits (using HTF close)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    camarilla_r4 = close_1w + (high_1w - low_1w) * 1.1 / 2
-    camarilla_s4 = close_1w - (high_1w - low_1w) * 1.1 / 2
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    # Calculate 1d Camarilla levels (using prior day's close, high, low)
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):  # start after lookback
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(sma_20[i]) or 
-            np.isnan(std_20[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(williams_r_1h_aligned[i]) or 
             np.isnan(avg_volume[i]) or 
-            np.isnan(camarilla_r4_aligned[i]) or 
-            np.isnan(camarilla_s4_aligned[i])):
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > upper BBAND, ADX > 25 (trending), volume spike (>1.5x avg)
-            if (close[i] > upper_band[i] and 
-                adx_aligned[i] > 25 and 
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Close breaks above Camarilla R3, price > 1d EMA34, volume spike (>2.0x avg), Williams %R not overbought (> -80)
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > 2.0 * avg_volume[i] and 
+                williams_r_1h_aligned[i] > -80):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price < lower BBAND, ADX > 25 (trending), volume spike (>1.5x avg)
-            elif (close[i] < lower_band[i] and 
-                  adx_aligned[i] > 25 and 
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Close breaks below Camarilla S3, price < 1d EMA34, volume spike (>2.0x avg), Williams %R not oversold (< -20)
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > 2.0 * avg_volume[i] and 
+                  williams_r_1h_aligned[i] < -20):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches Camarilla R4 (profit target) OR ADX < 20 (trend weak)
-            if (close[i] >= camarilla_r4_aligned[i] or 
-                adx_aligned[i] < 20):
+            # EXIT LONG: Price reaches Camarilla S3 (mean reversion) OR Williams %R becomes oversold (< -80)
+            if (close[i] <= camarilla_s3_aligned[i] or 
+                williams_r_1h_aligned[i] < -80):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches Camarilla S4 (profit target) OR ADX < 20 (trend weak)
-            if (close[i] <= camarilla_s4_aligned[i] or 
-                adx_aligned[i] < 20):
+            # EXIT SHORT: Price reaches Camarilla R3 (mean reversion) OR Williams %R becomes overbought (> -20)
+            if (close[i] >= camarilla_r3_aligned[i] or 
+                williams_r_1h_aligned[i] > -20):
                 signals[i] = 0.0
                 position = 0
             else:
