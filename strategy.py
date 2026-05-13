@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-# 1h_4H_Donchian_Breakout_20_1dTrend_VolumeSpike_v2
-# Hypothesis: Use 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike.
-# Enter long when price breaks above 4h upper band with volume spike and 1d EMA50 uptrend.
-# Enter short when price breaks below 4h lower band with volume spike and 1d EMA50 downtrend.
-# Exit when price returns to 4h midline (average of upper/lower band).
-# Uses 1h timeframe for entry timing, 4h for structure, 1d for trend filter.
-# Designed to work in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
-# Target: 15-30 trades/year per symbol.
+# 6h_Williams_Alligator_1wTrend_VolumeFilter
+# Hypothesis: Williams Alligator (13,8,5 SMAs) on 1w defines trend. On 6s, enter long when green line > red line > blue line with volume spike; short when reverse. Exit when lines re-intertwine. Uses weekly trend filter to avoid counter-trend trades in 6s timeframe. Designed for trending markets with noise filtering via volume. Target: 15-35 trades/year per symbol.
 
-name = "1h_4H_Donchian_Breakout_20_1dTrend_VolumeSpike_v2"
-timeframe = "1h"
+name = "6h_Williams_Alligator_1wTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     close = prices['close'].values
@@ -26,52 +20,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 4h data for Donchian channel
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1w data for Williams Alligator (13,8,5 SMAs on median price)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
 
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    median_1w = (high_1w + low_1w) / 2.0
 
-    # Calculate 4h Donchian(20) channels
-    upper_4h = np.full(len(high_4h), np.nan)
-    lower_4h = np.full(len(low_4h), np.nan)
-    for i in range(20, len(high_4h)):
-        upper_4h[i] = np.max(high_4h[i-20:i])
-        lower_4h[i] = np.min(low_4h[i-20:i])
-    mid_4h = (upper_4h + lower_4h) / 2.0
+    # Williams Alligator lines: Jaw (13), Teeth (8), Lips (5) SMAs of median
+    jaw = pd.Series(median_1w).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(median_1w).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(median_1w).rolling(window=5, min_periods=5).mean().values
 
-    # Align Donchian levels to 1h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
-    mid_aligned = align_htf_to_ltf(prices, df_4h, mid_4h)
+    # Align to 6s timeframe (weekly trend only updates after weekly close)
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
 
-    # Volume confirmation: current volume > 2.0 x 24-period average (4h equivalent)
+    # Volume confirmation: current volume > 2.0 x 20-period average
     vol_ma = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (2.0 * vol_ma)
-
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-
-    close_1d = df_1d['close'].values
-
-    # Calculate 1d EMA50
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if data is not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(mid_aligned[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,29 +60,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: break above 4h upper band with volume spike and 1d EMA50 uptrend
-            if close[i] > upper_aligned[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
-                signals[i] = 0.20
+            # LONG: lips > teeth > jaw (bullish alignment) + volume spike
+            if lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: break below 4h lower band with volume spike and 1d EMA50 downtrend
-            elif close[i] < lower_aligned[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
-                signals[i] = -0.20
+            # SHORT: jaws > teeth > lips (bearish alignment) + volume spike
+            elif jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to 4h midline
-            if close[i] <= mid_aligned[i]:
+            # EXIT LONG: when alligator lines re-intertwine (not perfect order)
+            if not (lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to 4h midline
-            if close[i] >= mid_aligned[i]:
+            # EXIT SHORT: when alligator lines re-intertwine
+            if not (jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
