@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation, and ATR trailing stop.
-# Long when price breaks above Camarilla R3 level, 1d EMA34 is rising (uptrend), and volume > 1.5x 20-period average.
-# Short when price breaks below Camarilla S3 level, 1d EMA34 is falling (downtrend), and volume > 1.5x 20-period average.
+# Hypothesis: 4h Donchian(20) breakout with 12h ADX trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) upper band, 12h ADX > 25 (strong trend), and volume > 1.5x 20-period average.
+# Short when price breaks below Donchian(20) lower band, 12h ADX > 25 (strong trend), and volume > 1.5x 20-period average.
 # Uses ATR(14) trailing stop (2.5x) for risk control.
-# Camarilla levels provide precise support/resistance that work in ranging and trending markets.
-# 1d EMA34 trend filter ensures we trade with the daily trend, reducing whipsaws in bear markets.
-# Volume confirmation adds validity to breakouts. Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# Donchian channels provide clear trend-following structure that works in both bull and bear markets.
+# 12h ADX filter ensures we only trade during strong trending conditions, reducing whipsaws in ranging markets.
+# Volume confirmation adds validity to breakouts. Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hADX_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -33,32 +33,39 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels (based on previous day's OHLC)
-    # We need daily OHLC for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    open_1d = df_1d['open'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Donchian(20) channels
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels: R3, S3
-    # R3 = close + 1.1*(high-low)/4
-    # S3 = close - 1.1*(high-low)/4
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 4
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    # Get 12h data for ADX trend filter
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate ADX(14) on 12h data
+    # True Range
+    tr1_12h = high_12h - low_12h
+    tr2_12h = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3_12h = np.abs(low_12h - np.roll(close_12h, 1))
+    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
+    tr_12h[0] = tr1_12h[0]
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1d data for EMA34 trend filter
-    close_1d = df_1d['close'].values
+    # Directional Movement
+    up_move = high_12h - np.roll(high_12h, 1)
+    down_move = np.roll(low_12h, 1) - low_12h
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Calculate EMA(34) on 1d data
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Smoothed DM and TR
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr_12h
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr_12h
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Align 1d EMA34 to 12h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 12h ADX to 4h timeframe (wait for 12h bar to close)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -71,19 +78,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(adx_12h_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Camarilla R3 AND 1d EMA34 rising (trending up) AND volume confirmation
-            if close[i] > camarilla_r3_aligned[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]:
+            # LONG: Price > Donchian upper band AND 12h ADX > 25 (strong trend) AND volume confirmation
+            if close[i] > highest_20[i] and adx_12h_aligned[i] > 25 and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Camarilla S3 AND 1d EMA34 falling (trending down) AND volume confirmation
-            elif close[i] < camarilla_s3_aligned[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Price < Donchian lower band AND 12h ADX > 25 (strong trend) AND volume confirmation
+            elif close[i] < lowest_20[i] and adx_12h_aligned[i] > 25 and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
