@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator + 1d KAMA trend filter with volume confirmation.
-# Uses Williams Alligator (Jaw/Teeth/Lips) for trend direction and entry timing,
-# combined with 1d Kaufman Adaptive Moving Average for long-term trend filter.
-# Volume filter ensures trades occur with sufficient market participation.
-# Designed for low trade frequency (<30/year) to minimize fee drift.
-# Williams Alligator is effective in trending markets while avoiding whipsaws in ranging conditions.
-# KAMA adapts to market volatility, making it suitable for both bull and bear markets.
+# Hypothesis: 4h 4-period RSI with 1-day Bollinger Band mean reversion. Uses RSI to detect oversold/overbought conditions on the 4h chart, filtered by 1-day Bollinger Bands to ensure trades occur near extreme price levels. This combines short-term momentum exhaustion with longer-term volatility bands to capture reversals in both trending and ranging markets. Designed for low trade frequency (<30/year) to minimize fee drag.
 
-name = "12h_WilliamsAlligator_KAMA_Trend"
-timeframe = "12h"
+name = "4h_RSI4_BB1D_MeanReversion"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,74 +19,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator components (13,8,5 periods with 8,5,3 shifts)
+    # Calculate 4-period RSI on 4h chart
     close_series = pd.Series(close)
-    jaw = close_series.rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = close_series.rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = close_series.rolling(window=5, min_periods=5).mean().shift(3).values
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    avg_loss = loss.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # Neutral when undefined
     
-    # 1d Kaufman Adaptive Moving Average (KAMA)
+    # Get 1-day data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    # Calculate Efficiency Ratio (ER) and Smoothing Constant (SC)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)  # This needs correction
-    # Proper ER calculation: |net change| / sum(|changes|) over period
-    er = np.zeros_like(close_1d)
-    for i in range(2, len(close_1d)):  # Start from index 2 for 3-period calculation
-        net_change = np.abs(close_1d[i] - close_1d[i-2])
-        sum_changes = np.abs(close_1d[i] - close_1d[i-1]) + np.abs(close_1d[i-1] - close_1d[i-2])
-        if sum_changes > 0:
-            er[i] = net_change / sum_changes
-        else:
-            er[i] = 0
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # for EMA(2)
-    slow_sc = 2 / (30 + 1)  # for EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama_1d = np.zeros_like(close_1d)
-    kama_1d[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama_1d[i] = kama_1d[i-1] + sc[i] * (close_1d[i] - kama_1d[i-1])
-    # Align KAMA to 12h timeframe
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Volume filter: current volume > 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma20
+    # Calculate 20-period SMA and standard deviation for Bollinger Bands on 1d
+    close_1d_series = pd.Series(close_1d)
+    sma20_1d = close_1d_series.rolling(window=20, min_periods=20).mean()
+    std20_1d = close_1d_series.rolling(window=20, min_periods=20).std()
+    upper_bb_1d = sma20_1d + (2 * std20_1d)
+    lower_bb_1d = sma20_1d - (2 * std20_1d)
+    
+    # Align Bollinger Bands to 4h timeframe
+    upper_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_20.values)
+    lower_bb_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_20.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient data
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(kama_1d_aligned[i]) or np.isnan(vol_ma20[i]):
+    for i in range(20, n):  # Start after sufficient data for Bollinger Bands
+        if np.isnan(rsi[i]) or np.isnan(upper_bb_1d_aligned[i]) or np.isnan(lower_bb_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Alligator signals: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
         if position == 0:
-            # LONG: Lips > Teeth > Jaw (uptrend) AND price > KAMA (long-term uptrend) with volume
-            if lips[i] > teeth[i] > jaw[i] and close[i] > kama_1d_aligned[i] and volume_ok[i]:
+            # LONG: RSI oversold (<30) and price near lower Bollinger Band on 1d
+            if rsi[i] < 30 and close[i] <= lower_bb_1d_aligned[i] * 1.01:  # Allow small tolerance
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Lips < Teeth < Jaw (downtrend) AND price < KAMA (long-term downtrend) with volume
-            elif lips[i] < teeth[i] < jaw[i] and close[i] < kama_1d_aligned[i] and volume_ok[i]:
+            # SHORT: RSI overbought (>70) and price near upper Bollinger Band on 1d
+            elif rsi[i] > 70 and close[i] >= upper_bb_1d_aligned[i] * 0.99:  # Allow small tolerance
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Lips < Teeth (loss of uptrend momentum) OR price < KAMA
-            if lips[i] < teeth[i] or close[i] < kama_1d_aligned[i]:
+            # EXIT LONG: RSI returns to neutral (>50) or price reaches middle band
+            if rsi[i] > 50 or close[i] >= sma20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Lips > Teeth (loss of downtrend momentum) OR price > KAMA
-            if lips[i] > teeth[i] or close[i] > kama_1d_aligned[i]:
+            # EXIT SHORT: RSI returns to neutral (<50) or price reaches middle band
+            if rsi[i] < 50 or close[i] <= sma20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
