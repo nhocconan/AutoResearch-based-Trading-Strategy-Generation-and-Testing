@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Breakout_Trend_Filter
-Hypothesis: Weekly pivot points (calculated from prior week) provide significant support/resistance.
-Breakouts above R1 or below S1 with trend alignment (price vs weekly EMA) and volume confirmation
-capture strong moves in both bull and bear markets. Weekly context filters noise, reducing false
-breakouts. Targets 20-40 trades/year with discrete sizing to minimize fee drag.
+12h_200MA_Cross_With_1w_Trend_Filter
+Hypothesis: 200-period EMA cross on 12h timeframe provides strong trend signals with low frequency. 
+Weekly EMA 50 acts as trend filter to avoid counter-trend trades in choppy markets. 
+Designed for very low trade frequency (<20/year) with high win rate in both bull and bear markets.
 """
 
-name = "6h_Weekly_Pivot_Breakout_Trend_Filter"
-timeframe = "6h"
+name = "12h_200MA_Cross_With_1w_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,75 +16,54 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate pivot points from weekly data (using prior week's OHLC)
+    # Calculate 200 EMA for trend
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Get 1-week trend filter (EMA 50)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Use prior week's data to calculate pivots for current week
-    # Shift by 1 to avoid look-ahead (use completed week)
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    prev_week_close = df_1w['close'].shift(1).values
-    
-    # Calculate pivot points
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
-    r1 = 2 * pivot - prev_week_low
-    s1 = 2 * pivot - prev_week_high
-    r2 = pivot + (prev_week_high - prev_week_low)
-    s2 = pivot - (prev_week_high - prev_week_low)
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Trend filter: price vs weekly EMA (using prior week's EMA to avoid look-ahead)
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().shift(1).values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Volume confirmation: > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: > 1.5x 50-period average (to avoid low-volume false breaks)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(200, n):
         if position == 0:
-            # LONG: Price breaks above R1 with bullish trend and volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema_20_1w_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Price breaks below S1 with bearish trend and volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema_20_1w_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
+            # LONG: Price crosses above 200 EMA with weekly uptrend and volume confirmation
+            if close[i] > ema_200[i] and close[i-1] <= ema_200[i-1]:
+                if ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]:  # Weekly EMA rising
+                    if volume_confirm[i]:
+                        signals[i] = 0.30
+                        position = 1
+            # SHORT: Price crosses below 200 EMA with weekly downtrend and volume confirmation
+            elif close[i] < ema_200[i] and close[i-1] >= ema_200[i-1]:
+                if ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]:  # Weekly EMA falling
+                    if volume_confirm[i]:
+                        signals[i] = -0.30
+                        position = -1
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 (reversal) or above R2 (take profit at stronger level)
-            if close[i] < s1_aligned[i] or close[i] > r2_aligned[i]:
+            # EXIT LONG: Price crosses back below 200 EMA or weekly trend turns down
+            if close[i] < ema_200[i] or ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 (reversal) or below S2 (take profit at stronger level)
-            if close[i] > r1_aligned[i] or close[i] < s2_aligned[i]:
+            # EXIT SHORT: Price crosses back above 200 EMA or weekly trend turns up
+            if close[i] > ema_200[i] or ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
