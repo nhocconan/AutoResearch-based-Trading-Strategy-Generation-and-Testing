@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray (Bull Power/Bear Power) + 1d ADX regime filter + volume confirmation.
-# Long when Bull Power > 0, ADX > 25 (trending), and volume > 1.5x 20-bar average.
-# Short when Bear Power < 0, ADX > 25 (trending), and volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 6h timeframe.
-# Elder Ray measures trend strength via EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# 1d ADX ensures we only trade in strong trends, avoiding choppy markets.
-# Volume confirmation adds momentum validation.
-# Designed to work in both bull and bear markets by capturing strong directional moves.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d HMA34 trend filter and volume spike confirmation.
+# Long when price breaks above Camarilla R3 and close > 1d HMA34 with volume > 2.0x 20-bar average.
+# Short when price breaks below Camarilla S3 and close < 1d HMA34 with volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 12h timeframe.
+# Camarilla R3/S3 are stronger intraday levels than R1/S1, reducing false breakouts and overtrading.
+# 1d HMA34 ensures higher timeframe trend alignment; volume spike confirms momentum.
+# This variant targets fewer, higher-quality trades to avoid fee drag while maintaining edge in both bull and bear markets.
 
-name = "6h_ElderRay_ADX_Regime_1dEMA13_Trend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dHMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,47 +25,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA13 for Elder Ray
+    # Calculate 1d HMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    ema_13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    hma_34_1d = calculate_hma(df_1d['close'].values, 34)
+    hma_34_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_34_1d)
     
-    # Calculate 1d ADX for regime filter
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed values
-    tr_period = 14
-    atr = pd.Series(tr).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema_13_1d_aligned
-    bear_power = low - ema_13_1d_aligned
+    # Calculate Camarilla levels from previous day
+    # Camarilla R3 = close_prev + (high_prev - low_prev) * 1.1/4
+    # Camarilla S3 = close_prev - (high_prev - low_prev) * 1.1/4
+    close_prev = df_1d['close'].shift(1).values
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    camarilla_r3 = close_prev + (high_prev - low_prev) * 1.1 / 4
+    camarilla_s3 = close_prev - (high_prev - low_prev) * 1.1 / 4
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate average volume for confirmation (20-period)
     lookback = 20
@@ -77,39 +52,37 @@ def generate_signals(prices):
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(hma_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Bull Power > 0, ADX > 25 (trending), volume spike
-            if (bull_power[i] > 0 and 
-                adx_aligned[i] > 25 and 
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Price breaks above Camarilla R3, close > 1d HMA34, volume spike
+            if (high[i] > camarilla_r3_aligned[i] and 
+                close[i] > hma_34_1d_aligned[i] and 
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power < 0, ADX > 25 (trending), volume spike
-            elif (bear_power[i] < 0 and 
-                  adx_aligned[i] > 25 and 
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Price breaks below Camarilla S3, close < 1d HMA34, volume spike
+            elif (low[i] < camarilla_s3_aligned[i] and 
+                  close[i] < hma_34_1d_aligned[i] and 
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power <= 0 OR ADX <= 20 (choppy) OR volume drop
-            if (bull_power[i] <= 0 or 
-                adx_aligned[i] <= 20 or 
+            # EXIT LONG: Price breaks below Camarilla S3 OR volume drops below average
+            if (low[i] < camarilla_s3_aligned[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power >= 0 OR ADX <= 20 (choppy) OR volume drop
-            if (bear_power[i] >= 0 or 
-                adx_aligned[i] <= 20 or 
+            # EXIT SHORT: Price breaks above Camarilla R3 OR volume drops below average
+            if (high[i] > camarilla_r3_aligned[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
@@ -117,3 +90,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
+
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
+    if len(close) < period:
+        return np.full_like(close, np.nan)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    wma_half = pd.Series(close).ewm(span=half_period, adjust=False).mean()
+    wma_full = pd.Series(close).ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma_half - wma_full
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
+    return hma.values
