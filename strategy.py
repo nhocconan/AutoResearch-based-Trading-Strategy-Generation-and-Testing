@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 with 1d EMA34 uptrend and volume > 1.5x average.
-# Short when price breaks below S3 with 1d EMA34 downtrend and volume > 1.5x average.
-# Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
-# Based on proven ETH/USDT winners (test Sharpe up to 2.07) with tight entries.
+# Hypothesis: 6h Williams %R extreme with 1d trend filter and volume spike.
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 2x average.
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 2x average.
+# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
+# Williams %R captures mean reversion in ranging markets while trend filter avoids counter-trend trades.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dEMA50_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -35,31 +35,22 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 4h data for Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate Williams %R(14)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    wr = np.where((highest_high - lowest_low) == 0, -50, wr)
     
-    # Calculate Camarilla levels (R3, S3) from 4h data
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    camarilla_range = high_4h - low_4h
-    r3 = close_4h + 1.1 * camarilla_range / 2
-    s3 = close_4h - 1.1 * camarilla_range / 2
-    
-    # Align Camarilla levels to 4h timeframe (wait for 4h bar to close)
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
-    
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA34 to 4h timeframe (wait for daily bar to close)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align 1d EMA50 to 6h timeframe (wait for daily bar to close)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,24 +59,23 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(wr[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND 1d EMA34 uptrend AND volume > 1.5x average
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and  # Price above 1d EMA34 confirms uptrend
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 2x average
+            if (wr[i] < -80 and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below S3 AND 1d EMA34 downtrend AND volume > 1.5x average
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and  # Price below 1d EMA34 confirms downtrend
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 2x average
+            elif (wr[i] > -20 and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -98,8 +88,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
+            # EXIT LONG: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -113,8 +103,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
