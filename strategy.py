@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Chaikin_Money_Flow_Volume_Price_Confirmation
-# Hypothesis: Chaikin Money Flow (CMF) on 12h for institutional flow direction, combined with 6h price action near VWAP and volume confirmation.
-# CMF > 0 indicates buying pressure, CMF < 0 selling pressure. Enter long when CMF turns positive, price above VWAP, and volume spike.
-# Enter short when CMF turns negative, price below VWAP, and volume spike. Uses 12h CMF to avoid noise, 6h for execution.
-# Designed for 15-25 trades/year to minimize fee drift. Works in bull/bear: follows institutional flow.
+# 12h_Camarilla_R1S1_Breakout_1wTrend_Volume
+# Hypothesis: Camarilla pivot R1/S1 breakouts from weekly pivot levels, filtered by 1-week EMA trend and volume spike.
+# Weekly pivots capture longer-term institutional levels, reducing noise vs daily pivots.
+# Trend filter ensures alignment with higher timeframe direction. Designed for 12-37 trades/year to minimize fee drag.
+# Works in bull/bear: long when price breaks above R1 with volume and above weekly EMA; short when breaks below S1 with volume and below weekly EMA.
 
-name = "6h_Chaikin_Money_Flow_Volume_Price_Confirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,43 +23,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for CMF calculation (institutional flow)
-    df_12h = get_htf_data(prices, '12h')
+    # Get weekly data for Camarilla pivots and trend filter
+    df_1w = get_htf_data(prices, '1w')
 
-    # Calculate Chaikin Money Flow (CMF) on 12h
-    # CMF = Sum((Close - Low - (High - Close)) / (High - Low) * Volume) / Sum(Volume) over period
-    # Avoid division by zero
-    hl_range = df_12h['high'] - df_12h['low']
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)  # prevent div by zero
-    mf_multiplier = ((df_12h['close'] - df_12h['low']) - (df_12h['high'] - df_12h['close'])) / hl_range
-    mf_volume = mf_multiplier * df_12h['volume']
+    # Calculate Camarilla pivot levels from previous week
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
     
-    # 20-period CMF
-    cmf_20 = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum() / \
-             pd.Series(df_12h['volume']).rolling(window=20, min_periods=20).sum()
-    cmf_20_values = cmf_20.values
+    # Calculate R1 and S1
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align to 12h timeframe (values available after weekly bar closes)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
 
-    # Align CMF to 6h timeframe (available after 12h bar closes)
-    cmf_aligned = align_htf_to_ltf(prices, df_12h, cmf_20_values)
+    # 1-week EMA34 trend filter
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
 
-    # 6h VWAP (volume-weighted average price)
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum()
-    vwap_denominator = pd.Series(volume).rolling(window=20, min_periods=20).sum()
-    vwap = vwap_numerator / vwap_denominator
-    vwap = vwap.values
-
-    # Volume confirmation: current volume > 1.8 x 20-period average
+    # Volume confirmation: current volume > 2.0 x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after sufficient warmup
+    for i in range(34, n):  # Start after sufficient warmup for EMA34
         # Skip if any required value is NaN
-        if (np.isnan(cmf_aligned[i]) or 
-            np.isnan(vwap[i]) or 
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,32 +64,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: CMF turns positive, price above VWAP, volume spike
-            if (cmf_aligned[i] > 0 and 
-                cmf_aligned[i-1] <= 0 and  # crossed above zero
-                close[i] > vwap[i] and 
-                volume_spike[i]):
+            # LONG: Price breaks above R1 with volume spike and above weekly EMA34
+            if (close[i] > r1_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: CMF turns negative, price below VWAP, volume spike
-            elif (cmf_aligned[i] < 0 and 
-                  cmf_aligned[i-1] >= 0 and  # crossed below zero
-                  close[i] < vwap[i] and 
-                  volume_spike[i]):
+            # SHORT: Price breaks below S1 with volume spike and below weekly EMA34
+            elif (close[i] < s1_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema34_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: CMF turns negative or price below VWAP
-            if cmf_aligned[i] < 0 or close[i] < vwap[i]:
+            # EXIT LONG: Price breaks below S1 or closes below weekly EMA34
+            if close[i] < s1_aligned[i] or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: CMF turns positive or price above VWAP
-            if cmf_aligned[i] > 0 or close[i] > vwap[i]:
+            # EXIT SHORT: Price breaks above R1 or closes above weekly EMA34
+            if close[i] > r1_aligned[i] or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
