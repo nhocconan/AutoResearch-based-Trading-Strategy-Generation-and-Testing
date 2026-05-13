@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 > EMA200 trend filter and volume confirmation (>1.5x avg volume).
-# Uses ATR(20) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
-# EMA trend filter on 1w ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Donchian(20) provides clear breakout/breakdown levels based on price structure.
-# Volume confirmation (>1.5x) ensures breakouts have institutional participation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 > EMA89 trend filter and volume confirmation (>1.8x avg volume).
+# Uses ATR(20) trailing stop (2.5x) for risk control. Discrete sizing 0.28.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# EMA trend filter on 1d ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
+# Camarilla R3/S3 levels provide stronger breakout/breakdown points than R1/S1, reducing false signals.
+# Volume confirmation (>1.8x) ensures breakouts have institutional participation.
 # Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
 
-name = "1d_Donchian20_1wEMATrend_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMATrend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -36,26 +36,42 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA50 and EMA200 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate 1d EMA34 and EMA89 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89_1d = close_1d_series.ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Align 1w EMAs to 1d timeframe (wait for 1w bar to close)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Align 1d EMAs to 12h timeframe (wait for 1d bar to close)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
     
-    # Calculate Donchian(20) channels from previous 1d bar
-    # Upper = max(high[-20:-1])
-    # Lower = min(low[-20:-1])
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
+    # Get 1d data for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # R3 = close + ((high - low) * 1.1 / 4)
+    # S3 = close - ((high - low) * 1.1 / 4)
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
+    
+    for i in range(1, len(close_1d)):
+        # Use previous 1d bar's data to calculate current levels
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        
+        camarilla_r3[i] = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+        camarilla_s3[i] = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,25 +80,25 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema200_1w_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema89_1d_aligned[i]) or 
             np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND 1w EMA50 > EMA200 AND volume > 1.5x average
-            if (close[i] > donchian_upper[i] and 
-                ema50_1w_aligned[i] > ema200_1w_aligned[i] and 
-                volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = 0.25
+            # LONG: Price breaks above Camarilla R3 AND 1d EMA34 > EMA89 AND volume > 1.8x average
+            if (close[i] > camarilla_r3_aligned[i] and 
+                ema34_1d_aligned[i] > ema89_1d_aligned[i] and 
+                volume[i] > 1.8 * avg_volume[i]):
+                signals[i] = 0.28
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian lower AND 1w EMA50 < EMA200 AND volume > 1.5x average
-            elif (close[i] < donchian_lower[i] and 
-                  ema50_1w_aligned[i] < ema200_1w_aligned[i] and 
-                  volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = -0.25
+            # SHORT: Price breaks below Camarilla S3 AND 1d EMA34 < EMA89 AND volume > 1.8x average
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  ema34_1d_aligned[i] < ema89_1d_aligned[i] and 
+                  volume[i] > 1.8 * avg_volume[i]):
+                signals[i] = -0.28
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
@@ -102,7 +118,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
                 # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
@@ -117,7 +133,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
                 # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
