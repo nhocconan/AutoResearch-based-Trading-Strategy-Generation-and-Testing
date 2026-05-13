@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above upper Donchian band and close > 1w EMA50 with volume > 2.0x 20-bar average.
-# Short when price breaks below lower Donchian band and close < 1w EMA50 with volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to target 20-60 total trades over 4 years on 1d timeframe.
-# Donchian breakouts capture strong trends; 1w EMA50 filter ensures alignment with weekly trend; volume confirmation reduces false breakouts.
-# Works in bull markets via breakouts and in bear markets via mean-reversion at extreme levels (price rejects Donchian bands).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 and close > 1d EMA34 with volume > 1.8x 24-bar average.
+# Short when price breaks below S3 and close < 1d EMA34 with volume > 1.8x 24-bar average.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 12h timeframe.
+# R3/S3 levels act as strong breakout zones; combined with 1d trend filter and volume spike reduces false breakouts.
+# Works in bull markets via breakouts and in bear markets via mean-reversion at extreme levels.
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeConfirm"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,20 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    lookback = 20  # for Donchian and volume average
+    lookback = 24  # for volume average (24 * 12h = 12 days)
     
-    # Calculate upper and lower Donchian bands (20-period)
-    upper_band = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    lower_band = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
-    
-    # Get 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate Camarilla levels (R3, S3) using previous day's OHLC
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate average volume for confirmation (20-period)
+    # Calculate Camarilla for each 1d bar: based on previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla R3 = close + (high - low) * 1.1 / 4
+    # Camarilla S3 = close - (high - low) * 1.1 / 4
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Get 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate average volume for confirmation (24-period)
     avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
     
     signals = np.zeros(n)
@@ -45,37 +57,37 @@ def generate_signals(prices):
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper Donchian band, close > 1w EMA50, volume spike
-            if (high[i] > upper_band[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume[i] > 2.0 * avg_volume[i]):
+            # LONG: Price breaks above R3, close > 1d EMA34, volume spike
+            if (high[i] > R3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian band, close < 1w EMA50, volume spike
-            elif (low[i] < lower_band[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume[i] > 2.0 * avg_volume[i]):
+            # SHORT: Price breaks below S3, close < 1d EMA34, volume spike
+            elif (low[i] < S3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below lower Donchian band OR volume drops below average
-            if (low[i] < lower_band[i] or 
+            # EXIT LONG: Price breaks below S3 OR volume drops below average
+            if (low[i] < S3_aligned[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above upper Donchian band OR volume drops below average
-            if (high[i] > upper_band[i] or 
+            # EXIT SHORT: Price breaks above R3 OR volume drops below average
+            if (high[i] > R3_aligned[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
