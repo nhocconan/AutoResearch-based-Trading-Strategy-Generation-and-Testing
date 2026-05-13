@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1D_Weekly_Pivot_Breakout_1wTrend_Volume
-# Hypothesis: Use weekly pivot point resistance/support for breakout entries with weekly trend filter and volume confirmation.
-# Long when price breaks above weekly R1 in uptrend with volume spike, short when price breaks below weekly S1 in downtrend with volume spike.
-# Weekly pivot points provide strong support/resistance; weekly trend filter avoids counter-trend trades; volume confirms breakout strength.
-# Designed for low trade frequency (30-100 total over 4 years) with clear entry/exit rules to avoid overtrading.
+# 12h_Donchian20_Breakout_1wTrend_1dVolume
+# Hypothesis: Use 12h Donchian channel breakout with weekly trend filter and daily volume confirmation.
+# Long when price breaks above 20-period 12h high with weekly close above weekly SMA40 and daily volume spike.
+# Short when price breaks below 20-period 12h low with weekly close below weekly SMA40 and daily volume spike.
+# Exit when price returns to 12h midline or volume drops below average.
+# Weekly trend filter reduces whipsaw in bear markets, volume confirmation ensures breakout strength.
 
-name = "1D_Weekly_Pivot_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_1wTrend_1dVolume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,39 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot calculation and trend filter
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly pivot points based on previous week's OHLC
-    high_1w = df_1w['high']
-    low_1w = df_1w['low']
-    close_1w = df_1w['close']
-    
-    # Weekly pivot point and support/resistance levels
-    pp_1w = (high_1w + low_1w + close_1w) / 3
-    r1_1w = 2 * pp_1w - low_1w  # Resistance 1
-    s1_1w = 2 * pp_1w - high_1w  # Support 1
-    
-    # Weekly EMA for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align weekly data to daily timeframe
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w.values)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w.values)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w.values)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Get daily data for volume filter
+    df_1d = get_htf_data(prices, '1d')
 
-    # Volume filter: >1.5x 20-day average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 20-period Donchian channel on 12h data
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_max_20 + low_min_20) / 2
+
+    # Calculate weekly SMA40 for trend filter
+    sma_40_1w = pd.Series(df_1w['close']).rolling(window=40, min_periods=40).mean().values
+    sma_40_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_40_1w)
+
+    # Calculate daily volume average for volume filter
+    vol_avg_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(40, n):
         # Skip if any required value is NaN
-        if (np.isnan(pp_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
-            np.isnan(s1_1w_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
+            np.isnan(sma_40_1w_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,30 +57,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + price above weekly EMA50 (uptrend) + volume spike
-            if (close[i] > r1_1w_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Price breaks above Donchian high + weekly close above SMA40 (uptrend) + volume spike
+            if (close[i] > high_max_20[i] and 
+                close[i] > sma_40_1w_aligned[i] and
+                volume[i] > vol_avg_20_1d_aligned[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + price below weekly EMA50 (downtrend) + volume spike
-            elif (close[i] < s1_1w_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Price breaks below Donchian low + weekly close below SMA40 (downtrend) + volume spike
+            elif (close[i] < low_min_20[i] and 
+                  close[i] < sma_40_1w_aligned[i] and
+                  volume[i] > vol_avg_20_1d_aligned[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to pivot point or trend changes (price below weekly EMA50)
-            if (close[i] <= pp_1w_aligned[i] or close[i] < ema_50_1w_aligned[i]):
+            # EXIT LONG: Price returns to midline or volume drops below average
+            if (close[i] <= donchian_mid[i] or 
+                volume[i] < vol_avg_20_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot point or trend changes (price above weekly EMA50)
-            if (close[i] >= pp_1w_aligned[i] or close[i] > ema_50_1w_aligned[i]):
+            # EXIT SHORT: Price returns to midline or volume drops below average
+            if (close[i] >= donchian_mid[i] or 
+                volume[i] < vol_avg_20_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
