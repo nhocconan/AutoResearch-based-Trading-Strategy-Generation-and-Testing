@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band with price > 1d EMA34 (bullish trend) and volume > 1.5x 20-bar average.
-# Short when price breaks below Donchian lower band with price < 1d EMA34 (bearish trend) and volume > 1.5x average.
-# Exit when price reverses and closes below/above the Donchian middle band (mean reversion exit).
-# Uses discrete position sizing 0.25. Target: 50-150 total trades over 4 years on 12h timeframe.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA(50) trend filter and volume confirmation.
+# Long when price breaks above Camarilla R1 with price > 12h EMA50 (bullish trend) and volume > 1.8x 20-bar average.
+# Short when price breaks below Camarilla S1 with price < 12h EMA50 (bearish trend) and volume > 1.8x average.
+# Exit when price reverses and closes below/above the Camarilla pivot point (mean reversion exit).
+# Uses discrete position sizing 0.28. Target: 75-200 total trades over 4 years on 4h timeframe.
 # EMA trend filter ensures we trade with the higher timeframe trend, avoiding counter-trend whipsaws.
-# Volume confirmation validates breakout strength. Donchian exit provides clear, objective stop.
-# Donchian channels work well in both trending and ranging markets, providing clear breakout levels.
+# Volume confirmation validates breakout strength. Camarilla exit provides clear, objective stop.
+# Camarilla pivot levels work well in both trending and ranging markets, providing clear breakout levels.
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeConfirm_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,28 +26,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    lookback = 20  # for Donchian and volume average
+    lookback = 20  # for volume average
     
-    # Calculate Donchian channels
-    donchian_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    donchian_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
-    donchian_middle = (donchian_upper + donchian_lower) / 2.0
+    # Calculate Camarilla pivot levels (based on previous bar)
+    pivot = (high[:-1] + low[:-1] + close[:-1]) / 3.0
+    range_ = high[:-1] - low[:-1]
+    r1 = pivot + range_ * 1.1 / 12
+    s1 = pivot - range_ * 1.1 / 12
+    # Shift to align with current bar (previous bar's levels)
+    camarilla_r1 = np.concatenate([np.array([np.nan]), r1])
+    camarilla_s1 = np.concatenate([np.array([np.nan]), s1])
+    camarilla_pivot = np.concatenate([np.array([np.nan]), pivot])
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA(34) on 1d close
-    if len(close_1d) < 34:
-        ema_34_1d = np.full(len(close_1d), np.nan)
+    # Calculate EMA(50) on 12h close
+    if len(close_12h) < 50:
+        ema_50_12h = np.full(len(close_12h), np.nan)
     else:
-        ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+        ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA to 12h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 12h EMA to 4h timeframe (wait for 12h bar to close)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
@@ -57,40 +62,40 @@ def generate_signals(prices):
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(donchian_middle[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(camarilla_pivot[i]) or np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper with bullish 1d EMA trend and volume spike
-            if (close[i] > donchian_upper[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = 0.25
+            # LONG: Price breaks above Camarilla R1 with bullish 12h EMA trend and volume spike
+            if (close[i] > camarilla_r1[i] and 
+                close[i] > ema_50_12h_aligned[i] and 
+                volume[i] > 1.8 * avg_volume[i]):
+                signals[i] = 0.28
                 position = 1
-            # SHORT: Price breaks below Donchian lower with bearish 1d EMA trend and volume spike
-            elif (close[i] < donchian_lower[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = -0.25
+            # SHORT: Price breaks below Camarilla S1 with bearish 12h EMA trend and volume spike
+            elif (close[i] < camarilla_s1[i] and 
+                  close[i] < ema_50_12h_aligned[i] and 
+                  volume[i] > 1.8 * avg_volume[i]):
+                signals[i] = -0.28
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Donchian middle (mean reversion)
-            if close[i] < donchian_middle[i]:
+            # EXIT LONG: Price closes below Camarilla pivot (mean reversion)
+            if close[i] < camarilla_pivot[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         elif position == -1:
-            # EXIT SHORT: Price closes above Donchian middle (mean reversion)
-            if close[i] > donchian_middle[i]:
+            # EXIT SHORT: Price closes above Camarilla pivot (mean reversion)
+            if close[i] > camarilla_pivot[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
