@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla R1/S1 levels from daily timeframe act as support/resistance in ranging markets.
-Breakout above R1 with daily uptrend and volume confirmation signals long.
-Breakdown below S1 with daily downtrend and volume confirmation signals short.
-Uses 1h volume spike to avoid false breakouts. Works in both bull/bear regimes by following daily trend.
-Target: 20-40 trades/year per symbol.
+12h_KAMA_Trend_Volume_Confirmation
+Hypothesis: KAMA adapts to market noise, providing a smooth trend line. Price above KAMA indicates uptrend, below indicates downtrend. Volume confirms the strength of the move. Weekly trend filter ensures alignment with higher timeframe momentum. Designed to work in both bull and bear markets by following the trend with volume confirmation, reducing whipsaws in choppy conditions. Target: 15-35 trades/year per symbol.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_KAMA_Trend_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,60 +22,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily high/low/close for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # KAMA: Kaufman Adaptive Moving Average
+    # Efficiency Ratio (ER) = |net change| / sum of absolute changes
+    change = np.abs(np.diff(close, prepend=close[0]))
+    abs_change = np.abs(np.diff(close, prepend=close[0]))
+    er = np.zeros_like(change)
+    for i in range(1, len(change)):
+        if np.sum(abs_change[i-9:i+1]) > 0:
+            er[i] = np.abs(change[i] - change[i-10]) / np.sum(abs_change[i-9:i+1]) if i >= 10 else 0
+        else:
+            er[i] = 0
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Volume average (20-period)
+    vol_ma = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[max(0, i-19):i+1]) if np.sum(volume[max(0, i-19):i+1]) > 0 else 0
+        else:
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+    
+    # Weekly trend filter: EMA50 on 1w data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    
-    # Calculate previous day's Camarilla levels
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Camarilla R1 and S1
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    
-    # Align to 4h timeframe (wait for daily close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Daily trend: EMA34
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = df_1d['close'].values > ema_34_1d
-    downtrend_1d = df_1d['close'].values < ema_34_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    
-    # Volume spike: 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * vol_ma
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1w = df_1w['close'].values > ema_50_1w
+    downtrend_1w = df_1w['close'].values < ema_50_1w
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
+        # Volume confirmation: current volume > 1.5 * 20-period MA
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
         if position == 0:
-            # LONG: break above R1, daily uptrend, volume spike
-            if close[i] > R1_aligned[i] and uptrend_1d_aligned[i] and volume_spike[i]:
+            # LONG: price > KAMA, volume confirmation, weekly uptrend
+            if close[i] > kama[i] and vol_confirm and uptrend_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1, daily downtrend, volume spike
-            elif close[i] < S1_aligned[i] and downtrend_1d_aligned[i] and volume_spike[i]:
+            # SHORT: price < KAMA, volume confirmation, weekly downtrend
+            elif close[i] < kama[i] and vol_confirm and downtrend_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: close below S1 or loss of daily uptrend
-            if close[i] < S1_aligned[i] or not uptrend_1d_aligned[i]:
+            # EXIT LONG: price < KAMA
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: close above R1 or loss of daily downtrend
-            if close[i] > R1_aligned[i] or not downtrend_1d_aligned[i]:
+            # EXIT SHORT: price > KAMA
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
