@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_OrderBlock_Equilibrium_Rebalance
-Hypothesis: Price revisits institutional order blocks (equilibrium zones) after strong moves.
-Institutions leave unfilled orders at swing points; price returns to rebalance before continuing.
-Long when price retraces to bullish OB in uptrend; short when price retraces to bearish OB in downtrend.
-Uses 12h trend filter and volume confirmation to avoid false signals in ranging markets.
-Works in bull (buy dips) and bear (sell rallies) by trading mean reversion within trend.
-Target: 15-30 trades/year per symbol.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels (R1/S1) breakouts on 4h with 1d trend filter and volume confirmation provide a robust edge in both bull and bear markets by combining mean-reversion levels with trend-following momentum.
+Breakout above R1 with 1d uptrend and volume spike = long.
+Breakdown below S1 with 1d downtrend and volume spike = short.
+Exit on opposite level touch or trend reversal. Target: 20-50 trades/year per symbol.
 """
 
-name = "6h_OrderBlock_Equilibrium_Rebalance"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,99 +17,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Identify swing points: pivot highs/lows (3-bar lookback)
-    # Bullish OB: base before strong up move (lowest low of 3 bars before bullish break)
-    # Bearish OB: base before strong down move (highest high of 3 bars before bearish break)
-    bullish_ob = np.full(n, np.nan)
-    bearish_ob = np.full(n, np.nan)
+    # Calculate Camarilla levels for each bar using previous day's range
+    # For intraday, we use previous bar's high/low as approximation for daily range
+    # This is a simplification but works for 4h timeframe
+    camarilla_r1 = np.zeros(n)
+    camarilla_s1 = np.zeros(n)
     
-    for i in range(3, n-3):
-        # Bullish OB: low of 3 bars before close breaks above recent high
-        if (close[i+3] > np.max(high[i:i+3]) and 
-            np.min(low[i:i+3]) == low[i]):  # lowest at start of base
-            bullish_ob[i+3] = np.min(low[i:i+3])
-        # Bearish OB: high of 3 bars before close breaks below recent low
-        if (close[i+3] < np.min(low[i:i+3]) and 
-            np.max(high[i:i+3]) == high[i]):  # highest at start of base
-            bearish_ob[i+3] = np.max(high[i:i+3])
+    for i in range(1, n):
+        # Use previous bar's high/low to calculate today's Camarilla levels
+        # Camarilla formula: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+        # where C = (H+L+Close)/3 (typical price)
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        
+        # Typical price of previous bar
+        typical_price = (prev_high + prev_low + prev_close) / 3.0
+        # Range of previous bar
+        range_val = prev_high - prev_low
+        
+        camarilla_r1[i] = typical_price + range_val * 1.1 / 12.0
+        camarilla_s1[i] = typical_price - range_val * 1.1 / 12.0
     
-    # Forward fill to keep OB levels valid until broken
-    bullish_ob_series = pd.Series(bullish_ob).ffill().values
-    bearish_ob_series = pd.Series(bearish_ob).ffill().values
-    
-    # 60-period EMA for trend (6h timeframe)
-    ema_60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
-    uptrend_6h = close > ema_60
-    downtrend_6h = close < ema_60
-    
-    # 12h trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1d trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = df_12h['close'].values > ema_50_12h
-    downtrend_12h = df_12h['close'].values < ema_50_12h
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 1.8 * 20-period average (avoid chop)
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.8 * vol_ma
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
-        # Skip if OB levels not established
-        if np.isnan(bullish_ob_series[i]) and np.isnan(bearish_ob_series[i]):
-            signals[i] = 0.0
-            continue
-            
-        bull_ob = bullish_ob_series[i]
-        bear_ob = bearish_ob_series[i]
-        uptrend = uptrend_6h[i]
-        downtrend = downtrend_6h[i]
-        uptrend_htf = uptrend_12h_aligned[i]
-        downtrend_htf = downtrend_12h_aligned[i]
+    for i in range(50, n):
+        # Get values
+        r1 = camarilla_r1[i]
+        s1 = camarilla_s1[i]
+        uptrend_htf = uptrend_1d_aligned[i]
+        downtrend_htf = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: price retraces to bullish OB in uptrend with volume
-            if (not np.isnan(bull_ob) and 
-                low[i] <= bull_ob * 1.005 and  # allow 0.5% slippage
-                uptrend and uptrend_htf and vol_conf):
+            # LONG: break above R1, 1d uptrend, volume confirmation
+            if close[i] > r1 and uptrend_htf and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price retraces to bearish OB in downtrend with volume
-            elif (not np.isnan(bear_ob) and 
-                  high[i] >= bear_ob * 0.995 and  # allow 0.5% slippage
-                  downtrend and downtrend_htf and vol_conf):
+            # SHORT: break below S1, 1d downtrend, volume confirmation
+            elif close[i] < s1 and downtrend_htf and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price reaches equilibrium (midpoint) or trend breaks
-            eq_level = (bull_ob + close[i]) / 2 if not np.isnan(bull_ob) else close[i]
-            if high[i] >= eq_level * 0.995 or not uptrend:
+            # EXIT LONG: touch S1 or 1d trend turns down
+            if close[i] < s1 or not uptrend_htf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price reaches equilibrium or trend breaks
-            eq_level = (bear_ob + close[i]) / 2 if not np.isnan(bear_ob) else close[i]
-            if low[i] <= eq_level * 1.005 or not downtrend:
+            # EXIT SHORT: touch R1 or 1d trend turns up
+            if close[i] > r1 or not downtrend_htf:
                 signals[i] = 0.0
                 position = 0
             else:
