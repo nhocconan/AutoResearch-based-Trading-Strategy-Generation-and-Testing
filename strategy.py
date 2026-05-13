@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
-# Long when price breaks above 20-day high AND price > 1w EMA50 AND volume > 1.5x 20-day average volume
-# Short when price breaks below 20-day low AND price < 1w EMA50 AND volume > 1.5x 20-day average volume
-# Exit when price crosses the 10-day moving average in opposite direction OR Alligator alignment breaks
-# Uses 1d timeframe for lower frequency (~15-35 trades/year), Donchian for structure, 1w EMA for trend filter, volume for confirmation.
-# Target: 60-140 total trades over 4 years (15-35/year). Works in bull via breakout continuation, bear via faded rallies.
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation.
+# Long when price breaks above 12h Donchian upper channel AND 1d EMA50 rising AND volume > 1.5x average.
+# Short when price breaks below 12h Donchian lower channel AND 1d EMA50 falling AND volume > 1.5x average.
+# Exit when price reverts to 12h Donchian midpoint OR trend reversal.
+# Uses 12h timeframe for lower frequency, Donchian for structure, 1d EMA for trend filter, volume for confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year). Works in bull via breakouts, bear via faded rallies.
 
-name = "1d_Donchian20_1wTrend_Volume_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dTrend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,54 +24,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 1d: 20-period high/low, 10-period exit
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    ma_10 = pd.Series(close).rolling(window=10, min_periods=10).mean().values
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Calculate Donchian(20) on 12h high/low
+    upper_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    lower_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    mid_12h = (upper_12h + lower_12h) / 2.0
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Volume filter: current 12h volume > 1.5x 20-period average
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_filter_12h = volume_12h > (1.5 * vol_ma_12h)
     
-    # Calculate EMA(50) on 1w close for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Calculate EMA(50) on 1d close for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate EMA50 slope for trend direction (rising/falling)
+    ema50_slope = np.diff(ema50_1d_aligned, prepend=ema50_1d_aligned[0])
+    ema50_rising = ema50_slope > 0
+    ema50_falling = ema50_slope < 0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after sufficient data for Donchian
+    for i in range(100, n):  # Start after sufficient data for all indicators
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ma_10[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(upper_12h[i]) or np.isnan(lower_12h[i]) or np.isnan(mid_12h[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_12h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price > 20-day high AND price > 1w EMA50 AND volume confirmation
-            if close[i] > high_20[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
+            # LONG: Price breaks above upper Donchian AND 1d EMA50 rising AND volume confirmation
+            if close[i] > upper_12h[i] and ema50_rising[i] and volume_filter_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price < 20-day low AND price < 1w EMA50 AND volume confirmation
-            elif close[i] < low_20[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
+            # SHORT: Price breaks below lower Donchian AND 1d EMA50 falling AND volume confirmation
+            elif close[i] < lower_12h[i] and ema50_falling[i] and volume_filter_12h[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price < 10-day MA OR price < 1w EMA50 (trend failure)
-            if close[i] < ma_10[i] or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Price reverts to midpoint OR trend reversal (EMA50 falling)
+            if close[i] < mid_12h[i] or ema50_falling[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price > 10-day MA OR price > 1w EMA50 (trend failure)
-            if close[i] > ma_10[i] or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Price reverts to midpoint OR trend reversal (EMA50 rising)
+            if close[i] > mid_12h[i] or ema50_rising[i]:
                 signals[i] = 0.0
                 position = 0
             else:
