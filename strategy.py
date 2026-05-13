@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Donchian(20) breakout with 4h EMA50 trend filter and 1d volume spike confirmation.
-# Long when price breaks above 20-bar high AND 4h EMA50 rising AND 1d volume > 1.5x 20-day average volume.
-# Short when price breaks below 20-bar low AND 4h EMA50 falling AND 1d volume > 1.5x 20-day average volume.
-# Uses session filter (08-20 UTC) to avoid low-liquidity hours. Fixed position size 0.20 to minimize fee churn.
-# Designed for 15-35 trades/year by requiring multi-timeframe confluence and volume confirmation.
-# Works in bull markets via breakout momentum and in bear markets via breakdown strength.
+# Hypothesis: 6h Bollinger Band Width Regime + 1d Donchian(20) Breakout
+# Uses Bollinger Band Width (BBW) percentile to detect low volatility squeeze regimes.
+# In low volatility (BBW < 20th percentile), waits for 1d Donchian breakout for entry.
+# In high volatility (BBW > 80th percentile), fades extreme price moves at Bollinger Bands.
+# Combines volatility regime filter with multi-timeframe structure for 12-35 trades/year.
+# Works in bull/bear/range markets by adapting to volatility conditions.
 
-name = "1h_Donchian20_4hTrend_1dVolSpike_v1"
-timeframe = "1h"
+name = "6h_BBW_Regime_1dDonchian_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,76 +16,89 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for HTF trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Bollinger Bands (20, 2) on 6h close
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    bb_width = (upper_bb - lower_bb) / sma20  # Normalized BB Width
     
-    # Calculate EMA(50) on 4h close for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # BB Width percentile rank (50-period lookback) for regime detection
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
     
-    # Get 1d data for volume spike confirmation
+    # Get 1d data for HTF Donchian breakout
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 20-day average volume on 1d
-    vol_avg_20d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_threshold = vol_avg_20d * 1.5
-    volume_spike = volume_1d > vol_spike_threshold
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float), additional_delay_bars=0)
-    
-    # Donchian channels (20-period)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Calculate 1d Donchian channels (20-period)
+    donch_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_high_20_aligned = align_htf_to_ltf(prices, df_1d, donch_high_20)
+    donch_low_20_aligned = align_htf_to_ltf(prices, df_1d, donch_low_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or np.isnan(volume_spike_aligned[i]):
+    for i in range(100, n):  # Start after sufficient data for all indicators
+        if np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(bb_width_percentile[i]) or \
+           np.isnan(donch_high_20_aligned[i]) or np.isnan(donch_low_20_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
+        bbwp = bb_width_percentile[i]
         
         if position == 0:
-            # LONG: Price breaks above 20-bar high AND 4h EMA50 rising AND 1d volume spike
-            if close[i] > highest_20[i] and ema50_4h_aligned[i] > ema50_4h_aligned[i-1] and volume_spike_aligned[i] > 0.5:
-                signals[i] = 0.20
-                position = 1
-            # SHORT: Price breaks below 20-bar low AND 4h EMA50 falling AND 1d volume spike
-            elif close[i] < lowest_20[i] and ema50_4h_aligned[i] < ema50_4h_aligned[i-1] and volume_spike_aligned[i] > 0.5:
-                signals[i] = -0.20
-                position = -1
-            else:
-                signals[i] = 0.0
+            # ENTRY CONDITIONS
+            # Low volatility regime (squeeze): BBW < 20th percentile
+            if bbwp < 20:
+                # Wait for 1d Donchian breakout in direction of 6h trend (price > SMA20)
+                if close[i] > donch_high_20_aligned[i] and close[i] > sma20[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < donch_low_20_aligned[i] and close[i] < sma20[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # High volatility regime (expansion): BBW > 80th percentile
+            elif bbwp > 80:
+                # Fade extreme moves at Bollinger Bands
+                if close[i] >= upper_bb[i]:
+                    signals[i] = -0.25  # Short at upper band
+                    position = -1
+                elif close[i] <= lower_bb[i]:
+                    signals[i] = 0.25   # Long at lower band
+                    position = 1
+        
         elif position == 1:
-            # EXIT LONG: Price breaks below 20-bar low OR 4h EMA50 starts falling
-            if close[i] < lowest_20[i] or ema50_4h_aligned[i] < ema50_4h_aligned[i-1]:
+            # EXIT LONG: BBW expansion signal or mean reversion in high volatility
+            if bbwp > 80 and close[i] <= sma20[i]:  # Mean reversion signal
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < lower_bb[i]:  # Stop at lower band
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
+                
         elif position == -1:
-            # EXIT SHORT: Price breaks above 20-bar high OR 4h EMA50 starts rising
-            if close[i] > highest_20[i] or ema50_4h_aligned[i] > ema50_4h_aligned[i-1]:
+            # EXIT SHORT: BBW expansion signal or mean reversion in high volatility
+            if bbwp > 80 and close[i] >= sma20[i]:  # Mean reversion signal
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > upper_bb[i]:  # Stop at upper band
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
