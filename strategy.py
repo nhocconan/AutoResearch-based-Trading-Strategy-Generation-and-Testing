@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Use 12h breakout above Camarilla R1 or below S1 levels derived from previous 1d candle, with volume confirmation (>1.5x 20-period average) and filtered by 1d EMA50 trend. This strategy targets medium-term momentum shifts with tight entry conditions to avoid overtrading. Camarilla levels provide precise intraday support/resistance, while the 1d trend filter ensures alignment with higher timeframe direction. Volume confirmation adds validity to breakouts. Designed for 12h timeframe to target 12-37 trades/year, avoiding fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Use daily Camarilla pivot levels (R1, S1) for breakout entries on 4h timeframe, filtered by 1-day EMA trend and volume spike. Enter long when price breaks above R1 with volume confirmation and price above EMA50, short when price breaks below S1 with volume confirmation and price below EMA50. Exit on opposite Camarilla level touch. Camarilla levels work well in ranging markets and breakouts capture momentum. Volume confirmation ensures institutional participation. Designed for 4h to balance trade frequency (~30-60/year) and avoid excessive fee drag.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,27 +22,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation (based on previous day's OHLC)
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Shift by 1 to use previous day's levels (no look-ahead)
-    camarilla_R1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_S1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Calculate Camarilla pivot levels for previous day
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
     
-    # Align Camarilla levels to 12h timeframe (previous day's levels available at 12h open)
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Get 1d EMA50 for trend filter
+    # Get daily EMA50 for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
@@ -54,7 +55,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -63,26 +64,26 @@ def generate_signals(prices):
         vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 + volume spike + price above 1d EMA50
-            if close[i] > camarilla_R1_aligned[i] and vol_spike and close[i] > ema_50_1d_aligned[i]:
+            # LONG: Price breaks above R1 with volume confirmation and price above EMA50
+            if high[i] > r1_aligned[i] and vol_spike and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S1 + volume spike + price below 1d EMA50
-            elif close[i] < camarilla_S1_aligned[i] and vol_spike and close[i] < ema_50_1d_aligned[i]:
+            # SHORT: Price breaks below S1 with volume confirmation and price below EMA50
+            elif low[i] < s1_aligned[i] and vol_spike and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S1 or below 1d EMA50
-            if close[i] < camarilla_S1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: Price touches or crosses below S1 (opposite level)
+            if low[i] <= s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R1 or above 1d EMA50
-            if close[i] > camarilla_R1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: Price touches or crosses above R1 (opposite level)
+            if high[i] >= r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
