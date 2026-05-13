@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
-# Bull Power = High - EMA13(close); Bear Power = EMA13(close) - Low.
-# Long when Bull Power > 0 AND 1d EMA50 rising AND volume > 1.5x 20-period average.
-# Short when Bear Power > 0 AND 1d EMA50 falling AND volume > 1.5x 20-period average.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 (1d) AND close > 1d EMA50 AND volume > 1.8x 24-period average.
+# Short when price breaks below Camarilla S3 (1d) AND close < 1d EMA50 AND volume > 1.8x 24-period average.
 # Uses ATR-based trailing stop (2.0x) for risk control.
-# Elder Ray measures bull/bear strength relative to EMA13, 1d EMA50 filters daily trend, volume confirms participation.
-# Target: 12-25 trades/year (50-100 total over 4 years) on 6h timeframe.
+# Target: 12-25 trades/year (50-100 total over 4 years) on 12h timeframe.
 
-name = "6h_ElderRay_BullBearPower_1dEMA50_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA50_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,48 +31,48 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray components
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = ema13 - low   # Bear Power = EMA13 - Low
-    
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for Camarilla levels and EMA50
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels (R3, S3) from previous 1d bar
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
     # Calculate EMA50 on 1d close
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF indicators to LTF (6h)
+    # Align HTF indicators to LTF (12h)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate volume confirmation: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    # Calculate volume confirmation: volume > 1.8x 24-period average
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > (1.8 * vol_ma_24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
     lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(100, n):  # Start after sufficient data for indicators
+    for i in range(50, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Bull Power > 0 AND 1d EMA50 rising AND volume confirmation
-            ema50_rising = ema50_1d_aligned[i] > ema50_1d_aligned[i-1] if i > 0 else False
-            if bull_power[i] > 0 and ema50_rising and volume_confirm[i]:
+            # LONG: Price > Camarilla R3 AND close > EMA50 AND volume confirmation
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Bear Power > 0 AND 1d EMA50 falling AND volume confirmation
-            elif bear_power[i] > 0 and ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Price < Camarilla S3 AND close < EMA50 AND volume confirmation
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
