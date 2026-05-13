@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high with 1d EMA34 uptrend and volume > 1.8x average.
-# Short when price breaks below 20-period Donchian low with 1d EMA34 downtrend and volume > 1.8x average.
-# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
-# Based on proven 12h winners showing resilience in both bull and bear markets.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 level with 1d EMA34 uptrend and volume > 1.5x average.
+# Short when price breaks below Camarilla S3 level with 1d EMA34 downtrend and volume > 1.5x average.
+# Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Based on proven 4h Camarilla winners showing resilience in both bull and bear markets.
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,27 +35,26 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 12h data for Donchian channel calculation
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Calculate 20-period Donchian channels
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian channels to 12h timeframe (wait for 12h bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    
-    # Get 1d data for EMA34 trend filter
+    # Get 4h data for Camarilla pivot calculation (using daily high/low/close from prior day)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34
+    # Calculate Camarilla levels: R3, S3
+    # R3 = close + 1.1*(high-low)*1.1/4 = close + 1.1*(high-low)*0.275
+    # S3 = close - 1.1*(high-low)*1.1/4 = close - 1.1*(high-low)*0.275
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) * 0.275
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) * 0.275
+    
+    # Align Camarilla levels to 4h timeframe (wait for daily bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Get 1d data for EMA34 trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 12h timeframe (wait for daily bar to close)
+    # Align 1d EMA34 to 4h timeframe (wait for daily bar to close)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
@@ -65,24 +64,24 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high AND 1d EMA34 uptrend AND volume > 1.8x average
-            if (close[i] > donchian_high_aligned[i] and 
+            # LONG: Price breaks above Camarilla R3 AND 1d EMA34 uptrend AND volume > 1.5x average
+            if (close[i] > camarilla_r3_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and  # Price above 1d EMA34 confirms uptrend
-                volume[i] > 1.8 * avg_volume[i]):
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian low AND 1d EMA34 downtrend AND volume > 1.8x average
-            elif (close[i] < donchian_low_aligned[i] and 
+            # SHORT: Price breaks below Camarilla S3 AND 1d EMA34 downtrend AND volume > 1.5x average
+            elif (close[i] < camarilla_s3_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and  # Price below 1d EMA34 confirms downtrend
-                  volume[i] > 1.8 * avg_volume[i]):
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -95,8 +94,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -110,8 +109,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
