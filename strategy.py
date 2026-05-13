@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_Strategy
-Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance.
-Price rejection at these levels with volume confirmation and trend alignment provides
-high-probability mean-reversion entries. Designed for low trade frequency (15-25/year)
-to minimize fee drag while capturing reversals in both bull and bear markets.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance levels.
+Breakouts above R1 or below S1 with volume confirmation and 1-day EMA50 trend filter capture
+trend moves in both bull and bear markets. Low trade frequency design targets 20-40 trades/year
+to minimize fee drag while maintaining edge in trending markets.
 """
 
-name = "12h_Camarilla_Pivot_Strategy"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,78 +25,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily OHLC for Camarilla calculation
+    # Calculate Camarilla levels from previous day
+    # Using previous day's high, low, close to calculate today's levels
+    phigh = np.concatenate([[high[0]], high[:-1]])  # Previous day high
+    plow = np.concatenate([[low[0]], low[:-1]])    # Previous day low
+    pclose = np.concatenate([[close[0]], close[:-1]])  # Previous day close
+    
+    # Camarilla calculations
+    range_val = phigh - plow
+    R1 = pclose + range_val * 1.1 / 12
+    S1 = pclose - range_val * 1.1 / 12
+    
+    # Calculate 1-day EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla levels from previous day's range
-    # Camarilla: H4 = Close + 1.5*(High-Low), L4 = Close - 1.5*(High-Low)
-    # Using previous day's data to avoid look-ahead
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    prev_range = prev_high - prev_low
-    
-    # Calculate resistance and support levels
-    R4 = prev_close + 1.5 * prev_range  # Strong resistance
-    R3 = prev_close + 1.25 * prev_range  # Resistance
-    S3 = prev_close - 1.25 * prev_range  # Support
-    S4 = prev_close - 1.5 * prev_range   # Strong support
-    
-    # Align levels to 12h timeframe (wait for daily close)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Trend filter: 50-period EMA on 1-day timeframe
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         if position == 0:
-            # LONG: Price touches/slightly breaks S3/S4 with rejection and volume
-            # In downtrend (price < EMA50), look for longs at support
-            if close[i] < ema_50_1d_aligned[i]:  # Downtrend filter
-                if low[i] <= S3_aligned[i] and close[i] > S3_aligned[i] * 0.999:  # Touch S3 with close recovery
-                    if volume_confirm[i]:
-                        signals[i] = 0.25
-                        position = 1
-                elif low[i] <= S4_aligned[i] and close[i] > S4_aligned[i] * 0.999:  # Touch S4 with close recovery
-                    if volume_confirm[i]:
-                        signals[i] = 0.25
-                        position = 1
-            # SHORT: Price touches/slightly breaks R3/R4 with rejection and volume
-            # In uptrend (price > EMA50), look for shorts at resistance
-            elif close[i] > ema_50_1d_aligned[i]:  # Uptrend filter
-                if high[i] >= R3_aligned[i] and close[i] < R3_aligned[i] * 1.001:  # Touch R3 with close rejection
-                    if volume_confirm[i]:
-                        signals[i] = -0.25
-                        position = -1
-                elif high[i] >= R4_aligned[i] and close[i] < R4_aligned[i] * 1.001:  # Touch R4 with close rejection
-                    if volume_confirm[i]:
-                        signals[i] = -0.25
-                        position = -1
+            # LONG: Price breaks above R1 with volume confirmation and uptrend filter
+            if close[i] > R1[i] and volume_confirm[i]:
+                # Additional filter: only take long if price above 1-day EMA50 (uptrend filter)
+                if close[i] > ema_50_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # SHORT: Price breaks below S1 with volume confirmation and downtrend filter
+            elif close[i] < S1[i] and volume_confirm[i]:
+                # Additional filter: only take short if price below 1-day EMA50 (downtrend filter)
+                if close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches midpoint or shows weakness
-            midpoint = (S3_aligned[i] + R3_aligned[i]) / 2
-            if close[i] >= midpoint or close[i] < S3_aligned[i]:
+            # EXIT LONG: Price crosses below S1 (reversal signal) or volume dries up
+            if close[i] < S1[i] or not volume_confirm[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches midpoint or shows strength
-            midpoint = (S3_aligned[i] + R3_aligned[i]) / 2
-            if close[i] <= midpoint or close[i] > R3_aligned[i]:
+            # EXIT SHORT: Price crosses above R1 (reversal signal) or volume dries up
+            if close[i] > R1[i] or not volume_confirm[i]:
                 signals[i] = 0.0
                 position = 0
             else:
