@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when price breaks above Camarilla R3 level AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
 # Short when price breaks below Camarilla S3 level AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
 # Uses ATR(14) trailing stop (2.5x) for risk control.
 # Uses discrete position sizing (0.25) to balance return and fee drag.
-# Target: 75-200 total trades over 4 years (19-50/year) on 6h.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,21 +32,13 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla pivot levels (based on previous day's OHLC)
-    # Camarilla levels: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
-    #                S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    # We need previous day's OHLC, so we shift by 1
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    
-    # First bar has no previous day, so we use current values (will be NaN until we have enough data)
-    prev_close[0] = close[0]
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
+    # Calculate Camarilla pivot levels (R3, S3) on 12h data
+    # Pivot = (H + L + C) / 3
+    # R3 = C + (H - L) * 1.1 / 4
+    # S3 = C - (H - L) * 1.1 / 4
+    pivot = (high + low + close) / 3.0
+    camarilla_r3 = close + (high - low) * 1.1 / 4.0
+    camarilla_s3 = close - (high - low) * 1.1 / 4.0
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -55,7 +47,7 @@ def generate_signals(prices):
     # Calculate EMA(34) on 1d data
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 6h timeframe (wait for 1d bar to close)
+    # Align 1d EMA34 to 12h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate volume confirmation: volume > 2.0x 20-period average
