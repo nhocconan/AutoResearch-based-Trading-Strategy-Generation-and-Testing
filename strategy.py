@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4H_RSI_Divergence_Trend_Filter
-Hypothesis: RSI divergence (bullish/bearish) on 4h chart with 12h trend filter (price > EMA50 for long, price < EMA50 for short) and volume confirmation (volume > 1.5x 20-period average). Designed to capture reversal points in both bull and bear markets with low trade frequency (<50/year) by requiring confluence of divergence, trend, and volume.
+1H_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
+Hypothesis: Use 4h trend (price > EMA50 for long, price < EMA50 for short) and 1d volume confirmation to filter 1h Camarilla breakouts. Enter long when 1h price breaks above daily R1 in 4h uptrend with above-average volume; enter short when breaks below daily S1 in 4h downtrend with above-average volume. Exit on trend reversal or price retracing to EMA50. Designed for 15-30 trades/year by requiring 4h trend alignment and volume confirmation.
 """
 
-name = "4H_RSI_Divergence_Trend_Filter"
-timeframe = "4h"
+name = "1H_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,81 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Get 1d data for Camarilla levels and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate RSI(14) on 4h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma)
+    # Calculate Camarilla levels for each 1d bar (based on previous day's range)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
+    camarilla_r1 = np.full_like(prev_close, np.nan)
+    camarilla_s1 = np.full_like(prev_close, np.nan)
+    
+    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    
+    # Align Camarilla levels to 1h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # 1d volume confirmation: volume > 1.5x 20-day average
+    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_confirm_1d = df_1d['volume'].values > (1.5 * vol_ma_1d)
+    vol_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_confirm_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
-    for i in range(30, n):
-        # Decrease cooldown if active
-        if cooldown > 0:
-            cooldown -= 1
-        
-        if position == 0 and cooldown == 0:
-            # Bullish RSI divergence: price makes lower low, RSI makes higher low
-            bullish_div = False
-            if i >= 3:
-                # Look back 3 bars for lower low in price and higher low in RSI
-                if low[i] < low[i-1] and low[i] < low[i-2] and low[i] < low[i-3]:
-                    if rsi[i] > rsi[i-1] and rsi[i] > rsi[i-2] and rsi[i] > rsi[i-3]:
-                        bullish_div = True
-            
-            # Bearish RSI divergence: price makes higher high, RSI makes lower high
-            bearish_div = False
-            if i >= 3:
-                # Look back 3 bars for higher high in price and lower high in RSI
-                if high[i] > high[i-1] and high[i] > high[i-2] and high[i] > high[i-3]:
-                    if rsi[i] < rsi[i-1] and rsi[i] < rsi[i-2] and rsi[i] < rsi[i-3]:
-                        bearish_div = True
-            
-            # LONG: Bullish divergence with uptrend and volume confirmation
-            if bullish_div and ema_50_12h_aligned[i] > 0 and not np.isnan(ema_50_12h_aligned[i]) and \
-               close[i] > ema_50_12h_aligned[i] and volume_confirmed[i]:
-                signals[i] = 0.25
+    for i in range(50, n):
+        if position == 0:
+            # LONG: Price breaks above R1 with 4h uptrend and volume confirmation
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               high[i] > camarilla_r1_aligned[i] and \
+               close[i] > ema_50_4h_aligned[i] and \
+               vol_confirm_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Bearish divergence with downtrend and volume confirmation
-            elif bearish_div and ema_50_12h_aligned[i] > 0 and not np.isnan(ema_50_12h_aligned[i]) and \
-                 close[i] < ema_50_12h_aligned[i] and volume_confirmed[i]:
-                signals[i] = -0.25
+            # SHORT: Price breaks below S1 with 4h downtrend and volume confirmation
+            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+                 low[i] < camarilla_s1_aligned[i] and \
+                 close[i] < ema_50_4h_aligned[i] and \
+                 vol_confirm_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below EMA50 or bearish divergence
-            if ema_50_12h_aligned[i] > 0 and not np.isnan(ema_50_12h_aligned[i]) and close[i] < ema_50_12h_aligned[i]:
+            # EXIT LONG: 4h trend turns down or price retrace to EMA50
+            if close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                cooldown = 3
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price crosses above EMA50 or bullish divergence
-            if ema_50_12h_aligned[i] > 0 and not np.isnan(ema_50_12h_aligned[i]) and close[i] > ema_50_12h_aligned[i]:
+            # EXIT SHORT: 4h trend turns up or price retrace to EMA50
+            if close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                cooldown = 3
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
