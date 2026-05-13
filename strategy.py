@@ -1,73 +1,75 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_SpreadFilter
-# Hypothesis: Use 1d Camarilla pivot levels (R1/S1) for breakout entries with 1w EMA200 trend filter and volume confirmation.
-# Long when price breaks above R1 in uptrend with volume spike, short when price breaks below S1 in downtrend with volume spike.
-# Exit when price returns to the 1d pivot point (PP) or trend changes.
-# Spread filter: Only trade when BTC-ETH spread is within 1 std dev of 20-day mean to avoid regime extremes.
-# Designed for moderate trade frequency (75-200 total trades over 4 years) with clear entry/exit rules to avoid overtrading.
+# 6h_ConnorRSI_MeanReversion
+# Hypothesis: ConnorRSI (RSI(3) + RSI(2) streak + PercentRank(100))/3 on 6h timeframe.
+# Long when ConnorRSI < 15 and price above 1d EMA200 (bullish regime).
+# Short when ConnorRSI > 85 and price below 1d EMA200 (bearish regime).
+# Exit when ConnorRSI crosses above 70 (long) or below 30 (short).
+# Designed for low trade frequency (20-60 total trades over 4 years) with high win rate.
+# Works in bull markets via trend alignment and in bear markets via mean reversion against trend.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_SpreadFilter"
-timeframe = "4h"
+name = "6h_ConnorRSI_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def rsi(close, period):
+    """Calculate RSI with given period."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+def stoch_rsi(rsi_series, period):
+    """Calculate StochRSI (percentile rank) of RSI series."""
+    return pd.Series(rsi_series).rolling(window=period, min_periods=period).apply(
+        lambda x: (x.iloc[-1] - np.min(x)) / (np.max(x) - np.min(x) + 1e-10) * 100, raw=False
+    ).values
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot calculation
+    # Calculate ConnorRSI components on 6h close
+    rsi_3 = rsi(close, 3)
+    rsi_2 = rsi(close, 2)
+    
+    # Calculate RSI streak (consecutive up/down days)
+    delta = np.diff(close, prepend=close[0])
+    up_days = np.where(delta > 0, 1, 0)
+    down_days = np.where(delta < 0, 1, 0)
+    streak_up = np.where(up_days, np.concatenate([[0], np.cumsum(up_days[:-1]) * up_days]), 0)
+    streak_down = np.where(down_days, np.concatenate([[0], np.cumsum(down_days[:-1]) * down_days]), 0)
+    rsi_streak = np.where(streak_up > 0, streak_up, -streak_down)
+    rsi_streak_rsi = rsi(np.where(rsi_streak > 0, close, np.nan), 2)  # RSI of streak
+    rsi_streak_rsi = np.where(~np.isnan(rsi_streak_rsi), rsi_streak_rsi, 50)  # fill NaN with 50
+    
+    # Percent Rank of RSI(3) over 100 periods
+    percent_rank = stoch_rsi(rsi_3, 100)
+    
+    # ConnorRSI = (RSI(3) + RSI(streak) + PercentRank) / 3
+    connor_rsi = (rsi_3 + rsi_streak_rsi + percent_rank) / 3
+
+    # Get 1d data for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d Camarilla pivot levels: R1, S1, and PP (pivot point)
-    # Camarilla formulas:
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    pp_1d = typical_price.values
-    hl_range = df_1d['high'] - df_1d['low']
-    r1_1d = df_1d['close'].values + hl_range.values * 1.1 / 12
-    s1_1d = df_1d['close'].values - hl_range.values * 1.1 / 12
-    
-    # Align 1d Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate 1w EMA200 for trend filter
-    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-
-    # Volume filter: >1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-
-    # Spread filter: BTC-ETH price ratio within 1 std dev of 20-day mean
-    # We approximate spread using close price relative to its 20-day mean
-    price_mean_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    price_std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    z_score = (close - price_mean_20) / (price_std_20 + 1e-10)  # Avoid division by zero
-    spread_filter = np.abs(z_score) < 1.0  # Within 1 std dev
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(100, n):  # Start after 100 for percent rank calculation
         # Skip if any required value is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(pp_1d_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or 
-            np.isnan(vol_avg_20[i]) or np.isnan(spread_filter[i])):
+        if (np.isnan(connor_rsi[i]) or np.isnan(ema_200_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,32 +78,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 + price above 1w EMA200 (uptrend) + volume spike + spread filter
-            if (close[i] > r1_1d_aligned[i] and 
-                close[i] > ema_200_1w_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5 and
-                spread_filter[i]):
+            # LONG: ConnorRSI < 15 (oversold) + price above 1d EMA200 (bullish regime)
+            if connor_rsi[i] < 15 and close[i] > ema_200_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + price below 1w EMA200 (downtrend) + volume spike + spread filter
-            elif (close[i] < s1_1d_aligned[i] and 
-                  close[i] < ema_200_1w_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5 and
-                  spread_filter[i]):
+            # SHORT: ConnorRSI > 85 (overbought) + price below 1d EMA200 (bearish regime)
+            elif connor_rsi[i] > 85 and close[i] < ema_200_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to pivot point (PP) or trend changes (price below EMA200)
-            if (close[i] <= pp_1d_aligned[i] or close[i] < ema_200_1w_aligned[i]):
+            # EXIT LONG: ConnorRSI crosses above 70 (overbought)
+            if connor_rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot point (PP) or trend changes (price above EMA200)
-            if (close[i] >= pp_1d_aligned[i] or close[i] > ema_200_1w_aligned[i]):
+            # EXIT SHORT: ConnorRSI crosses below 30 (oversold)
+            if connor_rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
