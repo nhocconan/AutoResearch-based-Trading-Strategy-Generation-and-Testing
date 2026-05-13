@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d KAMA direction + RSI(14) + choppiness regime filter on 1d timeframe.
-# Long when KAMA is rising (trending up) AND RSI < 50 (mean reversion in uptrend) AND CHOP > 61.8 (range regime).
-# Short when KAMA is falling (trending down) AND RSI > 50 (mean reversion in downtrend) AND CHOP > 61.8 (range regime).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND 1d EMA34 > prior 1d EMA34 (uptrend) AND volume > 1.8x 20-period average.
+# Short when price breaks below Donchian lower band AND 1d EMA34 < prior 1d EMA34 (downtrend) AND volume > 1.8x 20-period average.
 # Uses ATR(14) trailing stop (2.5x) for risk control.
-# KAMA adapts to market noise, reducing false signals in choppy markets.
-# RSI extremes in the direction of the trend provide high-probability mean-reversion entries.
-# Choppiness filter ensures we only trade in ranging markets where mean reversion works best.
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d.
+# Donchian channels provide robust trend-following structure that works in both bull and bear markets via breakouts.
+# 1d EMA34 trend filter ensures we trade with the dominant higher-timeframe trend, reducing whipsaws.
+# Volume confirmation adds validity to breakouts, filtering low-conviction moves.
+# Target: 100-180 total trades over 4 years (25-45/year) on 4h.
 
-name = "1d_KAMA_RSI_Chop_MeanReversion_v1"
-timeframe = "1d"
+name = "4h_Donchian20_1dEMA34_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,6 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Calculate ATR(14) for stoploss
     tr1 = high - low
@@ -33,60 +34,25 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # Efficiency Ratio (ER) = |net change| / sum(|changes|)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = pd.Series(change).rolling(window=10, min_periods=10).sum().values
-    net_change = np.abs(np.diff(close, prepend=close[0]))
-    for i in range(1, len(net_change)):
-        net_change[i] = np.abs(close[i] - close[i-10]) if i >= 10 else np.abs(close[i] - close[0])
-    er = net_change / np.maximum(volatility, 1e-10)
-    # Smoothing constants: fastest SC=2/(2+1)=0.67, slowest SC=2/(30+1)=0.0645
-    sc = (er * (0.67 - 0.0645) + 0.0645) ** 2
-    # Initialize KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate Donchian channels (20-period) on 4h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate Choppiness Index (CHOP) on 1d timeframe
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
+    # Calculate EMA(34) on 1d data
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Sum of ATR over 14 periods
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Max high - min low over 14 periods
-    max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    range_14 = max_high_14 - min_low_14
-    
-    # CHOP = 100 * log10(sum(ATR14) / range14) / log10(14)
-    chop = 100 * np.log10(np.divide(sum_atr_14, range_14, out=np.full_like(sum_atr_14, np.nan), where=range_14!=0)) / np.log10(14)
-    
-    # Align indicators to 1d timeframe (wait for 1d bar to close)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate volume confirmation: volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -95,19 +61,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: KAMA rising (trending up) AND RSI < 50 (mean reversion in uptrend) AND CHOP > 61.8 (range regime)
-            if kama_aligned[i] > kama_aligned[i-1] and rsi_aligned[i] < 50 and chop_aligned[i] > 61.8:
+            # LONG: Price > Donchian upper AND 1d EMA34 rising (trending up) AND volume confirmation
+            if close[i] > donchian_upper[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: KAMA falling (trending down) AND RSI > 50 (mean reversion in downtrend) AND CHOP > 61.8 (range regime)
-            elif kama_aligned[i] < kama_aligned[i-1] and rsi_aligned[i] > 50 and chop_aligned[i] > 61.8:
+            # SHORT: Price < Donchian lower AND 1d EMA34 falling (trending down) AND volume confirmation
+            elif close[i] < donchian_lower[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
