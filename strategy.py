@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1W_1D_Camarilla_R3_S3_Breakout_With_Volume_Confirmation
-# Hypothesis: Price reactions at weekly/daily Camarilla pivot levels (R3/S3) provide high-probability
-# reversal or continuation signals when confirmed by volume spikes. Uses weekly trend filter
-# (price above/below weekly EMA50) to align with higher timeframe momentum. Designed to work
-# in both bull and bear markets by following the weekly trend direction. Targets low-frequency,
-# high-quality setups to minimize fee drag.
+# 1D_1W_Camarilla_R3S3_Breakout_Volume_Trend
+# Hypothesis: Daily price breaks at weekly-derived Camarilla R3/S3 levels with volume confirmation
+# and weekly trend filter (price above/below weekly EMA50) capture high-probability moves.
+# Weekly trend alignment reduces whipsaws in both bull and bear markets. Targets low-frequency,
+# high-quality setups (10-25 trades/year) to minimize fee drag.
 
-name = "12h_1W_1D_Camarilla_R3_S3_Breakout_With_Volume_Confirmation"
-timeframe = "12h"
+name = "1D_1W_Camarilla_R3S3_Breakout_Volume_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -44,9 +43,9 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
 
-    # Volume spike: volume > 2.0 * 24-period average (~12 days at 12h)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > 2.0 * vol_ma_24
+    # Volume spike: volume > 2.0 * 20-period average (~20 days at 1d)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * vol_ma_20
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
