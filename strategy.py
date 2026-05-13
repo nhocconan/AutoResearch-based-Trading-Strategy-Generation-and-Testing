@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Support_Resistance_Bounce_Turn_12hTrend_Filter
-Hypothesis: Price bounces off multi-timeframe support/resistance levels (prior swing highs/lows) with trend alignment from 12h EMA and volume confirmation. Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend). Uses swing points for structure, EMA for trend filter, volume for confirmation. Targets 20-40 trades/year to minimize fee drag.
+1h_Keltner_Channel_Breakout_4hTrend_1dVolFilter
+Hypothesis: Price breaking above Keltner upper band in 4h uptrend (price > 4h EMA50) with 1d volume spike triggers long; breaking below lower band in 4h downtrend (price < 4h EMA50) with volume spike triggers short. Uses 1h for entry timing with 4h trend filter and 1d volume confirmation. Designed to capture trend moves with controlled frequency.
 """
 
-name = "4h_Support_Resistance_Bounce_Turn_12hTrend_Filter"
-timeframe = "4h"
+name = "1h_Keltner_Channel_Breakout_4hTrend_1dVolFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,87 +22,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get swing points from 1d timeframe for S/R levels
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Get 1d data for volume filter (20-period average)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
+    vol_ma_20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Calculate swing highs and lows (3-bar lookback/forward)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Keltner Channel on 1h data (20-period EMA, ATR(10)*2)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    kc_upper = ema_20 + 2 * atr
+    kc_lower = ema_20 - 2 * atr
     
-    swing_high = np.full_like(high_1d, np.nan)
-    swing_low = np.full_like(low_1d, np.nan)
-    
-    for i in range(1, len(high_1d) - 1):
-        if high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i+1]:
-            swing_high[i] = high_1d[i]
-        if low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i+1]:
-            swing_low[i] = low_1d[i]
-    
-    # Forward fill swing levels to create support/resistance zones
-    swing_high_ff = pd.Series(swing_high).ffill().values
-    swing_low_ff = pd.Series(swing_low).ffill().values
-    
-    # Align S/R levels to 4h timeframe
-    resistance_aligned = align_htf_to_ltf(prices, df_1d, swing_high_ff)
-    support_aligned = align_htf_to_ltf(prices, df_1d, swing_low_ff)
-    
-    # Get 12h EMA for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    ema_30_12h = pd.Series(df_12h['close']).ewm(span=30, adjust=False, min_periods=30).mean().values
-    ema_30_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_30_12h)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_exit = 0  # bars since last exit
     
-    for i in range(50, n):
-        bars_since_exit += 1
+    for i in range(20, n):
+        # Apply session filter: only trade between 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        if position == 0:
-            # LONG: Price near support with bullish alignment
-            if (support_aligned[i] > 0 and not np.isnan(support_aligned[i]) and
-                low[i] <= support_aligned[i] * 1.005 and  # within 0.5% of support
-                close[i] > support_aligned[i] and        # closing above support
-                ema_30_12h_aligned[i] > 0 and not np.isnan(ema_30_12h_aligned[i]) and
-                close[i] > ema_30_12h_aligned[i] and     # above 12h EMA (uptrend)
-                volume_confirmed[i]):
-                signals[i] = 0.25
+        if not in_session:
+            signals[i] = 0.0
+            continue
+            
+        # LONG: Price breaks above Keltner upper band in 4h uptrend with volume spike
+        if (ema_50_4h_aligned[i] > 0 and not np.isnan(ema_50_4h_aligned[i]) and
+            kc_upper[i] > 0 and not np.isnan(kc_upper[i]) and
+            close[i] > kc_upper[i] and
+            close[i] > ema_50_4h_aligned[i] and
+            vol_ma_20_1d_aligned[i] > 0 and not np.isnan(vol_ma_20_1d_aligned[i]) and
+            volume[i] > 2.0 * vol_ma_20_1d_aligned[i]):
+            if position != 1:
+                signals[i] = 0.20
                 position = 1
-                bars_since_exit = 0
-            # SHORT: Price near resistance with bearish alignment
-            elif (resistance_aligned[i] > 0 and not np.isnan(resistance_aligned[i]) and
-                  high[i] >= resistance_aligned[i] * 0.995 and  # within 0.5% of resistance
-                  close[i] < resistance_aligned[i] and          # closing below resistance
-                  ema_30_12h_aligned[i] > 0 and not np.isnan(ema_30_12h_aligned[i]) and
-                  close[i] < ema_30_12h_aligned[i] and        # below 12h EMA (downtrend)
-                  volume_confirmed[i]):
-                signals[i] = -0.25
+            else:
+                signals[i] = 0.20
+        # SHORT: Price breaks below Keltner lower band in 4h downtrend with volume spike
+        elif (ema_50_4h_aligned[i] > 0 and not np.isnan(ema_50_4h_aligned[i]) and
+              kc_lower[i] > 0 and not np.isnan(kc_lower[i]) and
+              close[i] < kc_lower[i] and
+              close[i] < ema_50_4h_aligned[i] and
+              vol_ma_20_1d_aligned[i] > 0 and not np.isnan(vol_ma_20_1d_aligned[i]) and
+              volume[i] > 2.0 * vol_ma_20_1d_aligned[i]):
+            if position != -1:
+                signals[i] = -0.20
                 position = -1
-                bars_since_exit = 0
-        elif position == 1:
-            # EXIT LONG: Price breaks below support or trend changes
-            if (support_aligned[i] > 0 and not np.isnan(support_aligned[i]) and
-                close[i] < support_aligned[i]) or \
-               (ema_30_12h_aligned[i] > 0 and not np.isnan(ema_30_12h_aligned[i]) and
-                close[i] < ema_30_12h_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-        elif position == -1:
-            # EXIT SHORT: Price breaks above resistance or trend changes
-            if (resistance_aligned[i] > 0 and not np.isnan(resistance_aligned[i]) and
-                close[i] > resistance_aligned[i]) or \
-               (ema_30_12h_aligned[i] > 0 and not np.isnan(ema_30_12h_aligned[i]) and
-                close[i] > ema_30_12h_aligned[i]):
-                signals[i] = 0.0
-                position = 0
+            else:
+                signals[i] = -0.20
+        # EXIT: Price crosses back through EMA20 (middle of Keltner Channel)
+        elif position == 1 and close[i] < ema_20[i]:
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and close[i] > ema_20[i]:
+            signals[i] = 0.0
+            position = 0
+        else:
+            signals[i] = 0.0
     
     return signals
