@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and 1d volume spike confirmation.
-# Long when price breaks above Donchian upper channel AND price > 1d EMA50 AND 1d volume > 2.0 * 20-period average volume.
-# Short when price breaks below Donchian lower channel AND price < 1d EMA50 AND 1d volume > 2.0 * 20-period average volume.
-# Exit when price crosses Donchian midpoint (mean reversion to median).
-# Uses discrete position sizing (0.25) to limit fee churn. Designed for BTC/ETH robustness by capturing strong trends with volume confirmation in both bull and bear markets.
-# Target: 80-120 total trades over 4 years (20-30/year) for 4h timeframe.
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and volume spike confirmation.
+# Long when price breaks above 20-period Donchian high AND price > 1d EMA50 AND 1d volume > 2.0 * 20-period average volume.
+# Short when price breaks below 20-period Donchian low AND price < 1d EMA50 AND 1d volume > 2.0 * 20-period average volume.
+# Exit when price crosses the 10-period Donchian midpoint (mean reversion within the channel).
+# Uses discrete position sizing (0.30) to balance profit potential and drawdown control.
+# Designed for BTC/ETH robustness by capturing strong trending moves with volume confirmation in both bull and bear markets.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
-name = "4h_Donchian20_Breakout_1dEMA50_1dVolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -53,22 +54,23 @@ def generate_signals(prices):
         if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(volume_spike_aligned[i]) or
             np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i])):
+            np.isnan(lowest_low[i]) or
+            np.isnan(donchian_mid[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND price > 1d EMA50 AND volume spike
+            # LONG: Price breaks above Donchian high AND price > 1d EMA50 AND volume spike
             if (close[i] > highest_high[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
                 volume_spike_aligned[i] > 0.5):  # True if volume spike aligned
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Price breaks below Donchian lower AND price < 1d EMA50 AND volume spike
+            # SHORT: Price breaks below Donchian low AND price < 1d EMA50 AND volume spike
             elif (close[i] < lowest_low[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
                   volume_spike_aligned[i] > 0.5):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
@@ -78,13 +80,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # EXIT SHORT: Price crosses above Donchian midpoint
             if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
