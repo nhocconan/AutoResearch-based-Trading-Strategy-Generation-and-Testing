@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 1D_1W_Camarilla_Pivot_Support_Resistance_Bounce
-# Hypothesis: On daily timeframe, price tends to respect weekly Camarilla pivot levels (S3/S4 and R3/R4) as major support/resistance.
-# Go long when price touches weekly S3/S4 with bullish rejection (close > open) and volume confirmation.
-# Go short when price touches weekly R3/R4 with bearish rejection (close < open) and volume confirmation.
-# Uses weekly timeframe for structural levels (more reliable in ranging/ bear markets) and daily for execution.
-# Volume spike filters for institutional interest. Works in both bull/bear by fading extremes at proven weekly levels.
+# 6h_Volatility_Skew_Rebound
+# Hypothesis: During high volatility periods, price tends to revert to the mean after extreme moves.
+# Uses a volatility-adjusted RSI on 6h timeframe with 12h trend filter.
+# Long when volatility is high, RSI is oversold, and 12h trend is up.
+# Short when volatility is high, RSI is overbought, and 12h trend is down.
+# Volatility filter prevents trading in low-vol chop where mean reversion fails.
+# Works in bull/bear by following 12h trend direction while capturing mean reversion in high vol.
 
-name = "1D_1W_Camarilla_Pivot_Support_Resistance_Bounce"
-timeframe = "1d"
+name = "6h_Volatility_Skew_Rebound"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,55 +17,56 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla levels for weekly timeframe
-    # Formula: R4 = close + (high - low) * 1.1/2, R3 = close + (high - low) * 1.1/4, etc.
-    # We focus on S3, S4, R3, R4 as extreme levels
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate 12h EMA34 for trend direction
+    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Calculate Camarilla levels
-    diff = weekly_high - weekly_low
-    S4 = weekly_close - diff * 1.1 / 2
-    S3 = weekly_close - diff * 1.1 / 4
-    R3 = weekly_close + diff * 1.1 / 4
-    R4 = weekly_close + diff * 1.1 / 2
+    # Volatility: ATR(6) on 6h
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr6 = pd.Series(tr).rolling(window=6, min_periods=6).mean().values
     
-    # Align weekly Camarilla levels to daily timeframe
-    S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
-    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
-    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
-    R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
+    # Volatility ratio: current ATR6 vs 24-period average (~4 days)
+    atr6_ma_24 = pd.Series(atr6).rolling(window=24, min_periods=24).mean().values
+    volatility_ratio = atr6 / atr6_ma_24
+    high_vol = volatility_ratio > 1.5  # Volatility spike
     
-    # Volume spike: volume > 2.0 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # RSI(6) on 6h close
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
     
-    # Bullish/bearish rejection candles
-    bullish_rejection = close > open_price  # close above open
-    bearish_rejection = close < open_price  # close below open
+    # RSI extremes
+    rsi_oversold = rsi < 30
+    rsi_overbought = rsi > 70
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(24, n):
         # Skip if any required value is NaN
-        if (np.isnan(S4_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or 
-            np.isnan(R4_aligned[i])):
+        if (np.isnan(ema34_12h_aligned[i]) or 
+            np.isnan(atr6[i]) or 
+            np.isnan(atr6_ma_24[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,30 +75,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price touches weekly S3/S4 with bullish rejection and volume spike
-            if ((low[i] <= S3_aligned[i] or low[i] <= S4_aligned[i]) and 
-                bullish_rejection[i] and 
-                volume_spike[i]):
+            # LONG: High vol + RSI oversold + 12h uptrend
+            if high_vol[i] and rsi_oversold[i] and close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price touches weekly R3/R4 with bearish rejection and volume spike
-            elif ((high[i] >= R3_aligned[i] or high[i] >= R4_aligned[i]) and 
-                  bearish_rejection[i] and 
-                  volume_spike[i]):
+            # SHORT: High vol + RSI overbought + 12h downtrend
+            elif high_vol[i] and rsi_overbought[i] and close[i] < ema34_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price moves back above weekly S3 or shows weakness
-            if close[i] > S3_aligned[i] or not bullish_rejection[i]:
+            # EXIT LONG: Volatility drops or RSI neutral or trend breaks
+            if not high_vol[i] or rsi[i] >= 50 or close[i] < ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price moves back below weekly R3 or shows weakness
-            if close[i] < R3_aligned[i] or not bearish_rejection[i]:
+            # EXIT SHORT: Volatility drops or RSI neutral or trend breaks
+            if not high_vol[i] or rsi[i] <= 50 or close[i] > ema34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
