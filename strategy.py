@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_KAMA_Trend_Volume_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,20 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-day trend filter: EMA(34)
+    # KAMA: Kaufman Adaptive Moving Average
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will fix below
+    # Correct volatility calculation: sum of absolute changes over ER period
+    er_period = 10
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.zeros(n)
+    for i in range(er_period, n):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-er_period+1:i+1])))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # 1d trend filter: EMA(34)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Donchian(20) on 12h chart
-    high_20 = np.full(n, np.nan)
-    low_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        high_20[i] = np.max(high[i-19:i+1])
-        low_20[i] = np.min(low[i-19:i+1])
     
     # Volume filter: current volume > 1.5 x 20-period average
     vol_ma_20 = np.full(n, np.nan)
@@ -40,35 +48,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+    for i in range(30, n):
+        if (np.isnan(kama[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_filter = volume[i] > 1.5 * vol_ma_20[i]
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper + 1d uptrend + volume
-            if close[i] > high_20[i] and close[i] > ema34_1d_aligned[i] and vol_filter:
+            # LONG: price > KAMA + 1d uptrend + volume confirmation
+            if price_above_kama and close[i] > ema34_1d_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian lower + 1d downtrend + volume
-            elif close[i] < low_20[i] and close[i] < ema34_1d_aligned[i] and vol_filter:
+            # SHORT: price < KAMA + 1d downtrend + volume confirmation
+            elif price_below_kama and close[i] < ema34_1d_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian lower or trend breaks
-            if close[i] < low_20[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: price < KAMA or trend breaks
+            if price_below_kama or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian upper or trend breaks
-            if close[i] > high_20[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: price > KAMA or trend breaks
+            if price_above_kama or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
