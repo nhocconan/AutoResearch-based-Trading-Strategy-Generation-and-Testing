@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + ADX regime filter + volume spike
-# Long when Bull Power > 0, ADX > 25 (trending), and volume > 2.0x average
-# Short when Bear Power < 0, ADX > 25 (trending), and volume > 2.0x average
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high with 1d EMA34 uptrend and volume > 1.8x average.
+# Short when price breaks below 20-period Donchian low with 1d EMA34 downtrend and volume > 1.8x average.
 # Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
-# Works in both bull and bear markets by adapting to trend strength via ADX.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# Based on proven 12h winners showing resilience in both bull and bear markets.
 
-name = "6h_ElderRay_ADX_Regime_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -35,51 +35,28 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Elder Ray and ADX calculation
+    # Get 12h data for Donchian channel calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate 20-period Donchian channels
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian channels to 12h timeframe (wait for 12h bar to close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Elder Ray components
-    # Bull Power = High - EMA13(Close)
-    # Bear Power = Low - EMA13(Close)
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    # Calculate 1d EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Elder Ray to 6h timeframe (wait for daily bar to close)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Calculate ADX(14) on 1d timeframe
-    # ADX requires +DM, -DM, and TR
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # True Range (already calculated as 'tr' above for 1d)
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate +DI and -DI
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    
-    # Calculate DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align ADX to 6h timeframe (wait for daily bar to close)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 1d EMA34 to 12h timeframe (wait for daily bar to close)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -88,24 +65,24 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Bull Power > 0 AND ADX > 25 (strong trend) AND volume > 2.0x average
-            if (bull_power_aligned[i] > 0 and 
-                adx_aligned[i] > 25 and 
-                volume[i] > 2.0 * avg_volume[i]):
+            # LONG: Price breaks above Donchian high AND 1d EMA34 uptrend AND volume > 1.8x average
+            if (close[i] > donchian_high_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and  # Price above 1d EMA34 confirms uptrend
+                volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Bear Power < 0 AND ADX > 25 (strong trend) AND volume > 2.0x average
-            elif (bear_power_aligned[i] < 0 and 
-                  adx_aligned[i] > 25 and 
-                  volume[i] > 2.0 * avg_volume[i]):
+            # SHORT: Price breaks below Donchian low AND 1d EMA34 downtrend AND volume > 1.8x average
+            elif (close[i] < donchian_low_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and  # Price below 1d EMA34 confirms downtrend
+                  volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
