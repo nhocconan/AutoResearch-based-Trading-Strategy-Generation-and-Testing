@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_Pivot_Trend_Volume
-Hypothesis: Camarilla pivot levels (H3/L3, H4/L4) provide strong support/resistance.
-In trending markets (identified by 4h EMA20 > EMA50 for long, EMA20 < EMA50 for short),
-price tends to continue after retracing to H3/L3 with volume confirmation.
-In ranging markets, price reverses at H4/L4. Uses 1d trend filter to avoid counter-trend trades.
-Designed for low trade frequency (15-30/year) by requiring confluence of trend, level, and volume.
-Works in both bull and bear markets by adapting to trend direction.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
+Hypothesis: Daily EMA34 sets trend direction, Camarilla R1/S1 levels provide entry points for breakouts with volume confirmation. Designed for low trade frequency (20-40/year) to work in both bull and bear markets by combining trend-following with breakout logic.
 """
 
-name = "1h_Camarilla_Pivot_Trend_Volume"
-timeframe = "1h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,14 +13,18 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
+    """Calculate Camarilla pivot levels for the day"""
+    typical = (high + low + close) / 3.0
     range_val = high - low
-    pivot = (high + low + close) / 3.0
-    h3 = pivot + (range_val * 1.1 / 4)
-    l3 = pivot - (range_val * 1.1 / 4)
-    h4 = pivot + (range_val * 1.1 / 2)
-    l4 = pivot - (range_val * 1.1 / 2)
-    return h3, l3, h4, l4
+    r1 = close + range_val * 1.1 / 12
+    r2 = close + range_val * 1.1 / 6
+    r3 = close + range_val * 1.1 / 4
+    r4 = close + range_val * 1.1 / 2
+    s1 = close - range_val * 1.1 / 12
+    s2 = close - range_val * 1.1 / 6
+    s3 = close - range_val * 1.1 / 4
+    s4 = close - range_val * 1.1 / 2
+    return r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,109 +36,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and Camarilla calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Get daily data for trend and Camarilla calculation
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA20 and EMA50 for trend direction
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily EMA34 for trend direction
+    daily_close_series = pd.Series(df_daily['close'])
+    ema34_daily = daily_close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 4h EMAs to 1h timeframe
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate daily Camarilla levels
+    r1_d, r2_d, r3_d, r4_d, s1_d, s2_d, s3_d, s4_d = calculate_camarilla(
+        df_daily['high'].values, df_daily['low'].values, df_daily['close'].values
+    )
     
-    # Calculate Camarilla levels from 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h_for_cam = df_4h['close'].values
-    h3, l3, h4, l4 = calculate_camarilla(high_4h, low_4h, close_4h_for_cam)
+    # Align daily indicators to 4h timeframe
+    ema34_4h = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    r1_4h = align_htf_to_ltf(prices, df_daily, r1_d)
+    r2_4h = align_htf_to_ltf(prices, df_daily, r2_d)
+    r3_4h = align_htf_to_ltf(prices, df_daily, r3_d)
+    r4_4h = align_htf_to_ltf(prices, df_daily, r4_d)
+    s1_4h = align_htf_to_ltf(prices, df_daily, s1_d)
+    s2_4h = align_htf_to_ltf(prices, df_daily, s2_d)
+    s3_4h = align_htf_to_ltf(prices, df_daily, s3_d)
+    s4_4h = align_htf_to_ltf(prices, df_daily, s4_d)
     
-    # Align Camarilla levels to 1h timeframe
-    h3_1h = align_htf_to_ltf(prices, df_4h, h3)
-    l3_1h = align_htf_to_ltf(prices, df_4h, l3)
-    h4_1h = align_htf_to_ltf(prices, df_4h, h4)
-    l4_1h = align_htf_to_ltf(prices, df_4h, l4)
-    
-    # Get 1d data for trend filter (avoid counter-trend trades)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA50 for higher timeframe trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume confirmation: > 1.3x 24-period average (to reduce noise)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation: > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.3 * vol_ma)
-    
-    # Session filter: 08-20 UTC to avoid low-volume Asian session
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if outside trading session
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-            
-        # Determine trend direction from 4h EMA crossover
-        # Long trend: EMA20 > EMA50, Short trend: EMA20 < EMA50
-        long_trend = ema20_4h_aligned[i] > ema50_4h_aligned[i]
-        short_trend = ema20_4h_aligned[i] < ema50_4h_aligned[i]
-        
-        # Higher timeframe trend filter: only trade in direction of 1d trend
-        # Long only if price above 1d EMA50, short only if price below 1d EMA50
-        long_htf_filter = close[i] > ema50_1d_aligned[i]
-        short_htf_filter = close[i] < ema50_1d_aligned[i]
-        
+    for i in range(34, n):
         if position == 0:
-            # LONG ENTRY: Price retraces to L3 in uptrend with volume confirmation
-            # OR price breaks above H4 with volume confirmation (momentum)
-            if (long_trend and long_htf_filter and 
-                close[i] <= l3_1h[i] and close[i-1] > l3_1h[i-1] and 
-                volume_confirm[i]):
-                signals[i] = 0.20
+            # LONG: Price above EMA34 (uptrend) and breaks above R1 with volume
+            if close[i] > ema34_4h[i] and close[i] > r1_4h[i] and close[i-1] <= r1_4h[i-1] and volume_confirm[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT ENTRY: Price retraces to H3 in downtrend with volume confirmation
-            # OR price breaks below L4 with volume confirmation (momentum)
-            elif (short_trend and short_htf_filter and 
-                  close[i] >= h3_1h[i] and close[i-1] < h3_1h[i-1] and 
-                  volume_confirm[i]):
-                signals[i] = -0.20
+            # SHORT: Price below EMA34 (downtrend) and breaks below S1 with volume
+            elif close[i] < ema34_4h[i] and close[i] < s1_4h[i] and close[i-1] >= s1_4h[i-1] and volume_confirm[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 
-            # 1. Take profit at H3 (reached target level)
-            # 2. Stop loss if price breaks below L4 (trend failure)
-            # 3. Exit if trend reverses (EMA20 < EMA50)
-            if (close[i] >= h3_1h[i] or 
-                close[i] < l4_1h[i] or 
-                ema20_4h_aligned[i] < ema50_4h_aligned[i]):
+            # EXIT LONG: Price reaches R2 (take profit) or breaks below EMA34 (trend change)
+            if close[i] >= r2_4h[i] or close[i] < ema34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT:
-            # 1. Take profit at L3 (reached target level)
-            # 2. Stop loss if price breaks above H4 (trend failure)
-            # 3. Exit if trend reverses (EMA20 > EMA50)
-            if (close[i] <= l3_1h[i] or 
-                close[i] > h4_1h[i] or 
-                ema20_4h_aligned[i] > ema50_4h_aligned[i]):
+            # EXIT SHORT: Price reaches S2 (take profit) or breaks above EMA34 (trend change)
+            if close[i] <= s2_4h[i] or close[i] > ema34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
