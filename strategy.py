@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_ThreeLineBreak_Trend_1wTrend_Volume
-# Hypothesis: Price reverses after exhaustion shown by Three Line Break (TLB) reversal on 1d,
-# confirmed by 1w trend direction and volume spike. Enter on close of reversal bar.
-# Works in bull markets (buy after 3-line down reversal in uptrend) and bear markets
-# (sell after 3-line up reversal in downtrend). Uses 1w trend filter to avoid counter-trend
-# trades and volume spike to confirm institutional participation. Target: 15-30 trades/year.
+# 6h_ElderRay_ZeroCross_1dTrend_Volume
+# Hypothesis: Elder Ray (Bull/Bear Power) crosses zero when bullish/bearish momentum shifts.
+# Enter long when Bull Power crosses above zero with 1d uptrend (EMA50) and volume confirmation.
+# Enter short when Bear Power crosses below zero with 1d downtrend and volume confirmation.
+# Exit on opposite cross or trend reversal. Works in bull/bear via trend filter.
+# Target: 15-35 trades/year per symbol.
 
-name = "1d_ThreeLineBreak_Trend_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_ZeroCross_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,55 +24,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # 1w trend: EMA21
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-
-    # Three Line Break calculation on daily close
-    # Returns +1 for up line, -1 for down line, 0 for no new line
-    tl = np.zeros(n, dtype=int)
-    if n > 0:
-        tl[0] = 1  # start with up line
-        line_count = 1
-        reversal_level = close[0]
-        for i in range(1, n):
-            if close[i] > reversal_level:
-                tl[i] = 1
-                line_count += 1
-                reversal_level = close[i]
-            elif close[i] < reversal_level:
-                tl[i] = -1
-                line_count += 1
-                reversal_level = close[i]
-            else:
-                tl[i] = 0
-
-    # Detect TLB reversal: current line opposite to previous line
-    # Need at least 3 consecutive same-direction lines for valid reversal signal
-    tl_reversal = np.zeros(n, dtype=bool)
-    tl_run = np.zeros(n, dtype=int)
-    for i in range(1, n):
-        if tl[i] == tl[i-1]:
-            tl_run[i] = tl_run[i-1] + 1
-        else:
-            tl_run[i] = 1
-        # Reversal when we have at least 3 prior same-direction lines and direction changes
-        if i >= 3 and tl_run[i-1] >= 3 and tl[i] != tl[i-1]:
-            tl_reversal[i] = True
-
-    # Volume spike: volume > 2.0 * 20-period average
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # 1d EMA50 trend
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 13-period EMA on 6h)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Detect zero crosses
+    bull_cross_up = (bull_power[1:] > 0) & (bull_power[:-1] <= 0)
+    bear_cross_down = (bear_power[1:] < 0) & (bear_power[:-1] >= 0)
+    # Prepend False for index 0
+    bull_cross_up = np.concatenate([[False], bull_cross_up])
+    bear_cross_down = np.concatenate([[False], bear_cross_down])
+    
+    # Volume spike: volume > 2.0 * 20-period average (~6.7 hours)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * vol_ma_20
-
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # start after vol MA warmup
+    for i in range(13, n):  # start after EMA13 warmup
         # Skip if any required value is NaN
-        if np.isnan(ema21_1w_aligned[i]):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,26 +64,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TBL down-to-up reversal + 1w uptrend + volume spike
-            if tl_reversal[i] and tl[i] == 1 and close[i] > ema21_1w_aligned[i] and volume_spike[i]:
+            # LONG: Bull Power crosses above zero + 1d uptrend + volume spike
+            if bull_cross_up[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TLB up-to-down reversal + 1w downtrend + volume spike
-            elif tl_reversal[i] and tl[i] == -1 and close[i] < ema21_1w_aligned[i] and volume_spike[i]:
+            # SHORT: Bear Power crosses below zero + 1d downtrend + volume spike
+            elif bear_cross_down[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TLB up-to-down reversal or trend failure
-            if tl_reversal[i] and tl[i] == -1 or close[i] < ema21_1w_aligned[i]:
+            # EXIT LONG: Bear Power crosses below zero or trend reversal
+            if bear_cross_down[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TLB down-to-up reversal or trend failure
-            if tl_reversal[i] and tl[i] == 1 or close[i] > ema21_1w_aligned[i]:
+            # EXIT SHORT: Bull Power crosses above zero or trend reversal
+            if bull_cross_up[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
