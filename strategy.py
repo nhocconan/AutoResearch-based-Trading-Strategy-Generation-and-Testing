@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
+# 12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
 # Hypothesis: Camarilla pivot R1/S1 breakouts from daily pivot levels, filtered by 1-day EMA trend and volume spike.
-# Camarilla levels identify key support/resistance; breakouts with volume capture institutional moves.
-# Trend filter ensures alignment with higher timeframe direction. Designed for 20-40 trades/year to minimize fee drag.
+# Designed for 12h timeframe to reduce trade frequency and improve generalization.
 # Works in bull/bear: long when price breaks above R1 with volume and above daily EMA; short when breaks below S1 with volume and below daily EMA.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -27,8 +27,6 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
 
     # Calculate Camarilla pivot levels from previous day
-    # Standard formula: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C, H, L are from previous day
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -37,7 +35,7 @@ def generate_signals(prices):
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align to 4h timeframe (values available after daily bar closes)
+    # Align to 12h timeframe (values available after daily bar closes)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
