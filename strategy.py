@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high AND close > 1w EMA50 AND volume > 1.5x 20-period average.
-# Short when price breaks below 20-period Donchian low AND close < 1w EMA50 AND volume > 1.5x 20-period average.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above 20-period high AND close > 1d EMA50 AND volume > 1.5x 20-period average.
+# Short when price breaks below 20-period low AND close < 1d EMA50 AND volume > 1.5x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
-# Discrete position sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years (12-37/year) on 12h.
-# Donchian channels provide clear breakout levels that work in both trending and ranging markets.
-# 1w EMA50 provides long-term trend filter to avoid counter-trend trades.
-# Volume confirmation reduces false breakouts.
+# Donchian channels provide clear trend-following structure that works in both bull and bear markets.
+# EMA50 on 1d provides medium-term trend filter to avoid counter-trend trades.
+# Volume confirmation reduces false breakouts. Discrete sizing (0.25) minimizes fee churn.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
-name = "12h_Donchian20_1wEMA50_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Volume_Confirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,17 +34,17 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1w data for EMA50
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for EMA50
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1w close
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate EMA50 on 1d close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian channels (20-period) on primary timeframe
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,19 +57,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Donchian high AND close > 1w EMA50 AND volume confirmation
-            if close[i] > donchian_high[i] and close[i] > ema50_1w_aligned[i] and volume_confirm[i]:
+            # LONG: Price > 20-period high AND close > 1d EMA50 AND volume confirmation
+            if close[i] > highest_20[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Donchian low AND close < 1w EMA50 AND volume confirmation
-            elif close[i] < donchian_low[i] and close[i] < ema50_1w_aligned[i] and volume_confirm[i]:
+            # SHORT: Price < 20-period low AND close < 1d EMA50 AND volume confirmation
+            elif close[i] < lowest_20[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
