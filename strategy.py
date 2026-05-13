@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
-Hypothesis: Camarilla pivot R1/S1 breakouts with 12h trend (EMA50) and volume confirmation work in both bull and bear markets.
-Breakout above R1 with uptrend and volume spike = long.
-Breakdown below S1 with downtrend and volume spike = short.
-Exit on opposite S1/R1 touch or trend reversal. Target: 20-50 trades/year per symbol.
+1h_Donchian_Breakout_Trend_Volume
+Hypothesis: 1-hour Donchian breakouts with 4h trend and volume confirmation work in both bull and bear markets.
+Breakout above 20-period high with 4h uptrend and volume spike = long.
+Breakdown below 20-period low with 4h downtrend and volume spike = short.
+Exit on opposite band touch or trend reversal.
+Uses 1d trend filter for higher timeframe bias. Uses 4h EMA50 for trend.
+Target: 15-37 trades/year per session (60-150 total over 4 years).
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Donchian_Breakout_Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,78 +27,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We need previous day's OHLC
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]  # First bar uses current
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 12
-    s1 = prev_close - camarilla_range * 1.1 / 12
+    # Donchian Channel: 20-period high/low
+    high_20 = np.zeros(n)
+    low_20 = np.zeros(n)
+    for i in range(20, n):
+        high_20[i] = np.max(high[i-20:i])
+        low_20[i] = np.min(low[i-20:i])
     
     # 4h trend: EMA50
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_4h = close > ema_50
-    downtrend_4h = close < ema_50
-    
-    # 12h trend filter (HTF) - using EMA50 on 12h closes
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = df_12h['close'].values > ema_50_12h
-    downtrend_12h = df_12h['close'].values < ema_50_12h
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    uptrend_4h = close > ema_50_4h_aligned
+    downtrend_4h = close < ema_50_4h_aligned
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # 1d trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    uptrend_1d = close > ema_50_1d_aligned
+    downtrend_1d = close < ema_50_1d_aligned
+    
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.5 * vol_ma
+    volume_conf = volume > 2.0 * vol_ma
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
+        if not session_filter[i]:
+            signals[i] = 0.0
+            continue
+        
         # Get values
-        r1_val = r1[i]
-        s1_val = s1[i]
-        uptrend = uptrend_4h[i]
-        downtrend = downtrend_4h[i]
-        uptrend_htf = uptrend_12h_aligned[i]
-        downtrend_htf = downtrend_12h_aligned[i]
+        upper = high_20[i]
+        lower = low_20[i]
+        uptrend_4h_val = uptrend_4h[i]
+        downtrend_4h_val = downtrend_4h[i]
+        uptrend_1d_val = uptrend_1d[i]
+        downtrend_1d_val = downtrend_1d[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: break above R1, 4h uptrend, 12h uptrend filter, volume confirmation
-            if close[i] > r1_val and uptrend and uptrend_htf and vol_conf:
-                signals[i] = 0.25
+            # LONG: break above 20-period high, 4h uptrend, 1d uptrend, volume confirmation
+            if close[i] > upper and uptrend_4h_val and uptrend_1d_val and vol_conf:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: break below S1, 4h downtrend, 12h downtrend filter, volume confirmation
-            elif close[i] < s1_val and downtrend and downtrend_htf and vol_conf:
-                signals[i] = -0.25
+            # SHORT: break below 20-period low, 4h downtrend, 1d downtrend, volume confirmation
+            elif close[i] < lower and downtrend_4h_val and downtrend_1d_val and vol_conf:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch S1 or 4h trend turns down
-            if close[i] < s1_val or not uptrend:
+            # EXIT LONG: touch 20-period low or 4h trend turns down
+            if close[i] < lower or not uptrend_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: touch R1 or 4h trend turns up
-            if close[i] > r1_val or not downtrend:
+            # EXIT SHORT: touch 20-period high or 4h trend turns up
+            if close[i] > upper or not downtrend_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
