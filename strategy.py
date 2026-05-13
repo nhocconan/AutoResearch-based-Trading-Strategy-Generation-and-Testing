@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend
-Hypothesis: Donchian channel breakouts with volume confirmation and trend filter
-capture strong moves while avoiding false signals. Works in bull markets by 
-riding breakouts and in bear markets by catching sharp reversals when price 
-breaks below lower band with volume. Designed for low trade frequency (20-40/year)
-to minimize fee drag.
+1d_Weekly_Pivot_MR_With_Volume
+Hypothesis: Weekly pivot levels act as strong support/resistance on daily timeframe.
+Price tends to mean revert from extreme levels (R4/S4) but continues when breaking R3/S3.
+Volume confirmation filters false signals. Designed for low trade frequency (10-20/year)
+to work in both bull and bear markets by capturing reversals at extremes and breakouts
+in strong trends.
 """
 
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_MR_With_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points: P, R1-R4, S1-S4"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,49 +39,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get weekly data for pivot points (using weekly timeframe)
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Trend filter: 50-period EMA on 1d timeframe
-    df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly pivot points
+    pivot, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivot_points(
+        weekly_high, weekly_low, weekly_close
+    )
     
-    # Volume confirmation: > 1.8x 20-period average
+    # Align weekly pivot levels to daily timeframe
+    r3_1d = align_htf_to_ltf(prices, df_weekly, r3)
+    r4_1d = align_htf_to_ltf(prices, df_weekly, r4)
+    s3_1d = align_htf_to_ltf(prices, df_weekly, s3)
+    s4_1d = align_htf_to_ltf(prices, df_weekly, s4)
+    
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         if position == 0:
-            # LONG ENTRY: Price breaks above upper Donchian with volume and trend filter
-            if close[i] > high_max[i] and volume_confirm[i] and close[i] > ema_50_1d_aligned[i]:
-                signals[i] = 0.30
+            # MEAN REVERSION LONG: Price at S4 with volume confirmation
+            if close[i] <= s4_1d[i] and volume_confirm[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT ENTRY: Price breaks below lower Donchian with volume (no trend filter for shorts in bear markets)
-            elif close[i] < low_min[i] and volume_confirm[i]:
-                signals[i] = -0.30
+            # MEAN REVERSION SHORT: Price at R4 with volume confirmation
+            elif close[i] >= r4_1d[i] and volume_confirm[i]:
+                signals[i] = -0.25
+                position = -1
+            # BREAKOUT LONG: Price breaks above R3 with volume confirmation
+            elif close[i] > r3_1d[i] and close[i-1] <= r3_1d[i-1] and volume_confirm[i]:
+                signals[i] = 0.25
+                position = 1
+            # BREAKOUT SHORT: Price breaks below S3 with volume confirmation
+            elif close[i] < s3_1d[i] and close[i-1] >= s3_1d[i-1] and volume_confirm[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to midpoint or breaks below lower band
-            midpoint = (high_max[i] + low_min[i]) / 2.0
-            if close[i] < midpoint or close[i] < low_min[i]:
+            # EXIT LONG: Price reaches R3 (take profit) or breaks below S3 (stop)
+            if close[i] >= r3_1d[i] or close[i] < s3_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to midpoint or breaks above upper band
-            midpoint = (high_max[i] + low_min[i]) / 2.0
-            if close[i] > midpoint or close[i] > high_max[i]:
+            # EXIT SHORT: Price reaches S3 (take profit) or breaks above R3 (stop)
+            if close[i] <= s3_1d[i] or close[i] > r3_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
