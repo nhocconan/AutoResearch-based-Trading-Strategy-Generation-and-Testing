@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_52WeekLow_HighBreakout_Target_Volume_20
-# Hypothesis: Price breaking above the 52-week high (or below 52-week low) with volume confirmation
-# captures the start of a new major trend. The 52-week extreme acts as a strong support/resistance level.
-# We use a 20-bar target to take partial profits, reducing exposure and increasing win rate.
-# Works in bull (breakouts above 52w high) and bear (breakdowns below 52w low).
-# Target ~20-40 trades/year to avoid fee drag.
+# 1d_Weekly_Pivot_R1_S1_Breakout_Trend_Volume
+# Hypothesis: Weekly Pivot R1/S1 levels act as strong support/resistance on daily chart.
+# Breakouts above R1 or below S1 with volume confirmation and weekly trend filter capture momentum.
+# Uses 1d for execution and 1w EMA for trend direction. Target ~15-30 trades/year to avoid fee drag.
+# Works in bull (breakouts with trend) and bear (breakdowns against trend filtered by 1w EMA).
 
-name = "4h_52WeekLow_HighBreakout_Target_Volume_20"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_R1_S1_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 260:  # Need ~1 year of 4h data for 52-week calculation
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,53 +23,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for 52-week high/low calculation
+    # Get weekly data for Pivot calculation
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 52-week high and low (52 weeks of weekly data)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate weekly Pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    h_1w = df_1w['high'].values
+    l_1w = df_1w['low'].values
+    c_1w = df_1w['close'].values
     
-    # 52-week high: rolling max of high over 52 weeks
-    week_high_52 = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
-    # 52-week low: rolling min of low over 52 weeks
-    week_low_52 = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    pivot_1w = (h_1w + l_1w + c_1w) / 3.0
+    weekly_r1 = 2 * pivot_1w - l_1w
+    weekly_s1 = 2 * pivot_1w - h_1w
     
-    # Align weekly 52-week levels to 4h chart (wait for weekly close)
-    week_high_52_aligned = align_htf_to_ltf(prices, df_1w, week_high_52)
-    week_low_52_aligned = align_htf_to_ltf(prices, df_1w, week_low_52)
+    # Align weekly Pivot levels to daily chart (wait for weekly close)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (higher threshold for fewer trades)
+    # Get weekly EMA trend filter
+    ema_1w = pd.Series(c_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(260, n):  # Start after 52-week warmup
+    for i in range(100, n):  # Start after warmup
         if position == 0:
-            # LONG: Breakout above 52-week high with volume confirmation
-            if close[i] > week_high_52_aligned[i] and volume_filter[i]:
+            # LONG: Breakout above weekly R1 with volume confirmation and weekly EMA uptrend
+            if close[i] > weekly_r1_aligned[i] and volume_filter[i] and close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below 52-week low with volume confirmation
-            elif close[i] < week_low_52_aligned[i] and volume_filter[i]:
+            # SHORT: Breakdown below weekly S1 with volume confirmation and weekly EMA downtrend
+            elif close[i] < weekly_s1_aligned[i] and volume_filter[i] and close[i] < ema_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Take partial profit at 20% gain or reverse if breaks below 52-week low
-            # We don't track entry price exactly, so use close-based rules:
-            # Exit if price drops back below 52-week level (invalidates breakout)
-            if close[i] < week_high_52_aligned[i]:  # Broke back below breakout level
+            # EXIT LONG: Price returns to weekly S1 or breaks below weekly EMA
+            if close[i] < weekly_s1_aligned[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Take partial profit at 20% gain or reverse if breaks above 52-week high
-            if close[i] > week_low_52_aligned[i]:  # Broke back above breakdown level
+            # EXIT SHORT: Price returns to weekly R1 or breaks above weekly EMA
+            if close[i] > weekly_r1_aligned[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
