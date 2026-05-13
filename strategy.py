@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with weekly trend filter and volume confirmation.
-# Uses 1-week high/low channels for trend direction and 1-day Donchian breakouts for entry timing.
-# Long when price breaks above 1d Donchian(20) high and weekly trend is up; short when breaks below 1d Donchian(20) low and weekly trend is down.
-# Includes volume confirmation to avoid false breakouts. Designed for low trade frequency (<25/year) to minimize fee drag.
-# Works in both bull and bear markets by following the weekly trend direction.
+# Hypothesis: 12h Williams Alligator + 1d KAMA trend filter with volume confirmation.
+# Uses Williams Alligator (Jaw/Teeth/Lips) for trend direction and entry timing,
+# combined with 1d Kaufman Adaptive Moving Average for long-term trend filter.
+# Volume filter ensures trades occur with sufficient market participation.
+# Designed for low trade frequency (<30/year) to minimize fee drift.
+# Williams Alligator is effective in trending markets while avoiding whipsaws in ranging conditions.
+# KAMA adapts to market volatility, making it suitable for both bull and bear markets.
 
-name = "1d_Donchian20_WeeklyTrend"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_KAMA_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,22 +25,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    # Weekly trend: price above/below 20-period EMA
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_trend_up = close_1w > ema20_1w
-    weekly_trend_down = close_1w < ema20_1w
-    # Align to daily timeframe (wait for weekly bar to close)
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
-    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
+    # Williams Alligator components (13,8,5 periods with 8,5,3 shifts)
+    close_series = pd.Series(close)
+    jaw = close_series.rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = close_series.rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = close_series.rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Daily Donchian channels (20-period high/low)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # 1d Kaufman Adaptive Moving Average (KAMA)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Calculate Efficiency Ratio (ER) and Smoothing Constant (SC)
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0)  # This needs correction
+    # Proper ER calculation: |net change| / sum(|changes|) over period
+    er = np.zeros_like(close_1d)
+    for i in range(2, len(close_1d)):  # Start from index 2 for 3-period calculation
+        net_change = np.abs(close_1d[i] - close_1d[i-2])
+        sum_changes = np.abs(close_1d[i] - close_1d[i-1]) + np.abs(close_1d[i-1] - close_1d[i-2])
+        if sum_changes > 0:
+            er[i] = net_change / sum_changes
+        else:
+            er[i] = 0
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # for EMA(2)
+    slow_sc = 2 / (30 + 1)  # for EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama_1d = np.zeros_like(close_1d)
+    kama_1d[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama_1d[i] = kama_1d[i-1] + sc[i] * (close_1d[i] - kama_1d[i-1])
+    # Align KAMA to 12h timeframe
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
     # Volume filter: current volume > 20-period average
     volume_series = pd.Series(volume)
@@ -48,36 +66,33 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after sufficient data for Donchian
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma20[i]):
+    for i in range(50, n):  # Start after sufficient data
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(kama_1d_aligned[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
-        # Get weekly trend values for today
-        trend_up = weekly_trend_up_aligned[i]
-        trend_down = weekly_trend_down_aligned[i]
-        
+        # Alligator signals: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
         if position == 0:
-            # LONG: Price breaks above Donchian high with weekly uptrend and volume
-            if close[i] > donchian_high[i] and trend_up and volume_ok[i]:
+            # LONG: Lips > Teeth > Jaw (uptrend) AND price > KAMA (long-term uptrend) with volume
+            if lips[i] > teeth[i] > jaw[i] and close[i] > kama_1d_aligned[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low with weekly downtrend and volume
-            elif close[i] < donchian_low[i] and trend_down and volume_ok[i]:
+            # SHORT: Lips < Teeth < Jaw (downtrend) AND price < KAMA (long-term downtrend) with volume
+            elif lips[i] < teeth[i] < jaw[i] and close[i] < kama_1d_aligned[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low
-            if close[i] < donchian_low[i]:
+            # EXIT LONG: Lips < Teeth (loss of uptrend momentum) OR price < KAMA
+            if lips[i] < teeth[i] or close[i] < kama_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high
-            if close[i] > donchian_high[i]:
+            # EXIT SHORT: Lips > Teeth (loss of downtrend momentum) OR price > KAMA
+            if lips[i] > teeth[i] or close[i] > kama_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
