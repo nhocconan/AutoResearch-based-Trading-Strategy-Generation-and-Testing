@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 AND 1w EMA50 is rising AND volume > 2.0x 24-period average.
-# Short when price breaks below Camarilla S3 AND 1w EMA50 is falling AND volume > 2.0x 24-period average.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper channel AND 1w EMA50 is rising AND volume > 1.8x 20-period average.
+# Short when price breaks below Donchian lower channel AND 1w EMA50 is falling AND volume > 1.8x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
-# Uses discrete position sizing (0.25) to minimize fee drag and manage drawdown.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# Uses discrete position sizing (0.25) to minimize fee drag.
+# Target: 60-100 total trades over 4 years (15-25/year) on 1d.
 
-name = "12h_Camarilla_R3_S3_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wEMA50_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -32,13 +32,9 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla pivot levels (R3, S3) on 12h data
-    # Pivot = (high + low + close) / 3
-    # R3 = close + (high - low) * 1.1 / 4
-    # S3 = close - (high - low) * 1.1 / 4
-    pivot = (high + low + close) / 3.0
-    camarilla_r3 = close + (high - low) * 1.1 / 4.0
-    camarilla_s3 = close - (high - low) * 1.1 / 4.0
+    # Calculate Donchian channels (20-period) on 1d data
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Get 1w data for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -47,12 +43,12 @@ def generate_signals(prices):
     # Calculate EMA(50) on 1w data
     ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1w EMA50 to 12h timeframe (wait for 1w bar to close)
+    # Align 1w EMA50 to 1d timeframe (wait for 1w bar to close)
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate volume confirmation: volume > 2.0x 24-period average (24*12h = 12 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_24)
+    # Calculate volume confirmation: volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,19 +57,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Camarilla R3 AND 1w EMA50 rising (trending up) AND volume spike
-            if close[i] > camarilla_r3[i] and ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and volume_confirm[i]:
+            # LONG: Price > Donchian upper AND 1w EMA50 rising (trending up) AND volume spike
+            if close[i] > donchian_upper[i] and ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Camarilla S3 AND 1w EMA50 falling (trending down) AND volume spike
-            elif close[i] < camarilla_s3[i] and ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Price < Donchian lower AND 1w EMA50 falling (trending down) AND volume spike
+            elif close[i] < donchian_lower[i] and ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
