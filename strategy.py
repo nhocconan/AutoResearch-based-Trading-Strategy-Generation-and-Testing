@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Weekly_Pivot_Swing_Rejection
-# Hypothesis: Trade reversals at weekly pivot levels (R1/S1) in the direction of 1d trend, confirmed by volume exhaustion and momentum divergence.
-# In bull markets: buy R1 support when price shows bullish divergence on RSI and holds above 1d EMA50.
-# In bear markets: sell S1 resistance when price shows bearish divergence and holds below 1d EMA50.
-# Weekly pivots provide strong institutional support/resistance. Rejections at these levels with momentum divergence offer high-probability swings.
-# Works in both bull (buy support dips) and bear (sell resistance rallies) via trend-aligned mean reversion.
+# 4h_KAMA_Direction_RSI_1dTrend_With_Volume
+# Hypothesis: Use KAMA to determine trend direction on 4h, enter long when price pulls back to KAMA during uptrend with RSI < 40 and volume > 1.5x average, short when price pulls back to KAMA during downtrend with RSI > 60 and volume > 1.5x average.
+# Uses 1d EMA50 as higher timeframe trend filter to avoid counter-trend trades.
+# Designed for low frequency: only trades on pullbacks in strong trends with volume confirmation.
+# Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend).
 
-name = "6h_Weekly_Pivot_Swing_Rejection"
-timeframe = "6h"
+name = "4h_KAMA_Direction_RSI_1dTrend_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,57 +23,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Weekly pivot points (using prior week's OHLC)
-    high_wk = df_1w['high'].values
-    low_wk = df_1w['low'].values
-    close_wk = df_1w['close'].values
-    
-    # Calculate pivot and levels
-    pivot = (high_wk + low_wk + close_wk) / 3.0
-    r1 = 2 * pivot - low_wk
-    s1 = 2 * pivot - high_wk
-    r2 = pivot + (high_wk - low_wk)
-    s2 = pivot - (high_wk - low_wk)
-    
-    # Get daily data for trend and momentum
+    # 4h KAMA (trend direction)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, k=10))  # 10-period change
+    abs_change = np.sum(np.abs(np.diff(close, k=1)), axis=1) if len(close) > 1 else 0  # placeholder for actual ER calc
+    # Proper ER calculation
+    er = np.zeros_like(close)
+    for i in range(10, len(close)):
+        if i >= 10:
+            direction = np.abs(close[i] - close[i-10])
+            volatility = np.sum(np.abs(np.diff(close[i-9:i+1])))
+            er[i] = direction / volatility if volatility != 0 else 0
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+
+    # 4h RSI (14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Pad RSI to match length
+    rsi = np.concatenate([np.full(14, np.nan), rsi])
+
+    # 4h volume average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    
-    # Daily trend: EMA50
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # RSI for momentum divergence (14-period)
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Align all indicators to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
-    
-    # Volume exhaustion: volume < 0.5 * 24-period average (1 day worth at 6h)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_exhaustion = volume < 0.5 * vol_ma_24
-    
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(50, n):  # start after warmup
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(vol_ma_20[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,44 +78,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price at S1 support + bullish RSI divergence + above 1d EMA50 + volume exhaustion
-            # Bullish divergence: price making lower low, RSI making higher low
-            bullish_div = False
-            if i >= 2:
-                if low[i] < low[i-1] and low[i-1] < low[i-2] and rsi_aligned[i] > rsi_aligned[i-1] and rsi_aligned[i-1] > rsi_aligned[i-2]:
-                    bullish_div = True
-            
-            if (abs(low[i] - s1_aligned[i]) < 0.001 * s1_aligned[i] or low[i] <= s1_aligned[i]) and \
-               bullish_div and \
-               close[i] > ema50_1d_aligned[i] and \
-               volume_exhaustion[i]:
+            # LONG: Price near KAMA (pullback) in uptrend with oversold RSI and volume spike
+            if (close[i] <= kama[i] * 1.005 and  # within 0.5% above KAMA
+                close[i] > kama[i] and          # above KAMA
+                close[i] > ema50_1d_aligned[i] and  # above daily EMA50 (uptrend)
+                rsi[i] < 40 and               # oversold
+                volume[i] > 1.5 * vol_ma_20[i]):  # volume spike
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at R1 resistance + bearish RSI divergence + below 1d EMA50 + volume exhaustion
-            # Bearish divergence: price making higher high, RSI making lower high
-            bearish_div = False
-            if i >= 2:
-                if high[i] > high[i-1] and high[i-1] > high[i-2] and rsi_aligned[i] < rsi_aligned[i-1] and rsi_aligned[i-1] < rsi_aligned[i-2]:
-                    bearish_div = True
-            
-            elif (abs(high[i] - r1_aligned[i]) < 0.001 * r1_aligned[i] or high[i] >= r1_aligned[i]) and \
-                 bearish_div and \
-                 close[i] < ema50_1d_aligned[i] and \
-                 volume_exhaustion[i]:
+            # SHORT: Price near KAMA (pullback) in downtrend with overbought RSI and volume spike
+            elif (close[i] >= kama[i] * 0.995 and  # within 0.5% below KAMA
+                  close[i] < kama[i] and           # below KAMA
+                  close[i] < ema50_1d_aligned[i] and  # below daily EMA50 (downtrend)
+                  rsi[i] > 60 and                # overbought
+                  volume[i] > 1.5 * vol_ma_20[i]):  # volume spike
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches pivot or RSI overbought or trend breaks
-            if close[i] >= r1_aligned[i] or rsi_aligned[i] > 70 or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price crosses below KAMA or RSI overbought
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches pivot or RSI oversold or trend breaks
-            if close[i] <= s1_aligned[i] or rsi_aligned[i] < 30 or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price crosses above KAMA or RSI oversold
+            if close[i] > kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
