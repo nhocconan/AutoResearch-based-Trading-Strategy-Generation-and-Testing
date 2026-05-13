@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 1d_Weekly_Camarilla_R1_S1_Breakout_Trend_Volume
-# Hypothesis: Weekly Camarilla pivot levels (R1/S1) act as strong support/resistance.
-# Buy when price breaks above R1 with volume confirmation and weekly trend up.
-# Sell when price breaks below S1 with volume confirmation and weekly trend down.
-# Weekly trend filter reduces whipsaws in ranging markets.
-# Works in bull (buying dips in uptrend) and bear (selling rallies in downtrend).
-# Target: 15-25 trades/year to minimize fee drag.
+# 12h_Camarilla_R1S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Camarilla pivot level breaks (R1/S1) on 12h chart with 1d trend filter (EMA34) and volume confirmation.
+# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
+# Target: 15-30 trades/year to minimize fee drag on 12h timeframe.
 
-name = "1d_Weekly_Camarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,73 +22,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Camarilla levels (based on prior week OHLC)
-    df_1w = get_htf_data(prices, '1w')
-    # Need at least 2 weeks of data to calculate levels for current week
-    if len(df_1w) < 2:
+    # Calculate 12h Camarilla levels (using previous 12h bar's range)
+    # Note: We use the previous completed 12h bar to avoid look-ahead
+    # For each 12h bar, Camarilla levels are based on that bar's high-low range
+    # We'll calculate these per 12h bar and align to 12h timeframe
+    
+    # Get 12h data for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Use prior week's OHLC to calculate current week's levels
-    # Weekly high, low, close from previous completed week
-    wk_high = df_1w['high'].values[:-1]  # Exclude current week
-    wk_low = df_1w['low'].values[:-1]
-    wk_close = df_1w['close'].values[:-1]
+    # Calculate Camarilla levels for each 12h bar (based on previous bar's range)
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # But we use the PREVIOUS completed bar's range to avoid look-ahead
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
+    prev_close = df_12h['close'].shift(1).values
     
-    # Camarilla calculation: 
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    wk_range = wk_high - wk_low
-    r1 = wk_close + wk_range * 1.1 / 12
-    s1 = wk_close - wk_range * 1.1 / 12
+    # Avoid NaN from shift
+    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
+    camarilla_r1 = np.full_like(prev_close, np.nan)
+    camarilla_s1 = np.full_like(prev_close, np.nan)
     
-    # Align weekly levels to daily timeframe (available after weekly close)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Calculate where we have valid data
+    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     
-    # Weekly trend filter: EMA50 on weekly close
-    wk_ema50 = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Align weekly EMA to daily (available after weekly close)
-    wk_ema50_aligned = align_htf_to_ltf(prices, df_1w, wk_ema50)
+    # Align Camarilla levels to 12h timeframe (already on 12h bars)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
     
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 days for vol MA + 50 for EMA)
-    start_idx = max(20, 50)
-    for i in range(start_idx, n):
+    for i in range(50, n):  # Start after warmup
         if position == 0:
-            # LONG: Break above R1 with volume and weekly uptrend
-            if (r1_aligned[i] > 0 and  # Valid level
-                close[i] > r1_aligned[i] and
-                volume_confirm[i] and
-                wk_ema50_aligned[i] > 0 and  # Valid EMA
-                close[i] > wk_ema50_aligned[i]):
+            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 with volume and weekly downtrend
-            elif (s1_aligned[i] > 0 and  # Valid level
-                  close[i] < s1_aligned[i] and
-                  volume_confirm[i] and
-                  wk_ema50_aligned[i] > 0 and  # Valid EMA
-                  close[i] < wk_ema50_aligned[i]):
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34)
+            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below R1 or trend weakens
-            if close[i] < r1_aligned[i] or close[i] < wk_ema50_aligned[i]:
+            # EXIT LONG: Price crosses back below R1 or trend weakens (price < EMA34)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above S1 or trend weakens
-            if close[i] > s1_aligned[i] or close[i] > wk_ema50_aligned[i]:
+            # EXIT SHORT: Price crosses back above S1 or trend weakens (price > EMA34)
+            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+               high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
