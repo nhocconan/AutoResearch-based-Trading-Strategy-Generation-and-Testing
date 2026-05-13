@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 1d_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Use Camarilla pivot levels from daily timeframe (R1/S1) with 1-week trend filter and volume confirmation.
-# Enter long when price breaks above R1 with 1-week EMA uptrend and volume spike.
-# Enter short when price breaks below S1 with 1-week EMA downtrend and volume spike.
-# Exit when price returns to the daily pivot point (central level).
-# This structure-based approach reduces false breakouts and works in both bull/bear via trend filter.
-# Target: 10-20 trades/year on 1d to minimize fee drag.
+# 4h_Chaikin_Oscillator_ZeroCross_Trend_Filter
+# Hypothesis: Chaikin Oscillator (3,10) crossing zero with 1d EMA trend filter and volume confirmation
+# captures momentum shifts with low trade frequency. Works in bull via uptrend longs and in bear via downtrend shorts.
+# Target: 20-30 trades/year on 4h to minimize fee drag.
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_Chaikin_Oscillator_ZeroCross_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,47 +22,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Camarilla pivot levels (R1, S1, and pivot point)
-    # Formula: Pivot = (H + L + C) / 3
-    # R1 = Pivot + (H - L) * 1.1 / 12
-    # S1 = Pivot - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = pivot_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = pivot_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Calculate Chaikin Oscillator: (3-period EMA of ADL) - (10-period EMA of ADL)
+    # ADL = ADL_prev + ((close - low) - (high - close)) / (high - low) * volume
+    # Avoid division by zero
+    hl_range = high - low
+    hl_range = np.where(hl_range == 0, 1, hl_range)  # replace zero with 1 to avoid div/0
+    money_flow_multiplier = ((close - low) - (high - close)) / hl_range
+    money_flow_volume = money_flow_multiplier * volume
+    adl = np.cumsum(money_flow_volume)
 
-    # Align Camarilla levels to 1d timeframe (no shift needed as already daily)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # EMA of ADL
+    adl_series = pd.Series(adl)
+    ema3_adl = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10_adl = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    chaikin_osc = ema3_adl - ema10_adl
 
-    # Get 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # 1-week EMA34 for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or 
+        if (np.isnan(chaikin_osc[i]) or np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -75,30 +65,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above R1 + price > 1w EMA34 + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema34_1w_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Chaikin Osc crosses above zero + price > 1d EMA34 + volume spike
+            if (chaikin_osc[i] > 0 and chaikin_osc[i-1] <= 0 and
+                close[i] > ema34_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.3):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S1 + price < 1w EMA34 + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_1w_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Chaikin Osc crosses below zero + price < 1d EMA34 + volume spike
+            elif (chaikin_osc[i] < 0 and chaikin_osc[i-1] >= 0 and
+                  close[i] < ema34_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.3):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close returns to or below pivot point (mean reversion to fair value)
-            if close[i] <= pivot_aligned[i]:
+            # EXIT LONG: Chaikin Osc crosses below zero
+            if chaikin_osc[i] < 0 and chaikin_osc[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close returns to or above pivot point (mean reversion to fair value)
-            if close[i] >= pivot_aligned[i]:
+            # EXIT SHORT: Chaikin Osc crosses above zero
+            if chaikin_osc[i] > 0 and chaikin_osc[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
