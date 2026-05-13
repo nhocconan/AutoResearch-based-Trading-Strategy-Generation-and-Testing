@@ -1,12 +1,15 @@
-# 165118
+# 165120
 #!/usr/bin/env python3
 """
-1d_Donchian_20_Weekly_Trend_Volume
-Hypothesis: Daily Donchian(20) breakouts with weekly trend alignment and volume confirmation work in both bull and bear markets. Weekly trend filter avoids counter-trend trades, reducing whipsaws. Volume confirmation ensures breakout strength. Designed for low trade frequency (~10-25/year) to minimize fee drag on daily bars.
+4h_Donchian_20_Breakout_Volume_Trend_Filter
+Hypothesis: Donchian channel (20-period) breakouts on 4h capture trend continuations. 
+Volume filter (>1.5x 20-period average) confirms breakout strength. 
+Trend filter (price > 50-period EMA) ensures alignment with medium-term trend. 
+Designed for 20-40 trades/year to minimize fee drag. Works in bull/bear via trend filter.
 """
 
-name = "1d_Donchian_20_Weekly_Trend_Volume"
-timeframe = "1d"
+name = "4h_Donchian_20_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,20 +26,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Daily Donchian channels (20-period)
-    # Upper = max(high, 20)
-    # Lower = min(low, 20)
+    # Donchian channel (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly trend: EMA(34) on weekly close
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Trend filter: 50-period EMA on close
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
@@ -45,32 +42,32 @@ def generate_signals(prices):
     
     for i in range(20, n):
         if position == 0:
-            # LONG: Price breaks above Donchian upper, weekly uptrend, volume confirmation
+            # LONG: Price breaks above Donchian high, volume confirmation, above EMA50 (uptrend)
             if (close[i] > donchian_high[i] and 
-                close[i] > ema34_1w_aligned[i] and 
-                volume_filter[i]):
+                volume_filter[i] and 
+                close[i] > ema50[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian lower, weekly downtrend, volume confirmation
+            # SHORT: Price breaks below Donchian low, volume confirmation, below EMA50 (downtrend)
             elif (close[i] < donchian_low[i] and 
-                  close[i] < ema34_1w_aligned[i] and 
-                  volume_filter[i]):
+                  volume_filter[i] and 
+                  close[i] < ema50[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below Donchian lower (failed breakout) OR weekly trend turns down
-            if (close[i] < donchian_low[i] or 
-                close[i] < ema34_1w_aligned[i]):
+            # EXIT LONG: Price re-enters below Donchian high OR trend reverses
+            if (close[i] < donchian_high[i] or 
+                close[i] < ema50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above Donchian upper (failed breakdown) OR weekly trend turns up
-            if (close[i] > donchian_high[i] or 
-                close[i] > ema34_1w_aligned[i]):
+            # EXIT SHORT: Price re-enters above Donchian low OR trend reverses
+            if (close[i] > donchian_low[i] or 
+                close[i] > ema50[i]):
                 signals[i] = 0.0
                 position = 0
             else:
