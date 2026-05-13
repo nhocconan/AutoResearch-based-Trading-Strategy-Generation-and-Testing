@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_1w_1d_Camarilla_R4_S4_Breakout_Trend_Volume
-Hypothesis: Weekly R4/S4 levels are strong breakout levels. A breakout above R4 with 1d uptrend and volume continuation signals a long entry. A breakdown below S4 with 1d downtrend and volume continuation signals a short entry. Uses weekly structure for trend direction and daily trend for entry filter. Designed to capture strong momentum moves in both bull and bear markets with tight entries to avoid overtrading.
+12h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_v2
+Hypothesis: Camarilla pivot levels (R1, S1) from the daily chart act as strong support/resistance levels.
+A breakout above R1 with 1d uptrend and volume confirmation signals a long entry.
+A breakdown below S1 with 1d downtrend and volume confirmation signals a short entry.
+This strategy works in both bull and bear markets by following the higher timeframe (1d) trend.
+Target: 12-37 trades/year per signal.
 """
 
-name = "6h_1w_1d_Camarilla_R4_S4_Breakout_Trend_Volume"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,78 +24,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate Camarilla pivot levels for each weekly bar
-    # R4 = close + (high - low) * 1.1/2
-    # S4 = close - (high - low) * 1.1/2
-    cam_r4 = close_1w + (high_1w - low_1w) * 1.1 / 2
-    cam_s4 = close_1w - (high_1w - low_1w) * 1.1 / 2
-    
-    # Align Camarilla levels to 6h timeframe (wait for weekly bar to close)
-    cam_r4_aligned = align_htf_to_ltf(prices, df_1w, cam_r4)
-    cam_s4_aligned = align_htf_to_ltf(prices, df_1w, cam_s4)
-    
-    # Get daily data for trend filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Daily trend: 34 EMA
+    
+    # Calculate Camarilla pivot levels for each 1d bar
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    cam_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    cam_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
+    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
+    
+    # 1d trend: 34 EMA
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     uptrend_1d = close_1d > ema_34_1d
     downtrend_1d = close_1d < ema_34_1d
     
-    # Align daily trend to 6h
+    # Align 1d trend to 12h
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 1.3 * 20-period average (to allow continuation)
+    # Volume confirmation: volume > 1.5 * 20-period average (vectorized)
     vol_ma = np.zeros(n)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_cont = volume > 1.3 * vol_ma
+    vol_ma[20:] = np.convolve(volume, np.ones(20)/20, mode='valid')
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Get aligned values for current bar
-        r4 = cam_r4_aligned[i]
-        s4 = cam_s4_aligned[i]
+        r1 = cam_r1_aligned[i]
+        s1 = cam_s1_aligned[i]
         uptrend = uptrend_1d_aligned[i]
         downtrend = downtrend_1d_aligned[i]
-        vol_cont = volume_cont[i]
+        vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: price breaks above R4, 1d uptrend, volume continuation
-            if close[i] > r4 and uptrend and vol_cont:
+            # LONG: price breaks above R1, 1d uptrend, volume confirmation
+            if close[i] > r1 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S4, 1d downtrend, volume continuation
-            elif close[i] < s4 and downtrend and vol_cont:
+            # SHORT: price breaks below S1, 1d downtrend, volume confirmation
+            elif close[i] < s1 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below S4 or 1d trend turns down
-            if close[i] < s4 or not uptrend:
+            # EXIT LONG: price breaks below S1 or 1d trend turns down
+            if close[i] < s1 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above R4 or 1d trend turns up
-            if close[i] > r4 or not downtrend:
+            # EXIT SHORT: price breaks above R1 or 1d trend turns up
+            if close[i] > r1 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
