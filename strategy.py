@@ -1,47 +1,21 @@
 #!/usr/bin/env python3
 """
-1d_Pivot_Price_Action_Strategy
-Hypothesis: Daily price action at key weekly pivot points (R1/S1) with volume confirmation 
-and volatility filter works in both bull and bear markets. Uses weekly pivots as 
-structural support/resistance, enters on rejection or breakout with volume spike.
-Exit on opposite pivot touch or volatility expansion. Target: 10-25 trades/year.
+6h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels from 1d timeframe provide high-probability reversal (R3/S3) and continuation (R4/S4) signals.
+- Breakout above R3 with 1d uptrend and volume spike = long
+- Breakdown below S3 with 1d downtrend and volume spike = short
+- Breakout above R4 or below S4 signals continuation with same filters
+- Uses 12h trend filter for additional confirmation
+- Target: 12-37 trades/year (50-150 total over 4 years)
 """
 
-name = "1d_Pivot_Price_Action_Strategy"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_true_range(high, low, close):
-    """Calculate True Range"""
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0.0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    return tr
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr = calculate_true_range(high, low, close)
-    atr = np.zeros_like(close, dtype=float)
-    if len(close) < period:
-        return atr
-    # First ATR is simple average
-    atr[period-1] = np.mean(tr[1:period])
-    # Wilder's smoothing: ATR[t] = (ATR[t-1] * (period-1) + TR[t]) / period
-    for i in range(period, len(close)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-    return atr
-
-def calculate_pivot_points(high, low, close):
-    """Calculate standard pivot points: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    return pivot, r1, s1
 
 def generate_signals(prices):
     n = len(prices)
@@ -53,32 +27,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for volatility filter (14-period)
-    atr_14 = calculate_atr(high, low, close, 14)
-    atr_ma = np.zeros(n)
-    for i in range(14, n):
-        atr_ma[i] = np.mean(atr_14[i-14:i])
-    # Low volatility filter: avoid choppy markets
-    low_vol = atr_14 < 0.8 * atr_ma
-    
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Camarilla pivot levels from 1d (using previous day's HLC)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points
-    wp_high = df_1w['high'].values
-    wp_low = df_1w['low'].values
-    wp_close = df_1w['close'].values
+    # Previous day's high, low, close
+    ph = df_1d['high'].shift(1).values
+    pl = df_1d['low'].shift(1).values
+    pc = df_1d['close'].shift(1).values
     
-    wp_pivot, wp_r1, wp_s1 = calculate_pivot_points(wp_high, wp_low, wp_close)
+    # Calculate Camarilla levels
+    R4 = pc + ((ph - pl) * 1.1 / 2)
+    R3 = pc + ((ph - pl) * 1.1 / 4)
+    R2 = pc + ((ph - pl) * 1.1 / 6)
+    R1 = pc + ((ph - pl) * 1.1 / 12)
+    S1 = pc - ((ph - pl) * 1.1 / 12)
+    S2 = pc - ((ph - pl) * 1.1 / 6)
+    S3 = pc - ((ph - pl) * 1.1 / 4)
+    S4 = pc - ((ph - pl) * 1.1 / 2)
     
-    # Align weekly pivots to daily timeframe
-    wp_pivot_aligned = align_htf_to_ltf(prices, df_1w, wp_pivot)
-    wp_r1_aligned = align_htf_to_ltf(prices, df_1w, wp_r1)
-    wp_s1_aligned = align_htf_to_ltf(prices, df_1w, wp_s1)
+    # Align Camarilla levels to 6h timeframe
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Volume confirmation: volume > 1.5 * 20-day average
+    # 12h trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    ema_20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    uptrend_12h = df_12h['close'].values > ema_20_12h
+    downtrend_12h = df_12h['close'].values < ema_20_12h
+    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
+    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -87,39 +72,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup period
-        # Get current values
-        curr_close = close[i]
-        curr_high = high[i]
-        curr_low = low[i]
-        r1 = wp_r1_aligned[i]
-        s1 = wp_s1_aligned[i]
-        vol_ok = volume_conf[i]
-        vol_filter = low_vol[i]
+    for i in range(20, n):
+        # Get values
+        r3 = R3_aligned[i]
+        s3 = S3_aligned[i]
+        r4 = R4_aligned[i]
+        s4 = S4_aligned[i]
+        uptrend = uptrend_12h_aligned[i]
+        downtrend = downtrend_12h_aligned[i]
+        vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG ENTRY: Price rejects S1 with bullish close and volume
-            # Conditions: low touches/goes below S1, closes back above S1, volume spike
-            if curr_low <= s1 and curr_close > s1 and vol_ok and vol_filter:
+            # LONG: break above R3 (reversal) or R4 (continuation) with 12h uptrend and volume
+            if ((close[i] > r3 or close[i] > r4) and uptrend and vol_conf):
                 signals[i] = 0.25
                 position = 1
-            # SHORT ENTRY: Price rejects R1 with bearish close and volume
-            # Conditions: high touches/goes above R1, closes back below R1, volume spike
-            elif curr_high >= r1 and curr_close < r1 and vol_ok and vol_filter:
+            # SHORT: break below S3 (reversal) or S4 (continuation) with 12h downtrend and volume
+            elif ((close[i] < s3 or close[i] < s4) and downtrend and vol_conf):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches R1 or volatility expands
-            if curr_high >= r1 or not vol_filter:
+            # EXIT LONG: price returns to R3 or trend turns down
+            if close[i] < r3 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches S1 or volatility expands
-            if curr_low <= s1 or not vol_filter:
+            # EXIT SHORT: price returns to S3 or trend turns up
+            if close[i] > s3 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
