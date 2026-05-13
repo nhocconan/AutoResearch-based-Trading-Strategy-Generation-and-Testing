@@ -1,16 +1,63 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
-Hypothesis: Camarilla pivot levels (R1/S1) on 1d act as support/resistance. A breakout above R1 or below S1 with volume confirmation and aligned 12h trend (close > EMA50) signals continuation. Designed for 4h timeframe with low trade frequency (~20-50/year) to minimize fee drag. Uses 12h trend filter for multi-timeframe alignment and volume confirmation to avoid false breakouts. Works in both bull and bear markets by following the higher timeframe trend.
+4h_KAMA_Direction_RSI_Chop_Filter
+Hypothesis: KAMA adapts to market efficiency, providing smooth trend direction. 
+Combined with RSI for momentum and Choppiness Index for regime filtering, this creates 
+a robust strategy that works in both trending and ranging markets. 
+Designed for ~20-40 trades/year to minimize fee drag on 4h timeframe.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
+name = "4h_KAMA_Direction_RSI_Chop_Filter"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_kama(close, er_length=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(change.shape) > 0 else np.abs(np.diff(close)).sum()
+    # For 1D arrays, calculate rolling volatility
+    volatility_rolling = pd.Series(close).rolling(window=er_length).sum(np.abs(np.diff(close, prepend=close[0]))).values
+    # Fix: Calculate ER properly
+    price_change = np.abs(np.diff(close, n=er_length, prepend=close[:er_length]))
+    total_change = pd.Series(close).rolling(window=er_length).apply(lambda x: np.sum(np.abs(np.diff(x))), raw=True).values
+    er = np.where(total_change != 0, price_change / total_change, 0)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
+def calculate_rsi(close, length=14):
+    """Calculate Relative Strength Index"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_choppiness(high, low, close, length=14):
+    """Calculate Choppiness Index"""
+    atr = np.zeros_like(close)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).ewm(alpha=1/length, adjust=False, min_periods=length).mean().values
+    
+    max_high = pd.Series(high).rolling(window=length, min_periods=length).max().values
+    min_low = pd.Series(low).rolling(window=length, min_periods=length).min().values
+    
+    chop = np.where(atr != 0, 100 * np.log10((max_high - min_low) / (atr * length)) / np.log10(length), 50)
+    return chop
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,27 +69,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots (once before loop)
+    # Get 1d data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_ = df_1d['high'] - df_1d['low']
+    # Calculate KAMA on close prices
+    kama = calculate_kama(close, er_length=10, fast=2, slow=30)
     
-    # Camarilla levels R1 and S1
-    camarilla_r1 = df_1d['close'] + (range_ * 1.1 / 12)
-    camarilla_s1 = df_1d['close'] - (range_ * 1.1 / 12)
+    # Calculate RSI
+    rsi = calculate_rsi(close, length=14)
     
-    # Align to 4h - use previous day's levels (available at 4h open)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
+    # Calculate Choppiness Index
+    chop = calculate_choppiness(high, low, close, length=14)
     
-    # Get 12h data for trend filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    
-    # 12h trend filter: EMA(50) on close
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 1d trend filter: close vs KAMA on 1d
+    kama_1d = calculate_kama(df_1d['close'].values, er_length=10, fast=2, slow=30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,34 +92,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):  # Warmup period
+        # Determine market regime: chop < 38.2 = trending, chop > 61.8 = ranging
+        is_trending = chop[i] < 38.2
+        is_ranging = chop[i] > 61.8
+        
         if position == 0:
-            # LONG: Price breaks above R1, volume confirmation, price above 12h EMA50 (uptrend)
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume_filter[i] and 
-                close[i] > ema50_12h_aligned[i]):
+            # LONG: KAMA up + RSI > 50 + volume + (trending OR ranging with mean reversion)
+            if (kama[i] > kama[i-1] and 
+                rsi[i] > 50 and 
+                volume_filter[i] and
+                ((is_trending and close[i] > kama[i]) or 
+                 (is_ranging and rsi[i] < 40))):  # Mean reversion in ranging market
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1, volume confirmation, price below 12h EMA50 (downtrend)
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume_filter[i] and 
-                  close[i] < ema50_12h_aligned[i]):
+            # SHORT: KAMA down + RSI < 50 + volume + (trending OR ranging with mean reversion)
+            elif (kama[i] < kama[i-1] and 
+                  rsi[i] < 50 and 
+                  volume_filter[i] and
+                  ((is_trending and close[i] < kama[i]) or 
+                   (is_ranging and rsi[i] > 60))):  # Mean reversion in ranging market
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R1 (failed breakout) OR volume drops
-            if (close[i] < camarilla_r1_aligned[i] or 
-                not volume_filter[i]):
+            # EXIT LONG: KAMA turns down OR RSI < 40 (overbought mean reversion)
+            if (kama[i] < kama[i-1] or 
+                rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S1 (failed breakdown) OR volume drops
-            if (close[i] > camarilla_s1_aligned[i] or 
-                not volume_filter[i]):
+            # EXIT SHORT: KAMA turns up OR RSI > 60 (oversold mean reversion)
+            if (kama[i] > kama[i-1] or 
+                rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
