@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and 1d ADX regime filter.
-# Long when price breaks above R3 (bullish breakout) AND price > 4h EMA50 AND 1d ADX > 25 (trending market).
-# Short when price breaks below S3 (bearish breakout) AND price < 4h EMA50 AND 1d ADX > 25.
-# Exits when price returns to the Camarilla pivot point (mean reversion to equilibrium) OR ADX < 20 (regime shift to ranging).
-# Uses discrete position sizing (0.20) to limit fee churn. Designed for BTC/ETH robustness by capturing breakouts in trending markets while avoiding false breakouts in ranging markets via ADX filter.
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and 1d volume confirmation.
+# Long when price breaks above 6h Donchian upper (20) AND price > weekly EMA50 (bullish weekly trend) AND 1d volume > 1.5x 20-period average.
+# Short when price breaks below 6h Donchian lower (20) AND price < weekly EMA50 (bearish weekly trend) AND 1d volume > 1.5x 20-period average.
+# Exit when price crosses the 6h Donchian midpoint (mean reversion to equilibrium).
+# Uses discrete position sizing (0.25) to limit fee churn. Designed for BTC/ETH robustness by capturing breakouts aligned with weekly trend and volume confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_1dADX_v1"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyEMA50_1dVolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,118 +22,76 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 4h EMA50 for trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate 1d ADX for regime filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate ADX components
-    plus_dm = np.zeros(len(high_1d))
-    minus_dm = np.zeros(len(low_1d))
-    tr = np.zeros(len(high_1d))
-    
-    for i in range(1, len(high_1d)):
-        plus_dm[i] = max(0, high_1d[i] - high_1d[i-1])
-        minus_dm[i] = max(0, low_1d[i-1] - low_1d[i])
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                   abs(high_1d[i] - close_1d[i-1]), 
-                   abs(low_1d[i] - close_1d[i-1]))
-    
-    # Wilder's smoothing
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    period = 14
-    if len(tr) < period:
-        return np.zeros(n)
-        
-    atr = wilder_smooth(tr, period)
-    plus_dm_smooth = wilder_smooth(plus_dm, period)
-    minus_dm_smooth = wilder_smooth(minus_dm, period)
-    
-    divisor = np.where(atr == 0, 1, atr)
-    plus_di = 100 * plus_dm_smooth / divisor
-    minus_di = 100 * minus_dm_smooth / divisor
-    
-    dx = np.where((plus_di + minus_di) == 0, 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di))
-    adx = wilder_smooth(dx, period)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate Camarilla pivot levels from previous day
+    # Calculate 6h Donchian channels (20-period)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
-        # Need previous day's OHLC for Camarilla calculation
-        if i < 24:  # need at least 24 hours of 1h data for previous day
-            signals[i] = 0.0
-            continue
-            
-        # Get previous day's OHLC (24 hours ago in 1h timeframe)
-        prev_high = high[i-24]
-        prev_low = low[i-24]
-        prev_close = close[i-24]
-        
-        # Calculate Camarilla levels
-        pivot = (prev_high + prev_low + prev_close) / 3
-        range_val = prev_high - prev_low
-        r3 = pivot + (range_val * 1.1 / 4)
-        s3 = pivot - (range_val * 1.1 / 4)
-        
+    # Pre-calculate Donchian channels for efficiency
+    upper_20 = np.full(n, np.nan)
+    lower_20 = np.full(n, np.nan)
+    midpoint_20 = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper_20[i] = np.max(high[i-20:i])
+        lower_20[i] = np.min(low[i-20:i])
+        midpoint_20[i] = (upper_20[i] + lower_20[i]) / 2
+    
+    # Calculate weekly EMA50 for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate 1d volume average (20-period) for confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(upper_20[i]) or 
+            np.isnan(lower_20[i]) or 
+            np.isnan(midpoint_20[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND price > 4h EMA50 AND ADX > 25 (trending)
-            if (close[i] > r3 and 
-                close[i] > ema_50_4h_aligned[i] and 
-                adx_aligned[i] > 25):
-                signals[i] = 0.20
+            # LONG: Price breaks above Donchian upper AND price > weekly EMA50 AND volume > 1.5x average
+            if (close[i] > upper_20[i] and 
+                close[i] > ema_50_1w_aligned[i] and
+                volume[i] > 1.5 * vol_ma_20_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 AND price < 4h EMA50 AND ADX > 25 (trending)
-            elif (close[i] < s3 and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  adx_aligned[i] > 25):
-                signals[i] = -0.20
+            # SHORT: Price breaks below Donchian lower AND price < weekly EMA50 AND volume > 1.5x average
+            elif (close[i] < lower_20[i] and 
+                  close[i] < ema_50_1w_aligned[i] and
+                  volume[i] > 1.5 * vol_ma_20_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to pivot (mean reversion) OR ADX < 20 (ranging)
-            if (close[i] <= pivot or 
-                adx_aligned[i] < 20):
+            # EXIT LONG: Price crosses Donchian midpoint (mean reversion)
+            if close[i] <= midpoint_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot (mean reversion) OR ADX < 20 (ranging)
-            if (close[i] >= pivot or 
-                adx_aligned[i] < 20):
+            # EXIT SHORT: Price crosses Donchian midpoint (mean reversion)
+            if close[i] >= midpoint_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
