@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high, 1d EMA50 is rising, and volume > 1.5x 20-period average.
-# Short when price breaks below 20-period Donchian low, 1d EMA50 is falling, and volume > 1.5x 20-period average.
+# Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high, 12h HMA21 is rising, and volume > 1.5x 20-period average.
+# Short when price breaks below 20-period Donchian low, 12h HMA21 is falling, and volume > 1.5x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
-# Donchian channels provide robust trend-following structure that works in both trending and ranging markets.
-# 1d EMA50 trend filter ensures we trade with the higher timeframe trend, reducing whipsaws in bear markets.
-# Volume confirmation adds validity to breakouts. Target: 50-150 total trades over 4 years (12-37/year) on 12h.
+# Donchian channels provide robust support/resistance that work across market regimes.
+# 12h HMA21 trend filter ensures we trade with the intermediate-term trend, reducing whipsaws.
+# Volume confirmation adds validity to breakouts. Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
-name = "12h_Donchian20_Breakout_1dEMA50_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hHMA21_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -33,29 +33,44 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian(20) channels on 12h data
+    # Calculate 20-period Donchian channels (highest high, lowest low over 20 periods)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Get 12h data for HMA21 trend filter
     df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     
-    # Donchian high = max(high over 20 periods)
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Donchian low = min(low over 20 periods)
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # Calculate HMA(21) on 12h data
+    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # Align Donchian levels to 12h timeframe (wait for 12h bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    def wma(values, window):
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Pad arrays for WMA calculation
+    wma_half = np.full_like(close_12h, np.nan)
+    wma_full = np.full_like(close_12h, np.nan)
     
-    # Calculate EMA(50) on 1d data
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    for i in range(len(close_12h)):
+        if i >= half_len - 1:
+            wma_half[i] = wma(close_12h[i - half_len + 1:i + 1], half_len)
+        if i >= 21 - 1:
+            wma_full[i] = wma(close_12h[i - 21 + 1:i + 1], 21)
     
-    # Align 1d EMA50 to 12h timeframe (wait for 1d bar to close)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
+    raw_hma = 2 * wma_half - wma_full
+    hma_21_12h = np.full_like(close_12h, np.nan)
+    for i in range(len(raw_hma)):
+        if i >= sqrt_len - 1 and not np.isnan(raw_hma[i - sqrt_len + 1:i + 1]).any():
+            hma_21_12h[i] = wma(raw_hma[i - sqrt_len + 1:i + 1], sqrt_len)
+    
+    # Align 12h HMA21 to 4h timeframe (wait for 12h bar to close)
+    hma_21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
     
     # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,19 +83,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(hma_21_12h_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Donchian high AND 1d EMA50 rising (trending up) AND volume confirmation
-            if close[i] > donchian_high_aligned[i] and ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and volume_confirm[i]:
+            # LONG: Price > Donchian high AND 12h HMA21 rising (trending up) AND volume confirmation
+            if close[i] > donchian_high[i] and hma_21_12h_aligned[i] > hma_21_12h_aligned[i-1] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Donchian low AND 1d EMA50 falling (trending down) AND volume confirmation
-            elif close[i] < donchian_low_aligned[i] and ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Price < Donchian low AND 12h HMA21 falling (trending down) AND volume confirmation
+            elif close[i] < donchian_low[i] and hma_21_12h_aligned[i] < hma_21_12h_aligned[i-1] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
