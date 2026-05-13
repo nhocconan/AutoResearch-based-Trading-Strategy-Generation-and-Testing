@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Fibonacci_Retracement_Trend_Filter
-Hypothesis: In both bull and bear markets, price retraces to key Fibonacci levels (38.2%, 50%, 61.8%) during pullbacks within a strong weekly trend. Enter long at 61.8% retracement in weekly uptrend, short at 38.2% retracement in weekly downtrend. Use volume confirmation to avoid false signals. Target: 15-25 trades/year per symbol.
+4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakouts with 1d trend filter and volume spikes capture breakouts in both bull and bear markets.
+Long when price breaks above R3 with 1d uptrend and volume spike; short when breaks below S3 with 1d downtrend and volume spike.
+Exit on opposite Camarilla level touch or trend reversal. Target: 25-40 trades/year per symbol.
 """
 
-name = "1d_Fibonacci_Retracement_Trend_Filter"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,65 +24,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1w = df_1w['close'].values > ema_50_1w
-    downtrend_1w = df_1w['close'].values < ema_50_1w
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    # 4-day high/low for Camarilla calculation (use 4 prior days to avoid lookahead)
+    high_4d = np.zeros(n)
+    low_4d = np.zeros(n)
+    for i in range(n):
+        if i < 96:  # Need 4 days of 4h data (4*24=96)
+            high_4d[i] = np.nan
+            low_4d[i] = np.nan
+        else:
+            high_4d[i] = np.max(high[i-96:i])
+            low_4d[i] = np.min(low[i-96:i])
     
-    # 20-day high/low for Fibonacci calculation
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla levels: R3/S3 based on prior 4-day range
+    camarilla_r3 = np.zeros(n)
+    camarilla_s3 = np.zeros(n)
+    for i in range(n):
+        if np.isnan(high_4d[i]) or np.isnan(low_4d[i]):
+            camarilla_r3[i] = np.nan
+            camarilla_s3[i] = np.nan
+        else:
+            range_4d = high_4d[i] - low_4d[i]
+            camarilla_r3[i] = close[i-1] + range_4d * 1.1 / 4  # R3 = C + 1.1*(H-L)/4
+            camarilla_s3[i] = close[i-1] - range_4d * 1.1 / 4  # S3 = C - 1.1*(H-L)/4
     
-    # Fibonacci levels: 38.2%, 50%, 61.8%
-    diff = high_20 - low_20
-    fib_382 = high_20 - 0.382 * diff
-    fib_500 = high_20 - 0.500 * diff
-    fib_618 = high_20 - 0.618 * diff
-    
-    # Volume confirmation: volume > 1.5 * 20-day average
+    # Volume confirmation: volume > 2.0 * 24-period average (4 days)
     vol_ma = np.zeros(n)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.5 * vol_ma
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
+    volume_conf = volume > 2.0 * vol_ma
+    
+    # 1d trend: EMA50 on daily
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Get values
-        fib382 = fib_382[i]
-        fib500 = fib_500[i]
-        fib618 = fib_618[i]
-        uptrend = uptrend_1w_aligned[i]
-        downtrend = downtrend_1w_aligned[i]
+    for i in range(96, n):  # Start after 4 days of data
+        r3 = camarilla_r3[i]
+        s3 = camarilla_s3[i]
+        uptrend = uptrend_1d_aligned[i]
+        downtrend = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: price at 61.8% retracement in weekly uptrend with volume confirmation
-            if close[i] <= fib618 and close[i] >= fib500 and uptrend and vol_conf:
+            # LONG: break above R3, 1d uptrend, volume confirmation
+            if not np.isnan(r3) and close[i] > r3 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price at 38.2% retracement in weekly downtrend with volume confirmation
-            elif close[i] >= fib382 and close[i] <= fib500 and downtrend and vol_conf:
+            # SHORT: break below S3, 1d downtrend, volume confirmation
+            elif not np.isnan(s3) and close[i] < s3 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price reaches 50% retracement or weekly trend turns down
-            if close[i] >= fib500 or not uptrend:
+            # EXIT LONG: touch S3 or 1d trend turns down
+            if not np.isnan(s3) and close[i] < s3 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price reaches 50% retracement or weekly trend turns up
-            if close[i] <= fib500 or not downtrend:
+            # EXIT SHORT: touch R3 or 1d trend turns up
+            if not np.isnan(r3) and close[i] > r3 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
