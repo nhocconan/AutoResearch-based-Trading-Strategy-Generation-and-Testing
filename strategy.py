@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_200EMA_RSI_Pullback_Strategy
-Hypothesis: Buy pullbacks to the 200-day EMA with RSI oversold in uptrends, sell bounces to the 200-day EMA with RSI overbought in downtrends. Uses 1-week trend filter and volume confirmation. Designed for low trade frequency (~15/year) with clear trend-following logic that works in both bull and bear markets by aligning with the primary trend.
+4h_Camarilla_Pivot_R3_S3_Breakout_1dEMA34_VolumeSpike
+Hypothesis: Camarilla R3/S3 breakouts with 1-day EMA34 trend filter and volume spikes capture institutional breakout patterns in both bull and bear markets. The Camarilla levels act as key pivot points where price often reverses or breaks out with volume. The EMA34 filter ensures alignment with the daily trend, while volume confirmation filters false breakouts. Designed for low trade frequency (20-40/year) with clear entry/exit rules.
 """
 
-name = "1d_200EMA_RSI_Pullback_Strategy"
-timeframe = "1d"
+name = "4h_Camarilla_Pivot_R3_S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,54 +22,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 200-day EMA
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Calculate Camarilla levels from previous day
+    # Using previous day's high, low, close
+    prev_high = np.roll(high, 1)  # Previous bar's high
+    prev_low = np.roll(low, 1)    # Previous bar's low  
+    prev_close = np.roll(close, 1) # Previous bar's close
     
-    # Calculate RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = (100 - (100 / (1 + rs))).fillna(50).values
+    # For first bar, use current values
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Get 1-week trend filter (EMA 50)
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate pivot and ranges
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    # Volume confirmation: > 1.5x 20-day average
+    # Camarilla levels
+    R3 = pivot + (range_val * 1.1 / 2.0)  # R3 = pivot + 1.1*(H-L)/2
+    S3 = pivot - (range_val * 1.1 / 2.0)  # S3 = pivot - 1.1*(H-L)/2
+    
+    # Calculate EMA 34 on 1-day timeframe for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(1, n):  # Start from 1 since we use previous bar data
         if position == 0:
-            # LONG: Price near 200EMA (within 1%) with RSI < 30, volume confirmation, and weekly uptrend
-            if (close[i] <= ema_200[i] * 1.01 and close[i] >= ema_200[i] * 0.99) and \
-               rsi[i] < 30 and volume_confirm[i] and close[i] > ema_50_1w_aligned[i]:
+            # LONG: Price breaks above R3 with volume confirmation and above daily EMA34 (uptrend)
+            if close[i] > R3[i] and volume_confirm[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price near 200EMA (within 1%) with RSI > 70, volume confirmation, and weekly downtrend
-            elif (close[i] <= ema_200[i] * 1.01 and close[i] >= ema_200[i] * 0.99) and \
-                 rsi[i] > 70 and volume_confirm[i] and close[i] < ema_50_1w_aligned[i]:
+            # SHORT: Price breaks below S3 with volume confirmation and below daily EMA34 (downtrend)
+            elif close[i] < S3[i] and volume_confirm[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above 200EMA or RSI > 70
-            if close[i] > ema_200[i] * 1.02 or rsi[i] > 70:
+            # EXIT LONG: Price crosses below S3 (reversal level) or volume dries up
+            if close[i] < S3[i] or volume[i] < vol_ma[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below 200EMA or RSI < 30
-            if close[i] < ema_200[i] * 0.98 or rsi[i] < 30:
+            # EXIT SHORT: Price crosses above R3 (reversal level) or volume dries up
+            if close[i] > R3[i] or volume[i] < vol_ma[i] * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
