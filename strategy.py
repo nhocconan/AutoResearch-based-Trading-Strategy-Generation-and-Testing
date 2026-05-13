@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_ThreeLevelBreakout_Pattern
-# Hypothesis: Combines multiple breakout levels (Donchian, Keltner, ATR-based) with volume confirmation and trend filter.
-# Uses three confirmation layers to reduce false signals and maintain low trade frequency.
-# Designed to work in both bull and bear markets by requiring trend alignment and volume spikes.
-# Target: 20-40 trades per year per symbol with disciplined risk management.
+# 1h_4H1D_Trend_With_Volume_Confirmation
+# Hypothesis: Use 4h trend direction (EMA50) and 1d momentum (RSI > 50) for signal direction,
+# Enter on 1h pullbacks to EMA21 with volume spike (>1.5x 20-bar average) during 08-20 UTC.
+# Exit on opposite 4h EMA50 cross. Designed for low turnover (15-35/year) to avoid fee drag.
 
-name = "4h_ThreeLevelBreakout_Pattern"
-timeframe = "4h"
+name = "1h_4H1D_Trend_With_Volume_Confirmation"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,44 +22,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Calculate ATR for volatility measurement
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
 
-    # Level 1: Donchian Channel (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
 
-    # Level 2: Keltner Channel (20-period EMA + 2*ATR)
-    ema_mid = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kelt_upper = ema_mid + 2 * atr
-    kelt_lower = ema_mid - 2 * atr
+    # Get 1d data for momentum filter (RSI(14) > 50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
 
-    # Level 3: ATR-based breakout levels
-    atr_upper = donch_high + 0.5 * atr
-    atr_lower = donch_low - 0.5 * atr
-
-    # Volume confirmation: current volume > 2.0 x 20-period average
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
 
-    # Trend filter: 50-period EMA on price
-    ema_trend = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1h EMA21 for entry timing
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
-        # Skip if any data is not ready
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(kelt_upper[i]) or np.isnan(kelt_lower[i]) or
-            np.isnan(atr_upper[i]) or np.isnan(atr_lower[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(ema_trend[i])):
+        # Skip if data not ready
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema_21[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,37 +72,37 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above all three levels with volume spike and uptrend
-            if (close[i] > donch_high[i] and 
-                close[i] > kelt_upper[i] and 
-                close[i] > atr_upper[i] and
+            # LONG: 4h uptrend (price > EMA50), 1d bullish (RSI > 50), volume spike, pullback to EMA21
+            if (close[i] > ema_4h_aligned[i] and 
+                rsi_1d_aligned[i] > 50 and 
                 volume_spike[i] and 
-                close[i] > ema_trend[i]):
-                signals[i] = 0.25
+                close[i] <= ema_21[i] * 1.005 and  # Allow small buffer above EMA21
+                in_session[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below all three levels with volume spike and downtrend
-            elif (close[i] < donch_low[i] and 
-                  close[i] < kelt_lower[i] and 
-                  close[i] < atr_lower[i] and
+            # SHORT: 4h downtrend (price < EMA50), 1d bearish (RSI < 50), volume spike, pullback to EMA21
+            elif (close[i] < ema_4h_aligned[i] and 
+                  rsi_1d_aligned[i] < 50 and 
                   volume_spike[i] and 
-                  close[i] < ema_trend[i]):
-                signals[i] = -0.25
+                  close[i] >= ema_21[i] * 0.995 and  # Allow small buffer below EMA21
+                  in_session[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below the middle Keltner level
-            if close[i] < ema_mid[i]:
+            # EXIT LONG: 4h trend turns down (price < EMA50)
+            if close[i] < ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price closes above the middle Keltner level
-            if close[i] > ema_mid[i]:
+            # EXIT SHORT: 4h trend turns up (price > EMA50)
+            if close[i] > ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
