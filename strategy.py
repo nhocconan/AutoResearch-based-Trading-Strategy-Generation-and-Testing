@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (>1.5x 20-bar avg volume), and daily choppiness regime filter (CHOP > 61.8 = range -> avoid entries, CHOP < 38.2 = trend -> allow breakout entries). Uses 6h timeframe to target 50-150 total trades over 4 years. Camarilla R3/S3 levels provide clear breakout zones from daily pivot structure. Daily trend filter and regime filter reduce false signals in bear markets. Discrete position sizing (0.25) minimizes fee churn.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (>1.5x 20-bar avg volume), and daily choppiness regime filter (CHOP > 61.8 = range -> avoid entries, CHOP < 38.2 = trend -> allow breakout entries). Uses 12h timeframe to target 50-150 total trades over 4 years. Camarilla pivot levels provide high-probability support/resistance. Daily trend and regime filters reduce false signals in bear markets. Discrete position sizing (0.25) minimizes fee churn.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -46,24 +46,15 @@ def generate_signals(prices):
     chop_1d = np.where(true_range_sum == 0, 50, chop_1d)  # avoid div by zero
     chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Calculate Camarilla levels from previous 1d OHLC
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), 
-    #            S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    # We use previous day's levels (shifted by 1)
-    high_shift = np.roll(high, 1)
-    low_shift = np.roll(low, 1)
-    close_shift = np.roll(close, 1)
-    high_shift[0] = np.nan
-    low_shift[0] = np.nan
-    close_shift[0] = np.nan
+    # Calculate Camarilla pivot levels from daily OHLC
+    # R3 = close + (high - low) * 1.1 / 2
+    # S3 = close - (high - low) * 1.1 / 2
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    camarilla_range = high_shift - low_shift
-    r3 = close_shift + 1.1 * camarilla_range
-    s3 = close_shift - 1.1 * camarilla_range
-    
-    # Align to LTF (already accounts for completed bar timing)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to LTF (12h)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -73,24 +64,24 @@ def generate_signals(prices):
     
     for i in range(20, n):  # start after lookback
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(avg_volume[i]) or 
-            np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
             # LONG: Close breaks above R3, price > 1d EMA34, volume spike (>1.5x avg), trending regime (CHOP < 38.2)
-            if (close[i] > r3_aligned[i] and 
+            if (close[i] > camarilla_r3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume[i] > 1.5 * avg_volume[i] and 
                 chop_1d_aligned[i] < 38.2):
                 signals[i] = 0.25
                 position = 1
             # SHORT: Close breaks below S3, price < 1d EMA34, volume spike (>1.5x avg), trending regime (CHOP < 38.2)
-            elif (close[i] < s3_aligned[i] and 
+            elif (close[i] < camarilla_s3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume[i] > 1.5 * avg_volume[i] and 
                   chop_1d_aligned[i] < 38.2):
@@ -99,8 +90,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close position if price falls below S3 (reversal) OR chop becomes too high (choppy market)
-            if (close[i] < s3_aligned[i] or 
+            # EXIT LONG: Close position if price drops below S3 (reversal) OR chop becomes too high (choppy market)
+            if (close[i] < camarilla_s3_aligned[i] or 
                 chop_1d_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
@@ -108,7 +99,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Close position if price rises above R3 (reversal) OR chop becomes too high (choppy market)
-            if (close[i] > r3_aligned[i] or 
+            if (close[i] > camarilla_r3_aligned[i] or 
                 chop_1d_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
