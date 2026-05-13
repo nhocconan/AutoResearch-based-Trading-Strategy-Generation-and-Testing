@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h timeframe strategy using Donchian channel breakouts (20-period) with 1d EMA50 trend filter and volume confirmation (>1.5x average volume). ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Designed to work in both bull and bear markets by only taking breakouts in the direction of the 1d EMA50 trend, reducing false breakouts and whipsaws. Volume confirmation ensures institutional participation. ATR stop manages risk during volatile moves.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation (>1.5x avg volume). Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
+# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+# EMA trend filter on 1w ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw in both bull and bear markets.
+# Donchian breakouts capture strong momentum moves at key price channels, volume confirmation ensures institutional participation.
+# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
 
-name = "12h_Donchian20_1dEMA50_VolumeConfirm_ATRStop_v1"
-timeframe = "12h"
+name = "1d_Donchian20_1wEMA50_VolumeConfirm_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -31,19 +34,18 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA50 for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 12h timeframe (wait for 1d bar to close)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 1w EMA50 to 1d timeframe (wait for 1w bar to close)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate 12h Donchian channel (20-period) using previous period's data to avoid look-ahead
-    # We use rolling window on the previous bar's high/low to ensure no look-ahead
+    # Calculate 1d Donchian channels (20-period) from previous period to avoid look-ahead
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
@@ -55,21 +57,21 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper band AND 1d EMA50 > 0 (rising trend) AND volume > 1.5x average
+            # LONG: Price breaks above Donchian upper band AND 1w EMA50 > 0 (rising trend) AND volume > 1.5x average
             if (close[i] > highest_high[i] and 
-                ema50_1d_aligned[i] > np.roll(ema50_1d_aligned, 1)[i] and  # EMA50 rising
+                ema50_1w_aligned[i] > np.roll(ema50_1w_aligned, 1)[i] and  # EMA50 rising
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian lower band AND 1d EMA50 < 0 (falling trend) AND volume > 1.5x average
+            # SHORT: Price breaks below Donchian lower band AND 1w EMA50 < 0 (falling trend) AND volume > 1.5x average
             elif (close[i] < lowest_low[i] and 
-                  ema50_1d_aligned[i] < np.roll(ema50_1d_aligned, 1)[i] and  # EMA50 falling
+                  ema50_1w_aligned[i] < np.roll(ema50_1w_aligned, 1)[i] and  # EMA50 falling
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
