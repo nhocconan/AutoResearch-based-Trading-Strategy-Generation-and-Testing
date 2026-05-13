@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3 AND 12h EMA50 is rising AND volume > 2.0x 20-period average.
-# Short when price breaks below S3 AND 12h EMA50 is falling AND volume > 2.0x 20-period average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above R3 AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
+# Short when price breaks below S3 AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
 # Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Uses 1d HTF for trend alignment to ensure trades follow higher timeframe direction.
 
-name = "6h_Camarilla_R3_S3_Breakout_12hEMA50_VolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -33,8 +34,7 @@ def generate_signals(prices):
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate Camarilla pivot levels from previous day
-    # R4 = close + 1.5*(high-low), R3 = close + 1.0*(high-low), S3 = close - 1.0*(high-low), S4 = close - 1.5*(high-low)
-    # We use the previous day's high, low, close for today's levels
+    # R3 = close + 1.0*(high-low), S3 = close - 1.0*(high-low)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -45,15 +45,15 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + 1.0 * (prev_high - prev_low)
     camarilla_s3 = prev_close - 1.0 * (prev_high - prev_low)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 12h data
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA(34) on 1d data
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 12h EMA50 to 6h timeframe (wait for 12h bar to close)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,18 +67,18 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
         if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND 12h EMA50 rising AND volume spike
-            if (close[i] > camarilla_r3[i] and ema_50_12h_aligned[i] > ema_50_12h_aligned[i-1] and volume_confirm[i]):
+            # LONG: Price breaks above R3 AND 1d EMA34 rising AND volume spike
+            if (close[i] > camarilla_r3[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below S3 AND 12h EMA50 falling AND volume spike
-            elif (close[i] < camarilla_s3[i] and ema_50_12h_aligned[i] < ema_50_12h_aligned[i-1] and volume_confirm[i]):
+            # SHORT: Price breaks below S3 AND 1d EMA34 falling AND volume spike
+            elif (close[i] < camarilla_s3[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
