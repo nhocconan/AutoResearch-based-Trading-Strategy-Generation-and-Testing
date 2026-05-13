@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Trix_Momentum_Volume_Filter
-Hypothesis: TRIX (12) crossing zero with 1d EMA50 trend and volume spike confirms momentum.
-Long when TRIX crosses above zero in uptrend with volume confirmation.
-Short when TRIX crosses below zero in downtrend with volume confirmation.
-TRIX filters noise, EMA50 ensures trend alignment, volume avoids false signals.
-Target: 20-40 trades/year per symbol to minimize fee drag.
+4h_Donchian_Breakout_Volume_Trend_Filter
+Hypothesis: Use 20-period Donchian channel breakouts with volume confirmation and 12h EMA50 trend filter.
+In trending markets, breakouts capture momentum; in ranging markets, volume filter reduces false signals.
+12h trend filter aligns with higher timeframe momentum to avoid counter-trend trades.
+Target: 20-40 trades/year per symbol (~80-160 total over 4 years).
+Works in both bull and bear markets by only taking trades in direction of higher timeframe trend.
 """
 
-name = "4h_Trix_Momentum_Volume_Filter"
+name = "4h_Donchian_Breakout_Volume_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,62 +26,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # TRIX (12): triple EMA of percent change
-    # ROC = (close / close.shift(1) - 1) * 100
-    roc = np.zeros(n)
-    roc[1:] = (close[1:] / close[:-1] - 1.0) * 100.0
-    
-    # Triple EMA of ROC
-    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = ema3  # TRIX value
-    
-    # Zero line cross signals
-    trix_prev = np.roll(trix, 1)
-    trix_prev[0] = 0
-    trix_cross_up = (trix > 0) & (trix_prev <= 0)
-    trix_cross_down = (trix < 0) & (trix_prev >= 0)
-    
-    # 1d EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 12h EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_12h = df_12h['close'].values > ema_50_12h
+    downtrend_12h = df_12h['close'].values < ema_50_12h
+    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
+    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # 4h Donchian channel (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.8 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         if position == 0:
-            # LONG: TRIX crosses up, 1d uptrend, volume confirmation
-            if trix_cross_up[i] and uptrend_1d_aligned[i] and volume_confirm[i]:
+            # LONG: break above upper band, 12h uptrend, volume confirmation
+            if close[i] > high_max[i] and uptrend_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses down, 1d downtrend, volume confirmation
-            elif trix_cross_down[i] and downtrend_1d_aligned[i] and volume_confirm[i]:
+            # SHORT: break below lower band, 12h downtrend, volume confirmation
+            elif close[i] < low_min[i] and downtrend_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses down or trend reverses
-            if trix_cross_down[i] or not uptrend_1d_aligned[i]:
+            # EXIT LONG: price falls back below midpoint or trend reverses
+            midpoint = (high_max[i] + low_min[i]) / 2.0
+            if close[i] < midpoint or not uptrend_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses up or trend reverses
-            if trix_cross_up[i] or not downtrend_1d_aligned[i]:
+            # EXIT SHORT: price rises back above midpoint or trend reverses
+            midpoint = (high_max[i] + low_min[i]) / 2.0
+            if close[i] > midpoint or not downtrend_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
