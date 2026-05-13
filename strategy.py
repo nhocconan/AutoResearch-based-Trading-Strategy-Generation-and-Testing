@@ -1,10 +1,12 @@
-# 4H_Donchian_Breakout_20_1DTrend_Volume
-# Breakout above 4h Donchian upper/lower band (20-period) in direction of daily trend,
-# confirmed by volume spike. Daily trend filter ensures alignment with higher timeframe momentum.
-# Volume spike confirms institutional participation. Works in bull (breakouts above upper band in uptrend)
-# and bear (breakdowns below lower band in downtrend). Designed for low frequency to avoid fee drag.
+#!/usr/bin/env python3
+# 4h_TRIX_Zero_Cross_Volume_Spike_Trend_Filter
+# Hypothesis: TRIX zero-line crossovers in the direction of 1d EMA50 trend, confirmed by volume spike.
+# TRIX captures momentum reversals with low whipsaw. Zero-line cross provides clear entry/exit.
+# Volume spike confirms institutional participation. EMA50 trend filter ensures alignment with higher timeframe momentum.
+# Works in bull (long on zero-line cross up in uptrend) and bear (short on zero-line cross down in downtrend).
+# Low frequency due to requirement of TRIX crossover + volume spike + trend alignment.
 
-name = "4H_Donchian_Breakout_20_1DTrend_Volume"
+name = "4h_TRIX_Zero_Cross_Volume_Spike_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,28 +19,26 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter and Donchian calculation
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
     # Daily trend: EMA50
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 4h Donchian channels (20-period)
-    # Use rolling window on 4h data directly
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate TRIX on 4h data
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) then % change
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = (pd.Series(ema3).pct_change() * 100).values  # percentage
     
-    # Volume spike: volume > 2.0 * 20-period average (approx 1.67 days worth at 4h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Volume spike: volume > 2.0 * 24-period average (2 days worth at 4h)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 2.0 * vol_ma_24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,8 +46,8 @@ def generate_signals(prices):
     for i in range(100, n):
         # Skip if any required value is NaN
         if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i])):
+            np.isnan(trix[i]) or 
+            np.isnan(trix[i-1])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,26 +56,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Breakout above Donchian high + daily uptrend + volume spike
-            if close[i] > donchian_high[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: TRIX crosses above zero + daily uptrend + volume spike
+            if trix[i-1] <= 0 and trix[i] > 0 and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below Donchian low + daily downtrend + volume spike
-            elif close[i] < donchian_low[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: TRIX crosses below zero + daily downtrend + volume spike
+            elif trix[i-1] >= 0 and trix[i] < 0 and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price below Donchian low OR trend reversal
-            if close[i] < donchian_low[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: TRIX crosses below zero OR trend reversal
+            if trix[i-1] >= 0 and trix[i] < 0:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above Donchian high OR trend reversal
-            if close[i] > donchian_high[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: TRIX crosses above zero OR trend reversal
+            if trix[i-1] <= 0 and trix[i] > 0:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
