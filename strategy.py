@@ -1,12 +1,14 @@
-# 1d_RSI_Range_Bound_1wTrend_Filter
-# Hypothesis: RSI mean reversion works better in ranging markets, but we can filter by 1w trend to avoid fighting strong trends.
-# In 1d ranging markets (low ADX), go long when RSI < 30 and short when RSI > 70.
-# In strong 1d trends (high ADX), follow the trend: long when RSI crosses above 50 in uptrend, short when below 50 in downtrend.
-# Uses 1w EMA20 for trend filter to avoid whipsaws in major trend reversals.
-# Designed for low trade frequency (<25/year) to minimize fee drag on 1d timeframe.
+#!/usr/bin/env python3
+# 6h_Ichimoku_Cloud_Trend_Filtered_Breakout
+# Hypothesis: Ichimoku Cloud from 1d timeframe provides trend direction and support/resistance.
+# Go long when price breaks above Kumo (cloud) top with bullish TK cross and volume confirmation.
+# Go short when price breaks below Kumo bottom with bearish TK cross and volume confirmation.
+# Uses 6h for entry timing and 1d for Ichimoku filter to reduce false signals.
+# Works in bull markets (bullish TK cross + price above cloud) and bear markets (bearish TK cross + price below cloud).
+# Target: 12-30 trades/year per symbol to minimize fee drag.
 
-name = "1d_RSI_Range_Bound_1wTrend_Filter"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Trend_Filtered_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -23,50 +25,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Ichimoku calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w EMA20 for trend filter
-    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate Ichimoku components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1d RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # fill NaN with neutral 50
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_tenkan + min_low_tenkan) / 2
     
-    # 1d ADX(14) for ranging vs trending detection
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_kijun + min_low_kijun) / 2
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2, shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
     
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Senkou Span B (Leading Span B): (52-period high + low)/2, shifted 26 periods ahead
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
     
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Chikou Span (Lagging Span): current close shifted 26 periods behind
+    chikou = close_1d  # Will be aligned properly
+    
+    # Kumo (Cloud) top and bottom
+    kumo_top = np.maximum(senkou_a, senkou_b)
+    kumo_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # TK Cross signals
+    tk_bullish = tenkan > kijun
+    tk_bearish = tenkan < kijun
+    
+    # Align 1d Ichimoku components to 6h timeframe
+    kumo_top_aligned = align_htf_to_ltf(prices, df_1d, kumo_top)
+    kumo_bottom_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom)
+    tk_bullish_aligned = align_htf_to_ltf(prices, df_1d, tk_bullish)
+    tk_bearish_aligned = align_htf_to_ltf(prices, df_1d, tk_bearish)
+    chikou_aligned = align_htf_to_ltf(prices, df_1d, chikou)
+    
+    # Volume spike: volume > 2.0 * 20-period average (approx 5 days at 6h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
+    for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(adx[i])):
+        if (np.isnan(kumo_top_aligned[i]) or 
+            np.isnan(kumo_bottom_aligned[i]) or 
+            np.isnan(tk_bullish_aligned[i]) or 
+            np.isnan(tk_bearish_aligned[i]) or
+            np.isnan(chikou_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,42 +94,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # Ranging market: ADX < 25
-            if adx[i] < 25:
-                # Mean reversion: RSI extremes
-                if rsi[i] < 30:
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi[i] > 70:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # LONG: Price above Kumo top + bullish TK cross + Chikou above price + volume spike
+            if (close[i] > kumo_top_aligned[i] and 
+                tk_bullish_aligned[i] and 
+                chikou_aligned[i] > close[i] and 
+                volume_spike[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Price below Kumo bottom + bearish TK cross + Chikou below price + volume spike
+            elif (close[i] < kumo_bottom_aligned[i] and 
+                  tk_bearish_aligned[i] and 
+                  chikou_aligned[i] < close[i] and 
+                  volume_spike[i]):
+                signals[i] = -0.25
+                position = -1
             else:
-                # Trending market: ADX >= 25
-                # Follow 1w trend with RSI crossing 50
-                if ema20_1w_aligned[i] > ema20_1w_aligned[i-1]:  # 1w uptrend
-                    if rsi[i] > 50 and rsi[i-1] <= 50:
-                        signals[i] = 0.25
-                        position = 1
-                    else:
-                        signals[i] = 0.0
-                else:  # 1w downtrend
-                    if rsi[i] < 50 and rsi[i-1] >= 50:
-                        signals[i] = -0.25
-                        position = -1
-                    else:
-                        signals[i] = 0.0
+                signals[i] = 0.0
         elif position == 1:
-            # Exit long: RSI > 60 (overbought) or 1w trend turns down
-            if rsi[i] > 60 or ema20_1w_aligned[i] < ema20_1w_aligned[i-1]:
+            # EXIT LONG: Price below Kumo bottom or bearish TK cross
+            if close[i] < kumo_bottom_aligned[i] or not tk_bullish_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 40 (oversold) or 1w trend turns up
-            if rsi[i] < 40 or ema20_1w_aligned[i] > ema20_1w_aligned[i-1]:
+            # EXIT SHORT: Price above Kumo top or bullish TK cross
+            if close[i] > kumo_top_aligned[i] or tk_bullish_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
