@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation (>2.0x 20-bar avg volume).
-# Uses discrete sizing 0.28 to target 75-150 total trades over 4 years on 4h timeframe.
-# Camarilla pivot levels provide strong intraday support/resistance; 1d EMA34 ensures higher timeframe trend alignment.
-# Volume confirmation filters breakouts with low participation. Designed for fewer, higher-quality trades
-# to minimize fee drag while working in both bull and bear markets.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter, volume confirmation (>1.5x 20-bar avg volume), and choppiness regime filter (CHOP(14) > 61.8 for ranging markets).
+# Uses discrete sizing 0.25 to target 75-150 total trades over 4 years on 4h timeframe.
+# Donchian breakouts capture momentum; 1d EMA34 ensures higher timeframe trend alignment.
+# Volume confirmation filters breakouts with low participation. Choppiness filter avoids false breakouts in strong trends.
+# Designed for fewer, higher-quality trades to minimize fee drag while working in both bull and bear markets.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike"
+name = "4h_Donchian20_1dEMA34_Volume_Chop_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,63 +30,69 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla pivot levels (R3, S3) from prior 1d candle only
-    lookback_camarilla = 1
-    prior_close = pd.Series(close).rolling(window=lookback_camarilla, min_periods=lookback_camarilla).mean().shift(1).values
-    prior_high = pd.Series(high).rolling(window=lookback_camarilla, min_periods=lookback_camarilla).max().shift(1).values
-    prior_low = pd.Series(low).rolling(window=lookback_camarilla, min_periods=lookback_camarilla).min().shift(1).values
-    
-    # Camarilla R3 = C + (H-L) * 1.1/4
-    # Camarilla S3 = C - (H-L) * 1.1/4
-    camarilla_range = prior_high - prior_low
-    camarilla_r3 = prior_close + camarilla_range * 1.1 / 4
-    camarilla_s3 = prior_close - camarilla_range * 1.1 / 4
+    # Calculate Donchian channels (20-period) from prior candle only
+    lookback_dc = 20
+    prior_high_max = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().shift(1).values
+    prior_low_min = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().shift(1).values
     
     # Calculate average volume for confirmation (20-period)
     lookback_vol = 20
     avg_volume = pd.Series(volume).rolling(window=lookback_vol, min_periods=lookback_vol).mean().shift(1).values
     
+    # Calculate Choppiness Index (14-period) for regime filter
+    lookback_chop = 14
+    atr_series = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))))
+    atr_series.iloc[0] = high[0] - low[0]  # first ATR
+    tr_sum = atr_series.rolling(window=lookback_chop, min_periods=lookback_chop).sum().values
+    highest_high = pd.Series(high).rolling(window=lookback_chop, min_periods=lookback_chop).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_chop, min_periods=lookback_chop).min().values
+    chop = 100 * np.log10(tr_sum / (lookback_chop * (highest_high - lowest_low))) / np.log10(lookback_chop)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(lookback_camarilla, lookback_vol, 1), n):  # Start after sufficient data
+    for i in range(max(lookback_dc, lookback_vol, lookback_chop, 1), n):
         # Skip if any required data is NaN
-        if (np.isnan(prior_close[i]) or np.isnan(prior_high[i]) or np.isnan(prior_low[i]) or
-            np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(prior_high_max[i]) or np.isnan(prior_low_min[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i]) or np.isnan(chop[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Only trade in ranging markets (choppiness > 61.8)
+        if chop[i] <= 61.8:
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R3, close > 1d EMA34, volume spike
-            if (high[i] > camarilla_r3[i] and 
+            # LONG: Price breaks above Donchian upper band, close > 1d EMA34, volume spike
+            if (high[i] > prior_high_max[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = 0.28
+                volume[i] > 1.5 * avg_volume[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S3, close < 1d EMA34, volume spike
-            elif (low[i] < camarilla_s3[i] and 
+            # SHORT: Price breaks below Donchian lower band, close < 1d EMA34, volume spike
+            elif (low[i] < prior_low_min[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = -0.28
+                  volume[i] > 1.5 * avg_volume[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S3 OR volume drops below average
-            if (low[i] < camarilla_s3[i] or 
+            # EXIT LONG: Price breaks below Donchian lower band OR volume drops below average
+            if (low[i] < prior_low_min[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R3 OR volume drops below average
-            if (high[i] > camarilla_r3[i] or 
+            # EXIT SHORT: Price breaks above Donchian upper band OR volume drops below average
+            if (high[i] > prior_high_max[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.25
     
     return signals
