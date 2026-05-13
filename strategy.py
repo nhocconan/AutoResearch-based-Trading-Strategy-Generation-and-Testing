@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_RSI_DivMACD_TrendFilter
-Hypothesis: RSI divergence signals momentum exhaustion, while MACD histogram confirms trend strength.
-Long on bullish RSI divergence + positive MACD histogram + price above 4h EMA50.
-Short on bearish RSI divergence + negative MACD histogram + price below 4h EMA50.
-Uses 12h EMA50 as higher timeframe trend filter to avoid counter-trend trades.
-Designed for low trade frequency (<30/year) to minimize fee drag in ranging markets.
+1d_KAMA_Direction_RSI_ChopFilter
+Hypothesis: Kaufman Adaptive Moving Average (KAMA) captures trend direction with minimal lag in trending markets, while RSI filters overbought/oversold conditions and Choppiness Index (CHOP) identifies ranging vs trending regimes. Long when KAMA upward, RSI < 70, and CHOP < 38.2 (trending); Short when KAMA downward, RSI > 30, and CHOP < 38.2. Uses weekly trend filter for higher timeframe bias. Designed to work in both bull and bear markets by avoiding false signals in high-chop regimes.
+Target: 15-25 trades/year per symbol.
 """
 
-name = "4h_RSI_DivMACD_TrendFilter"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,80 +22,86 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # RSI(14) with proper min_periods
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
+    # Kaufman Adaptive Moving Average (KAMA)
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]))[:, None], axis=1)  # This is incorrect, need rolling sum
+    # Correct calculation of volatility as rolling sum of absolute changes
+    volatility = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=10, min_periods=10).sum().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2 / (2 + 1) - 2 / (30 + 1)) + 2 / (30 + 1)) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Relative Strength Index (RSI)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
     
-    # MACD(12,26,9)
-    ema_fast = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema_slow = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean()
-    macd_line = ema_fast - ema_slow
-    macd_signal = macd_line.ewm(span=9, adjust=False, min_periods=9).mean()
-    macd_hist = macd_line - macd_signal
-    macd_hist = macd_hist.values
+    # Choppiness Index (CHOP)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = high[0] - low[0]  # first period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Sum of True Range over period
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Max and min close over period
+    max_close = pd.Series(close).rolling(window=14, min_periods=14).max().values
+    min_close = pd.Series(close).rolling(window=14, min_periods=14).min().values
+    chop = np.where((max_close - min_close) != 0, 100 * np.log10(sum_tr / (max_close - min_close)) / np.log10(14), 50)
     
-    # 4h EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 12h EMA50 as higher timeframe trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Weekly trend filter: EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = df_12h['close'].values > ema_50_12h
-    downtrend_12h = df_12h['close'].values < ema_50_12h
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
-    
-    # RSI divergence detection (bullish: price makes LL, RSI makes HL)
-    # Bearish: price makes HH, RSI makes LH
-    rsi_bull_div = np.zeros(n, dtype=bool)
-    rsi_bear_div = np.zeros(n, dtype=bool)
-    
-    # Look for divergences over 3-bar windows to reduce noise
-    for i in range(10, n):
-        # Bullish divergence: price lower low, RSI higher low
-        if (low[i] < low[i-3] and low[i] < low[i-6] and 
-            rsi[i] > rsi[i-3] and rsi[i] > rsi[i-6]):
-            rsi_bull_div[i] = True
-        # Bearish divergence: price higher high, RSI lower high
-        if (high[i] > high[i-3] and high[i] > high[i-6] and 
-            rsi[i] < rsi[i-3] and rsi[i] < rsi[i-6]):
-            rsi_bear_div[i] = True
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1w = df_1w['close'].values > ema_50_1w
+    downtrend_1w = df_1w['close'].values < ema_50_1w
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
+        kama_val = kama[i]
+        rsi_val = rsi[i]
+        chop_val = chop[i]
+        close_val = close[i]
+        
+        uptrend_htf = uptrend_1w_aligned[i]
+        downtrend_htf = downtrend_1w_aligned[i]
+        
         if position == 0:
-            # LONG: bullish RSI divergence + positive MACD histogram + price above EMA50 + 12h uptrend
-            if (rsi_bull_div[i] and macd_hist[i] > 0 and 
-                close[i] > ema_50[i] and uptrend_12h_aligned[i]):
+            # LONG: KAMA upward (price > KAMA), RSI < 70, CHOP < 38.2 (trending), weekly uptrend
+            if close_val > kama_val and rsi_val < 70 and chop_val < 38.2 and uptrend_htf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: bearish RSI divergence + negative MACD histogram + price below EMA50 + 12h downtrend
-            elif (rsi_bear_div[i] and macd_hist[i] < 0 and 
-                  close[i] < ema_50[i] and downtrend_12h_aligned[i]):
+            # SHORT: KAMA downward (price < KAMA), RSI > 30, CHOP < 38.2 (trending), weekly downtrend
+            elif close_val < kama_val and rsi_val > 30 and chop_val < 38.2 and downtrend_htf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: bearish RSI divergence or MACD histogram turns negative
-            if rsi_bear_div[i] or macd_hist[i] <= 0:
+            # EXIT LONG: price < KAMA or RSI >= 70 (overbought) or CHOP >= 61.8 (choppy)
+            if close_val < kama_val or rsi_val >= 70 or chop_val >= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: bullish RSI divergence or MACD histogram turns positive
-            if rsi_bull_div[i] or macd_hist[i] >= 0:
+            # EXIT SHORT: price > KAMA or RSI <= 30 (oversold) or CHOP >= 61.8 (choppy)
+            if close_val > kama_val or rsi_val <= 30 or chop_val >= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
