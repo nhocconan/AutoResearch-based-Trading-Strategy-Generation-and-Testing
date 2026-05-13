@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_RSI_Regime_Breakout"
+name = "4h_Camarilla_R1_S1_Breakout_1D_Trend_Force_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,26 +17,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 1d EMA(34) trend filter
+    # Calculate 1-day Camarilla levels using previous day's OHLC
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
+    
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # 1-day trend filter: EMA(34)
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
@@ -45,62 +44,40 @@ def generate_signals(prices):
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Choppiness regime: avoid trending markets (CHOP < 38.2)
-    atr_period = 14
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr = np.zeros(n)
-    for i in range(atr_period, n):
-        if i == atr_period:
-            atr[i] = np.mean(tr[1:atr_period+1])
-        else:
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-    
-    sum_tr = np.zeros(n)
-    for i in range(atr_period, n):
-        sum_tr[i] = np.sum(tr[i-atr_period+1:i+1])
-    highest = np.maximum.accumulate(high)
-    lowest = np.minimum.accumulate(low)
-    range_max_min = highest - lowest
-    chop = np.where(range_max_min != 0, 100 * np.log10(sum_tr / range_max_min) / np.log10(atr_period), 50)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(30, n):
-        if (np.isnan(rsi[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(chop[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_filter = volume[i] > 1.5 * vol_ma_20[i]
-        chop_filter = chop[i] > 50  # favor ranging markets
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        price_above_r1 = close[i] > camarilla_r1_aligned[i]
+        price_below_s1 = close[i] < camarilla_s1_aligned[i]
         
         if position == 0:
-            # LONG: RSI oversold + 1d uptrend + volume + chop
-            if rsi_oversold and close[i] > ema34_1d_aligned[i] and vol_filter and chop_filter:
+            # LONG: price breaks above R1 + 1d uptrend + volume confirmation
+            if price_above_r1 and close[i] > ema34_1d_aligned[i] and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought + 1d downtrend + volume + chop
-            elif rsi_overbought and close[i] < ema34_1d_aligned[i] and vol_filter and chop_filter:
+            # SHORT: price breaks below S1 + 1d downtrend + volume confirmation
+            elif price_below_s1 and close[i] < ema34_1d_aligned[i] and vol_filter:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI > 50 or trend breaks
-            if rsi[i] > 50 or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: price falls below S1 or trend breaks
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI < 50 or trend breaks
-            if rsi[i] < 50 or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: price rises above R1 or trend breaks
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
