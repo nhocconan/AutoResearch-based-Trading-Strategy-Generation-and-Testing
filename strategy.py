@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and volume confirmation (>1.8x 20-bar avg volume).
-# Uses Camarilla pivot levels from 4h timeframe for structure, EMA50 for higher timeframe trend alignment, volume spike for participation confirmation.
-# Session filter (08-20 UTC) to reduce noise. Discrete sizing (0.20) to minimize fee churn.
-# Target: 60-150 total trades over 4 years on 1h timeframe (15-37/year).
+# Hypothesis: 6h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation (>1.3x 20-bar avg volume).
+# Williams %R identifies overbought/oversold conditions on 6h timeframe. 1d EMA50 provides higher timeframe trend direction
+# to align with the dominant trend, reducing counter-trend whipsaws. Volume confirmation ensures participation.
+# Designed for BTC/ETH with discrete sizing (0.25) to minimize fee churn while capturing mean reversion moves.
+# Target: 50-150 total trades over 4 years on 6h timeframe.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Volume_Session"
-timeframe = "1h"
+name = "6h_WilliamsR_MeanReversion_1dEMA50_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,30 +23,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Calculate 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4h Camarilla levels (based on prior 4h bar)
-    # R3 = close + 1.1*(high-low)*1.125/4
-    # S3 = close - 1.1*(high-low)*1.125/4
-    prior_4h_high = df_4h['high'].values
-    prior_4h_low = df_4h['low'].values
-    prior_4h_close = df_4h['close'].values
-    
-    camarilla_r3 = prior_4h_close + 1.1 * (prior_4h_high - prior_4h_low) * 1.125 / 4
-    camarilla_s3 = prior_4h_close - 1.1 * (prior_4h_high - prior_4h_low) * 1.125 / 4
-    
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    # Calculate Williams %R on 6h timeframe (14-period)
+    lookback_willr = 14
+    highest_high = pd.Series(high).rolling(window=lookback_willr, min_periods=lookback_willr).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_willr, min_periods=lookback_willr).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when highest_high == lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Calculate average volume for confirmation (20-period)
     lookback_vol = 20
@@ -54,46 +45,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(lookback_vol, 1), n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(avg_volume[i]) or
-            not in_session[i]):
+    for i in range(max(lookback_willr, lookback_vol, 1), n):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(williams_r[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R3, close > 4h EMA50, volume spike
-            if (high[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_50_4h_aligned[i] and 
-                volume[i] > 1.8 * avg_volume[i]):
-                signals[i] = 0.20  # Full position on breakout
+            # LONG: Williams %R oversold (< -80), price > 1d EMA50, volume spike
+            if (williams_r[i] < -80 and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume[i] > 1.3 * avg_volume[i]):
+                signals[i] = 0.25  # Full position
                 position = 1
-            # SHORT: Price breaks below Camarilla S3, close < 4h EMA50, volume spike
-            elif (low[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  volume[i] > 1.8 * avg_volume[i]):
-                signals[i] = -0.20  # Full position on breakout
+            # SHORT: Williams %R overbought (> -20), price < 1d EMA50, volume spike
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume[i] > 1.3 * avg_volume[i]):
+                signals[i] = -0.25  # Full position
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # CONTINUE LONG: Reduce to half position if still above R3 and volume OK
-            if (high[i] > camarilla_r3_aligned[i] and 
-                volume[i] > avg_volume[i]):
-                signals[i] = 0.10  # Half position to reduce churn
-            else:
-                signals[i] = 0.0  # Exit if breaks below R3 or low volume
+            # EXIT LONG: Williams %R returns to neutral (> -50) or volume drops
+            if williams_r[i] > -50 or volume[i] <= avg_volume[i]:
+                signals[i] = 0.0  # Exit
                 position = 0
+            else:
+                signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # CONTINUE SHORT: Reduce to half position if still below S3 and volume OK
-            if (low[i] < camarilla_s3_aligned[i] and 
-                volume[i] > avg_volume[i]):
-                signals[i] = -0.10  # Half position to reduce churn
-            else:
-                signals[i] = 0.0  # Exit if breaks above S3 or low volume
+            # EXIT SHORT: Williams %R returns to neutral (< -50) or volume drops
+            if williams_r[i] < -50 or volume[i] <= avg_volume[i]:
+                signals[i] = 0.0  # Exit
                 position = 0
+            else:
+                signals[i] = -0.25  # Maintain position
     
     return signals
