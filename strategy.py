@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Weekly Pivot Reversal with 1d Volume Confirmation and ATR-based Position Sizing
-# Uses weekly Camarilla pivot levels (H4/L4) from prior week as key support/resistance.
-# Long when price crosses above H4 with 1d volume > 1.5x 20-period average AND price > 1d EMA50.
-# Short when price crosses below L4 with 1d volume > 1.5x 20-period average AND price < 1d EMA50.
-# Exits on opposite pivot touch (L4 for longs, H4 for shorts) or weekly trend reversal (price crosses 1d EMA200).
-# Position size: 0.25 in normal volatility, 0.15 in low volatility (ATR14 < ATR50).
-# Designed for 12-37 trades/year by requiring weekly structure, volume confirmation, and daily trend filter.
-# Works in bull markets via breakout continuation and in bear markets via mean reversion at extremes.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high AND close > 1w EMA34 AND volume > 1.5x 20-period average volume.
+# Short when price breaks below Donchian(20) low AND close < 1w EMA34 AND volume > 1.5x 20-period average volume.
+# Exit when price touches the opposite Donchian(20) level (low for long exit, high for short exit).
+# Uses discrete position sizes (0.0, ±0.25) to minimize fee churn. Designed for 7-25 trades/year by requiring
+# strong breakouts with volume confirmation and weekly trend alignment. Works in bull markets via breakout momentum
+# and in bear markets via breakdowns with weekly trend filter to avoid counter-trend whipsaws.
 
-name = "6h_WeeklyPivot_1dVolTrend_v1"
-timeframe = "6h"
+name = "1d_Donchian20_1wTrend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,83 +25,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume filters
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 1d EMA50 and EMA200 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # Calculate 1d volume average (20-period) for volume confirmation
-    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    
-    # Get weekly data for Camarilla pivot calculation (prior week's levels)
+    # Get 1w data for HTF trend filter
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels for weekly timeframe
-    # H4 = close + 1.5 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    camarilla_h4 = close_1w + 1.5 * (high_1w - low_1w)
-    camarilla_l4 = close_1w - 1.5 * (high_1w - low_1w)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
+    # Calculate EMA(34) on 1w close for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # ATR(14) and ATR(50) for volatility regime
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # first bar
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Donchian(20) channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volatility regime: ATR14 < ATR50 (low volatility) -> reduced size
-    vol_regime = atr14 < atr50  # True when low volatility
-    position_size = np.where(vol_regime, 0.15, 0.25)
+    # Average volume(20) for volume confirmation
+    avg_vol_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = avg_vol_20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # Start after sufficient data for all indicators
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or \
-           np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or \
-           np.isnan(atr14[i]) or np.isnan(atr50[i]) or np.isnan(volume[i]):
+    for i in range(20, n):  # Start after sufficient data for Donchian
+        if np.isnan(ema34_1w_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(avg_vol_20[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price crosses above weekly H4 with volume confirmation and price > 1d EMA50
-            if (close[i] > camarilla_h4_aligned[i] and close[i-1] <= camarilla_h4_aligned[i-1] and
-                volume[i] > 1.5 * vol_ma20_1d_aligned[i] and close[i] > ema50_1d_aligned[i]):
-                signals[i] = position_size[i]
+            # LONG: Price breaks above Donchian(20) high AND close > 1w EMA34 AND volume > 1.5x average volume
+            if close[i] > highest_high[i] and close[i] > ema34_1w_aligned[i] and volume[i] > volume_threshold[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below weekly L4 with volume confirmation and price < 1d EMA50
-            elif (close[i] < camarilla_l4_aligned[i] and close[i-1] >= camarilla_l4_aligned[i-1] and
-                  volume[i] > 1.5 * vol_ma20_1d_aligned[i] and close[i] < ema50_1d_aligned[i]):
-                signals[i] = -position_size[i]
+            # SHORT: Price breaks below Donchian(20) low AND close < 1w EMA34 AND volume > 1.5x average volume
+            elif close[i] < lowest_low[i] and close[i] < ema34_1w_aligned[i] and volume[i] > volume_threshold[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price touches weekly L4 OR price < 1d EMA200 (weekly trend break)
-            if close[i] <= camarilla_l4_aligned[i] or close[i] < ema200_1d_aligned[i]:
+            # EXIT LONG: Price touches Donchian(20) low
+            if close[i] <= lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = position_size[i]
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price touches weekly H4 OR price > 1d EMA200 (weekly trend break)
-            if close[i] >= camarilla_h4_aligned[i] or close[i] > ema200_1d_aligned[i]:
+            # EXIT SHORT: Price touches Donchian(20) high
+            if close[i] >= highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -position_size[i]
+                signals[i] = -0.25
     
     return signals
