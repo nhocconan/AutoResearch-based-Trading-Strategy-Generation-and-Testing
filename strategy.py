@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_PriceAction_Reversal_Pattern
-Hypothesis: Price action reversal patterns (pin bars, inside bars) at key support/resistance levels 
-combined with volume confirmation work in both bull and bear markets by capturing reversals 
-at exhaustion points. Uses 1d trend filter for higher timeframe bias and avoids chop via 
-volatility regime filter. Target: 20-40 trades/year per symbol.
+12h_Camarilla_R1S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels (R1/S1) act as strong support/resistance on 12h timeframe.
+Breakout above R1 or below S1 with volume confirmation and 1d trend filter captures
+sustained moves in both bull and bear markets. Volume filter reduces false breakouts.
+Target: 12-30 trades/year per symbol.
 """
 
-name = "4h_PriceAction_Reversal_Pattern"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,73 +20,47 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    open_price = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volatility regime filter: ATR ratio (short/long)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr_short = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr_long = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = atr_short / np.where(atr_long == 0, np.nan, atr_long)
-    # Low volatility (range market) = mean reversion, High volatility = trend
-    # We want low volatility for mean reversion reversals
-    low_vol = atr_ratio < 0.8  # regime filter
-    
-    # Volume confirmation: volume > average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > vol_ma
-    
-    # Price action patterns
-    # Pin bar: long wick, small body
-    body_size = np.abs(close - open_price)
-    upper_wick = high - np.maximum(open_price, close)
-    lower_wick = np.minimum(open_price, close) - low
-    is_pin_bar = ((upper_wick > 2 * body_size) | (lower_wick > 2 * body_size)) & (body_size > 0)
-    
-    # Inside bar: current high < previous high and current low > previous low
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    is_inside_bar = (high < prev_high) & (low > prev_low)
-    
-    # Support/resistance levels from 1d pivots (simplified: recent swing high/low)
+    # Calculate Camarilla levels for each 12h bar using previous day's OHLC
+    # We'll calculate daily pivots first, then map to 12h bars
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d trend filter: price vs 20-period EMA
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    uptrend_1d = df_1d['close'].values > ema_20_1d
-    downtrend_1d = df_1d['close'].values < ema_20_1d
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla R1 and S1 levels
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # 1d trend filter: EMA50
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Dynamic support/resistance: recent 10-period high/low from 1d data
-    # We'll use the 1d high/low as reference levels, aligned to 4h
-    resistance_1d = df_1d['high'].values
-    support_1d = df_1d['low'].values
-    resistance_aligned = align_htf_to_ltf(prices, df_1d, resistance_1d)
-    support_aligned = align_htf_to_ltf(prices, df_1d, support_1d)
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip first roll values
-        if np.isnan(atr_ratio[i]) or np.isnan(vol_ma[i]):
-            signals[i] = 0.0
-            continue
-            
-        # Only trade in low volatility regime for mean reversion
-        if not low_vol[i]:
+    for i in range(50, n):
+        # Skip if volume filter not met
+        if not volume_filter[i]:
             if position == 1:
                 signals[i] = 0.0
                 position = 0
@@ -96,61 +70,33 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
             continue
-            
-        # Volume confirmation required
-        if not vol_confirm[i]:
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-            
-        # Check for price action patterns at key levels
-        pin_bar = is_pin_bar[i]
-        inside_bar = is_inside_bar[i]
         
-        # Distance to support/resistance (normalized by ATR)
-        atr_val = atr_short[i] if not np.isnan(atr_short[i]) else 1.0
-        dist_to_resistance = (resistance_aligned[i] - high[i]) / atr_val if not np.isnan(resistance_aligned[i]) else 999
-        dist_to_support = (low[i] - support_aligned[i]) / atr_val if not np.isnan(support_aligned[i]) else 999
-        
-        # Consider level touched if within 0.5 ATR
-        near_resistance = dist_to_resistance < 0.5
-        near_support = dist_to_support < 0.5
+        r1 = R1_aligned[i]
+        s1 = S1_aligned[i]
+        uptrend = uptrend_1d_aligned[i]
+        downtrend = downtrend_1d_aligned[i]
         
         if position == 0:
-            # LONG: bullish pin bar or inside bar breakout near support in 1d uptrend
-            if (pin_bar or inside_bar) and near_support and uptrend_1d_aligned[i]:
-                # Additional confirmation: bullish pin bar (long lower wick) or breakout above inside bar high
-                if pin_bar and lower_wick[i] > upper_wick[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif inside_bar and close[i] > prev_high[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # SHORT: bearish pin bar or inside bar breakdown near resistance in 1d downtrend
-            elif (pin_bar or inside_bar) and near_resistance and downtrend_1d_aligned[i]:
-                # Additional confirmation: bearish pin bar (long upper wick) or breakdown below inside bar low
-                if pin_bar and upper_wick[i] > lower_wick[i]:
-                    signals[i] = -0.25
-                    position = -1
-                elif inside_bar and close[i] < prev_low[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # LONG: break above R1 with 1d uptrend
+            if close[i] > r1 and uptrend:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: break below S1 with 1d downtrend
+            elif close[i] < s1 and downtrend:
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below support or pattern fails
-            if close[i] < support_aligned[i] or (pin_bar and upper_wick[i] > lower_wick[i]):
+            # EXIT LONG: close below S1 or trend change
+            if close[i] < s1 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above resistance or pattern fails
-            if close[i] > resistance_aligned[i] or (pin_bar and lower_wick[i] > upper_wick[i]):
+            # EXIT SHORT: close above R1 or trend change
+            if close[i] > r1 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
