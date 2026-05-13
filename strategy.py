@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation (1.8x MA30).
-# Enters long when price breaks above 20-period Donchian high with 1w bullish trend (close > EMA50) and volume > 1.8x MA30.
-# Enters short when price breaks below 20-period Donchian low with 1w bearish trend (close < EMA50) and volume > 1.8x MA30.
-# Exits when price reverts to 10-period Donchian midpoint or ATR-based stoploss hit (2.0 * ATR14 from entry).
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation (1.5x MA20).
+# Enters long when price breaks above Donchian upper channel with 1d bullish trend (ADX>25 and +DI>-DI) and volume > 1.5x MA20.
+# Enters short when price breaks below Donchian lower channel with 1d bearish trend (ADX>25 and -DI>+DI) and volume > 1.5x MA20.
+# Exits when price reverts to Donchian midpoint or ATR-based stoploss hit (2.0 * ATR14 from entry).
 # Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
-# Designed for low trade frequency (~12-37/year) by requiring strict confluence: price breakout + HTF trend + volume spike.
-# Donchian channels provide robust trend-following structure, while 1w EMA50 filter ensures alignment with higher timeframe momentum.
-# Volume threshold (1.8x) reduces false breakouts, improving signal quality in both bull and bear markets.
-# Works in bull markets by capturing breakouts and in bear markets by avoiding counter-trend entries via 1w trend filter.
+# Designed for low trade frequency (~19-50/year) by requiring strict confluence: price breakout + HTF trend + volume spike.
+# Donchian channels provide structural breakout levels, while 1d ADX filter ensures alignment with higher timeframe momentum.
+# Volume threshold (1.5x) reduces false breakouts, improving signal quality in both bull and bear markets.
 
-name = "12h_Donchian20_Breakout_1wTrend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dADX_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,25 +26,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for HTF indicators
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for HTF indicators
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1w close for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate ADX(14), +DI(14), -DI(14) on 1d for trend filter
+    # True Range
+    tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.absolute(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high_1d[0] - low_1d[0]  # first bar
+    atr1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) on 12h data
+    # +DM and -DM
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed +DM, -DM, TR
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # +DI and -DI
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.absolute(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d indicators to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
+    
+    # Calculate Donchian channels (20) on 4h
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (highest_high + lowest_low) / 2.0  # 10-period midpoint for exit
+    midpoint = (highest_high + lowest_low) / 2.0
     
-    # Volume filter: current volume > 1.8x 30-period average
+    # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
-    vol_ma30 = volume_series.rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (vol_ma30 * 1.8)
+    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 1.5)
     
-    # ATR(14) for stoploss
+    # ATR(14) for stoploss on 4h
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
     tr2 = np.absolute(low - np.roll(close, 1))
     tr = np.maximum(tr1, tr2)
@@ -58,20 +87,20 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(donchian_mid[i]) or \
-           np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma30[i]) or \
-           np.isnan(atr14[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(midpoint[i]) or \
+           np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or np.isnan(minus_di_aligned[i]) or \
+           np.isnan(vol_ma20[i]) or np.isnan(atr14[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high with 1w bullish trend and volume spike
-            if close[i] > highest_high[i] and close[i] > ema50_1w_aligned[i] and volume_spike[i]:
+            # LONG: Price breaks above Donchian upper channel with 1d bullish trend and volume spike
+            if close[i] > highest_high[i] and adx_aligned[i] > 25 and plus_di_aligned[i] > minus_di_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
-            # SHORT: Price breaks below Donchian low with 1w bearish trend and volume spike
-            elif close[i] < lowest_low[i] and close[i] < ema50_1w_aligned[i] and volume_spike[i]:
+            # SHORT: Price breaks below Donchian lower channel with 1d bearish trend and volume spike
+            elif close[i] < lowest_low[i] and adx_aligned[i] > 25 and minus_di_aligned[i] > plus_di_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
@@ -79,7 +108,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # EXIT LONG: Price reverts to Donchian midpoint OR ATR stoploss hit
-            if close[i] < donchian_mid[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
+            if close[i] < midpoint[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
@@ -88,7 +117,7 @@ def generate_signals(prices):
                 entry_price[i] = entry_price[i-1]  # carry forward entry price
         elif position == -1:
             # EXIT SHORT: Price reverts to Donchian midpoint OR ATR stoploss hit
-            if close[i] > donchian_mid[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
+            if close[i] > midpoint[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
