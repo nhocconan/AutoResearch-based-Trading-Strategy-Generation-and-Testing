@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when price breaks above R3 AND 1d EMA34 rising AND volume > 2.0x average.
 # Short when price breaks below S3 AND 1d EMA34 falling AND volume > 2.0x average.
 # Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -41,19 +41,16 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels for each 1d bar
-    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
     camarilla_range = high_1d - low_1d
     r3 = close_1d + 1.1 * camarilla_range
     s3 = close_1d - 1.1 * camarilla_range
     
-    # Align 1d Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    # Align 1d Camarilla levels to 12h timeframe (wait for 1d bar to close)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # Get 1d data for EMA34 trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
