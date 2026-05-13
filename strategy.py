@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_1D_TrendFilter_Volume
-Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) direction on 4h for trend, filtered by 1d EMA trend and volume spike. 
-Go long when KAMA turns up (bullish shift) with price above 1d EMA50 and volume > 1.5x 20-bar average. 
-Go short when KAMA turns down (bearish shift) with price below 1d EMA50 and volume confirmation.
-Exit when KAMA reverses or price crosses 1d EMA50.
-Designed for 4h timeframe to balance signal quality and trade frequency (target: 20-50 trades/year).
-KAMA adapts to market noise, reducing whipsaws in chop while capturing trends.
+4h_KAMA_Trend_With_RSI_Filter_and_Volume_Confirmation
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) to capture trend direction, filtered by RSI for overbought/oversold conditions and volume confirmation for momentum. Go long when price crosses above KAMA with RSI < 70 and volume > 1.5x average, short when price crosses below KAMA with RSI > 30 and volume > 1.5x average. This strategy aims to capture trend moves while avoiding extremes and ensuring momentum confirmation, suitable for both bull and bear markets. Designed for 4h timeframe to limit trades and avoid fee drag.
 """
 
-name = "4h_KAMA_Trend_1D_TrendFilter_Volume"
+name = "4h_KAMA_Trend_With_RSI_Filter_and_Volume_Confirmation"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,88 +17,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Calculate KAMA on 4h close
-    # Efficiency ratio: |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(close - np.roll(close, 10))
-    # Avoid index error for first 10 bars
-    change[:10] = np.nan
-    
-    abs_diff = np.abs(np.diff(close, prepend=close[0]))
-    volatility = pd.Series(abs_diff).rolling(window=10, min_periods=10).sum().values
-    
-    # Avoid division by zero
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    # Efficiency ratio
+    change = np.abs(np.diff(close, k=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
     er = np.where(volatility != 0, change / volatility, 0)
-    # Smooth ER
-    er = pd.Series(er).ewm(alpha=1, adjust=False).mean().values  # ER is already 0-1
-    
     # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    
-    # Calculate KAMA
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    # Initialize KAMA
     kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama[9] = close[9]  # start at index 9 for 10-period lookback
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Align KAMA to 4h (no extra delay needed as it's LTF)
-    kama_4h = kama
+    # Calculate RSI (14-period)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Get daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Calculate volume average (20-bar) for volume spike filter
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate volume average (20-period)
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after KAMA warmup
+    for i in range(20, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_4h[i]) or np.isnan(kama_4h[i-1]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(kama[i-1]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-bar average
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: KAMA turns up (current > previous) + price above daily EMA50 + volume spike
-            if kama_4h[i] > kama_4h[i-1] and close[i] > ema_50_1d_aligned[i] and vol_spike:
+            # LONG: price crosses above KAMA + RSI < 70 (not overbought) + volume confirmation
+            if close[i-1] <= kama[i-1] and close[i] > kama[i] and rsi[i] < 70 and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA turns down (current < previous) + price below daily EMA50 + volume spike
-            elif kama_4h[i] < kama_4h[i-1] and close[i] < ema_50_1d_aligned[i] and vol_spike:
+            # SHORT: price crosses below KAMA + RSI > 30 (not oversold) + volume confirmation
+            elif close[i-1] >= kama[i-1] and close[i] < kama[i] and rsi[i] > 30 and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA turns down or price crosses below daily EMA50
-            if kama_4h[i] < kama_4h[i-1] or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: price crosses below KAMA or RSI > 70 (overbought)
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA turns up or price crosses above daily EMA50
-            if kama_4h[i] > kama_4h[i-1] or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: price crosses above KAMA or RSI < 30 (oversold)
+            if close[i] > kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
