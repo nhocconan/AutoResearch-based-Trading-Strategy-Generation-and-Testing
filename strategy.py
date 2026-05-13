@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Use daily Camarilla pivot R3/S3 levels as breakout triggers on 12h timeframe.
-# Enter long when price breaks above R3 with 1d EMA uptrend and volume spike.
-# Enter short when price breaks below S3 with 1d EMA downtrend and volume spike.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Use daily Camarilla pivot R1/S1 levels as breakout triggers.
+# Enter long when price breaks above R1 with 1d EMA50 uptrend and volume spike.
+# Enter short when price breaks below S1 with 1d EMA50 downtrend and volume spike.
 # Exit when price returns to the central pivot point (PP) to avoid reversals.
 # Camarilla levels are derived from prior day's range and work well in trending markets.
 # Combined with 1d trend filter and volume confirmation to reduce false signals.
-# Target: 12-37 trades/year on 12h to minimize fee drag while capturing strong moves.
-# Works in bull markets via breakout continuation and in bear markets via mean-reversion to pivot.
+# Target: 20-30 trades/year on 4h to minimize fee drag while capturing strong moves.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -39,17 +38,17 @@ def generate_signals(prices):
     # Based on previous day's OHLC
     range_1d = high_1d - low_1d
     pp = (high_1d + low_1d + close_1d) / 3.0
-    r3 = pp + (high_1d - low_1d) * 1.1 / 2.0
-    s3 = pp - (high_1d - low_1d) * 1.1 / 2.0
+    r1 = pp + (high_1d - low_1d) * 1.1 / 4.0
+    s1 = pp - (high_1d - low_1d) * 1.1 / 4.0
 
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
 
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
     # Volume confirmation: volume > 1.8x 24-period average (to filter weak moves)
     vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -59,8 +58,8 @@ def generate_signals(prices):
 
     for i in range(24, n):
         # Skip if any required value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(vol_avg_24[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,15 +69,15 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above R3 + price > 1d EMA34 + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and
+            # LONG: Close breaks above R1 + price > 1d EMA50 + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and
                 volume[i] > vol_avg_24[i] * 1.8):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S3 + price < 1d EMA34 + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and
+            # SHORT: Close breaks below S1 + price < 1d EMA50 + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and
                   volume[i] > vol_avg_24[i] * 1.8):
                 signals[i] = -0.25
                 position = -1
