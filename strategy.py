@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_Volume_And_Chop_Filter
-Hypothesis: KAMA adapts to market noise, providing reliable trend signals in both trending and ranging markets.
-Combined with volume confirmation (>1.5x 20-period average) and Choppiness Index (<40 for trending, >60 for ranging),
-this strategy avoids whipsaws. Long when KAMA rising + volume + chop<40; short when KAMA falling + volume + chop>60.
-Position size 0.25 targets ~20-30 trades/year to minimize fee drag.
+4h_Aggressive_Trend_Scalper_12hTrend_Volume
+Hypothesis: Aggressive trend-following on 4h using 12h EMA trend filter, volume confirmation, and price breakout from recent highs/lows. Designed to capture strong momentum moves in both bull and bear markets with tight risk control. Target: 15-25 trades/year per symbol.
 """
 
-name = "4h_KAMA_Trend_With_Volume_And_Chop_Filter"
+name = "4h_Aggressive_Trend_Scalper_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -15,87 +12,66 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_period=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    close = pd.Series(close)
-    change = abs(close - close.shift(er_period))
-    volatility = abs(close.diff()).rolling(window=er_period).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = [np.nan] * len(close)
-    kama[0] = close.iloc[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc.iloc[i] * (close.iloc[i] - kama[i-1])
-    return np.array(kama)
-
-def calculate_chop(high, low, close, period=14):
-    """Calculate Choppiness Index"""
-    high = pd.Series(high)
-    low = pd.Series(low)
-    close = pd.Series(close)
-    atr = np.maximum(high - low, np.maximum(abs(high - close.shift(1)), abs(low - close.shift(1))))
-    tr_sum = atr.rolling(window=period).sum()
-    highest_high = high.rolling(window=period).max()
-    lowest_low = low.rolling(window=period).min()
-    chop = 100 * np.log10(tr_sum / (highest_high - lowest_low)) / np.log10(period)
-    return chop.fillna(50).values  # fill NaN with neutral 50
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA trend (ER=10, fast=2, slow=30)
-    kama = calculate_kama(close, er_period=10, fast=2, slow=30)
+    # Get 4h data for range calculation
+    df_4h = get_htf_data(prices, '4h')
+    
+    # Calculate 4-period high/low for breakout (16 periods = 1 day on 4h)
+    high_4 = pd.Series(high).rolling(window=4, min_periods=4).max().values
+    low_4 = pd.Series(low).rolling(window=4, min_periods=4).min().values
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
-    # Choppiness Index for regime filter
-    chop = calculate_chop(high, low, close, period=14)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup for KAMA and CHOP
+    for i in range(20, n):  # Start after warmup
         if position == 0:
-            # LONG: KAMA rising, volume confirmation, trending market (CHOP < 40)
-            if (kama[i] > kama[i-1] and 
+            # LONG: Breakout above recent high with volume and uptrend
+            if (close[i] > high_4[i] and 
                 volume_filter[i] and 
-                chop[i] < 40):
-                signals[i] = 0.25
+                close[i] > ema20_12h_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # SHORT: KAMA falling, volume confirmation, ranging market (CHOP > 60)
-            elif (kama[i] < kama[i-1] and 
+            # SHORT: Breakdown below recent low with volume and downtrend
+            elif (close[i] < low_4[i] and 
                   volume_filter[i] and 
-                  chop[i] > 60):
-                signals[i] = -0.25
+                  close[i] < ema20_12h_aligned[i]):
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA turns down OR chop becomes too high (ranging)
-            if (kama[i] < kama[i-1]) or (chop[i] > 60):
+            # EXIT LONG: Price breaks below recent low or trend reverses
+            if (close[i] < low_4[i]) or \
+               (close[i] < ema20_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: KAMA turns up OR chop becomes too low (trending)
-            if (kama[i] > kama[i-1]) or (chop[i] < 40):
+            # EXIT SHORT: Price breaks above recent high or trend reverses
+            if (close[i] > high_4[i]) or \
+               (close[i] > ema20_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
