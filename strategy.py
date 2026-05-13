@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper channel AND price > 12h HMA21 AND volume > 1.5x 20-period average volume.
-# Short when price breaks below Donchian lower channel AND price < 12h HMA21 AND volume > 1.5x 20-period average volume.
-# Exit when price crosses Donchian middle (20-period average) OR volume drops below average.
-# Uses discrete position sizing (0.25) to limit fee churn. Designed for BTC/ETH robustness by capturing
-# institutional breakouts with trend and volume confirmation while avoiding false signals in low-volume environments.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and 1d ADX regime filter.
+# Long when price breaks above R3 (bullish breakout) AND price > 4h EMA50 AND 1d ADX > 25 (trending market).
+# Short when price breaks below S3 (bearish breakout) AND price < 4h EMA50 AND 1d ADX > 25.
+# Exits when price returns to the Camarilla pivot point (mean reversion to equilibrium) OR ADX < 20 (regime shift to ranging).
+# Uses discrete position sizing (0.20) to limit fee churn. Designed for BTC/ETH robustness by capturing breakouts in trending markets while avoiding false breakouts in ranging markets via ADX filter.
+# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
 
-name = "4h_DonchianBreakout_HMATrend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_1dADX_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,98 +16,124 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate 12h HMA21 for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Calculate 4h EMA50 for trend filter (HTF)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    def wma(data, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(data, weights / weights.sum(), mode='valid')
+    # Calculate 1d ADX for regime filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    if len(close_12h) < 21:
-        hma_21_12h = np.full(len(close_12h), np.nan)
-    else:
-        wma_half = wma(close_12h, half_len)
-        wma_full = wma(close_12h, 21)
-        wma_2x_sub = 2 * wma_half[-len(wma_full):] - wma_full
-        if len(wma_2x_sub) < sqrt_len:
-            hma_21_12h = np.full(len(close_12h), np.nan)
-        else:
-            hma_21_12h = wma(wma_2x_sub, sqrt_len)
-            # Pad with NaN to match original length
-            hma_21_12h = np.concatenate([np.full(len(close_12h) - len(hma_21_12h), np.nan), hma_21_12h])
+    # Calculate ADX components
+    plus_dm = np.zeros(len(high_1d))
+    minus_dm = np.zeros(len(low_1d))
+    tr = np.zeros(len(high_1d))
     
-    hma_21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
+    for i in range(1, len(high_1d)):
+        plus_dm[i] = max(0, high_1d[i] - high_1d[i-1])
+        minus_dm[i] = max(0, low_1d[i-1] - low_1d[i])
+        tr[i] = max(high_1d[i] - low_1d[i], 
+                   abs(high_1d[i] - close_1d[i-1]), 
+                   abs(low_1d[i] - close_1d[i-1]))
     
-    # Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
-    middle_channel = (highest_high + lowest_low) / 2
+    # Wilder's smoothing
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    avg_volume = np.full(n, np.nan)
-    for i in range(20 - 1, n):
-        avg_volume[i] = np.mean(volume[i - 20 + 1:i + 1])
-    volume_threshold = avg_volume * 1.5
+    period = 14
+    if len(tr) < period:
+        return np.zeros(n)
+        
+    atr = wilder_smooth(tr, period)
+    plus_dm_smooth = wilder_smooth(plus_dm, period)
+    minus_dm_smooth = wilder_smooth(minus_dm, period)
     
+    divisor = np.where(atr == 0, 1, atr)
+    plus_di = 100 * plus_dm_smooth / divisor
+    minus_di = 100 * minus_dm_smooth / divisor
+    
+    dx = np.where((plus_di + minus_di) == 0, 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di))
+    adx = wilder_smooth(dx, period)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate Camarilla pivot levels from previous day
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(1, n):
+        # Need previous day's OHLC for Camarilla calculation
+        if i < 24:  # need at least 24 hours of 1h data for previous day
+            signals[i] = 0.0
+            continue
+            
+        # Get previous day's OHLC (24 hours ago in 1h timeframe)
+        prev_high = high[i-24]
+        prev_low = low[i-24]
+        prev_close = close[i-24]
+        
+        # Calculate Camarilla levels
+        pivot = (prev_high + prev_low + prev_close) / 3
+        range_val = prev_high - prev_low
+        r3 = pivot + (range_val * 1.1 / 4)
+        s3 = pivot - (range_val * 1.1 / 4)
+        
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(hma_21_12h_aligned[i]) or np.isnan(volume[i]) or 
-            np.isnan(volume_threshold[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above upper channel AND price > 12h HMA21 AND volume > 1.5x avg volume
-            if (close[i] > highest_high[i] and 
-                close[i] > hma_21_12h_aligned[i] and 
-                volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
+            # LONG: Price breaks above R3 AND price > 4h EMA50 AND ADX > 25 (trending)
+            if (close[i] > r3 and 
+                close[i] > ema_50_4h_aligned[i] and 
+                adx_aligned[i] > 25):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: price breaks below lower channel AND price < 12h HMA21 AND volume > 1.5x avg volume
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < hma_21_12h_aligned[i] and 
-                  volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
+            # SHORT: Price breaks below S3 AND price < 4h EMA50 AND ADX > 25 (trending)
+            elif (close[i] < s3 and 
+                  close[i] < ema_50_4h_aligned[i] and 
+                  adx_aligned[i] > 25):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below middle channel OR volume drops below average
-            if (close[i] < middle_channel[i] or 
-                volume[i] < avg_volume[i]):
+            # EXIT LONG: Price returns to pivot (mean reversion) OR ADX < 20 (ranging)
+            if (close[i] <= pivot or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: price crosses above middle channel OR volume drops below average
-            if (close[i] > middle_channel[i] or 
-                volume[i] < avg_volume[i]):
+            # EXIT SHORT: Price returns to pivot (mean reversion) OR ADX < 20 (ranging)
+            if (close[i] >= pivot or 
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
