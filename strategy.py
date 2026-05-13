@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-# 4h_RSI_Volume_Breakout
-# Hypothesis: RSI(14) extremes with volume confirmation on 4h timeframe. In bull markets, RSI > 70 with volume indicates strong momentum; in bear markets, RSI < 30 with volume indicates capitulation and potential reversal. Volume filter ensures institutional participation, reducing false signals. Designed for 20-40 trades/year to minimize fee drag. Works in both bull and bear by capturing momentum bursts and reversal attempts.
+# 4h_Adaptive_Donchian_Breakout_With_Volume
+# Hypothesis: Donchian channel breakouts with volume confirmation and ATR-based position sizing.
+# In bull markets: breakout above upper band signals momentum continuation.
+# In bear markets: breakdown below lower band signals continuation of downtrend.
+# Volume filter ensures institutional participation, reducing false breakouts.
+# Uses dynamic position sizing based on ATR volatility to adapt to market conditions.
+# Designed for 20-40 trades/year to minimize fee drag.
 
-name = "4h_RSI_Volume_Breakout"
+name = "4h_Adaptive_Donchian_Breakout_With_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -15,38 +20,43 @@ def generate_signals(prices):
         return np.zeros(n)
 
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
 
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Donchian Channel (20-period)
+    lookback = 20
+    upper = np.full_like(high, np.nan)
+    lower = np.full_like(low, np.nan)
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(lookback, n):
+        upper[i] = np.max(high[i-lookback:i])
+        lower[i] = np.min(low[i-lookback:i])
+
+    # ATR for volatility-based position sizing (14-period)
+    atr_period = 14
+    tr = np.zeros_like(close)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation: current volume > 1.8 x 20-period average
-    vol_ma = np.zeros_like(volume)
+    atr = np.zeros_like(close)
+    atr[atr_period-1] = np.mean(tr[1:atr_period])
+    for i in range(atr_period, n):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+
+    # Volume confirmation: current volume > 1.5 x 20-period average
+    vol_ma = np.full_like(volume, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        # Skip if RSI or volume data is not ready
-        if i < 14 or np.isnan(rsi[i]) or np.isnan(volume_spike[i]):
+    for i in range(max(lookback, atr_period, 20), n):
+        # Skip if data is not ready
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(atr[i]) or np.isnan(volume_spike[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,29 +65,41 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI > 70 (overbought momentum) with volume spike
-            if rsi[i] > 70 and volume_spike[i]:
-                signals[i] = 0.25
+            # LONG: Price breaks above upper Donchian band with volume spike
+            if close[i] > upper[i] and volume_spike[i]:
+                # Scale position by volatility (inverse ATR)
+                vol_factor = np.clip(atr[0] / atr[i], 0.5, 2.0)  # Normalize to initial volatility
+                base_size = 0.25
+                signals[i] = base_size * vol_factor
                 position = 1
-            # SHORT: RSI < 30 (oversold capitulation) with volume spike
-            elif rsi[i] < 30 and volume_spike[i]:
-                signals[i] = -0.25
+            # SHORT: Price breaks below lower Donchian band with volume spike
+            elif close[i] < lower[i] and volume_spike[i]:
+                vol_factor = np.clip(atr[0] / atr[i], 0.5, 2.0)
+                base_size = 0.25
+                signals[i] = -base_size * vol_factor
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI falls below 50 (momentum fading)
-            if rsi[i] < 50:
+            # EXIT LONG: Price re-enters Donchian channel (below midpoint)
+            midpoint = (upper[i] + lower[i]) / 2
+            if close[i] < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                # Maintain position with volatility scaling
+                vol_factor = np.clip(atr[0] / atr[i], 0.5, 2.0)
+                base_size = 0.25
+                signals[i] = base_size * vol_factor
         elif position == -1:
-            # EXIT SHORT: RSI rises above 50 (selling pressure fading)
-            if rsi[i] > 50:
+            # EXIT SHORT: Price re-enters Donchian channel (above midpoint)
+            midpoint = (upper[i] + lower[i]) / 2
+            if close[i] > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                vol_factor = np.clip(atr[0] / atr[i], 0.5, 2.0)
+                base_size = 0.25
+                signals[i] = -base_size * vol_factor
 
     return signals
