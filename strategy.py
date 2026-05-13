@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Camarilla pivot levels from 1-day chart provide strong support/resistance.
-Breakout above R1 with 1-day EMA34 uptrend and volume spike indicates bullish momentum.
-Breakdown below S1 with 1-day EMA34 downtrend and volume spike indicates bearish momentum.
-Designed for low trade frequency (~20-30/year) on 12h timeframe to avoid fee drag.
+4h_KAMA_Trend_RSI_Pullback
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both trending and ranging markets.
+Buy on pullbacks to KAMA during uptrend (RSI<40), sell on rallies to KAMA during downtrend (RSI>60).
+Uses 1d trend filter to avoid counter-trend trades. Designed for low trade frequency (<25/year) to avoid fee drag.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_KAMA_Trend_RSI_Pullback"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,41 +16,55 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1-day data once before loop (HTF)
+    # KAMA (Kaufman Adaptive Moving Average)
+    def kama(close, period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.zeros_like(close)
+        er[period:] = change[period-1:] / np.maximum(volatility[period-1:], 1e-10)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[period-1] = close[period-1]
+        for i in range(period, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
+    
+    kama_val = kama(close, 10, 2, 30)
+    
+    # RSI
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi_val = rsi(close, 14)
+    
+    # 1d trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    uptrend_1d = close > ema_50_1d_aligned
+    downtrend_1d = close < ema_50_1d_aligned
     
-    # Calculate Camarilla levels from previous day's range
-    # R1 = C + (H-L) * 1.1/12
-    # S1 = C - (H-L) * 1.1/12
-    # Where C, H, L are from previous day
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    
-    # Calculate Camarilla levels for each 1-day bar
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 12
-    s1 = prev_close - camarilla_range * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe (wait for 1-day close)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Trend filter: EMA34 on 1-day close
-    ema_34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    uptrend_1d = close > ema_34_12h
-    downtrend_1d = close < ema_34_12h
-    
-    # Volume confirmation: > 1.5x 20-period average on 12h
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
     
@@ -60,26 +73,34 @@ def generate_signals(prices):
     
     for i in range(50, n):
         if position == 0:
-            # LONG: Close breaks above R1, 1-day uptrend, volume confirmation
-            if close[i] > r1_12h[i] and uptrend_1d[i] and volume_confirm[i]:
+            # LONG: price near KAMA (pullback) in uptrend, RSI oversold, volume confirmation
+            if (close[i] <= kama_val[i] * 1.01 and  # within 1% above KAMA
+                close[i] >= kama_val[i] * 0.99 and   # within 1% below KAMA
+                uptrend_1d[i] and
+                rsi_val[i] < 40 and
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S1, 1-day downtrend, volume confirmation
-            elif close[i] < s1_12h[i] and downtrend_1d[i] and volume_confirm[i]:
+            # SHORT: price near KAMA (pullback) in downtrend, RSI overbought, volume confirmation
+            elif (close[i] <= kama_val[i] * 1.01 and
+                  close[i] >= kama_val[i] * 0.99 and
+                  downtrend_1d[i] and
+                  rsi_val[i] > 60 and
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below S1 or trend fails
-            if close[i] < s1_12h[i] or not uptrend_1d[i]:
+            # EXIT LONG: price crosses above KAMA or RSI overbought
+            if close[i] > kama_val[i] * 1.02 or rsi_val[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses above R1 or trend fails
-            if close[i] > r1_12h[i] or not downtrend_1d[i]:
+            # EXIT SHORT: price crosses below KAMA or RSI oversold
+            if close[i] < kama_val[i] * 0.98 or rsi_val[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
