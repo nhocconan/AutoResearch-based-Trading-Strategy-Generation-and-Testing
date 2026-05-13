@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Adaptive_Donchian_Breakout_With_Volume
-# Hypothesis: Donchian channel breakouts with volume confirmation and ATR-based position sizing.
-# In bull markets: breakout above upper band signals momentum continuation.
-# In bear markets: breakdown below lower band signals continuation of downtrend.
-# Volume filter ensures institutional participation, reducing false breakouts.
-# Uses dynamic position sizing based on ATR volatility to adapt to market conditions.
-# Designed for 20-40 trades/year to minimize fee drag.
+# 12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: On 12h timeframe, trade breakouts of daily Camarilla R1/S1 levels in the direction of the 1-day EMA34 trend, confirmed by volume spike (>1.8x 20-period average). In bull markets, buy breakouts above R1; in bear markets, sell breakdowns below S1. Uses EMA34 for trend filter and volume confirmation to ensure institutional participation. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag. Works in both bull and bear by capturing trend-aligned breakouts with volume confirmation.
 
-name = "4h_Adaptive_Donchian_Breakout_With_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,39 +20,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Donchian Channel (20-period)
-    lookback = 20
-    upper = np.full_like(high, np.nan)
-    lower = np.full_like(low, np.nan)
-    
-    for i in range(lookback, n):
-        upper[i] = np.max(high[i-lookback:i])
-        lower[i] = np.min(low[i-lookback:i])
+    # Calculate EMA34 on daily timeframe for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.zeros_like(close_1d)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
-    # ATR for volatility-based position sizing (14-period)
-    atr_period = 14
-    tr = np.zeros_like(close)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = np.zeros_like(close)
-    atr[atr_period-1] = np.mean(tr[1:atr_period])
-    for i in range(atr_period, n):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Calculate daily Camarilla levels (R1, S1) from previous day
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    R1 = np.zeros_like(close_1d)
+    S1 = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i >= 1:
+            R1[i] = close_1d[i-1] + 1.1 * (high_1d[i-1] - low_1d[i-1]) / 12
+            S1[i] = close_1d[i-1] - 1.1 * (high_1d[i-1] - low_1d[i-1]) / 12
+        else:
+            R1[i] = close_1d[0]
+            S1[i] = close_1d[0]
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
 
-    # Volume confirmation: current volume > 1.5 x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
+    # Volume confirmation: current volume > 1.8 x 20-period average
+    vol_ma = np.zeros_like(volume)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(max(lookback, atr_period, 20), n):
-        # Skip if data is not ready
-        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(atr[i]) or np.isnan(volume_spike[i]):
+    for i in range(20, n):
+        # Skip if EMA or Camarilla data is not ready
+        if i < 20 or np.isnan(ema_34_1d_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(volume_spike[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,41 +67,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above upper Donchian band with volume spike
-            if close[i] > upper[i] and volume_spike[i]:
-                # Scale position by volatility (inverse ATR)
-                vol_factor = np.clip(atr[0] / atr[i], 0.5, 2.0)  # Normalize to initial volatility
-                base_size = 0.25
-                signals[i] = base_size * vol_factor
+            # LONG: price breaks above R1 with volume spike and price > EMA34 (uptrend)
+            if close[i] > R1_aligned[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian band with volume spike
-            elif close[i] < lower[i] and volume_spike[i]:
-                vol_factor = np.clip(atr[0] / atr[i], 0.5, 2.0)
-                base_size = 0.25
-                signals[i] = -base_size * vol_factor
+            # SHORT: price breaks below S1 with volume spike and price < EMA34 (downtrend)
+            elif close[i] < S1_aligned[i] and volume_spike[i] and close[i] < ema_34_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters Donchian channel (below midpoint)
-            midpoint = (upper[i] + lower[i]) / 2
-            if close[i] < midpoint:
+            # EXIT LONG: price falls below S1 (reversal signal)
+            if close[i] < S1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                # Maintain position with volatility scaling
-                vol_factor = np.clip(atr[0] / atr[i], 0.5, 2.0)
-                base_size = 0.25
-                signals[i] = base_size * vol_factor
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters Donchian channel (above midpoint)
-            midpoint = (upper[i] + lower[i]) / 2
-            if close[i] > midpoint:
+            # EXIT SHORT: price rises above R1 (reversal signal)
+            if close[i] > R1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                vol_factor = np.clip(atr[0] / atr[i], 0.5, 2.0)
-                base_size = 0.25
-                signals[i] = -base_size * vol_factor
+                signals[i] = -0.25
 
     return signals
