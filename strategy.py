@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Trix_Trend_Volume_Signal
-Hypothesis: TRIX (15) crossing zero with 12h EMA trend and volume confirmation captures medium-term momentum in both bull and bear markets.
-Long when TRIX crosses above zero with 12h uptrend and volume spike.
-Short when TRIX crosses below zero with 12h downtrend and volume spike.
-Exit when TRIX crosses back through zero or trend reverses.
-Target: 20-40 trades/year per symbol.
+1d_Alligator_ElderRay_Trend
+Hypothesis: Williams Alligator (13,8,5 SMAs) defines trend direction, Elder Ray (bull/bear power) confirms momentum, 
+and weekly trend filter avoids counter-trend trades. Works in both bull/bear by only taking trend-following entries.
+Target: 15-25 trades/year per symbol.
 """
 
-name = "4h_Trix_Trend_Volume_Signal"
-timeframe = "4h"
+name = "1d_Alligator_ElderRay_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,66 +20,77 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # TRIX: EMA(EMA(EMA(close,15),15),15) - 1 period percent change
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix_raw = ema3.pct_change(1) * 100
-    trix = trix_raw.fillna(0).values
+    # Williams Alligator: SMA(13), SMA(8), SMA(5) - smoothed with 8,5,3 periods
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = pd.Series(jaw).rolling(window=8, min_periods=8).mean().values  # smoothed by 8
     
-    # 12h trend: EMA50
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = pd.Series(teeth).rolling(window=5, min_periods=5).mean().values  # smoothed by 5
+    
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = pd.Series(lips).rolling(window=3, min_periods=3).mean().values  # smoothed by 3
+    
+    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = df_12h['close'].values > ema_50_12h
-    downtrend_12h = df_12h['close'].values < ema_50_12h
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
-    
-    # Volume confirmation: volume > 1.8 * 20-period average
-    vol_ma = np.zeros(n)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.8 * vol_ma
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    uptrend_1w = df_1w['close'].values > ema_20_1w
+    downtrend_1w = df_1w['close'].values < ema_20_1w
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
-        # TRIX zero cross
-        trix_now = trix[i]
-        trix_prev = trix[i-1]
-        cross_up = trix_prev <= 0 and trix_now > 0
-        cross_down = trix_prev >= 0 and trix_now < 0
+    for i in range(20, n):
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        lips_val = lips[i]
+        teeth_val = teeth[i]
+        jaw_val = jaw[i]
         
-        uptrend = uptrend_12h_aligned[i]
-        downtrend = downtrend_12h_aligned[i]
-        vol_conf = volume_conf[i]
+        # Bullish alignment: Lips > Teeth > Jaw
+        bullish_align = lips_val > teeth_val and teeth_val > jaw_val
+        # Bearish alignment: Lips < Teeth < Jaw
+        bearish_align = lips_val < teeth_val and teeth_val < jaw_val
+        
+        # Elder Ray confirmation
+        bull_power_val = bull_power[i]
+        bear_power_val = bear_power[i]
+        
+        # Weekly trend
+        uptrend_weekly = uptrend_1w_aligned[i]
+        downtrend_weekly = downtrend_1w_aligned[i]
         
         if position == 0:
-            # LONG: TRIX crosses up through zero, 12h uptrend, volume confirmation
-            if cross_up and uptrend and vol_conf:
+            # LONG: Bullish Alligator + positive Bull Power + weekly uptrend
+            if bullish_align and bull_power_val > 0 and uptrend_weekly:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses down through zero, 12h downtrend, volume confirmation
-            elif cross_down and downtrend and vol_conf:
+            # SHORT: Bearish Alligator + negative Bear Power + weekly downtrend
+            elif bearish_align and bear_power_val < 0 and downtrend_weekly:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses down through zero or 12h trend turns down
-            if cross_down or not uptrend:
+            # EXIT LONG: Bearish Alligator alignment OR Bear Power turns negative
+            if bearish_align or bear_power_val < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses up through zero or 12h trend turns up
-            if cross_up or not downtrend:
+            # EXIT SHORT: Bullish Alligator alignment OR Bull Power turns positive
+            if bullish_align or bull_power_val > 0:
                 signals[i] = 0.0
                 position = 0
             else:
