@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above Donchian upper channel AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
-# Short when price breaks below Donchian lower channel AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above Camarilla R1 AND 1d EMA34 is rising AND volume > 2.0x 20-period average.
+# Short when price breaks below Camarilla S1 AND 1d EMA34 is falling AND volume > 2.0x 20-period average.
 # Uses ATR(14) trailing stop (2.5x) for risk control.
 # Uses discrete position sizing (0.30) to balance return and fee drag.
 # Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,9 +32,14 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) on 4h data
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # Using previous day's OHLC
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    camarilla_upper = prev_close + 1.1 * (prev_high - prev_low) / 12
+    camarilla_lower = prev_close - 1.1 * (prev_high - prev_low) / 12
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -57,19 +62,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+        if (np.isnan(camarilla_upper[i]) or np.isnan(camarilla_lower[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Donchian upper AND 1d EMA34 rising (trending up) AND volume spike
-            if close[i] > donchian_upper[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]:
+            # LONG: Price > Camarilla R1 AND 1d EMA34 rising (trending up) AND volume spike
+            if close[i] > camarilla_upper[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]:
                 signals[i] = 0.30
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Donchian lower AND 1d EMA34 falling (trending down) AND volume spike
-            elif close[i] < donchian_lower[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Price < Camarilla S1 AND 1d EMA34 falling (trending down) AND volume spike
+            elif close[i] < camarilla_lower[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]:
                 signals[i] = -0.30
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
