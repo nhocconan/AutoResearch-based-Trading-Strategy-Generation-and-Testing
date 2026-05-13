@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 1d_KAMA_RSI_ChopFilter_TrendFollow_v2
-# Hypothesis: On 1d timeframe, KAMA trend direction (adaptive trend filter) combined with RSI extreme
-# reversals and Choppiness Index regime filter (CHOP > 61.8 = ranging) provides high-probability
-# mean-reversion entries in ranging markets and trend continuation in trending markets.
-# Weekly trend filter (price vs weekly EMA50) avoids counter-trend trades in strong trends.
-# Designed for low-frequency, high-quality setups with clear risk control.
+# 12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: On 12h timeframe, breakout beyond daily Camarilla R1/S1 levels with alignment to 1d trend (price vs EMA50) and volume confirmation captures strong momentum moves. The 1d trend provides a longer-term filter to reduce whipsaws in choppy markets, while volume spike confirms institutional participation. Designed for low-frequency, high-quality setups suitable for 12h timeframe to minimize fee drag.
 
-name = "1d_KAMA_RSI_ChopFilter_TrendFollow_v2"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,65 +20,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # KAMA trend efficiency ratio (10-period)
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
-    # Pad beginning with zeros
-    er = np.concatenate([np.full(10, np.nan), er])
+    # Get daily data for trend filter and Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
 
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
-    for i in range(10, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Weekly trend filter (EMA50 on weekly close)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate daily Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
 
-    # RSI (14-period)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Pad beginning
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
 
-    # Choppiness Index (14-period)
-    atr1 = np.abs(np.subtract(high[1:], low[:-1]))
-    atr2 = np.abs(np.subtract(close[1:], close[:-1]))
-    tr = np.concatenate([[np.nan], np.maximum(atr1, atr2)])
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = np.where((highest_high - lowest_low) != 0,
-                    100 * np.log10(np.sum(atr) / (highest_high - lowest_low)) / np.log10(14),
-                    50)
-    chop = np.concatenate([np.full(13, np.nan), chop])
+    # Volume spike: volume > 2.0 * 20-period average (~10 days at 12h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * vol_ma_20
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(rsi[i]) or
-            np.isnan(chop[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,26 +62,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Uptrend (price > KAMA) + RSI oversold (<30) + Chop > 61.8 (ranging)
-            if close[i] > kama[i] and rsi[i] < 30 and chop[i] > 61.8:
+            # LONG: Uptrend + breakout above R1 + volume spike
+            if close[i] > ema50_1d_aligned[i] and close[i] > r1_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend (price < KAMA) + RSI overbought (>70) + Chop > 61.8 (ranging)
-            elif close[i] < kama[i] and rsi[i] > 70 and chop[i] > 61.8:
+            # SHORT: Downtrend + breakdown below S1 + volume spike
+            elif close[i] < ema50_1d_aligned[i] and close[i] < s1_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought (>70) or trend turns bearish (price < KAMA)
-            if rsi[i] > 70 or close[i] < kama[i]:
+            # EXIT LONG: Price breaks below S1 or trend turns bearish
+            if close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold (<30) or trend turns bullish (price > KAMA)
-            if rsi[i] < 30 or close[i] > kama[i]:
+            # EXIT SHORT: Price breaks above R1 or trend turns bullish
+            if close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
