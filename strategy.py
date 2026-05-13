@@ -1,33 +1,20 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1w trend filter (price > weekly EMA34 for long, < for short) and volume confirmation (1.8x 20-period MA).
-# Enters long when price breaks above R3 with bullish weekly trend and volume spike.
-# Enters short when price breaks below S3 with bearish weekly trend and volume spike.
-# Exits when price reverts to the daily pivot point (PP) from 1d timeframe.
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA34), volume confirmation (2x MA20), and ATR(14) volatility filter.
+# Enters long when price breaks above Donchian upper channel (20-period high) with 1d bullish trend (close > EMA34), volume > 2x MA20, and ATR(14) > 0.25 * ATR(50).
+# Enters short when price breaks below Donchian lower channel (20-period low) with 1d bearish trend (close < EMA34), volume > 2x MA20, and ATR(14) > 0.25 * ATR(50).
+# Exits when price reverses to Donchian midpoint (10-period average of upper/lower) or ATR-based stoploss (2 * ATR(14) from entry).
 # Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
-# Designed for low trade frequency (~12-37/year) by requiring strict confluence: Camarilla breakout + weekly trend + volume spike.
-# Camarilla levels provide institutional support/resistance; weekly EMA34 filter ensures alignment with major trend; volume spike confirms institutional participation.
+# Designed for low trade frequency (~12-37/year) by requiring strict confluence: price breakout + HTF trend + volume spike + volatility filter.
+# Donchian channels provide clear structure, effective in both bull (breakouts) and bear (breakdowns) markets.
+# The 1d trend filter ensures alignment with higher timeframe direction, while volatility filter avoids low volatility false breakouts.
 
-name = "6h_Camarilla_R3S3_Breakout_1wTrend_Volume_v1"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_1dTrend_Volume_Volatility_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    range_val = high - low
-    pp = (high + low + close) / 3
-    r1 = pp + (range_val * 1.1 / 12)
-    r2 = pp + (range_val * 1.1 / 6)
-    r3 = pp + (range_val * 1.1 / 4)
-    r4 = pp + (range_val * 1.1 / 2)
-    s1 = pp - (range_val * 1.1 / 12)
-    s2 = pp - (range_val * 1.1 / 6)
-    s3 = pp - (range_val * 1.1 / 4)
-    s4 = pp - (range_val * 1.1 / 2)
-    return pp, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -39,65 +26,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Calculate EMA(34) on 1w close
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Get 1d data for exit (daily pivot point)
+    # Get 1d data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate daily pivot point: PP = (H + L + C) / 3
-    pp_1d = (high_1d + low_1d + close_1d) / 3
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    # Calculate EMA(34) on 1d close
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current volume > 1.8x 20-period average
+    # Donchian channels (20-period) on 12h data
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_20 + lowest_20) / 2.0
+    
+    # Volume filter: current volume > 2x 20-period average
     volume_series = pd.Series(volume)
     vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 1.8)
+    volume_spike = volume > (vol_ma20 * 2.0)
     
+    # ATR(14) and ATR(50) for volatility filter
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]  # first bar
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr14 > (0.25 * atr50)  # avoid low volatility breakouts
+    
+    # Track entry price for ATR-based stoploss
+    entry_price = np.full(n, np.nan)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough data for indicators
-    start_idx = max(100, 34)  # EMA34 needs 34 periods
-    
-    for i in range(start_idx, n):
-        if np.isnan(ema34_1w_aligned[i]) or np.isnan(pp_1d_aligned[i]) or np.isnan(vol_ma20[i]):
+    for i in range(100, n):  # Start after sufficient data for all indicators
+        if np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or \
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]) or \
+           np.isnan(atr14[i]) or np.isnan(atr50[i]):
             signals[i] = 0.0
             continue
         
-        # Calculate Camarilla levels for current 6h bar
-        pp, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_camarilla(high[i], low[i], close[i])
-        
         if position == 0:
-            # LONG: Price breaks above R3 with bullish weekly trend and volume spike
-            if close[i] > r3 and close[i] > ema34_1w_aligned[i] and volume_spike[i]:
+            # LONG: Price breaks above Donchian upper channel with 1d bullish trend, volume spike, and sufficient volatility
+            if close[i] > highest_20[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i] and volatility_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with bearish weekly trend and volume spike
-            elif close[i] < s3 and close[i] < ema34_1w_aligned[i] and volume_spike[i]:
+                entry_price[i] = close[i]  # record entry price at close of signal bar
+            # SHORT: Price breaks below Donchian lower channel with 1d bearish trend, volume spike, and sufficient volatility
+            elif close[i] < lowest_20[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i] and volatility_filter[i]:
                 signals[i] = -0.25
                 position = -1
+                entry_price[i] = close[i]  # record entry price at close of signal bar
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reverts to daily pivot point (mean reversion to PP)
-            if close[i] <= pp_1d_aligned[i]:
+            # EXIT LONG: Price reverses to Donchian midpoint OR ATR stoploss hit
+            if close[i] < donchian_mid[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price[i] = np.nan
             else:
                 signals[i] = 0.25
+                entry_price[i] = entry_price[i-1]  # carry forward entry price
         elif position == -1:
-            # EXIT SHORT: Price reverts to daily pivot point (mean reversion to PP)
-            if close[i] >= pp_1d_aligned[i]:
+            # EXIT SHORT: Price reverses to Donchian midpoint OR ATR stoploss hit
+            if close[i] > donchian_mid[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price[i] = np.nan
             else:
                 signals[i] = -0.25
+                entry_price[i] = entry_price[i-1]  # carry forward entry price
     
     return signals
