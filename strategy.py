@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20-bar avg volume). Uses chop regime filter (CHOP < 38.2 = trending) to avoid false breakouts in ranging markets. Discrete position sizing (0.25) minimizes fee churn. Targets 50-150 total trades over 4 years on BTC/ETH/SOL.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x 20-bar avg volume). Uses chop regime filter (CHOP < 38.2 = trending) to avoid false breakouts in ranging markets. Discrete position sizing (0.25) minimizes fee churn. Targets 50-150 total trades over 4 years on BTC/ETH/SOL.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -52,7 +52,7 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
     camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align Camarilla levels to LTF (12h)
+    # Align Camarilla levels to LTF (4h)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
