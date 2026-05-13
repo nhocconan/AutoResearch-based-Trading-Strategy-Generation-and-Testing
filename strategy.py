@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Keltner_Channel_Breakout_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "1d_KAMA_Trend_With_Volume_and_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -13,33 +13,25 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # EMA(20) for Keltner mid-line
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # KAMA calculation (20-period)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    sc = np.power(er * (2/(2+1) - 2/(30+1)) + 2/(30+1), 2)
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # ATR(10) for Keltner width
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Keltner Channels
-    upper = ema20 + 2.0 * atr10
-    lower = ema20 - 2.0 * atr10
-    
-    # Weekly EMA(50) trend filter
+    # Weekly trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
     close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
     
-    # Volume filter: current volume > 1.5 x 20-period average
+    # Volume filter: current volume > 1.5 x 20-day average
     vol_ma_20 = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
@@ -48,34 +40,34 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        if (np.isnan(ema20[i]) or np.isnan(atr10[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema13_1w_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
         vol_condition = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Close above upper Keltner + weekly uptrend + volume
-            if close[i] > upper[i] and close[i] > ema50_1w_aligned[i] and vol_condition:
+            # LONG: price above KAMA with bullish weekly trend and volume
+            if close[i] > kama[i] and close[i] > ema13_1w_aligned[i] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below lower Keltner + weekly downtrend + volume
-            elif close[i] < lower[i] and close[i] < ema50_1w_aligned[i] and vol_condition:
+            # SHORT: price below KAMA with bearish weekly trend and volume
+            elif close[i] < kama[i] and close[i] < ema13_1w_aligned[i] and vol_condition:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below EMA20 or trend reversal
-            if close[i] < ema20[i] or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: price below KAMA or trend reversal
+            if close[i] < kama[i] or close[i] < ema13_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above EMA20 or trend reversal
-            if close[i] > ema20[i] or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: price above KAMA or trend reversal
+            if close[i] > kama[i] or close[i] > ema13_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
