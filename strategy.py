@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R3 level, 1d EMA34 is rising (uptrend), and volume > 2.0x 20-period average.
-# Short when price breaks below Camarilla S3 level, 1d EMA34 is falling (downtrend), and volume > 2.0x 20-period average.
-# Uses ATR(14) trailing stop (2.5x) for risk control. Camarilla R3/S3 levels represent stronger breakout thresholds
-# than R1/S1, reducing false signals. 1d EMA34 ensures we trade with the dominant daily trend. Volume spike confirms
-# strong participation. Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
-# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above Camarilla R3 level, 1d EMA34 is rising (bullish trend), and volume > 2.0x 20-period average.
+# Short when price breaks below Camarilla S3 level, 1d EMA34 is falling (bearish trend), and volume > 2.0x 20-period average.
+# Uses ATR(14) trailing stop (2.5x) for risk control.
+# Camarilla R3/S3 levels represent stronger support/resistance than R1/S1, reducing false breakouts.
+# 1d EMA34 ensures we trade with the dominant daily trend, improving performance in both bull and bear markets.
+# Volume spike filter (2.0x average) ensures breakouts have institutional participation, reducing whipsaws.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,26 +35,27 @@ def generate_signals(prices):
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate Camarilla levels (based on previous day's OHLC)
+    # We need daily OHLC for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     open_1d = df_1d['open'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: R3, S3 (stronger breakout levels)
+    # Camarilla levels: R3, S3 (stronger levels)
     # R3 = close + 1.1*(high-low)/4
     # S3 = close - 1.1*(high-low)/4
     camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 4
     camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Get 1d data for EMA34 trend filter
+    # Calculate EMA(34) on 1d data for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 12h timeframe (wait for 1d bar to close)
+    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate volume confirmation: volume > 2.0x 20-period average (spike filter)
@@ -73,12 +75,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price > Camarilla R3 AND 1d EMA34 rising (trending up) AND volume spike
+            # LONG: Price > Camarilla R3 AND 1d EMA34 rising (bullish trend) AND volume spike
             if close[i] > camarilla_r3_aligned[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Camarilla S3 AND 1d EMA34 falling (trending down) AND volume spike
+            # SHORT: Price < Camarilla S3 AND 1d EMA34 falling (bearish trend) AND volume spike
             elif close[i] < camarilla_s3_aligned[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
