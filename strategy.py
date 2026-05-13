@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Trix_Volume_Regime_Momentum
-# Hypothesis: TRIX (12-period) crossing above/below zero with volume confirmation and regime filter (Choppiness Index < 61.8) captures momentum in trending markets while avoiding chop. Works in bull markets (TRIX > 0 with volume) and bear markets (TRIX < 0 with volume). Uses 1d Choppiness Index to filter regime. Target: 15-30 trades/year per symbol to minimize fee drag.
+# 12h_RSI_Extremes_1dTrend_Volume
+# Hypothesis: At 12h timeframe, RSI extremes (>80 or <20) indicate overextended moves likely to reverse.
+# Enter counter-trend when RSI reaches extreme AND 1d trend opposes the extreme (e.g., RSI>80 in 1d downtrend = short).
+# Volume confirmation ensures institutional participation in the reversal.
+# Works in both bull and bear markets by fading extremes in the direction of higher timeframe trend.
+# Target: 15-30 trades/year per symbol to minimize fee drag.
 
-name = "6h_Trix_Volume_Regime_Momentum"
-timeframe = "6h"
+name = "12h_RSI_Extremes_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,73 +16,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Choppiness Index (regime filter)
+    # Get 1d data for trend and RSI
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Choppiness Index (14-period) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d EMA34 for trend
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # first value NaN
+    # 1d RSI(14)
+    close_1d = pd.Series(df_1d['close'].values)
+    delta = close_1d.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
     
-    # ATR (14-period smoothed)
-    atr = np.zeros_like(tr)
-    atr[13] = np.nanmean(tr[1:15])  # seed
-    for i in range(14, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Align 1d indicators to 12h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Sum of ATR over 14 periods
-    atr_sum = np.zeros_like(atr)
-    for i in range(13, len(atr)):
-        if i == 13:
-            atr_sum[i] = np.nansum(atr[1:15])
-        else:
-            atr_sum[i] = atr_sum[i-1] - atr[i-13] + atr[i]
-    
-    # High-Low range over 14 periods
-    hh = np.zeros_like(high_1d)
-    ll = np.zeros_like(low_1d)
-    for i in range(len(high_1d)):
-        if i < 13:
-            hh[i] = np.nan
-            ll[i] = np.nan
-        else:
-            hh[i] = np.nanmax(high_1d[i-13:i+1])
-            ll[i] = np.nanmin(low_1d[i-13:i+1])
-    
-    # Choppiness Index
-    chop = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if np.isnan(atr_sum[i]) or np.isnan(hh[i]) or np.isnan(ll[i]) or hh[i] == ll[i]:
-            chop[i] = np.nan
-        else:
-            chop[i] = 100 * np.log10(atr_sum[i] / (hh[i] - ll[i])) / np.log10(14)
-    
-    # Regime: chop < 61.8 = trending (favorable for momentum)
-    chop_regime = chop < 61.8
-    
-    # Align 1d chop regime to 6h
-    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime.astype(float))
-    
-    # Calculate TRIX (12-period) on 6h close
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1 period ago, then percent change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = np.zeros_like(close)
-    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    # 12h RSI(14) for entry timing
+    close_12h = pd.Series(close)
+    delta_12h = close_12h.diff()
+    gain_12h = delta_12h.clip(lower=0)
+    loss_12h = -delta_12h.clip(upper=0)
+    avg_gain_12h = gain_12h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_12h = loss_12h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_12h = avg_gain_12h / avg_loss_12h
+    rsi_12h = 100 - (100 / (1 + rs_12h))
+    rsi_12h = rsi_12h.values
     
     # Volume spike: volume > 1.5 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -87,11 +63,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(30, n):
         # Skip if any required value is NaN
-        if (np.isnan(trix[i]) or 
-            np.isnan(chop_regime_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(rsi_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -100,26 +76,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX > 0 (bullish momentum) + chop regime (trending) + volume spike
-            if trix[i] > 0 and chop_regime_aligned[i] and volume_spike[i]:
+            # LONG: 12h RSI < 20 (oversold) + 1d downtrend + volume spike
+            if (rsi_12h[i] < 20 and 
+                close[i] < ema34_1d_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX < 0 (bearish momentum) + chop regime (trending) + volume spike
-            elif trix[i] < 0 and chop_regime_aligned[i] and volume_spike[i]:
+            # SHORT: 12h RSI > 80 (overbought) + 1d uptrend + volume spike
+            elif (rsi_12h[i] > 80 and 
+                  close[i] > ema34_1d_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX <= 0 or chop regime > 61.8 (choppy)
-            if trix[i] <= 0 or not chop_regime_aligned[i]:
+            # EXIT LONG: 12h RSI > 60 or trend reversal
+            if rsi_12h[i] > 60 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX >= 0 or chop regime > 61.8 (choppy)
-            if trix[i] >= 0 or not chop_regime_aligned[i]:
+            # EXIT SHORT: 12h RSI < 40 or trend reversal
+            if rsi_12h[i] < 40 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
