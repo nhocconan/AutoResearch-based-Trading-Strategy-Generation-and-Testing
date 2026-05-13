@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2
-Hypothesis: Breakouts from Camarilla R3/S3 levels (1-day) with volume confirmation, filtered by 1-day trend direction. Uses 1d Camarilla pivot levels as dynamic support/resistance. Go long when price breaks above R3 with volume surge and 1d uptrend, short when breaks below S3 with volume surge and 1d downtrend. Designed for 12h timeframe to capture intermediate trends with low trade frequency (~15-35/year), avoiding excessive churn while capturing momentum in both bull and bear markets. Camarilla levels are statistically significant reversal points, effective in ranging and trending markets.
+1d_WickReversal_Volume_Spike
+Hypothesis: Long wicks indicate rejection of price levels and potential reversals. Combines long upper/lower wick detection with volume spikes on the 1-day timeframe. Uses 1-week EMA200 as trend filter to align with higher timeframe momentum. Designed for 1d timeframe to capture swing reversals with low trade frequency (~10-25/year), minimizing fee impact while capturing momentum shifts in both bull and bear markets.
 """
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
-timeframe = "12h"
+name = "1d_WickReversal_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,69 +21,69 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Get 1d data for Camarilla pivot levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    # Pivot point = (H + L + C) / 3
-    # R3 = H + 2*(P - L)  [Resistance level 3]
-    # S3 = L - 2*(H - P)  [Support level 3]
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r3 = high_1d + 2.0 * (pivot - low_1d)
-    s3 = low_1d - 2.0 * (high_1d - pivot)
+    # Calculate 1w EMA200 for trend filter
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align 1w EMA200 to 1d timeframe
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Align 1d indicators to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate body and wick sizes
+    body_size = np.abs(close - open_price)
+    total_range = high - low
+    lower_wick = np.minimum(open_price, close) - low
+    upper_wick = high - np.maximum(open_price, close)
     
-    # Calculate volume average (20-period) for volume spike filter
+    # Avoid division by zero
+    total_range_safe = np.where(total_range == 0, 1e-10, total_range)
+    
+    # Long lower wick: lower wick >= 60% of total range
+    long_lower_wick = lower_wick >= 0.6 * total_range_safe
+    # Long upper wick: upper wick >= 60% of total range
+    long_upper_wick = upper_wick >= 0.6 * total_range_safe
+    
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 2.0 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 2.0x 20-period average
-        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
-        
         if position == 0:
-            # LONG: Price breaks above R3 + volume spike + 1d uptrend
-            if close[i] > r3_aligned[i] and vol_spike and close[i] > ema_50_1d_aligned[i]:
+            # LONG: Long lower wick + volume spike + price above 1w EMA200 (uptrend filter)
+            if long_lower_wick[i] and vol_spike[i] and close[i] > ema_200_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + volume spike + 1d downtrend
-            elif close[i] < s3_aligned[i] and vol_spike and close[i] < ema_50_1d_aligned[i]:
+            # SHORT: Long upper wick + volume spike + price below 1w EMA200 (downtrend filter)
+            elif long_upper_wick[i] and vol_spike[i] and close[i] < ema_200_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 or trend reverses
-            if close[i] < s3_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: Price closes below 1w EMA200 or long upper wick appears
+            if close[i] < ema_200_1w_aligned[i] or long_upper_wick[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 or trend reverses
-            if close[i] > r3_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: Price closes above 1w EMA200 or long lower wick appears
+            if close[i] > ema_200_1w_aligned[i] or long_lower_wick[i]:
                 signals[i] = 0.0
                 position = 0
             else:
