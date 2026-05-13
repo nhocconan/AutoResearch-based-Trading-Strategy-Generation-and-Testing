@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Williams %R mean reversion with 1d EMA50 trend filter and volume spike confirmation.
-# Long when Williams %R < -80 (oversold), price > 1d EMA50 (uptrend), and volume > 2.0x 20-period average.
-# Short when Williams %R > -20 (overbought), price < 1d EMA50 (downtrend), and volume > 2.0x 20-period average.
+# Hypothesis: 1d KAMA trend with 1w EMA34 filter, volume confirmation, and ATR trailing stop.
+# Long when price > KAMA and 1w EMA34 rising, short when price < KAMA and 1w EMA34 falling.
 # Uses ATR(14) trailing stop (2.5x) for risk control.
-# Williams %R identifies extreme momentum exhaustion; 1d EMA50 filters for intermediate trend alignment.
-# Volume spike confirms institutional participation in reversals. Target: 100-180 total trades over 4 years (25-45/year) on 4h.
+# KAMA adapts to market noise, reducing whipsaws in choppy markets.
+# 1w EMA34 ensures we trade with the primary weekly trend, improving survivability in bear markets.
+# Volume confirmation filters weak breakouts. Target: 30-100 total trades over 4 years (7-25/year) on 1d.
 
-name = "4h_WilliamsR_MeanReversion_1dEMA50_Trend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_KAMA_EMA34_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -32,26 +32,32 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Williams %R(14) on 4h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate KAMA ( Kaufman Adaptive Moving Average )
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Initialize KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # Start after 10 periods
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(50) on 1d data
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA(34) on 1w data
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA50 to 4h timeframe (wait for 1d bar to close)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align 1w EMA34 to 1d timeframe (wait for 1w bar to close)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate volume confirmation: volume > 2.0x 20-period average
+    # Calculate volume confirmation: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.3 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,19 +66,18 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) AND price > 1d EMA50 (uptrend) AND volume spike
-            if williams_r[i] < -80 and close[i] > ema_50_1d_aligned[i] and volume_spike[i]:
+            # LONG: Price > KAMA AND 1w EMA34 rising (trending up) AND volume confirmation
+            if close[i] > kama[i] and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Williams %R > -20 (overbought) AND price < 1d EMA50 (downtrend) AND volume spike
-            elif williams_r[i] > -20 and close[i] < ema_50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Price < KAMA AND 1w EMA34 falling (trending down) AND volume confirmation
+            elif close[i] < kama[i] and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
