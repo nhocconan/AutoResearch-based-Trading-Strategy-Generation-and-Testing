@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h RSI(14) mean reversion with 4h ADX(14) regime filter and volume confirmation.
-# Long when RSI < 30 (oversold) AND 4h ADX < 25 (range/chop regime) AND volume > 1.3x 20-bar average.
-# Short when RSI > 70 (overbought) AND 4h ADX < 25 (range/chop regime) AND volume > 1.3x average.
-# Exit when RSI crosses back above 50 (for longs) or below 50 (for shorts).
-# Uses discrete position sizing 0.20. Target: 60-150 total trades over 4 years on 1h timeframe.
-# ADX regime filter ensures we only mean revert in choppy/range markets, avoiding trending whipsaws.
-# Volume confirmation validates mean reversion strength. RSI 50 exit provides clear, objective stop.
-# RSI mean reversion works well in ranging markets (2025 BTC/ETH bear/range) and avoids strong trends.
+# Hypothesis: 6h Donchian(20) breakout with 1w ADX(14) trend filter and 1d volume confirmation.
+# Long when price breaks above Donchian upper band with weekly ADX > 25 (strong trend) and 1d volume > 1.8x 20-bar average.
+# Short when price breaks below Donchian lower band with weekly ADX > 25 and 1d volume > 1.8x average.
+# Exit when price closes below/above Donchian middle band.
+# Uses discrete position sizing 0.25. Target: 50-150 total trades over 4 years on 6h timeframe.
+# Weekly ADX ensures we only trade during strong trending regimes, avoiding chop/range whipsaws.
+# 1d volume confirmation validates breakout significance using higher timeframe volume context.
+# Donchian channels provide clear breakout levels effective in both trending and ranging markets.
 
-name = "1h_RSI14_4hADX14_Range_MeanReversion_VolumeConfirm"
-timeframe = "1h"
+name = "6h_Donchian20_1wADX14_1dVolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,101 +21,137 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    lookback = 20  # for volume average and RSI calculations
-    rsi_period = 14
-    adx_period = 14
+    lookback = 20  # for Donchian and volume average
     
-    # Calculate RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral RSI when no data
+    # Calculate Donchian channels
+    donchian_upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    donchian_lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
-    # Get 4h data for ADX regime filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < adx_period * 2:
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # need enough for ADX calculation
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate ADX(14) on 4h
-    # True Range
-    tr1 = pd.Series(high_4h).diff().abs()
-    tr2 = (pd.Series(high_4h) - pd.Series(close_4h).shift()).abs()
-    tr3 = (pd.Series(low_4h) - pd.Series(close_4h).shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1/adx_period, adjust=False, min_periods=adx_period).mean()
+    # Calculate ADX(14) on 1w data
+    if len(close_1w) < 14:
+        adx_14_1w = np.full(len(close_1w), np.nan)
+    else:
+        # True Range
+        tr1 = np.abs(high_1w[1:] - low_1w[1:])
+        tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+        tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # align with index
+        
+        # Directional Movement
+        up_move = high_1w[1:] - high_1w[:-1]
+        down_move = low_1w[:-1] - low_1w[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        plus_dm = np.concatenate([[0], plus_dm])
+        minus_dm = np.concatenate([[0], minus_dm])
+        
+        # Smoothed TR, +DM, -DM (Wilder's smoothing = EMA with alpha=1/period)
+        period = 14
+        alpha = 1.0 / period
+        tr_smooth = np.zeros_like(tr)
+        plus_dm_smooth = np.zeros_like(tr)
+        minus_dm_smooth = np.zeros_like(tr)
+        
+        # Initialize with first period sum
+        tr_smooth[period] = np.nansum(tr[1:period+1])
+        plus_dm_smooth[period] = np.nansum(plus_dm[1:period+1])
+        minus_dm_smooth[period] = np.nansum(minus_dm[1:period+1])
+        
+        # Wilder's smoothing for rest
+        for i in range(period+1, len(tr)):
+            tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / period) + tr[i]
+            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
+            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
+        
+        # Directional Indicators
+        plus_di = 100 * plus_dm_smooth / tr_smooth
+        minus_di = 100 * minus_dm_smooth / tr_smooth
+        
+        # DX and ADX
+        dx = np.zeros_like(tr)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        # ADX = EMA of DX
+        adx_14_1w = np.zeros_like(tr)
+        adx_14_1w[2*period-1] = np.nanmean(dx[period:2*period])  # seed
+        for i in range(2*period, len(dx)):
+            adx_14_1w[i] = (adx_14_1w[i-1] * (period-1) + dx[i]) / period
+        # Set NaN for insufficient data
+        adx_14_1w[:2*period-1] = np.nan
     
-    # Directional Movement
-    up_move = pd.Series(high_4h).diff()
-    down_move = -pd.Series(low_4h).diff()
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    # Align 1w ADX to 6h timeframe (wait for 1w bar to close)
+    adx_14_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_14_1w)
     
-    # Smoothed DM
-    plus_di = 100 * (plus_dm.ewm(alpha=1/adx_period, adjust=False, min_periods=adx_period).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(alpha=1/adx_period, adjust=False, min_periods=adx_period).mean() / atr)
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # DX and ADX
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)).replace([np.inf, -np.inf], 0).fillna(0) * 100
-    adx = dx.ewm(alpha=1/adx_period, adjust=False, min_periods=adx_period).mean()
-    adx_values = adx.values
+    volume_1d = df_1d['volume'].values
     
-    # Align 4h ADX to 1h timeframe (wait for 4h bar to close)
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx_values)
+    # Calculate average volume for confirmation (20-period) on 1d
+    if len(volume_1d) < lookback:
+        avg_volume_1d = np.full(len(volume_1d), np.nan)
+    else:
+        avg_volume_1d = pd.Series(volume_1d).rolling(window=lookback, min_periods=lookback).mean().values
     
-    # Calculate average volume for confirmation (20-period)
-    avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
+    # Align 1d average volume to 6h timeframe (wait for 1d bar to close)
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(donchian_middle[i]) or np.isnan(adx_14_1w_aligned[i]) or 
+            np.isnan(avg_volume_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: RSI oversold (<30) AND 4h ADX < 25 (range/chop) AND volume spike
-            if (rsi[i] < 30 and 
-                adx_aligned[i] < 25 and 
-                volume[i] > 1.3 * avg_volume[i]):
-                signals[i] = 0.20
+            # LONG: Price breaks above Donchian upper with strong weekly trend and 1d volume spike
+            if (close[i] > donchian_upper[i] and 
+                adx_14_1w_aligned[i] > 25 and 
+                volume[i] > 1.8 * avg_volume_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought (>70) AND 4h ADX < 25 (range/chop) AND volume spike
-            elif (rsi[i] > 70 and 
-                  adx_aligned[i] < 25 and 
-                  volume[i] > 1.3 * avg_volume[i]):
-                signals[i] = -0.20
+            # SHORT: Price breaks below Donchian lower with strong weekly trend and 1d volume spike
+            elif (close[i] < donchian_lower[i] and 
+                  adx_14_1w_aligned[i] > 25 and 
+                  volume[i] > 1.8 * avg_volume_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI crosses back above 50 (mean reversion complete)
-            if rsi[i] > 50:
+            # EXIT LONG: Price closes below Donchian middle (mean reversion)
+            if close[i] < donchian_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI crosses back below 50 (mean reversion complete)
-            if rsi[i] < 50:
+            # EXIT SHORT: Price closes above Donchian middle (mean reversion)
+            if close[i] > donchian_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
