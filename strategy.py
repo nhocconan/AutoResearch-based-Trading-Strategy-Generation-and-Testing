@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels (R1/S1) from 1d act as support/resistance. Breakouts above R1 or below S1 with 1d trend alignment (price > EMA50 for long, < EMA50 for short) and volume confirmation (>1.5x 30-period average) capture institutional moves. Works in bull via upward breakouts and bear via downward breakdowns. Target: 15-25 trades/year.
+# 6h_HeikinAshi_TRIX_Trend_With_1d_Volume_Spike_Filter
+# Hypothesis: Combines Heikin-Ashi smoothed candles with TRIX momentum to filter noise. 
+# Long when HA close > HA open AND TRIX rising; short when HA close < HA open AND TRIX falling.
+# Uses 1d volume spike (>2x 20-period average) to confirm institutional interest and avoid chop.
+# Works in bull via trend continuation and bear via mean reversion spikes. Target: 15-30 trades/year.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_HeikinAshi_TRIX_Trend_With_1d_Volume_Spike_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,35 +22,38 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
 
-    # Calculate Camarilla pivot levels (R1, S1) from previous 12h bar's OHLC
-    def camarilla_levels(h, l, c):
-        # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-        r1 = c + (h - l) * 1.1 / 12
-        s1 = c - (h - l) * 1.1 / 12
-        return r1, s1
-
-    # Shift by 1 to use previous bar's levels (no look-ahead)
-    r1 = np.full(n, np.nan)
-    s1 = np.full(n, np.nan)
+    # Heikin-Ashi calculation
+    ha_close = (open_price + high + low + close) / 4
+    ha_open = np.zeros_like(ha_close)
+    ha_open[0] = (open_price[0] + close[0]) / 2
     for i in range(1, n):
-        r1[i], s1[i] = camarilla_levels(high[i-1], low[i-1], close[i-1])
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
+    ha_high = np.maximum(high, np.maximum(ha_open, ha_close))
+    ha_low = np.minimum(low, np.minimum(ha_open, ha_close))
 
-    # Get 1d data for EMA50 trend filter
+    # TRIX: Triple EMA of ROC (1-period)
+    roc = np.diff(close, prepend=close[0]) / close  # 1-period ROC
+    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = np.diff(ema3, prepend=ema3[0]) / ema3  # TRIX value
+
+    # Get 1d data for volume spike filter
     df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # Volume filter: >1.5x 30-period average
-    vol_avg_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_1d = df_1d['volume'].values
+    vol_avg_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike = vol_1d > (vol_avg_20 * 2.0)  # True when volume > 2x average
+    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(15, n):  # Start after TRIX warmup
         # Skip if any required value is NaN
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_30[i])):
+        if (np.isnan(ha_open[i]) or np.isnan(ha_close[i]) or 
+            np.isnan(trix[i]) or np.isnan(vol_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,30 +62,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above R1 + price > EMA50 (1d uptrend) + volume spike
-            if (close[i] > r1[i] and 
-                close[i] > ema50_1d_aligned[i] and
-                volume[i] > vol_avg_30[i] * 1.5):
+            # LONG: HA bullish (close > open) AND TRIX rising AND volume spike
+            if (ha_close[i] > ha_open[i] and 
+                trix[i] > trix[i-1] and 
+                vol_spike_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 + price < EMA50 (1d downtrend) + volume spike
-            elif (close[i] < s1[i] and 
-                  close[i] < ema50_1d_aligned[i] and
-                  volume[i] > vol_avg_30[i] * 1.5):
+            # SHORT: HA bearish (close < open) AND TRIX falling AND volume spike
+            elif (ha_close[i] < ha_open[i] and 
+                  trix[i] < trix[i-1] and 
+                  vol_spike_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R1 or trend reverses (price < EMA50)
-            if (close[i] < r1[i] or close[i] < ema50_1d_aligned[i]):
+            # EXIT LONG: HA bearish reversal OR TRIX turns down
+            if (ha_close[i] < ha_open[i] or trix[i] < trix[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S1 or trend reverses (price > EMA50)
-            if (close[i] > s1[i] or close[i] > ema50_1d_aligned[i]):
+            # EXIT SHORT: HA bullish reversal OR TRIX turns up
+            if (ha_close[i] > ha_open[i] or trix[i] > trix[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
