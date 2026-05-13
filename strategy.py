@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Trix_Volume_Spike_Trend_Weekly
-Hypothesis: TRIX momentum combined with volume spikes and weekly trend filters works in both bull and bear markets.
-Long when TRIX crosses above zero with volume spike and weekly uptrend.
-Short when TRIX crosses below zero with volume spike and weekly downtrend.
-Exit when TRIX crosses back through zero or trend weakens.
-Weekly trend filter reduces whipsaws in ranging markets.
-Target: 15-35 trades/year per symbol.
+4h_RSI_Trend_Filter_Volume_Confirm
+Hypothesis: RSI(14) extremes with trend filter (EMA50) and volume confirmation capture mean-reversion in both bull and bear markets. 
+Long when RSI<30, EMA50 uptrend, volume spike. Short when RSI>70, EMA50 downtrend, volume spike.
+Exit when RSI crosses 50. Uses 1d EMA50 as higher timeframe bias filter.
+Target: 20-50 trades/year per symbol.
 """
 
-name = "12h_Trix_Volume_Spike_Trend_Weekly"
-timeframe = "12h"
+name = "4h_RSI_Trend_Filter_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,65 +23,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # TRIX: Triple EMA of log returns, period=15
-    # Step 1: log returns
-    log_ret = np.diff(np.log(np.concatenate([[close[0]], close])))
-    # Step 2: EMA1
-    ema1 = pd.Series(log_ret).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # Step 3: EMA2
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # Step 4: EMA3
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # TRIX = 100 * (EMA3 - previous EMA3) / previous EMA3
-    trix_raw = 100 * np.diff(np.concatenate([[0], ema3])) / np.concatenate([[1e-10], ema3[:-1]])
+    # EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_4h = close > ema_50
+    downtrend_4h = close < ema_50
     
-    # Weekly trend filter: EMA50 on weekly closes
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1d trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1w = df_1w['close'].values > ema50_1w
-    downtrend_1w = df_1w['close'].values < ema50_1w
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
     # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > 2.0 * vol_ma
+    volume_conf = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after TRIX warmup
-        trix_now = trix_raw[i]
-        trix_prev = trix_raw[i-1]
-        vol_spike = volume_spike[i]
-        uptrend_weekly = uptrend_1w_aligned[i]
-        downtrend_weekly = downtrend_1w_aligned[i]
+    for i in range(50, n):
+        # Get values
+        rsi_val = rsi[i]
+        uptrend = uptrend_4h[i]
+        downtrend = downtrend_4h[i]
+        uptrend_htf = uptrend_1d_aligned[i]
+        downtrend_htf = downtrend_1d_aligned[i]
+        vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: TRIX crosses above zero with volume spike and weekly uptrend
-            if trix_prev <= 0 and trix_now > 0 and vol_spike and uptrend_weekly:
+            # LONG: RSI oversold, uptrend, volume confirmation
+            if rsi_val < 30 and uptrend and uptrend_htf and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero with volume spike and weekly downtrend
-            elif trix_prev >= 0 and trix_now < 0 and vol_spike and downtrend_weekly:
+            # SHORT: RSI overbought, downtrend, volume confirmation
+            elif rsi_val > 70 and downtrend and downtrend_htf and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses back below zero or weekly trend turns down
-            if trix_now < 0 or not uptrend_weekly:
+            # EXIT LONG: RSI crosses above 50 (mean reversion complete)
+            if rsi_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses back above zero or weekly trend turns up
-            if trix_now > 0 or not downtrend_weekly:
+            # EXIT SHORT: RSI crosses below 50 (mean reversion complete)
+            if rsi_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
