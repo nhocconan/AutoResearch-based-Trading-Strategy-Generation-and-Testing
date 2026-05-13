@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Donchian20_Breakout_1dTrend_Volume
-# Hypothesis: Price breaks above/below Donchian(20) channel with 1d trend and volume confirmation.
-# Long: price > upper Donchian(20) + 1d EMA50 uptrend + volume spike
-# Short: price < lower Donchian(20) + 1d EMA50 downtrend + volume spike
-# Exit: trend reversal (price crosses 1d EMA50 opposite direction)
-# Uses 1d timeframe for trend filter and Donchian calculation to reduce noise and false breakouts.
-# Target: 20-50 trades/year per symbol to minimize fee drag and work in both bull and bear markets.
+# 1d_ThreeLineBreak_Trend_1wTrend_Volume
+# Hypothesis: Price reverses after exhaustion shown by Three Line Break (TLB) reversal on 1d,
+# confirmed by 1w trend direction and volume spike. Enter on close of reversal bar.
+# Works in bull markets (buy after 3-line down reversal in uptrend) and bear markets
+# (sell after 3-line up reversal in downtrend). Uses 1w trend filter to avoid counter-trend
+# trades and volume spike to confirm institutional participation. Target: 15-30 trades/year.
 
-name = "12h_Donchian20_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_ThreeLineBreak_Trend_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,38 +24,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Donchian channel and trend
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Donchian channel (20-period) on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Upper band: highest high of last 20 days
-    upper_donchian = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 days
-    lower_donchian = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # 1d trend: EMA50
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1d indicators to 12h timeframe
-    upper_donchian_aligned = align_htf_to_ltf(prices, df_1d, upper_donchian)
-    lower_donchian_aligned = align_htf_to_ltf(prices, df_1d, lower_donchian)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume spike: volume > 2.0 * 20-period average (approx 10 days worth at 12h)
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # 1w trend: EMA21
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+
+    # Three Line Break calculation on daily close
+    # Returns +1 for up line, -1 for down line, 0 for no new line
+    tl = np.zeros(n, dtype=int)
+    if n > 0:
+        tl[0] = 1  # start with up line
+        line_count = 1
+        reversal_level = close[0]
+        for i in range(1, n):
+            if close[i] > reversal_level:
+                tl[i] = 1
+                line_count += 1
+                reversal_level = close[i]
+            elif close[i] < reversal_level:
+                tl[i] = -1
+                line_count += 1
+                reversal_level = close[i]
+            else:
+                tl[i] = 0
+
+    # Detect TLB reversal: current line opposite to previous line
+    # Need at least 3 consecutive same-direction lines for valid reversal signal
+    tl_reversal = np.zeros(n, dtype=bool)
+    tl_run = np.zeros(n, dtype=int)
+    for i in range(1, n):
+        if tl[i] == tl[i-1]:
+            tl_run[i] = tl_run[i-1] + 1
+        else:
+            tl_run[i] = 1
+        # Reversal when we have at least 3 prior same-direction lines and direction changes
+        if i >= 3 and tl_run[i-1] >= 3 and tl[i] != tl[i-1]:
+            tl_reversal[i] = True
+
+    # Volume spike: volume > 2.0 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * vol_ma_20
-    
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(20, n):  # start after vol MA warmup
         # Skip if any required value is NaN
-        if (np.isnan(upper_donchian_aligned[i]) or 
-            np.isnan(lower_donchian_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if np.isnan(ema21_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,26 +81,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above upper Donchian + 1d uptrend + volume spike
-            if close[i] > upper_donchian_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: TBL down-to-up reversal + 1w uptrend + volume spike
+            if tl_reversal[i] and tl[i] == 1 and close[i] > ema21_1w_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian + 1d downtrend + volume spike
-            elif close[i] < lower_donchian_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: TLB up-to-down reversal + 1w downtrend + volume spike
+            elif tl_reversal[i] and tl[i] == -1 and close[i] < ema21_1w_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend reversal (price crosses below 1d EMA50)
-            if close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: TLB up-to-down reversal or trend failure
+            if tl_reversal[i] and tl[i] == -1 or close[i] < ema21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend reversal (price crosses above 1d EMA50)
-            if close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: TLB down-to-up reversal or trend failure
+            if tl_reversal[i] and tl[i] == 1 or close[i] > ema21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
