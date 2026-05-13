@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_RSI_Volume_Breakout_v2
-# Hypothesis: RSI(14) extremes with volume confirmation and 12h EMA trend filter on 4h timeframe.
-# Uses 12h EMA50 as trend filter to avoid counter-trend trades, reducing false signals and trade frequency.
-# RSI > 70 with volume spike and price above 12h EMA50 = long
-# RSI < 30 with volume spike and price below 12h EMA50 = short
-# Exits when RSI crosses 50 (momentum fade)
-# Designed for 20-40 trades/year to minimize fee drag. Works in both bull and bear by capturing momentum bursts with trend alignment.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
+# Hypothesis: Camarilla pivot levels on 1h timeframe with 4h EMA trend filter and 1d volume spike confirmation.
+# Long when price breaks above R1 level with volume spike and above 4h EMA50 (uptrend).
+# Short when price breaks below S1 level with volume spike and below 4h EMA50 (downtrend).
+# Exit when price crosses back through pivot point (mean reversion to equilibrium).
+# Uses 1h for entry timing, 4h for trend direction, 1d for volume confirmation.
+# Designed for 15-30 trades/year to minimize fee drag while capturing institutional breakouts.
 
-name = "4h_RSI_Volume_Breakout_v2"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -20,45 +20,38 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation: current volume > 1.8 x 20-period average
-    vol_ma = np.zeros_like(volume)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.8 * vol_ma)
+    # Camarilla pivot levels for 1h timeframe
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # Pivot = (high + low + close)/3
+    hl_range = high - low
+    r1 = close + (1.1 * hl_range / 12)
+    s1 = close - (1.1 * hl_range / 12)
+    pivot = (high + low + close) / 3
 
-    # Get 12h EMA50 for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+
+    # 1d volume confirmation: current volume > 2.0 x 24-period average
+    vol_ma_1d = np.zeros_like(volume)
+    for i in range(24, n):
+        vol_ma_1d[i] = np.mean(volume[i-24:i])
+    volume_spike = volume > (2.0 * vol_ma_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        # Skip if RSI or volume data is not ready
-        if i < 14 or np.isnan(rsi[i]) or np.isnan(volume_spike[i]) or np.isnan(ema_12h_aligned[i]):
+    for i in range(24, n):
+        # Skip if data not ready
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(volume_spike[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,29 +60,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI > 70 (overbought momentum) with volume spike and price above 12h EMA50 (uptrend)
-            if rsi[i] > 70 and volume_spike[i] and close[i] > ema_12h_aligned[i]:
-                signals[i] = 0.25
+            # LONG: Break above R1 with volume spike and above 4h EMA50 (uptrend)
+            if close[i] > r1[i] and volume_spike[i] and close[i] > ema_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: RSI < 30 (oversold capitulation) with volume spike and price below 12h EMA50 (downtrend)
-            elif rsi[i] < 30 and volume_spike[i] and close[i] < ema_12h_aligned[i]:
-                signals[i] = -0.25
+            # SHORT: Break below S1 with volume spike and below 4h EMA50 (downtrend)
+            elif close[i] < s1[i] and volume_spike[i] and close[i] < ema_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI falls below 50 (momentum fading)
-            if rsi[i] < 50:
+            # EXIT LONG: Price returns to pivot point (mean reversion)
+            if close[i] < pivot[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: RSI rises above 50 (selling pressure fading)
-            if rsi[i] > 50:
+            # EXIT SHORT: Price returns to pivot point (mean reversion)
+            if close[i] > pivot[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
