@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Donchian_Breakout_20_Trix_50_Volume_Spike
-# Hypothesis: On 4h timeframe, breakout beyond Donchian(20) channels with TRIX(50) momentum confirmation and volume spike captures sustained momentum moves in both bull and bear markets. The TRIX filter reduces whipsaws by ensuring momentum alignment, while volume confirms institutional participation. Designed for low-frequency, high-quality setups.
+# 1d_1w_Camarilla_R1S1_Breakout_Trend_Volume
+# Hypothesis: On daily timeframe, breakout beyond weekly Camarilla R1/S1 levels
+# with alignment to weekly trend (price vs weekly EMA20) and volume capture
+# strong momentum moves. Weekly trend provides multi-week filter reducing whipsaws.
+# Volume confirms institutional participation. Designed for low-frequency, high-quality
+# setups targeting 10-30 trades per year per symbol.
 
-name = "4h_Donchian_Breakout_20_Trix_50_Volume_Spike"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1S1_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,29 +24,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for TRIX calculation
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend and Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate TRIX(50) on daily close
-    # TRIX = EMA(EMA(EMA(close, 50), 50), 50) - 1
-    ema1 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema2 = pd.Series(ema1).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema3 = pd.Series(ema2).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trix_raw = (ema3 / np.roll(ema3, 1)) - 1  # % change
-    trix_raw[0] = 0  # first value has no previous
-    trix = trix_raw  # already in percent form
+    # Calculate weekly EMA20 for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
 
-    # Align TRIX to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # Calculate weekly Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12.0
+    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12.0
 
-    # Calculate Donchian channels (20-period) on 4h data
-    # Upper = max(high, 20), Lower = min(low, 20)
-    df = pd.DataFrame({'high': high, 'low': low})
-    donch_high = df['high'].rolling(window=20, min_periods=20).max().values
-    donch_low = df['low'].rolling(window=20, min_periods=20).min().values
+    # Align to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
 
-    # Volume spike: volume > 2.0 * 20-period average (~3.3 days at 4h)
+    # Volume spike: volume > 2.0 * 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * vol_ma_20
 
@@ -51,9 +55,9 @@ def generate_signals(prices):
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(trix_aligned[i]) or 
-            np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema20_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,26 +66,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Uptrend momentum + breakout above Donchian high + volume spike
-            if trix_aligned[i] > 0 and close[i] > donch_high[i] and volume_spike[i]:
+            # LONG: Uptrend + breakout above R1 + volume spike
+            if close[i] > ema20_1w_aligned[i] and close[i] > r1_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend momentum + breakdown below Donchian low + volume spike
-            elif trix_aligned[i] < 0 and close[i] < donch_low[i] and volume_spike[i]:
+            # SHORT: Downtrend + breakdown below S1 + volume spike
+            elif close[i] < ema20_1w_aligned[i] and close[i] < s1_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low or momentum turns negative
-            if close[i] < donch_low[i] or trix_aligned[i] < 0:
+            # EXIT LONG: Price breaks below S1 or trend turns bearish
+            if close[i] < s1_aligned[i] or close[i] < ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high or momentum turns positive
-            if close[i] > donch_high[i] or trix_aligned[i] > 0:
+            # EXIT SHORT: Price breaks above R1 or trend turns bullish
+            if close[i] > r1_aligned[i] or close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
