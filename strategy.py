@@ -1,13 +1,11 @@
-#!/usr/bin/env python3
-# 6h_RSI_Trend_Filter_with_Volume_Spike
-# Hypothesis: RSI extremes on 6h timeframe (RSI<20 or >80) with trend filter (1d EMA100) and volume spike to confirm momentum.
-# In bull markets: buy RSI<20 pullbacks in uptrend with volume; sell RSI>80 overextensions in downtrend with volume.
-# In bear markets: sell RSI>80 rallies in downtrend with volume; buy RSI<20 bounces in uptrend with volume.
-# Uses 1d EMA100 for trend to avoid counter-trend trades. Volume spike filters low-conviction moves.
-# Target: 20-40 trades/year per symbol to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_v2
+# Hypothesis: Trade breakouts at R1/S1 levels from 12h timeframe, aligned with 1d trend, filtered by volume spike and chop regime to avoid whipsaws.
+# Uses 12h for pivot calculation (structure) and 1d for trend (higher timeframe bias). Volume spike confirms institutional interest.
+# Chop filter avoids ranging markets where breakouts fail. Works in bull (breakouts above R1 in uptrend) and bear (breakdowns below S1 in downtrend).
+# Target: 25-40 trades/year per symbol to stay well under fee drag limits.
 
-name = "6h_RSI_Trend_Filter_with_Volume_Spike"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,37 +17,76 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA100 trend filter
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate Camarilla pivot levels (R1, S1) from previous 12h bar
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    camarilla_width = (high_12h - low_12h) * 1.1 / 12
+    r1 = close_12h + camarilla_width
+    s1 = close_12h - camarilla_width
+    
+    # 12h trend: EMA50
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Get 1d data for chop filter
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d EMA100
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # Calculate 6-period RSI on 6h closes
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Chopping index (14-period)
+    def choppiness_index(high, low, close, period=14):
+        atr = np.zeros(len(close))
+        tr = np.zeros(len(close))
+        for i in range(1, len(close)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        for i in range(period, len(close)):
+            atr[i] = np.mean(tr[i-period+1:i+1])
+        # Avoid division by zero
+        atr_sum = np.nansum(atr[period-1:]) if np.any(~np.isnan(atr[period-1:])) else 1e-10
+        if atr_sum == 0:
+            atr_sum = 1e-10
+        highest_high = np.max(high[period-1:]) if len(high[period-1:]) > 0 else close[-1]
+        lowest_low = np.min(low[period-1:]) if len(low[period-1:]) > 0 else close[-1]
+        range_max_min = highest_high - lowest_low
+        if range_max_min == 0:
+            range_max_min = 1e-10
+        chop = 100 * np.log10(atr_sum / range_max_min) / np.log10(period)
+        # Align to array length
+        chop_full = np.full(len(close), np.nan)
+        chop_full[period-1:] = chop
+        return chop_full
+
+    chop_1d = choppiness_index(high_1d, low_1d, close_1d, 14)
     
-    # Volume spike: volume > 2.0 * 20-period average (~5 days worth at 6h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Align 12h indicators to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Volume spike: volume > 2.0 * 3-period average (1.5 days worth at 4h)
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    volume_spike = volume > 2.0 * vol_ma_3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema100_1d_aligned[i]) or 
-            np.isnan(rsi[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or
+            np.isnan(chop_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,26 +95,36 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI < 20 (oversold) + price above 1d EMA100 (uptrend) + volume spike
-            if rsi[i] < 20 and close[i] > ema100_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > R1 + 12h uptrend + volume spike + chop > 61.8 (ranging)
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema50_12h_aligned[i] and 
+                volume_spike[i] and 
+                chop_1d_aligned[i] > 61.8):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI > 80 (overbought) + price below 1d EMA100 (downtrend) + volume spike
-            elif rsi[i] > 80 and close[i] < ema100_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < S1 + 12h downtrend + volume spike + chop > 61.8 (ranging)
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema50_12h_aligned[i] and 
+                  volume_spike[i] and 
+                  chop_1d_aligned[i] > 61.8):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI > 70 (overbought) or trend reversal (price below EMA100)
-            if rsi[i] > 70 or close[i] < ema100_1d_aligned[i]:
+            # EXIT LONG: Close below S1 or trend reversal or chop < 38.2 (trending - exit range play)
+            if (close[i] < s1_aligned[i] or 
+                close[i] < ema50_12h_aligned[i] or
+                chop_1d_aligned[i] < 38.2):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI < 30 (oversold) or trend reversal (price above EMA100)
-            if rsi[i] < 30 or close[i] > ema100_1d_aligned[i]:
+            # EXIT SHORT: Close above R1 or trend reversal or chop < 38.2 (trending - exit range play)
+            if (close[i] > r1_aligned[i] or 
+                close[i] > ema50_12h_aligned[i] or
+                chop_1d_aligned[i] < 38.2):
                 signals[i] = 0.0
                 position = 0
             else:
