@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and ATR trailing stop.
-# Long when price breaks above 20-period high AND volume > 1.5x average volume.
-# Short when price breaks below 20-period low AND volume > 1.5x average volume.
-# Exit on ATR(14) trailing stop (2.5x) or opposite Donchian breakout.
-# Uses discrete sizing 0.25 to minimize fee churn. Target: 75-200 trades over 4 years.
-# Donchian channels provide objective structure, volume confirms breakout strength,
-# ATR stop manages risk without look-ahead. Works in bull/bear via symmetric logic.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above 20-day high AND 1w EMA50 rising AND volume > 1.5x average.
+# Short when price breaks below 20-day low AND 1w EMA50 falling AND volume > 1.5x average.
+# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
+# Donchian provides robust price channels, 1w EMA50 filters primary trend on weekly timeframe,
+# volume confirms breakout authenticity. Designed for low trade frequency to minimize fee drag.
 
-name = "4h_Donchian20_VolumeBreakout_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Volume_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -36,30 +35,43 @@ def generate_signals(prices):
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1d data for Donchian channels (20-period)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1w EMA50 to 1d timeframe (wait for 1w bar to close)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
     lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(20, n):  # Start after sufficient data for Donchian
+    for i in range(50, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above 20-period high AND volume > 1.5x average
-            if close[i] > highest_high[i] and volume[i] > 1.5 * avg_volume[i]:
+            # LONG: Price breaks above 20-day high AND 1w EMA50 rising AND volume > 1.5x average
+            if (close[i] > highest_20[i] and 
+                ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and 
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below 20-period low AND volume > 1.5x average
-            elif close[i] < lowest_low[i] and volume[i] > 1.5 * avg_volume[i]:
+            # SHORT: Price breaks below 20-day low AND 1w EMA50 falling AND volume > 1.5x average
+            elif (close[i] < lowest_20[i] and 
+                  ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and 
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -72,10 +84,9 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR) OR opposite breakout
+            # EXIT LONG: trailing stop hit (2.5x ATR)
             trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
-            opposite_break = close[i] < lowest_low[i]  # Break below Donchian low
-            if trailing_stop or opposite_break:
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
@@ -88,10 +99,9 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR) OR opposite breakout
+            # EXIT SHORT: trailing stop hit (2.5x ATR)
             trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
-            opposite_break = close[i] > highest_high[i]  # Break above Donchian high
-            if trailing_stop or opposite_break:
+            if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
