@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Alligator_Turn_WeeklyTrend_Filter
-# Hypothesis: Williams Alligator signals on 12h timeframe filtered by weekly trend direction.
-# Long when Alligator lines turn bullish (jaws < teeth < lips) during weekly uptrend.
-# Short when Alligator lines turn bearish (jaws > teeth > lips) during weekly downtrend.
-# Uses 1-week trend filter to avoid counter-trend whipsaws, targeting 15-30 trades/year per symbol.
-# Designed to work in bull markets (trend-following) and bear markets (counter-trend bounces during weekly mean reversion).
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Squeeze
+# Hypothesis: Use Camarilla pivot points from daily data for breakout entries, filtered by daily trend and volume squeeze conditions.
+# Long when price breaks above R1 during daily uptrend with volume squeeze release.
+# Short when price breaks below S1 during daily downtrend with volume squeeze release.
+# Exit on opposite Camarilla level touch or trend reversal.
+# Designed for low trade frequency (<40 total/year) to minimize fee drag and work in both bull and bear markets.
 
-name = "12h_Alligator_Turn_WeeklyTrend_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Squeeze"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,45 +24,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA34 for trend direction
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-
-    # Williams Alligator on 12h: SMMA(13,8), SMMA(8,5), SMMA(5,3)
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: SMMA = (prev*(period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-
-    jaws = smma(close, 13)  # Blue line: 13-period SMMA shifted 8 bars
-    teeth = smma(close, 8)   # Red line: 8-period SMMA shifted 5 bars
-    lips = smma(close, 5)    # Green line: 5-period SMMA shifted 3 bars
-
-    # Shift the lines as per Alligator definition
-    jaws = np.roll(jaws, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
-    # Set shifted values to NaN
-    jaws[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    # Calculate Camarilla pivot levels from daily OHLC
+    # R4 = C + ((H-L) * 1.5000), R3 = C + ((H-L) * 1.2500)
+    # R2 = C + ((H-L) * 1.1666), R1 = C + ((H-L) * 1.0833)
+    # PP = (H+L+C)/3, S1 = C - ((H-L) * 1.0833)
+    # S2 = C - ((H-L) * 1.1666), S3 = C - ((H-L) * 1.2500)
+    # S4 = C - ((H-L) * 1.5000)
+    H = df_1d['high'].values
+    L = df_1d['low'].values
+    C = df_1d['close'].values
+    
+    R1 = C + (H - L) * 1.0833
+    S1 = C - (H - L) * 1.0833
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(C).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume squeeze: Bollinger Bands width < 20th percentile indicates low volatility
+    vol_series = pd.Series(volume)
+    vol_ma_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_std_20 = vol_series.rolling(window=20, min_periods=20).std().values
+    vol_upper = vol_ma_20 + 2 * vol_std_20
+    vol_lower = vol_ma_20 - 2 * vol_std_20
+    bb_width = (vol_upper - vol_lower) / vol_ma_20
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=10).rank(pct=True).values
+    volatility_squeeze = bb_width_percentile < 0.2  # Bottom 20% = squeeze
+    
+    # Align all daily data to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    volatility_squeeze_aligned = align_htf_to_ltf(prices, df_1d, volatility_squeeze.astype(float))
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(jaws[i]) or 
-            np.isnan(teeth[i]) or np.isnan(lips[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volatility_squeeze_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,26 +74,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Alligator lines turn bullish (jaws < teeth < lips) during weekly uptrend
-            if (jaws[i] < teeth[i] < lips[i]) and (close[i] > ema_34_1w_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Alligator lines turn bearish (jaws > teeth > lips) during weekly downtrend
-            elif (jaws[i] > teeth[i] > lips[i]) and (close[i] < ema_34_1w_aligned[i]):
-                signals[i] = -0.25
-                position = -1
+            # LONG: Break above R1 during daily uptrend with volatility squeeze release
+            if close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]:
+                if close[i] > ema_34_1d_aligned[i] and volatility_squeeze_aligned[i] > 0.3:  # Squeeze releasing
+                    signals[i] = 0.25
+                    position = 1
+            # SHORT: Break below S1 during daily downtrend with volatility squeeze release
+            elif close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]:
+                if close[i] < ema_34_1d_aligned[i] and volatility_squeeze_aligned[i] > 0.3:  # Squeeze releasing
+                    signals[i] = -0.25
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alligator lines turn bearish or weekly trend turns down
-            if (jaws[i] > teeth[i] > lips[i]) or (close[i] < ema_34_1w_aligned[i]):
+            # EXIT LONG: Touch S1 or trend turns down
+            if close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < ema_34_1d_aligned[i]:  # Trend turned down
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator lines turn bullish or weekly trend turns up
-            if (jaws[i] < teeth[i] < lips[i]) or (close[i] > ema_34_1w_aligned[i]):
+            # EXIT SHORT: Touch R1 or trend turns up
+            if close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > ema_34_1d_aligned[i]:  # Trend turned up
                 signals[i] = 0.0
                 position = 0
             else:
