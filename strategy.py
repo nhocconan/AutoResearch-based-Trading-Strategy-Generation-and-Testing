@@ -1,14 +1,15 @@
-# 165085
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_Volume_Trend_1dEMA34
-Hypothesis: Donchian(20) breakout on 12h with volume confirmation and 1d EMA34 trend filter.
-Works in bull markets via breakout continuation and in bear via mean-reversion failed breakouts (quick exits).
-Targets 20-50 trades/year to minimize fee drag. Uses 25% position size for risk control.
+6h_Pivot_Reversal_With_Volume_Spike_v2
+Hypothesis: Reversal at daily pivot points (PP) with volume spike and rejection of R1/S1 levels.
+In ranging markets, price tends to revert to the pivot after testing R1/S1. In trending markets,
+breakouts beyond R1/S1 with volume continuation are filtered out by requiring price to stay
+within the pivot-R1/S1 band. Uses 6h timeframe to reduce noise and overtrading.
+Target: 20-50 trades/year, size 0.25.
 """
 
-name = "12h_Donchian_Breakout_Volume_Trend_1dEMA34"
-timeframe = "12h"
+name = "6h_Pivot_Reversal_With_Volume_Spike_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,56 +26,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter (once before loop)
+    # Get 1d data for pivot calculation (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d trend filter: EMA(34) on close
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Daily pivot points: PP = (H + L + C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    pp = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    r1 = 2 * pp - df_1d['low']
+    s1 = 2 * pp - df_1d['high']
     
-    # Donchian channels (20-period) on 12h data
-    # Upper = max(high, lookback 20)
-    # Lower = min(low, lookback 20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Align to 6h - use previous day's levels (available at 6h open)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Volume confirmation: current volume > 1.5x 24-period average (4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(24, n):
         if position == 0:
-            # LONG: Price breaks above Donchian high, volume confirmation, price above 1d EMA34 (uptrend)
-            if (close[i] > donchian_high[i] and 
-                volume_filter[i] and 
-                close[i] > ema34_1d_aligned[i]):
+            # LONG: Price rejects S1 (bounces off support) with volume spike, below pivot
+            if (low[i] <= s1_aligned[i] and  # tested S1
+                close[i] > s1_aligned[i] and  # closed above S1 (rejection)
+                close[i] < pp_aligned[i] and  # still below pivot (range-bound)
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low, volume confirmation, price below 1d EMA34 (downtrend)
-            elif (close[i] < donchian_low[i] and 
-                  volume_filter[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+            # SHORT: Price rejects R1 (fails at resistance) with volume spike, above pivot
+            elif (high[i] >= r1_aligned[i] and  # tested R1
+                  close[i] < r1_aligned[i] and  # closed below R1 (rejection)
+                  close[i] > pp_aligned[i] and  # still above pivot (range-bound)
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below Donchian high (failed breakout) OR trend changes
-            if (close[i] < donchian_high[i] or 
-                close[i] < ema34_1d_aligned[i]):
+            # EXIT LONG: Price reaches pivot (mean reversion target) OR stops rejecting S1
+            if (close[i] >= pp_aligned[i] or  # reached pivot target
+                low[i] > s1_aligned[i]):      # no longer testing S1
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above Donchian low (failed breakdown) OR trend changes
-            if (close[i] > donchian_low[i] or 
-                close[i] > ema34_1d_aligned[i]):
+            # EXIT SHORT: Price reaches pivot (mean reversion target) OR stops rejecting R1
+            if (close[i] <= pp_aligned[i] or  # reached pivot target
+                high[i] < r1_aligned[i]):     # no longer testing R1
                 signals[i] = 0.0
                 position = 0
             else:
