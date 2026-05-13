@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Use Camarilla pivot levels (R1/S1) from 1d as breakout levels.
-# Enter long when price breaks above R1 with 1d EMA uptrend and volume spike.
-# Enter short when price breaks below S1 with 1d EMA downtrend and volume spike.
-# Exit when price crosses back below/above the pivot point (midpoint of R1/S1).
-# This structure-based approach reduces false breakouts and works in both bull/bear via trend filter.
-# Target: 15-25 trades/year on 12h to minimize fee drag.
+# 4h_SupportResistance_Fibonacci_Extension
+# Hypothesis: Use 1D swing high/low to calculate Fibonacci extension levels (127.2%, 161.8%, 261.8%) as dynamic support/resistance.
+# Enter long when price breaks above 127.2% extension of prior swing low with bullish 1D trend and volume spike.
+# Enter short when price breaks below 61.8% retracement of prior swing high with bearish 1D trend and volume spike.
+# Exit when price crosses back below/above the swing point level.
+# This captures momentum after pullbacks in trending markets while avoiding false breakouts.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_SupportResistance_Fibonacci_Extension"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for swing points and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -33,21 +31,39 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Camarilla pivot levels (R1, S1, Pivot Point)
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    # Pivot = (high + low + close) / 3
-    range_1d = high_1d - low_1d
-    r1 = close_1d + 1.1 * range_1d / 12
-    s1 = close_1d - 1.1 * range_1d / 12
-    pivot = (high_1d + low_1d + close_1d) / 3
+    # Calculate swing high/low on 1D (pivot points)
+    swing_high = np.full_like(high_1d, np.nan)
+    swing_low = np.full_like(low_1d, np.nan)
+    
+    for i in range(2, len(high_1d)-2):
+        # Swing high: higher than 2 bars on each side
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and 
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            swing_high[i] = high_1d[i]
+        # Swing low: lower than 2 bars on each side
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and 
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            swing_low[i] = low_1d[i]
 
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Forward fill swing points to use most recent
+    for i in range(1, len(swing_high)):
+        if np.isnan(swing_high[i]):
+            swing_high[i] = swing_high[i-1]
+        if np.isnan(swing_low[i]):
+            swing_low[i] = swing_low[i-1]
 
-    # 1d EMA34 for trend filter (more responsive than EMA50)
+    # Calculate Fibonacci levels
+    range_1d = swing_high - swing_low
+    fib_ext_127 = swing_low + range_1d * 1.272  # 127.2% extension
+    fib_ret_618 = swing_high - range_1d * 0.618  # 61.8% retracement
+
+    # Align Fibonacci levels to 4h timeframe
+    fib_ext_127_aligned = align_htf_to_ltf(prices, df_1d, fib_ext_127)
+    fib_ret_618_aligned = align_htf_to_ltf(prices, df_1d, fib_ret_618)
+    swing_high_aligned = align_htf_to_ltf(prices, df_1d, swing_high)
+    swing_low_aligned = align_htf_to_ltf(prices, df_1d, swing_low)
+
+    # 1D EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
@@ -59,9 +75,9 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(fib_ext_127_aligned[i]) or np.isnan(fib_ret_618_aligned[i]) or 
+            np.isnan(swing_high_aligned[i]) or np.isnan(swing_low_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,14 +86,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above R1 + price > 1d EMA34 + volume spike
-            if (close[i] > r1_aligned[i] and 
+            # LONG: Close breaks above 127.2% extension + price > 1D EMA34 + volume spike
+            if (close[i] > fib_ext_127_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S1 + price < 1d EMA34 + volume spike
-            elif (close[i] < s1_aligned[i] and 
+            # SHORT: Close breaks below 61.8% retracement + price < 1D EMA34 + volume spike
+            elif (close[i] < fib_ret_618_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
@@ -85,15 +101,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses back below pivot point (return to neutral zone)
-            if close[i] < pivot_aligned[i]:
+            # EXIT LONG: Close crosses back below swing low (invalidates uptrend)
+            if close[i] < swing_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses back above pivot point (return to neutral zone)
-            if close[i] > pivot_aligned[i]:
+            # EXIT SHORT: Close crosses back above swing high (invalidates downtrend)
+            if close[i] > swing_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
