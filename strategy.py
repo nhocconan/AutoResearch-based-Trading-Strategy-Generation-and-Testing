@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_ChaikinBreakout_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,78 +17,150 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1D data ONCE for Camarilla levels
+    # Load 1D data ONCE for ADX and Chaikin Money Flow
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Camarilla R3, S3, R4, S4
-    camarilla_r3 = close_prev + 1.1 * (high_prev - low_prev) / 6
-    camarilla_s3 = close_prev - 1.1 * (high_prev - low_prev) / 6
-    camarilla_r4 = close_prev + 1.1 * (high_prev - low_prev) / 2
-    camarilla_s4 = close_prev - 1.1 * (high_prev - low_prev) / 2
+    # Calculate ADX(14) on 1D
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_plus = np.concatenate([[0], dm_plus])
+        dm_minus = np.concatenate([[0], dm_minus])
+        
+        # Smoothed values
+        atr = np.full_like(tr, np.nan)
+        dm_plus_smooth = np.full_like(dm_plus, np.nan)
+        dm_minus_smooth = np.full_like(dm_minus, np.nan)
+        
+        # First values (simple average)
+        if len(tr) >= period:
+            atr[period-1] = np.nanmean(tr[1:period])
+            dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period])
+            dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period])
+            
+            # Wilder's smoothing
+            for i in range(period, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
+        
+        # Directional Indicators
+        di_plus = np.full_like(atr, np.nan)
+        di_minus = np.full_like(atr, np.nan)
+        dx = np.full_like(atr, np.nan)
+        
+        valid = ~np.isnan(atr) & (atr != 0)
+        di_plus[valid] = 100 * dm_plus_smooth[valid] / atr[valid]
+        di_minus[valid] = 100 * dm_minus_smooth[valid] / atr[valid]
+        
+        dx_valid = ~np.isnan(di_plus) & ~np.isnan(di_minus) & ((di_plus + di_minus) != 0)
+        dx[dx_valid] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
+        
+        # ADX
+        adx = np.full_like(dx, np.nan)
+        if len(dx) >= period:
+            adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
+            for i in range(2*period-1, len(dx)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Align Camarilla levels to 12H timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r4_12h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_12h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Calculate Chaikin Money Flow (CMF) on 1D
+    def calculate_cmf(high, low, close, volume, period=20):
+        # Money Flow Multiplier
+        mfm = np.where((high - low) != 0, ((close - low) - (high - close)) / (high - low), 0)
+        # Money Flow Volume
+        mfv = mfm * volume
+        
+        # Sum of MFV and Volume over period
+        mfv_sum = np.full_like(close, np.nan)
+        volume_sum = np.full_like(close, np.nan)
+        
+        for i in range(len(close)):
+            if i >= period - 1:
+                mfv_sum[i] = np.sum(mfv[i - period + 1:i + 1])
+                volume_sum[i] = np.sum(volume[i - period + 1:i + 1])
+        
+        # CMF
+        cmf = np.full_like(close, np.nan)
+        valid = volume_sum != 0
+        cmf[valid] = mfv_sum[valid] / volume_sum[valid]
+        return cmf
     
-    # Load 1W data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    cmf_1d = calculate_cmf(high_1d, low_1d, close_1d, volume_1d, 20)
     
-    # Calculate 20-period EMA on weekly close
-    close_1w = df_1d['close'].values  # Temporary: will replace with actual 1W close
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Align 1D indicators to 4H timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    cmf_1d_aligned = align_htf_to_ltf(prices, df_1d, cmf_1d)
     
-    # Volume spike detection (2x 20-period average)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma20)
+    # 4H Donchian Channel (20-period)
+    def calculate_donchian(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(len(high)):
+            if i >= period - 1:
+                upper[i] = np.max(high[i - period + 1:i + 1])
+                lower[i] = np.min(low[i - period + 1:i + 1])
+        return upper, lower
+    
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient data
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]) or
-            np.isnan(ema20_1w_aligned[i])):
+    for i in range(30, n):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(cmf_1d_aligned[i]) or 
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below weekly EMA20
-        price_above_weekly_ema = close[i] > ema20_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema20_1w_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        is_trending = adx_1d_aligned[i] > 25
+        
+        # Money flow filter: CMF > 0 for buying pressure, < 0 for selling pressure
+        bullish_money_flow = cmf_1d_aligned[i] > 0.05
+        bearish_money_flow = cmf_1d_aligned[i] < -0.05
+        
+        # Price breakout conditions
+        price_above_upper = close[i] > donchian_upper[i]
+        price_below_lower = close[i] < donchian_lower[i]
         
         if position == 0:
-            # LONG: Price breaks above R3 with volume spike in uptrend
-            if (close[i] > r3_12h[i]) and volume_spike[i] and price_above_weekly_ema:
+            # LONG: Uptrend + bullish money flow + break above upper band
+            if is_trending and bullish_money_flow and price_above_upper:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with volume spike in downtrend
-            elif (close[i] < s3_12h[i]) and volume_spike[i] and price_below_weekly_ema:
+            # SHORT: Downtrend + bearish money flow + break below lower band
+            elif is_trending and bearish_money_flow and price_below_lower:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches R4 or trend reverses
-            if (close[i] >= r4_12h[i]) or (close[i] < ema20_1w_aligned[i]):
+            # EXIT LONG: Trend weakens or money flow turns bearish or price breaks below lower band
+            if (adx_1d_aligned[i] <= 20) or (cmf_1d_aligned[i] < -0.05) or (close[i] < donchian_lower[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches S4 or trend reverses
-            if (close[i] <= s4_12h[i]) or (close[i] > ema20_1w_aligned[i]):
+            # EXIT SHORT: Trend weakens or money flow turns bullish or price breaks above upper band
+            if (adx_1d_aligned[i] <= 20) or (cmf_1d_aligned[i] > 0.05) or (close[i] > donchian_upper[i]):
                 signals[i] = 0.0
                 position = 0
             else:
