@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1dTrend
-Hypothesis: Ichimoku cloud (TK cross + price above/below cloud) with 1d trend filter and volume confirmation works in both bull and bear markets.
-Long when TK cross bullish, price above cloud, 1d uptrend, volume spike. Short when TK cross bearish, price below cloud, 1d downtrend, volume spike.
-Exit on opposite TK cross or trend reversal. Uses 12h trend for additional confirmation.
-Target: 50-150 total trades over 4 years = 12-37/year.
+4h_Volume_Weighted_RSI_Trend_Filter
+Hypothesis: RSI(14) with volume-weighted smoothing and 1d trend filter captures momentum 
+reversals in both bull and bear markets. Volume weighting reduces noise, making signals 
+more reliable. Long when VW-RSI < 30 and price > 1d EMA50; short when VW-RSI > 70 and 
+price < 1d EMA50. Exit on RSI reversion to 50 or trend change. Targets 20-40 trades/year.
 """
 
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend"
-timeframe = "6h"
+name = "4h_Volume_Weighted_RSI_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,75 +25,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Ichimoku components (9, 26, 52)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Volume-weighted RSI calculation
+    def vwma(series, weights, period):
+        """Volume Weighted Moving Average"""
+        return np.convolve(series, weights, 'full')[:len(series)] / np.convolve(weights, np.ones_like(series), 'full')[:len(series)]
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    # Calculate price changes
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    # But for cloud calculation, we need current values
-    senkou_a = (tenkan + kijun) / 2
+    # Volume-weighted smoothing
+    vol_weights = volume / np.mean(volume)  # Normalize volume
+    vol_weights = np.where(vol_weights == 0, 1, vol_weights)  # Avoid division by zero
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
+    # VWMA of gains and losses
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
     
-    # Cloud boundaries (use current Senkou spans)
-    upper_cloud = np.maximum(senkou_a, senkou_b)
-    lower_cloud = np.minimum(senkou_a, senkou_b)
+    # Initialize with simple average for first period
+    if n >= 14:
+        avg_gain[13] = np.mean(gain[1:15])
+        avg_loss[13] = np.mean(loss[1:15])
+        
+        # Wilder smoothing with volume weighting
+        for i in range(14, n):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i] * vol_weights[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i] * vol_weights[i]) / 14
     
-    # TK Cross signals
-    tk_bullish = tenkan > kijun
-    tk_bearish = tenkan < kijun
+    # Calculate RSI
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Price relative to cloud
-    price_above_cloud = close > upper_cloud
-    price_below_cloud = close < lower_cloud
-    
-    # 12h trend filter (MTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 26:
-        return np.zeros(n)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # 12h Tenkan and Kijun for trend
-    high_9_12h = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
-    low_9_12h = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
-    tenkan_12h = (high_9_12h + low_9_12h) / 2
-    
-    high_26_12h = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
-    low_26_12h = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
-    kijun_12h = (high_26_12h + low_26_12h) / 2
-    
-    tk_bullish_12h = tenkan_12h > kijun_12h
-    tk_bearish_12h = tenkan_12h < kijun_12h
-    
-    tk_bullish_12h_aligned = align_htf_to_ltf(prices, df_12h, tk_bullish_12h)
-    tk_bearish_12h_aligned = align_htf_to_ltf(prices, df_12h, tk_bearish_12h)
-    
-    # 1d trend filter (additional HTF)
+    # 1d trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    high_26_1d = pd.Series(close_1d).rolling(window=26, min_periods=26).max().values
-    low_26_1d = pd.Series(close_1d).rolling(window=26, min_periods=26).min().values
-    # Using price vs 26-period high/low as trend proxy
-    uptrend_1d = close_1d > (high_26_1d + low_26_1d) / 2
-    downtrend_1d = close_1d < (high_26_1d + low_26_1d) / 2
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -102,39 +76,33 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after 52 for full Ichimoku
-        # Get values
-        tk_bull = tk_bullish[i]
-        tk_bear = tk_bearish[i]
-        price_above = price_above_cloud[i]
-        price_below = price_below_cloud[i]
+    for i in range(14, n):
+        rsi_val = rsi[i]
         vol_conf = volume_conf[i]
-        tk_bull_12h = tk_bullish_12h_aligned[i]
-        tk_bear_12h = tk_bearish_12h_aligned[i]
-        uptrend_1d = uptrend_1d_aligned[i]
-        downtrend_1d = downtrend_1d_aligned[i]
+        uptrend = uptrend_1d_aligned[i]
+        downtrend = downtrend_1d_aligned[i]
         
         if position == 0:
-            # LONG: TK bullish, price above cloud, 12h bullish, 1d uptrend, volume confirmation
-            if tk_bull and price_above and tk_bull_12h and uptrend_1d and vol_conf:
+            # LONG: VW-RSI oversold (<30) with 1d uptrend and volume confirmation
+            if rsi_val < 30 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TK bearish, price below cloud, 12h bearish, 1d downtrend, volume confirmation
-            elif tk_bear and price_below and tk_bear_12h and downtrend_1d and vol_conf:
+            # SHORT: VW-RSI overbought (>70) with 1d downtrend and volume confirmation
+            elif rsi_val > 70 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TK bearish or price below cloud or 1d trend turns down
-            if tk_bear or not price_above or not uptrend_1d:
+            # EXIT LONG: RSI returns to 50 or 1d trend turns down
+            if rsi_val >= 50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TK bullish or price above cloud or 1d trend turns up
-            if tk_bull or not price_below or not downtrend_1d:
+            # EXIT SHORT: RSI returns to 50 or 1d trend turns up
+            if rsi_val <= 50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
