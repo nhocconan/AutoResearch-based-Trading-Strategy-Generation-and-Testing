@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
-Hypothesis: Breakouts above 1d Camarilla R1 in uptrend (price > 12h EMA50) and breakdowns below S1 in downtrend (price < 12h EMA50) with volume confirmation (volume > 2.0x 20-period average). Designed for 4h timeframe to balance trade frequency and capture trend moves in both bull and bear markets.
+1h_4hDonchian20_1dTrend_Filter_v1
+Hypothesis: Breakouts above 4h Donchian(20) high or below low with 1d EMA50 trend filter, volume > 1.5x 20-period avg, and session filter (08-20 UTC) to reduce noise. Designed for 1h to capture trend moves with controlled trade frequency (~20-50/year) in both bull and bear markets.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1h_4hDonchian20_1dTrend_Filter_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,80 +22,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels
+    # Get 4h data for Donchian channels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    # Calculate Donchian channels (20-period high/low) on 4h
+    donch_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian levels to 1h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    
+    # Get 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar (based on previous day's range)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
-    camarilla_r1 = np.full_like(prev_close, np.nan)
-    camarilla_s1 = np.full_like(prev_close, np.nan)
-    
-    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
-    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Get 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma)
+    volume_confirmed = volume > (1.5 * vol_ma)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
     for i in range(50, n):
-        # Decrease cooldown if active
-        if cooldown > 0:
-            cooldown -= 1
+        # Only allow entries during session
+        if not session_filter[i]:
+            if position == 1:
+                signals[i] = 0.20
+            elif position == -1:
+                signals[i] = -0.20
+            else:
+                signals[i] = 0.0
+            continue
         
-        if position == 0 and cooldown == 0:
-            # LONG: Price breaks above R1 with volume confirmation in uptrend
-            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and \
-               close[i] > ema_50_12h_aligned[i]:
-                signals[i] = 0.25
+        if position == 0:
+            # LONG: Price breaks above 4h Donchian high with volume confirmation in uptrend
+            if donch_high_aligned[i] > 0 and not np.isnan(donch_high_aligned[i]) and \
+               high[i] > donch_high_aligned[i] and volume_confirmed[i] and \
+               close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below S1 with volume confirmation in downtrend
-            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and \
-                 close[i] < ema_50_12h_aligned[i]:
-                signals[i] = -0.25
+            # SHORT: Price breaks below 4h Donchian low with volume confirmation in downtrend
+            elif donch_low_aligned[i] > 0 and not np.isnan(donch_low_aligned[i]) and \
+                 low[i] < donch_low_aligned[i] and volume_confirmed[i] and \
+                 close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below R1 or trend weakens
-            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               (low[i] < camarilla_r1_aligned[i] or close[i] < ema_50_12h_aligned[i]):
+            # EXIT LONG: Price crosses back below Donchian low or trend weakens
+            if donch_low_aligned[i] > 0 and not np.isnan(donch_low_aligned[i]) and \
+               (low[i] < donch_low_aligned[i] or close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
-                cooldown = 3  # 3-bar cooldown after exit
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price crosses back above S1 or trend weakens
-            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-               (high[i] > camarilla_s1_aligned[i] or close[i] > ema_50_12h_aligned[i]):
+            # EXIT SHORT: Price crosses back above Donchian high or trend weakens
+            if donch_high_aligned[i] > 0 and not np.isnan(donch_high_aligned[i]) and \
+               (high[i] > donch_high_aligned[i] or close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
-                cooldown = 3  # 3-bar cooldown after exit
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
