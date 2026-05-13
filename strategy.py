@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_Choppiness_Index_Mean_Reversion
-Hypothesis: In ranging markets (high Choppiness Index), price reverts to the mean (50-period SMA). 
-Enter long when price is below SMA and Choppiness > 61.8, short when above SMA and Choppiness > 61.8.
-Use 1-week trend filter to avoid trading against the major trend. Works in both bull and bear markets by adapting to range conditions.
-Target: 10-25 trades/year per symbol.
+6h_ADX_Trend_Riding
+Hypothesis: ADX > 25 identifies trending markets. Ride trends with +DI/-DI crossovers, using 1d trend filter to avoid counter-trend whipsaws. Exit when trend weakens (ADX < 20) or opposite crossover. Works in both bull and bear by capturing sustained moves.
+Target: 15-30 trades/year per symbol.
 """
 
-name = "1d_Choppiness_Index_Mean_Reversion"
-timeframe = "1d"
+name = "6h_ADX_Trend_Riding"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,83 +18,80 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # 50-period SMA (mean)
-    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    # ADX(14) calculation
+    period = 14
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[0.0], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Choppiness Index (14-period)
-    def true_range(h, l, c):
-        tr1 = h[1:] - l[1:]
-        tr2 = np.abs(h[1:] - c[:-1])
-        tr3 = np.abs(l[1:] - c[:-1])
-        return np.concatenate([[0.0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    atr = pd.Series(true_range(high, low, close)).rolling(window=14, min_periods=14).mean().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Smoothed values
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False).values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).values
     
-    # Avoid division by zero
-    range_max_min = max_high - min_low
-    range_max_min = np.where(range_max_min == 0, 1e-10, range_max_min)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
     
-    chop = 100 * np.log10(atr * 14 / range_max_min) / np.log10(14)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).values
     
-    # 1-week trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d trend filter: EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1w = df_1w['close'].values > ema_50_1w
-    downtrend_1w = df_1w['close'].values < ema_50_1w
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Only trade in ranging markets (Choppiness > 61.8)
-        if chop[i] <= 61.8:
-            if position == 1:
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Get values
-        price = close[i]
-        sma = sma_50[i]
-        uptrend_htf = uptrend_1w_aligned[i]
-        downtrend_htf = downtrend_1w_aligned[i]
+    for i in range(period*2, n):
+        adx_val = adx[i]
+        plus_di_val = plus_di[i]
+        minus_di_val = minus_di[i]
+        uptrend_1d_filt = uptrend_1d_aligned[i]
+        downtrend_1d_filt = downtrend_1d_aligned[i]
         
         if position == 0:
-            # LONG: price below SMA in ranging market, but only if 1w trend is not strongly down
-            if price < sma and not downtrend_htf:
+            # LONG: ADX > 25, +DI crosses above -DI, 1d uptrend filter
+            if adx_val > 25 and plus_di_val > minus_di_val and plus_di[i-1] <= minus_di[i-1] and uptrend_1d_filt:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price above SMA in ranging market, but only if 1w trend is not strongly up
-            elif price > sma and not uptrend_htf:
+            # SHORT: ADX > 25, -DI crosses above +DI, 1d downtrend filter
+            elif adx_val > 25 and minus_di_val > plus_di_val and minus_di[i-1] <= plus_di[i-1] and downtrend_1d_filt:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses above SMA or chop drops (trend emerging)
-            if price >= sma or chop[i] < 61.8:
+            # EXIT LONG: ADX < 20 (trend weak) or -DI crosses above +DI
+            if adx_val < 20 or (minus_di_val > plus_di_val and minus_di[i-1] <= plus_di[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses below SMA or chop drops (trend emerging)
-            if price <= sma or chop[i] < 61.8:
+            # EXIT SHORT: ADX < 20 (trend weak) or +DI crosses above -DI
+            if adx_val < 20 or (plus_di_val > minus_di_val and plus_di[i-1] <= minus_di[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
