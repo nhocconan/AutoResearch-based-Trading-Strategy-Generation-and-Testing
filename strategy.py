@@ -1,12 +1,14 @@
-#!/usr/bin/env python3
-# 1d_Weekly_Keltner_Channel_Breakout_Trend_Filter
-# Hypothesis: Use weekly Keltner Channel breakout with daily trend filter to capture strong trends in BTC/ETH.
-# Combines volatility-based breakout (Keltner) with weekly trend alignment to avoid false signals.
-# Works in both bull and bear markets by following the weekly trend direction.
-# Target: 15-25 trades/year (60-100 total) to minimize fee drag while maintaining edge.
+#/usr/bin/env python3
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation
+# Hypothesis: Use Camarilla pivot levels (R1/S1) from daily timeframe with 12h price breakouts.
+# Enter long when price breaks above R1 with 12h uptrend and volume spike.
+# Enter short when price breaks below S1 with 12h downtrend and volume spike.
+# Exit when price returns to the Camarilla pivot point (central level).
+# Uses 12h timeframe to reduce trade frequency and avoid fee drag.
+# Works in both bull and bear markets by following 12h trend via price vs pivot.
 
-name = "1d_Weekly_Keltner_Channel_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,35 +25,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend and Keltner calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
 
-    weekly_close = df_weekly['close'].values
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
+    # Calculate Camarilla levels from previous day
+    # Using formula: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # Pivot = (high + low + close)/3
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate weekly ATR(10) for Keltner Channel
-    tr1 = weekly_high[1:] - weekly_low[1:]
-    tr2 = np.abs(weekly_high[1:] - weekly_close[:-1])
-    tr3 = np.abs(weekly_low[1:] - weekly_close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Shift by 1 to use previous day's data (no look-ahead)
+    high_1d_prev = np.roll(high_1d, 1)
+    low_1d_prev = np.roll(low_1d, 1)
+    close_1d_prev = np.roll(close_1d, 1)
+    high_1d_prev[0] = np.nan
+    low_1d_prev[0] = np.nan
+    close_1d_prev[0] = np.nan
 
-    # Weekly EMA(20) for trend filter and Keltner center
-    ema_20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla levels
+    R1 = close_1d_prev + 1.1 * (high_1d_prev - low_1d_prev) / 12
+    S1 = close_1d_prev - 1.1 * (high_1d_prev - low_1d_prev) / 12
+    Pivot = (high_1d_prev + low_1d_prev + close_1d_prev) / 3
 
-    # Keltner Channel: EMA(20) ± 2 * ATR(10)
-    keltner_upper = ema_20 + 2 * atr_10
-    keltner_lower = ema_20 - 2 * atr_10
+    # Align to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    Pivot_aligned = align_htf_to_ltf(prices, df_1d, Pivot)
 
-    # Align weekly indicators to daily timeframe
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_weekly, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_weekly, keltner_lower)
-    ema_20_aligned = align_htf_to_ltf(prices, df_weekly, ema_20)
-
-    # Daily volume confirmation: volume > 1.5 * 20-day average
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -62,8 +66,8 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if data is not ready
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or 
-            np.isnan(ema_20_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(Pivot_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,30 +76,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above weekly Keltner upper + weekly uptrend + volume spike
-            if (close[i] > keltner_upper_aligned[i] and 
-                close[i] > ema_20_aligned[i] and 
-                volume_spike[i]):
+            # LONG: Price breaks above R1 + volume spike
+            if close[i] > R1_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly Keltner lower + weekly downtrend + volume spike
-            elif (close[i] < keltner_lower_aligned[i] and 
-                  close[i] < ema_20_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: Price breaks below S1 + volume spike
+            elif close[i] < S1_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below weekly EMA(20) or re-enters Keltner Channel
-            if close[i] < ema_20_aligned[i] or close[i] < keltner_upper_aligned[i]:
+            # EXIT LONG: Price returns to pivot point
+            if close[i] <= Pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above weekly EMA(20) or re-enters Keltner Channel
-            if close[i] > ema_20_aligned[i] or close[i] > keltner_lower_aligned[i]:
+            # EXIT SHORT: Price returns to pivot point
+            if close[i] >= Pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
