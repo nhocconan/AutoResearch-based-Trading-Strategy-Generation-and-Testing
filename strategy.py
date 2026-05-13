@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R3 with volume > 1.5x 20-period average AND close > 1d EMA34.
-# Short when price breaks below S3 with volume > 1.5x 20-period average AND close < 1d EMA34.
-# Exit when price retouches the Camarilla pivot point (PP) or volume drops below average.
-# Uses discrete position sizing (0.25) to limit fee churn. Designed for BTC/ETH robustness
-# by trading institutional breakout levels with trend and volume filters to avoid false signals.
+# Hypothesis: 6h Williams %R reversal with 1d EMA34 trend filter and 1w Camarilla pivot exits.
+# Williams %R identifies overbought/oversold conditions: long when %R crosses above -80 from below,
+# short when %R crosses below -20 from above. Trend filter: price > 1d EMA34 for longs, price < 1d EMA34 for shorts.
+# Exits when price reaches 1w Camarilla R3/S3 levels (strong reversal zones) or %R reverts to -50.
+# Uses discrete position sizing (0.25) to limit fee churn. Designed for mean reversion in ranging markets
+# with trend alignment to avoid fighting the higher timeframe direction. Works in both bull and bear
+# regimes by capturing short-term exhaustion while respecting weekly structure.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeFilter_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Reversal_1dEMA34_1wCamarillaExits_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +23,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
     # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -32,83 +32,79 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 20-period volume average for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1w Camarilla levels for exits (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Camarilla levels: based on previous week's range
+    camarilla_r3 = np.zeros(len(close_1w))
+    camarilla_s3 = np.zeros(len(close_1w))
+    for i in range(1, len(close_1w)):
+        rng = high_1w[i-1] - low_1w[i-1]
+        camarilla_r3[i] = close_1w[i-1] + rng * 1.1 / 4  # R3 = C + 1.1*range/4
+        camarilla_s3[i] = close_1w[i-1] - rng * 1.1 / 4  # S3 = C - 1.1*range/4
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    
+    # Calculate Williams %R (14 period)
+    lookback = 14
+    highest_high = np.zeros_like(high)
+    lowest_low = np.zeros_like(low)
+    
+    for i in range(n):
+        start_idx = max(0, i - lookback + 1)
+        highest_high[i] = np.max(high[start_idx:i+1])
+        lowest_low[i] = np.min(low[start_idx:i+1])
+    
+    # Avoid division by zero
+    rr = highest_high - lowest_low
+    divisor = np.where(rr == 0, 1, rr)
+    williams_r = -100 * (highest_high - close) / divisor  # %R = -100*(HH - C)/(HH - LL)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after lookback for volume MA
+    for i in range(lookback, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+            np.isnan(williams_r[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate Camarilla levels for previous 1d bar (using HTF data)
-        # Need at least 1 day of data to calculate levels
-        if i < len(prices):
-            # Get the most recent completed 1d bar for Camarilla calculation
-            # We'll use the 1d data we already fetched
-            idx_1d = min(len(df_1d) - 1, i // 24)  # approximate 1d bar index (24*4h bars per day)
-            if idx_1d < 1:
+        if position == 0:
+            # LONG: Williams %R crosses above -80 from below (oversold bounce) AND price > 1d EMA34 (trend alignment)
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+                close[i] > ema_34_1d_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Williams %R crosses below -20 from above (overbought rejection) AND price < 1d EMA34 (trend alignment)
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+                  close[i] < ema_34_1d_aligned[i]):
+                signals[i] = -0.25
+                position = -1
+            else:
                 signals[i] = 0.0
-                continue
-                
-            # Use previous completed 1d bar (idx_1d-1) to avoid look-ahead
-            lookback_idx = idx_1d - 1
-            if lookback_idx < 0:
+        elif position == 1:
+            # EXIT LONG: Williams %R reverts to -50 OR price reaches weekly R3 (strong resistance)
+            if (williams_r[i] >= -50 or 
+                close[i] >= camarilla_r3_aligned[i]):
                 signals[i] = 0.0
-                continue
-                
-            high_1d = df_1d['high'].values[lookback_idx]
-            low_1d = df_1d['low'].values[lookback_idx]
-            close_1d_val = df_1d['close'].values[lookback_idx]
-            
-            # Calculate Camarilla levels
-            range_1d = high_1d - low_1d
-            if range_1d <= 0:
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: Williams %R reverts to -50 OR price reaches weekly S3 (strong support)
+            if (williams_r[i] <= -50 or 
+                close[i] <= camarilla_s3_aligned[i]):
                 signals[i] = 0.0
-                continue
-                
-            # Camarilla R3, S3, and PP (pivot point)
-            r3 = close_1d_val + range_1d * 1.1 / 4
-            s3 = close_1d_val - range_1d * 1.1 / 4
-            pp = (high_1d + low_1d + close_1d_val) / 3
-            
-            # Volume confirmation: current volume > 1.5x 20-period average
-            volume_confirm = volume[i] > 1.5 * volume_ma[i]
-            
-            if position == 0:
-                # LONG: price breaks above R3 with volume confirmation AND close > 1d EMA34 (uptrend)
-                if (close[i] > r3 and 
-                    volume_confirm and 
-                    close[i] > ema_34_1d_aligned[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # SHORT: price breaks below S3 with volume confirmation AND close < 1d EMA34 (downtrend)
-                elif (close[i] < s3 and 
-                      volume_confirm and 
-                      close[i] < ema_34_1d_aligned[i]):
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
-                # EXIT LONG: price retouches pivot point OR volume drops below average
-                if (close[i] <= pp or 
-                    volume[i] < volume_ma[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # EXIT SHORT: price retouches pivot point OR volume drops below average
-                if (close[i] >= pp or 
-                    volume[i] < volume_ma[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
