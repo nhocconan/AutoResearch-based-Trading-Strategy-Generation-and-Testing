@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_Adaptive_Camarilla_R3_S3_Exit
-Hypothesis: Uses 1-day Camarilla R3/S3 levels for breakout entries, filtered by 1-week trend via EMA50, with volume spike confirmation. Exits when price crosses the 1-day EMA34. Designed for 12h timeframe to capture major moves with low trade frequency (target 10-30/year), reducing fee impact while adapting to bull/bear regimes via trend filter.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Breakouts from daily Camarilla pivot levels (R1/S1) with volume confirmation, filtered by 1d EMA50 trend. Go long when price breaks above daily R1 with volume surge and price above EMA50, short when breaks below daily S1 with volume surge and price below EMA50. Designed for 12h timeframe to capture intermediate trends with low trade frequency (~10-30/year), avoiding excessive churn while capturing momentum in both bull and bear markets. Uses proven Camarilla structure from top performers.
 """
 
-name = "12h_Adaptive_Camarilla_R3_S3_Exit"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,78 +22,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and EMA34
+    # Get 1d data for Camarilla pivots and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for 1d
-    # R3 = Close + 1.1 * (High - Low)
-    # S3 = Close - 1.1 * (High - Low)
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
+    # Calculate daily Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # R1 = Pivot + (H - L) * 1.1 / 12
+    # S1 = Pivot - (H - L) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    r1_1d = pivot_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = pivot_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Calculate 1d EMA34 for exit
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Align 1d indicators to 12h timeframe
-    r3_level = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_level = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Calculate volume average (10-period) for volume spike filter
-    vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
+    # Calculate volume average (20-period) for volume spike filter
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_level[i]) or np.isnan(s3_level[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(vol_ma_10[i])):
+        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 10-period average
-        vol_spike = volume[i] > 1.5 * vol_ma_10[i]
+        # Volume spike condition: current volume > 2.0x 20-period average
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Price breaks above R3 + volume spike + weekly uptrend
-            if close[i] > r3_level[i] and vol_spike and close[i] > ema_50_1w_aligned[i]:
-                signals[i] = 0.30
+            # LONG: Price breaks above daily R1 + volume spike + price above EMA50
+            if close[i] > r1_1d_aligned[i] and vol_spike and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + volume spike + weekly downtrend
-            elif close[i] < s3_level[i] and vol_spike and close[i] < ema_50_1w_aligned[i]:
-                signals[i] = -0.30
+            # SHORT: Price breaks below daily S1 + volume spike + price below EMA50
+            elif close[i] < s1_1d_aligned[i] and vol_spike and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below EMA34
-            if close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: Price breaks below daily S1 or price below EMA50
+            if close[i] < s1_1d_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above EMA34
-            if close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above daily R1 or price above EMA50
+            if close[i] > r1_1d_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
