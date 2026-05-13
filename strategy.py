@@ -1,8 +1,14 @@
-# The strategy is a 1-hour trend-following system that uses 4h and 1d higher timeframes for trend direction and regime filtering. It enters long when the 4h EMA50 is above the 1d EMA200 (bullish regime) and price pulls back to the 4h EMA20 with momentum confirmation (RSI > 50). It enters short when the 4h EMA50 is below the 1d EMA200 (bearish regime) and price rallies to the 4h EMA20 with momentum confirmation (RSI < 50). Exits occur when the price crosses the 4h EMA50 or momentum diverges (RSI crosses 50 in the opposite direction). The strategy uses a fixed position size of 0.20 to limit risk and includes an 8 AM to 8 PM UTC session filter to avoid low-liquidity periods. Designed to capture medium-term trends while avoiding whipsaws in ranging markets, it should perform in both bull and bear regimes by aligning with the higher timeframe trend.
-
 #!/usr/bin/env python3
-name = "1h_EMA_Trend_Follow_With_Momentum_Filter"
-timeframe = "1h"
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Use daily Camarilla pivot levels (R1/S1) as support/resistance on 12h timeframe.
+# Enter long when price breaks above R1 with volume confirmation and daily uptrend (close > EMA34).
+# Enter short when price breaks below S1 with volume confirmation and daily downtrend (close < EMA34).
+# Exit when price returns to the pivot point (PP) or trend reverses.
+# Designed for low-frequency, high-probability setups to minimize fee drift in 12h timeframe.
+# Works in both bull and bear markets by following daily trend direction.
+
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,54 +25,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h and 1h data for trend and execution
-    df_4h = get_htf_data(prices, '4h')
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-
-    # Calculate 4h EMA50 and EMA20 for trend and entry
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-
-    # Calculate 1d EMA200 for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
 
-    # Calculate 1h RSI for momentum confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate Camarilla pivot levels for daily timeframe
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pp_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
 
-    # Session filter: 8 AM to 8 PM UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align Camarilla levels to 12h timeframe (wait for daily close)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+
+    # Daily trend filter: EMA34 on daily close
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Volume spike: volume > 2.0 * 20-period average (~10 days at 12h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * vol_ma_20
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(ema20_4h_aligned[i]) or
-            np.isnan(ema200_1d_aligned[i]) or
-            np.isnan(rsi[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Only trade during session
-        if not in_session[i]:
+        if (np.isnan(pp_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,33 +69,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Bullish regime (4h EMA50 > 1d EMA200) + price at 4h EMA20 support + bullish momentum (RSI > 50)
-            if ema50_4h_aligned[i] > ema200_1d_aligned[i] and \
-               close[i] <= ema20_4h_aligned[i] * 1.001 and \
-               rsi[i] > 50:
-                signals[i] = 0.20
+            # LONG: Daily uptrend + price breaks above R1 + volume spike
+            if close[i] > ema34_aligned[i] and close[i] > r1_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish regime (4h EMA50 < 1d EMA200) + price at 4h EMA20 resistance + bearish momentum (RSI < 50)
-            elif ema50_4h_aligned[i] < ema200_1d_aligned[i] and \
-                 close[i] >= ema20_4h_aligned[i] * 0.999 and \
-                 rsi[i] < 50:
-                signals[i] = -0.20
+            # SHORT: Daily downtrend + price breaks below S1 + volume spike
+            elif close[i] < ema34_aligned[i] and close[i] < s1_aligned[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bearish regime shift or momentum failure
-            if ema50_4h_aligned[i] < ema200_1d_aligned[i] or rsi[i] < 50:
+            # EXIT LONG: Price returns to PP or trend turns bearish
+            if close[i] <= pp_aligned[i] or close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bullish regime shift or momentum failure
-            if ema50_4h_aligned[i] > ema200_1d_aligned[i] or rsi[i] > 50:
+            # EXIT SHORT: Price returns to PP or trend turns bullish
+            if close[i] >= pp_aligned[i] or close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
