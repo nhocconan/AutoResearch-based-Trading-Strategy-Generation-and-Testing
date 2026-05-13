@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3S3_Breakout_1D_Trend_Volume"
-timeframe = "1h"
+name = "12h_Camarilla_R3S3_Breakout_1D_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,11 +17,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for each 1h bar using prior bar's OHLC
+    # Calculate Camarilla levels for each 12h bar using prior bar's OHLC
     camarilla_R3 = np.full(n, np.nan)
     camarilla_S3 = np.full(n, np.nan)
     
     for i in range(1, n):
+        # Use previous bar's OHLC to calculate current levels (no look-ahead)
         prev_high = high[i-1]
         prev_low = low[i-1]
         prev_close = close[i-1]
@@ -45,9 +46,6 @@ def generate_signals(prices):
     for i in range(19, n):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
-    # Session filter: 8-20 UTC
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -58,23 +56,17 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Session filter
-        hour = hours[i]
-        if not (8 <= hour <= 20):
-            signals[i] = 0.0
-            continue
-        
         # Volume condition
         vol_condition = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
             # LONG: Break above R3 with daily uptrend and volume
             if close[i] > camarilla_R3[i] and close[i] > ema34_1d_aligned[i] and vol_condition:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # SHORT: Break below S3 with daily downtrend and volume
             elif close[i] < camarilla_S3[i] and close[i] < ema34_1d_aligned[i] and vol_condition:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
@@ -84,13 +76,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Price re-enters Camarilla range (above S3) or trend reversal
             if close[i] > camarilla_S3[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
