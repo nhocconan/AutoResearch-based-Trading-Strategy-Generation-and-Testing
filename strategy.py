@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 4h_4H_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R3/S3 breakout with 1d EMA trend and volume confirmation.
-# Uses price channel breakouts with institutional levels, filtered by 1d trend and volume spikes.
-# Works in bull/bear via 1d trend filter and volume confirmation to avoid false breakouts.
-# Target: 20-50 trades/year on 4h timeframe to avoid fee drag.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
+# Hypothesis: Camarilla pivot breakouts on 1h with 4h EMA trend filter and 1d volume spike capture institutional breakout moves while avoiding chop. Works in bull/bear via 4h trend filter and volume confirmation. Targets 15-30 trades/year via tight entry conditions.
 
-name = "4h_4H_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,45 +20,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # ATR for stop context
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Calculate Camarilla levels for 1h (using previous bar's range)
+    # Camarilla R1 = close + 1.1*(high-low)/12
+    # Camarilla S1 = close - 1.1*(high-low)/12
+    # We use previous bar's high/low/close to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    range_hl = prev_high - prev_low
+    camarilla_r1 = prev_close + 1.1 * range_hl / 12
+    camarilla_s1 = prev_close - 1.1 * range_hl / 12
 
-    # Camarilla levels from previous day (R3, S3)
-    # Calculate from daily OHLC
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+
+    # 1d volume average (20-period)
     df_1d = get_htf_data(prices, '1d')
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # Camarilla: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3 = daily_close + (daily_high - daily_low) * 1.1 / 2
-    camarilla_s3 = daily_close - (daily_high - daily_low) * 1.1 / 2
-    
-    # Align to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    vol_avg_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
 
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # Volume filter: >1.8x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after warmup for 20-period volume average
-        # Skip if any required value is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+    for i in range(50, n):
+        # Skip if any required value is NaN or outside session
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_avg_20_1d_aligned[i]) or 
+            np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,33 +64,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above R3 + 1d EMA34 uptrend + volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.8):
-                signals[i] = 0.25
+            # LONG: Close above R1 + 4h EMA50 uptrend + 1d volume spike
+            if (close[i] > camarilla_r1[i] and 
+                close[i] > ema50_4h_aligned[i] and
+                volume[i] > vol_avg_20_1d_aligned[i] * 1.5):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Close below S3 + 1d EMA34 downtrend + volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.8):
-                signals[i] = -0.25
+            # SHORT: Close below S1 + 4h EMA50 downtrend + 1d volume spike
+            elif (close[i] < camarilla_s1[i] and 
+                  close[i] < ema50_4h_aligned[i] and
+                  volume[i] > vol_avg_20_1d_aligned[i] * 1.5):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S3 or volume drops significantly
-            if close[i] < camarilla_s3_aligned[i] or volume[i] < vol_avg_20[i] * 0.9:
+            # EXIT LONG: Close below S1 or trend change
+            if close[i] < camarilla_s1[i] or close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Close above R3 or volume drops significantly
-            if close[i] > camarilla_r3_aligned[i] or volume[i] < vol_avg_20[i] * 0.9:
+            # EXIT SHORT: Close above R1 or trend change
+            if close[i] > camarilla_r1[i] or close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
