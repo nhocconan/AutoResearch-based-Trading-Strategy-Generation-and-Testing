@@ -1,14 +1,10 @@
-#!/usr/bin/env python3
-"""
-6h_ElderRay_BullBearPower_SMA200_Trend_v2
-Hypothesis: Elder Ray (Bull Power/Bear Power) + 200-period SMA trend filter on 1d timeframe.
-Go long when Bull Power > 0 and price > 1d SMA200, short when Bear Power < 0 and price < 1d SMA200.
-Uses 13-period EMA for Bull/Bear Power calculation. Designed to capture trends with clear momentum,
-avoiding whipsaws in sideways markets. Targets 20-50 trades/year on 6h timeframe.
-"""
+# 4H_Camarilla_R3_S3_Breakout_1D_Trend_Volume
+# Hypothesis: Camarilla pivot levels from daily chart combined with volume spike and daily trend filter.
+# Long when price breaks above R3 with volume spike and daily uptrend, short when breaks below S3 with volume spike and daily downtrend.
+# Designed for 4h timeframe to capture breakouts with low trade frequency (~20-50/year) and strong performance in both bull and bear markets.
 
-name = "6h_ElderRay_BullBearPower_SMA200_Trend_v2"
-timeframe = "6h"
+name = "4H_Camarilla_R3_S3_Breakout_1D_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,63 +19,72 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for EMA13 (Elder Ray) and SMA200
+    # Get daily data for Camarilla pivots and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 13-period EMA for Elder Ray
-    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate daily Camarilla levels (based on previous day)
+    # Pivot = (H+L+C)/3
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Range = H - L
+    range_ = high_1d - low_1d
+    # R3 = Pivot + Range * 1.1
+    # S3 = Pivot - Range * 1.1
+    r3 = pivot + range_ * 1.1
+    s3 = pivot - range_ * 1.1
     
-    # Bull Power = High - EMA13
-    bull_power_1d = high_1d - ema_13_1d
-    # Bear Power = Low - EMA13
-    bear_power_1d = low_1d - ema_13_1d
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 200-period SMA for trend filter
-    sma_200_1d = pd.Series(close_1d).rolling(window=200, min_periods=200).mean().values
+    # Align daily indicators to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align 1d indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    sma_200_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
+    # Calculate volume average (20-period) for volume spike filter
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):
         # Skip if any required data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(sma_200_1d_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume spike condition: current volume > 2.0x 20-period average
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        
         if position == 0:
-            # LONG: Bull Power > 0 and price > 1d SMA200
-            if bull_power_aligned[i] > 0 and close[i] > sma_200_1d_aligned[i]:
+            # LONG: Price breaks above R3 + volume spike + daily uptrend
+            if close[i] > r3_aligned[i] and vol_spike and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power < 0 and price < 1d SMA200
-            elif bear_power_aligned[i] < 0 and close[i] < sma_200_1d_aligned[i]:
+            # SHORT: Price breaks below S3 + volume spike + daily downtrend
+            elif close[i] < s3_aligned[i] and vol_spike and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power <= 0 or price <= 1d SMA200
-            if bull_power_aligned[i] <= 0 or close[i] <= sma_200_1d_aligned[i]:
+            # EXIT LONG: Price breaks below S3 or trend reverses
+            if close[i] < s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power >= 0 or price >= 1d SMA200
-            if bear_power_aligned[i] >= 0 or close[i] >= sma_200_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above R3 or trend reverses
+            if close[i] > r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
