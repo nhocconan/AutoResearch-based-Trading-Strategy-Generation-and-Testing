@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Ichimoku_Cloud_Filter_1dTrend_Volume
-# Hypothesis: Use Ichimoku cloud from 1d timeframe to filter trend, enter on Tenkan-Kijun cross with volume confirmation on 6h.
-# In bull markets: price above cloud + TK cross up = long. In bear markets: price below cloud + TK cross down = short.
-# Volume filter reduces whipsaw. Targets 15-30 trades/year on 6f.
+# 4h_MultiTimeframe_Adaptive_Strategy_v1
+# Hypothesis: Multi-timeframe strategy combining 1d trend direction (EMA34), 4h momentum (RSI), and volume confirmation. 
+# Uses adaptive position sizing based on volatility (ATR) and avoids overtrading by requiring confluence of multiple conditions.
+# Designed for both bull and bear markets: long in uptrend (price > EMA34) with bullish momentum, short in downtrend (price < EMA34) with bearish momentum.
+# Includes volatility-based stop loss and cooldown periods to reduce false signals and manage risk.
 
-name = "6h_Ichimoku_Cloud_Filter_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_MultiTimeframe_Adaptive_Strategy_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,90 +23,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d EMA34 for trend direction
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    max_high_senkou = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((max_high_senkou + min_low_senkou) / 2)
-    
-    # Chikou Span (Lagging Span): close shifted 26 periods back (not used for filtering)
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    # Calculate 4h RSI for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (1.5 * vol_ma)
     
+    # Volatility filter: ATR(14) for dynamic sizing
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Dynamic position size based on volatility (inverse volatility scaling)
+    # Normalize ATR to get volatility factor, then scale position size
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    vol_factor = np.clip(atr_ma / (atr + 1e-10), 0.5, 2.0)  # Inverse volatility: higher volatility = smaller position
+    base_size = 0.25
+    position_size = base_size * vol_factor
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
-    for i in range(52, n):  # start after Ichimoku calculation period
-        # Skip if any Ichimoku values are NaN
-        if np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]):
-            signals[i] = 0.0
-            continue
+    for i in range(50, n):
+        # Decrease cooldown if active
+        if cooldown > 0:
+            cooldown -= 1
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        cloud_top = max(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom = min(senkou_a_6h[i], senkou_b_6h[i])
-        
-        # Check for Tenkan-Kijun cross
-        tk_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
-        tk_cross_down = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
-        
-        if position == 0:
-            # LONG: Price above cloud + TK cross up + volume confirmation
-            if close[i] > cloud_top and tk_cross_up and volume_confirmed[i]:
-                signals[i] = 0.25
+        if position == 0 and cooldown == 0:
+            # LONG: Uptrend (price > EMA34) + bullish momentum (RSI > 50) + volume confirmation
+            if close[i] > ema_34_1d_aligned[i] and rsi[i] > 50 and volume_confirmed[i]:
+                signals[i] = position_size[i]
                 position = 1
-            # SHORT: Price below cloud + TK cross down + volume confirmation
-            elif close[i] < cloud_bottom and tk_cross_down and volume_confirmed[i]:
-                signals[i] = -0.25
+            # SHORT: Downtrend (price < EMA34) + bearish momentum (RSI < 50) + volume confirmation
+            elif close[i] < ema_34_1d_aligned[i] and rsi[i] < 50 and volume_confirmed[i]:
+                signals[i] = -position_size[i]
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below cloud or TK cross down
-            if close[i] < cloud_bottom or tk_cross_down:
+            # EXIT LONG: Trend reversal (price < EMA34) or bearish momentum (RSI < 40)
+            if close[i] < ema_34_1d_aligned[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
+                cooldown = 4  # 4-bar cooldown after exit
             else:
-                signals[i] = 0.25
+                signals[i] = position_size[i]
         elif position == -1:
-            # EXIT SHORT: Price crosses above cloud or TK cross up
-            if close[i] > cloud_top or tk_cross_up:
+            # EXIT SHORT: Trend reversal (price > EMA34) or bullish momentum (RSI > 60)
+            if close[i] > ema_34_1d_aligned[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
+                cooldown = 4  # 4-bar cooldown after exit
             else:
-                signals[i] = -0.25
+                signals[i] = -position_size[i]
     
     return signals
