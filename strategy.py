@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_1d_ChaikinOscillator_Trend
-Hypothesis: Chaikin Oscillator (3,10) on 1d combined with 1d EMA(50) trend filter. 
-Chaikin Oscillator > 0 indicates buying pressure, < 0 selling pressure. 
-Follow the higher timeframe trend: long when 1d trend up and Chaikin > 0, short when 1d trend down and Chaikin < 0.
-Uses volume-weighted accumulation/distribution to filter noise, effective in both bull and bear markets.
-Target: 20-40 trades/year per symbol.
+12h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation
+Hypothesis: Camarilla pivot levels (R1, S1) from the daily chart act as strong support/resistance levels.
+A breakout above R1 with 1d uptrend and volume confirmation signals a long entry.
+A breakdown below S1 with 1d downtrend and volume confirmation signals a short entry.
+This strategy works in both bull and bear markets by following the higher timeframe (1d) trend.
+Target: 12-37 trades/year per symbol.
 """
 
-name = "4h_1d_ChaikinOscillator_Trend"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,80 +18,78 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Chaikin Oscillator on 1d data
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Money Flow Multiplier
-    mfm = np.where((high_1d - low_1d) != 0, 
-                   ((close_1d - low_1d) - (high_1d - close_1d)) / (high_1d - low_1d), 
-                   0)
-    # Money Flow Volume
-    mfv = mfm * volume_1d
+    # Calculate Camarilla pivot levels for each 1d bar
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    cam_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    cam_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Accumulation/Distribution Line
-    adl = np.cumsum(mfv)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
+    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
     
-    # Chaikin Oscillator = EMA(3, ADL) - EMA(10, ADL)
-    adl_series = pd.Series(adl)
-    ema3 = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10 = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin = ema3 - ema10
+    # 1d trend: 34 EMA
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
     
-    # 1d trend: EMA(50)
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = close_1d > ema50_1d
-    downtrend_1d = close_1d < ema50_1d
-    
-    # Align 1d indicators to 4h
-    chaikin_aligned = align_htf_to_ltf(prices, df_1d, chaikin)
+    # Align 1d trend to 12h
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma = np.zeros(n)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Get aligned values
-        chaikin_val = chaikin_aligned[i]
+    for i in range(100, n):
+        # Get aligned values for current bar
+        r1 = cam_r1_aligned[i]
+        s1 = cam_s1_aligned[i]
         uptrend = uptrend_1d_aligned[i]
         downtrend = downtrend_1d_aligned[i]
+        vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: 1d uptrend + positive Chaikin (buying pressure)
-            if uptrend and chaikin_val > 0:
+            # LONG: price breaks above R1, 1d uptrend, volume confirmation
+            if close[i] > r1 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1d downtrend + negative Chaikin (selling pressure)
-            elif downtrend and chaikin_val < 0:
+            # SHORT: price breaks below S1, 1d downtrend, volume confirmation
+            elif close[i] < s1 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 1d trend turns down or Chaikin turns negative
-            if not uptrend or chaikin_val <= 0:
+            # EXIT LONG: price breaks below S1 or 1d trend turns down
+            if close[i] < s1 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 1d trend turns up or Chaikin turns positive
-            if not downtrend or chaikin_val >= 0:
+            # EXIT SHORT: price breaks above R1 or 1d trend turns up
+            if close[i] > r1 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
