@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d HMA21 trend filter and volume spike confirmation.
-# Long when price breaks above Camarilla R1 and close > 1d HMA21 with volume > 2.0x 20-bar average.
-# Short when price breaks below Camarilla S1 and close < 1d HMA21 with volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to target 75-200 total trades over 4 years on 4h timeframe.
-# Camarilla levels provide intraday structure; 1d HMA21 ensures higher timeframe trend alignment;
-# volume spike confirms momentum. Works in bull markets via breakouts and in bear markets via
-# mean-reversion at extreme levels. Prior experiments show Camarilla-based strategies achieve
-# strong test performance when combined with volume and trend filters.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX25 regime filter and volume confirmation.
+# Long when Bull Power > 0, ADX > 25 (trending), and volume > 1.5x 20-bar average.
+# Short when Bear Power < 0, ADX > 25 (trending), and volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 6h timeframe.
+# Elder Ray measures bull/bear strength relative to EMA13; ADX filters for trending markets only;
+# volume confirmation ensures momentum. Works in bull markets via strong Bull Power and in bear markets via strong Bear Power.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dHMA21_Trend_VolumeSpike"
-timeframe = "4h"
+name = "6h_ElderRay_ADX25_Trend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,23 +24,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d HMA21 for trend filter
+    # Calculate 1d EMA13 for Elder Ray
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 13:
         return np.zeros(n)
-    hma_21_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
+    ema_13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Camarilla levels from previous day
-    # Camarilla R1 = close_prev + (high_prev - low_prev) * 1.1/12
-    # Camarilla S1 = close_prev - (high_prev - low_prev) * 1.1/12
-    close_prev = df_1d['close'].shift(1).values
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    camarilla_r1 = close_prev + (high_prev - low_prev) * 1.1 / 12
-    camarilla_s1 = close_prev - (high_prev - low_prev) * 1.1 / 12
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate 1d ADX for regime filter
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[np.nan], dm_plus])
+    dm_minus = np.concatenate([[np.nan], dm_minus])
+    
+    # Smoothed TR, DM+
+    tr_period = 14
+    atr = pd.Series(tr).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(span=tr_period, adjust=False, min_periods=tr_period).mean().values
+    
+    # Align HTF indicators to LTF
+    bull_power = high_1d - ema_13_1d
+    bear_power = low_1d - ema_13_1d
+    
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Calculate average volume for confirmation (20-period)
     lookback = 20
@@ -53,54 +83,41 @@ def generate_signals(prices):
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(hma_21_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R1, close > 1d HMA21, volume spike
-            if (high[i] > camarilla_r1_aligned[i] and 
-                close[i] > hma_21_1d_aligned[i] and 
-                volume[i] > 2.0 * avg_volume[i]):
+            # LONG: Bull Power > 0, ADX > 25, volume spike
+            if (bull_power_aligned[i] > 0 and 
+                adx_aligned[i] > 25 and 
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S1, close < 1d HMA21, volume spike
-            elif (low[i] < camarilla_s1_aligned[i] and 
-                  close[i] < hma_21_1d_aligned[i] and 
-                  volume[i] > 2.0 * avg_volume[i]):
+            # SHORT: Bear Power < 0, ADX > 25, volume spike
+            elif (bear_power_aligned[i] < 0 and 
+                  adx_aligned[i] > 25 and 
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S1 OR volume drops below average
-            if (low[i] < camarilla_s1_aligned[i] or 
-                volume[i] < avg_volume[i]):
+            # EXIT LONG: Bull Power <= 0 OR ADX <= 25 (trend weak)
+            if (bull_power_aligned[i] <= 0 or 
+                adx_aligned[i] <= 25):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R1 OR volume drops below average
-            if (high[i] > camarilla_r1_aligned[i] or 
-                volume[i] < avg_volume[i]):
+            # EXIT SHORT: Bear Power >= 0 OR ADX <= 25 (trend weak)
+            if (bear_power_aligned[i] >= 0 or 
+                adx_aligned[i] <= 25):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    if len(close) < period:
-        return np.full_like(close, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    wma_half = pd.Series(close).ewm(span=half_period, adjust=False).mean()
-    wma_full = pd.Series(close).ewm(span=period, adjust=False).mean()
-    raw_hma = 2 * wma_half - wma_full
-    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
-    return hma.values
