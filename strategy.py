@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 12h ADX25 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band with 12h ADX > 25 and volume > 1.5x average.
-# Short when price breaks below Donchian lower band with 12h ADX > 25 and volume > 1.5x average.
-# Uses discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
-# Donchian channels provide structural breakout levels. 12h ADX ensures we trade only when intermediate trend is strong.
-# Volume spike confirms institutional participation. Works in bull markets via upward breaks and in bear markets via downward breaks.
+# Hypothesis: 1h mean reversion with 4h trend filter and volume confirmation. 
+# Long when price pulls back to 4h VWAP with RSI(14) < 30 and volume > 1.5x average in uptrend (4h close > 4h EMA20).
+# Short when price rallies to 4h VWAP with RSI(14) > 70 and volume > 1.5x average in downtrend (4h close < 4h EMA20).
+# Uses discrete sizing 0.20. Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe.
+# 4h EMA20 filters for intermediate trend, 4h VWAP provides dynamic support/resistance, RSI identifies overextended moves.
+# Volume confirmation ensures participation. Works in bull markets via pullback longs and in bear markets via rally shorts.
 
-name = "4h_Donchian20_12hADX25_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1h_VWAP_RSI_MeanReversion_4hEMA20_VolumeConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,124 +24,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    lookback = 20
-    if n < lookback + 1:
-        return np.zeros(n)
+    # Calculate 1h VWAP (typical price * volume) cumulative
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = vwap_num / vwap_den
     
-    upper_band = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    lower_band = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    # Calculate 1h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate average volume for confirmation (20-period)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get 4h data for EMA20 trend filter and VWAP
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    volume_4h = df_4h['volume'].values
     
-    # Get 12h data for ADX25 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 4h EMA20
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    if len(close_12h) < 30:  # Need sufficient data for ADX calculation
-        return np.zeros(n)
+    # Calculate 4h VWAP
+    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
+    vwap_num_4h = np.cumsum(typical_price_4h * volume_4h)
+    vwap_den_4h = np.cumsum(volume_4h)
+    vwap_4h = vwap_num_4h / vwap_den_4h
     
-    # Calculate ADX (14-period) on 12h data
-    # True Range
-    tr1 = np.abs(high_12h[1:] - low_12h[1:])
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # Align with original indices
+    # Align 4h indicators to 1h timeframe (wait for 4h bar to close)
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h)
+    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = high_12h[1:] - high_12h[:-1]
-    down_move = low_12h[:-1] - low_12h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    
-    # Smoothed TR, +DM, -DM (using Wilder's smoothing, equivalent to EMA with alpha=1/14)
-    period = 14
-    alpha = 1.0 / period
-    atr = np.full_like(tr, np.nan)
-    plus_dm_smooth = np.full_like(plus_dm, np.nan)
-    minus_dm_smooth = np.full_like(minus_dm, np.nan)
-    
-    # Initialize first values
-    if not np.isnan(tr[period]):
-        atr[period] = np.nanmean(tr[1:period+1])
-        plus_dm_smooth[period] = np.nanmean(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.nanmean(minus_dm[1:period+1])
-    
-    # Wilder's smoothing
-    for i in range(period+1, len(tr)):
-        if not np.isnan(tr[i]):
-            atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
-            plus_dm_smooth[i] = alpha * plus_dm[i] + (1 - alpha) * plus_dm_smooth[i-1]
-            minus_dm_smooth[i] = alpha * minus_dm[i] + (1 - alpha) * minus_dm_smooth[i-1]
-    
-    # Calculate +DI and -DI
-    plus_di = np.full_like(tr, np.nan)
-    minus_di = np.full_like(tr, np.nan)
-    dx = np.full_like(tr, np.nan)
-    
-    for i in range(period, len(tr)):
-        if not np.isnan(atr[i]) and atr[i] != 0:
-            plus_di[i] = 100 * plus_dm_smooth[i] / atr[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / atr[i]
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-    
-    # Calculate ADX (smoothed DX)
-    adx = np.full_like(dx, np.nan)
-    for i in range(2*period-1, len(dx)):
-        if not np.isnan(dx[i]):
-            if np.isnan(adx[i-1]):
-                adx[i] = np.nanmean(dx[period-1:i+1])
-            else:
-                adx[i] = alpha * dx[i] + (1 - alpha) * adx[i-1]
-    
-    # Align 12h ADX to 4h timeframe (wait for 12h bar to close)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
+    # Calculate average volume for confirmation (24-period)
+    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(lookback + 20, 30), n):  # Start after sufficient data
+    for i in range(24, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(adx_12h_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(vwap[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema_20_4h_aligned[i]) or np.isnan(vwap_4h_aligned[i]) or 
+            np.isnan(close_4h_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper band with 12h ADX > 25 and volume spike
-            if (close[i] > upper_band[i] and 
-                adx_12h_aligned[i] > 25 and 
+            # LONG: Price near 1h VWAP, RSI oversold, 4h uptrend, volume spike
+            if (close[i] <= vwap[i] * 1.005 and  # Within 0.5% above VWAP
+                rsi[i] < 30 and 
+                close_4h_aligned[i] > ema_20_4h_aligned[i] and 
                 volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below lower band with 12h ADX > 25 and volume spike
-            elif (close[i] < lower_band[i] and 
-                  adx_12h_aligned[i] > 25 and 
+            # SHORT: Price near 1h VWAP, RSI overbought, 4h downtrend, volume spike
+            elif (close[i] >= vwap[i] * 0.995 and  # Within 0.5% below VWAP
+                  rsi[i] > 70 and 
+                  close_4h_aligned[i] < ema_20_4h_aligned[i] and 
                   volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below lower band (reversal signal)
-            if close[i] < lower_band[i]:
+            # EXIT LONG: Price reaches VWAP or RSI overbought
+            if close[i] >= vwap[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above upper band (reversal signal)
-            if close[i] > upper_band[i]:
+            # EXIT SHORT: Price reaches VWAP or RSI oversold
+            if close[i] <= vwap[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
