@@ -1,11 +1,12 @@
-# 12h_Camarilla_Pivot_R1_S1_1dTrend_VolumeConfirm
-# Hypothesis: 12h price action at Camarilla R1/S1 levels with daily trend and volume confirmation
-# captures institutional-level reversals while minimizing false signals. Daily trend aligns with
-# higher-timeframe momentum, volume confirms breakout strength, Camarilla provides precise levels.
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+#/usr/bin/env python3
+# 4h_EqualHighsLows_RangeBreakout_1dTrend_VolumeFilter
+# Hypothesis: In BTC/ETH, range-bound markets (equally spaced highs/lows) precede breakouts.
+# We detect a 4-bar range (equal highs/lows ±0.15%) and breakout in direction of 1d EMA50 with volume spike.
+# Works in bull/bear: ranges form before major moves in both regimes. Low trade frequency avoids fee drag.
+# Target: 20-30 trades/year (80-120 total over 4 years).
 
-name = "12h_Camarilla_Pivot_R1_S1_1dTrend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_EqualHighsLows_RangeBreakout_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -22,53 +23,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter and Camarilla calculation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate daily EMA34 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily EMA50 for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
-    # Calculate weekly high/low for Camarilla pivot points (use previous week)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Use previous week's high/low/close for current week's Camarilla levels
-    high_1w_prev = df_1w['high'].shift(1).values  # Previous week high
-    low_1w_prev = df_1w['low'].shift(1).values    # Previous week low
-    close_1w_prev = df_1w['close'].shift(1).values # Previous week close
-    
-    # Align weekly data to 12h timeframe
-    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w_prev)
-    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w_prev)
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w_prev)
+    # Detect 4-bar range: equal highs and lows within 0.15%
+    range_high = np.full(n, np.nan)
+    range_low = np.full(n, np.nan)
+    in_range = np.zeros(n, dtype=bool)
 
-    # Calculate Camarilla pivot levels for R1 and S1
-    # R1 = Close + 1.1*(High-Low)/12
-    # S1 = Close - 1.1*(High-Low)/12
-    camarilla_range = high_1w_aligned - low_1w_aligned
-    r1_level = close_1w_aligned + 1.1 * camarilla_range / 12.0
-    s1_level = close_1w_aligned - 1.1 * camarilla_range / 12.0
+    for i in range(4, n):
+        hh = np.max(high[i-4:i])
+        ll = np.min(low[i-4:i])
+        # Check if highs and lows are roughly equal (within 0.15%)
+        if (hh - np.min(high[i-4:i])) / hh < 0.0015 and (np.max(low[i-4:i]) - ll) / ll < 0.0015:
+            range_high[i] = hh
+            range_low[i] = ll
+            in_range[i] = True
 
-    # Volume confirmation: current volume > 1.3 x 20-period average
+    # Volume confirmation: current volume > 2.0 x 20-period average (strict)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.3 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if data is not ready
-        if (np.isnan(r1_level[i]) or np.isnan(s1_level[i]) or 
+        if (np.isnan(range_high[i]) or np.isnan(range_low[i]) or 
             np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -78,26 +69,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price touches S1 level with volume spike and daily uptrend
-            if low[i] <= s1_level[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Price touches R1 level with volume spike and daily downtrend
-            elif high[i] >= r1_level[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+            # Only enter on breakout AFTER a range is identified (lookback 1 bar)
+            if in_range[i-1]:
+                # LONG: Break above range high with volume spike and daily uptrend
+                if close[i] > range_high[i-1] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # SHORT: Break below range low with volume spike and daily downtrend
+                elif close[i] < range_low[i-1] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches R1 level or daily trend turns down
-            if high[i] >= r1_level[i] or close[i] < ema_1d_aligned[i]:
+            # EXIT LONG: Price re-enters range or daily trend turns down
+            if close[i] < range_low[i-1] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches S1 level or daily trend turns up
-            if low[i] <= s1_level[i] or close[i] > ema_1d_aligned[i]:
+            # EXIT SHORT: Price re-enters range or daily trend turns up
+            if close[i] > range_high[i-1] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
