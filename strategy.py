@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R3/S3 breakouts on 12h timeframe with 1d trend filter and volume confirmation capture institutional breakout moves while avoiding whipsaws. Works in bull markets via momentum continuation and in bear markets via mean-reversion failure at extreme levels.
-# Uses 1d EMA34 for trend filter to ensure alignment with higher timeframe momentum.
-# Entry: Long when price breaks above R3 + 1d EMA34 uptrend + volume spike; Short when price breaks below S3 + 1d EMA34 downtrend + volume spike.
-# Exit: Mean reversion to R4/S4 levels or opposite Camarilla level to avoid overstaying extended moves.
-# Target: 20-35 trades/year on 12h to stay within optimal range while capturing significant moves.
+# 1d_WeeklyPivot_PriceAction_Reversal
+# Hypothesis: Price reversals at weekly pivot levels with volume confirmation capture mean-reversion moves in both bull and bear markets.
+# Weekly pivots act as institutional support/resistance; price reacting off these levels with volume shows rejection.
+# Entry: Long when price bounces off weekly S1/S2/S3 with volume spike; Short when price rejects at weekly R1/R2/R3 with volume spike.
+# Exit: Mean reversion to weekly pivot point (PP) or opposite pivot level to avoid overstaying.
+# Target: 10-25 trades/year on 1d to stay within optimal range while capturing significant reversals.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_WeeklyPivot_PriceAction_Reversal"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,38 +24,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate 1d Camarilla levels (using previous day's OHLC)
-    # Get daily data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data once before loop
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
         return np.zeros(n)
-    
-    # Calculate Camarilla levels for each day: based on previous day's OHLC
-    # R4 = Close + 1.5 * (High - Low)
-    # R3 = Close + 1.1 * (High - Low)
-    # S3 = Close - 1.1 * (High - Low)
-    # S4 = Close - 1.5 * (High - Low)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Calculate Camarilla levels
-    R3_1d = prev_close + 1.1 * (prev_high - prev_low)
-    S3_1d = prev_close - 1.1 * (prev_high - prev_low)
-    R4_1d = prev_close + 1.5 * (prev_high - prev_low)
-    S4_1d = prev_close - 1.5 * (prev_high - prev_low)
-    
-    # Align to 12h timeframe
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
-    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
 
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly pivot points: PP = (H+L+C)/3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    
+    # Weekly support and resistance levels
+    weekly_r1 = 2 * weekly_pp - weekly_low
+    weekly_r2 = weekly_pp + (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pp - weekly_low)
+    weekly_s1 = 2 * weekly_pp - weekly_high
+    weekly_s2 = weekly_pp - (weekly_high - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pp)
 
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Align weekly pivot levels to daily timeframe (wait for weekly close)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
+
+    # Volume confirmation: volume > 1.5x 20-day average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
@@ -63,9 +60,8 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(R3_1d_aligned[i]) or np.isnan(S3_1d_aligned[i]) or 
-            np.isnan(R4_1d_aligned[i]) or np.isnan(S4_1d_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,30 +70,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above R3 + 1d EMA34 uptrend + volume spike
-            if (close[i] > R3_1d_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Price bounces off weekly support with volume spike
+            if ((close[i] >= s1_aligned[i] * 0.995 and close[i] <= s1_aligned[i] * 1.005) or
+                (close[i] >= s2_aligned[i] * 0.995 and close[i] <= s2_aligned[i] * 1.005) or
+                (close[i] >= s3_aligned[i] * 0.995 and close[i] <= s3_aligned[i] * 1.005)) and \
+               volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below S3 + 1d EMA34 downtrend + volume spike
-            elif (close[i] < S3_1d_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Price rejects at weekly resistance with volume spike
+            elif ((close[i] >= r1_aligned[i] * 0.995 and close[i] <= r1_aligned[i] * 1.005) or
+                  (close[i] >= r2_aligned[i] * 0.995 and close[i] <= r2_aligned[i] * 1.005) or
+                  (close[i] >= r3_aligned[i] * 0.995 and close[i] <= r3_aligned[i] * 1.005)) and \
+                 volume[i] > vol_avg_20[i] * 1.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Mean reversion to R4 level
-            if close[i] < R4_1d_aligned[i]:
+            # EXIT LONG: Mean reversion to weekly pivot or resistance
+            if close[i] >= pp_aligned[i] or close[i] >= r1_aligned[i] * 0.995:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Mean reversion to S4 level
-            if close[i] > S4_1d_aligned[i]:
+            # EXIT SHORT: Mean reversion to weekly pivot or support
+            if close[i] <= pp_aligned[i] or close[i] <= s1_aligned[i] * 1.005:
                 signals[i] = 0.0
                 position = 0
             else:
