@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: Camarilla pivot levels (R1, S1) from the daily chart act as strong support/resistance levels.
-A breakout above R1 with 1d uptrend and volume confirmation signals a long entry.
-A breakdown below S1 with 1d downtrend and volume confirmation signals a short entry.
-This strategy works in both bull and bear markets by following the higher timeframe (1d) trend.
-Target: 12-37 trades/year per symbol.
+1d_1w_Volatility_Breakout_Trend_Follow
+Hypothesis: In both bull and bear markets, volatility breakouts from ATR-based channels
+with weekly trend alignment provide strong directional moves. Uses 1d ATR(20) for
+channel width (1.5 * ATR) and 1w EMA(34) for trend filter. Volume confirmation
+filters low-quality breakouts. Designed for low trade frequency (<25/year) to
+minimize fee drag while capturing major trends.
 """
 
-name = "4h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "4h"
+name = "1d_1w_Volatility_Breakout_Trend_Follow"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,78 +18,92 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    cam_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    cam_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate ATR(20) on 1d
+    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(low_1d[1:], high_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.zeros_like(close_1d)
+    for i in range(20, len(atr)):
+        atr[i] = np.mean(tr[i-19:i+1])
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
-    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
+    # Calculate upper/lower bands: close ± 1.5 * ATR
+    upper_band = close_1d + 1.5 * atr
+    lower_band = close_1d - 1.5 * atr
     
-    # 1d trend: 34 EMA
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = close_1d > ema_34_1d
-    downtrend_1d = close_1d < ema_34_1d
+    # Align bands to daily timeframe (no shift needed as bands are based on closed 1d bar)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
-    # Align 1d trend to 4h
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    close_1w = df_1w['close'].values
+    # Calculate EMA(34) on 1w
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    uptrend_1w = close_1w > ema_34_1w
+    downtrend_1w = close_1w < ema_34_1w
+    
+    # Align 1w trend to daily
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    
+    # Volume confirmation: volume > 1.3 * 20-day average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.5 * vol_ma
+    volume_conf = volume > 1.3 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Get aligned values for current bar
-        r1 = cam_r1_aligned[i]
-        s1 = cam_s1_aligned[i]
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
+    for i in range(50, n):
+        upper = upper_band_aligned[i]
+        lower = lower_band_aligned[i]
+        uptrend = uptrend_1w_aligned[i]
+        downtrend = downtrend_1w_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: price breaks above R1, 1d uptrend, volume confirmation
-            if close[i] > r1 and uptrend and vol_conf:
+            # LONG: close breaks above upper band, weekly uptrend, volume confirmation
+            if close[i] > upper and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1, 1d downtrend, volume confirmation
-            elif close[i] < s1 and downtrend and vol_conf:
+            # SHORT: close breaks below lower band, weekly downtrend, volume confirmation
+            elif close[i] < lower and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below S1 or 1d trend turns down
-            if close[i] < s1 or not uptrend:
+            # EXIT LONG: close breaks below lower band or weekly trend turns down
+            if close[i] < lower or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above R1 or 1d trend turns up
-            if close[i] > r1 or not downtrend:
+            # EXIT SHORT: close breaks above upper band or weekly trend turns up
+            if close[i] > upper or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
