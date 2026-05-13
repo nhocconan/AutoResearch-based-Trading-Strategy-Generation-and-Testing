@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_Trend_Volume
-Hypothesis: Donchian(20) breakouts with 1d trend (EMA50) and volume confirmation work in both bull and bear markets.
-Breakout above upper band with uptrend and volume spike = long.
-Breakdown below lower band with downtrend and volume spike = short.
-Exit on opposite band touch or trend reversal. Uses 1d trend filter for higher timeframe bias.
-Target: 12-37 trades/year per symbol.
+1d_Fibonacci_Retracement_Trend_Filter
+Hypothesis: In both bull and bear markets, price retraces to key Fibonacci levels (38.2%, 50%, 61.8%) during pullbacks within a strong weekly trend. Enter long at 61.8% retracement in weekly uptrend, short at 38.2% retracement in weekly downtrend. Use volume confirmation to avoid false signals. Target: 15-25 trades/year per symbol.
 """
 
-name = "12h_Donchian_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "1d_Fibonacci_Retracement_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,72 +22,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel: 20-period high/low
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
-    
-    # 12h trend: EMA50
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = close > ema_50
-    downtrend_12h = close < ema_50
-    
-    # 1d trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1w = df_1w['close'].values > ema_50_1w
+    downtrend_1w = df_1w['close'].values < ema_50_1w
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
-    # Volume confirmation: volume > 2.0 * 20-period average
-    vol_ma = np.full(n, np.nan)
+    # 20-day high/low for Fibonacci calculation
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Fibonacci levels: 38.2%, 50%, 61.8%
+    diff = high_20 - low_20
+    fib_382 = high_20 - 0.382 * diff
+    fib_500 = high_20 - 0.500 * diff
+    fib_618 = high_20 - 0.618 * diff
+    
+    # Volume confirmation: volume > 1.5 * 20-day average
+    vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 2.0 * vol_ma
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if Donchian bands not yet calculated
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
-            signals[i] = 0.0
-            continue
-            
-        upper_band = highest_high[i]
-        lower_band = lowest_low[i]
-        uptrend = uptrend_12h[i]
-        downtrend = downtrend_12h[i]
-        uptrend_htf = uptrend_1d_aligned[i]
-        downtrend_htf = downtrend_1d_aligned[i]
+    for i in range(20, n):
+        # Get values
+        fib382 = fib_382[i]
+        fib500 = fib_500[i]
+        fib618 = fib_618[i]
+        uptrend = uptrend_1w_aligned[i]
+        downtrend = downtrend_1w_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: break above upper band, 12h uptrend, 1d uptrend filter, volume confirmation
-            if close[i] > upper_band and uptrend and uptrend_htf and vol_conf:
+            # LONG: price at 61.8% retracement in weekly uptrend with volume confirmation
+            if close[i] <= fib618 and close[i] >= fib500 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below lower band, 12h downtrend, 1d downtrend filter, volume confirmation
-            elif close[i] < lower_band and downtrend and downtrend_htf and vol_conf:
+            # SHORT: price at 38.2% retracement in weekly downtrend with volume confirmation
+            elif close[i] >= fib382 and close[i] <= fib500 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch lower band or 12h trend turns down
-            if close[i] < lower_band or not uptrend:
+            # EXIT LONG: price reaches 50% retracement or weekly trend turns down
+            if close[i] >= fib500 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch upper band or 12h trend turns up
-            if close[i] > upper_band or not downtrend:
+            # EXIT SHORT: price reaches 50% retracement or weekly trend turns up
+            if close[i] <= fib500 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
