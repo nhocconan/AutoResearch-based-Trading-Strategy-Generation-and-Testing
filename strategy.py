@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Bollinger Band squeeze breakout with 1w EMA200 trend filter and ATR volatility regime.
-# Long when price breaks above upper BB(20,2) AND close > 1w EMA200 AND ATR14 > ATR50 (high vol regime).
-# Short when price breaks below lower BB(20,2) AND close < 1w EMA200 AND ATR14 > ATR50.
-# Exit when price returns to middle BB(20) OR ATR14 < ATR50 * 0.8 (low vol exit).
-# Uses discrete position sizing (0.30) to balance return and drawdown.
-# Designed for low trade frequency (~7-25/year) by requiring confluence of BB breakout, weekly trend, and volatility regime.
-# Bollinger Band squeeze identifies low volatility periods preceding breakouts, effective in both bull and bear markets.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 12h trend filter and volume confirmation.
+# Camarilla levels calculated from prior 12h bar (HLC). Long when price breaks above R3 with 12h EMA50 uptrend and volume > 1.5x average.
+# Short when price breaks below S3 with 12h EMA50 downtrend and volume > 1.5x average.
+# Exit on break of opposite Camarilla level (R3/S3) or volume drop below average.
+# Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
+# Designed for low trade frequency (~12-37/year) by requiring confluence of breakout, trend, and volume confirmation.
+# Camarilla levels identify intraday support/resistance; breakouts with volume and trend alignment capture strong moves.
+# Effective in both bull and bear markets by trading breakouts in direction of higher timeframe trend.
 
-name = "1d_BollingerBand_Squeeze_1wTrend_VolRegime_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_12hTrend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,72 +24,68 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 12h data for HTF trend and Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate EMA(200) on 1w close for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate EMA(50) on 12h close for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Bollinger Bands: middle = SMA(20), std = 2
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + 2 * std20
-    lower_band = sma20 - 2 * std20
-    middle_band = sma20  # for exit
+    # Calculate Camarilla levels from prior 12h bar: based on (H+L+C)
+    # Typical Price = (H+L+C)/3, Camarilla width = (H-L) * 1.1/12
+    typical_12h = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    camarilla_width = range_12h * 1.1 / 12
     
-    # ATR(14) and ATR(50) for volatility regime
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # first bar
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # R3 = typical + 4 * width, S3 = typical - 4 * width
+    r3_12h = typical_12h + 4 * camarilla_width
+    s3_12h = typical_12h - 4 * camarilla_width
     
-    # Volatility regime: ATR14 > ATR50 (high volatility)
-    vol_regime = atr14 > atr50
+    # Align Camarilla levels to 6h timeframe (completed 12h bar only)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
     
-    # Breakout conditions
-    breakout_up = close > upper_band
-    breakout_down = close < lower_band
-    return_to_middle = np.abs(close - middle_band) < 0.5 * std20  # exit when near middle
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_ma20 * 1.5)
     
-    # Track position
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(ema200_1w_aligned[i]) or np.isnan(sma20[i]) or np.isnan(std20[i]) or \
-           np.isnan(atr14[i]) or np.isnan(atr50[i]):
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above upper BB, close > 1w EMA200, high volatility regime
-            if breakout_up[i] and close[i] > ema200_1w_aligned[i] and vol_regime[i]:
-                signals[i] = 0.30
+            # LONG: price breaks above R3, 12h EMA50 uptrend (close > EMA), volume confirmation
+            if close[i] > r3_12h_aligned[i] and close_12h[-1] > ema50_12h[-1] and volume_confirm[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below lower BB, close < 1w EMA200, high volatility regime
-            elif breakout_down[i] and close[i] < ema200_1w_aligned[i] and vol_regime[i]:
-                signals[i] = -0.30
+            # SHORT: price breaks below S3, 12h EMA50 downtrend (close < EMA), volume confirmation
+            elif close[i] < s3_12h_aligned[i] and close_12h[-1] < ema50_12h[-1] and volume_confirm[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to middle BB OR low volatility regime (ATR14 < ATR50 * 0.8)
-            if return_to_middle[i] or atr14[i] < atr50[i] * 0.8:
+            # EXIT LONG: price breaks below S3 (opposite level) OR volume drops below average
+            if close[i] < s3_12h_aligned[i] or volume[i] < vol_ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to middle BB OR low volatility regime (ATR14 < ATR50 * 0.8)
-            if return_to_middle[i] or atr14[i] < atr50[i] * 0.8:
+            # EXIT SHORT: price breaks above R3 (opposite level) OR volume drops below average
+            if close[i] > r3_12h_aligned[i] or volume[i] < vol_ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
