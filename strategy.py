@@ -1,32 +1,21 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume confirmation (>2.0x 20-bar avg) for confirmation.
-# Uses 12h HMA21 for trend alignment (HTF), 4h Donchian channels for breakout entry, and volume confirmation to avoid false breakouts.
-# Designed for low-moderate trade frequency (target 20-60 total over 4 years) to minimize fee drag while capturing strong trends.
-# Works in both bull and bear markets by following the 12h trend direction and requiring volume confirmation.
+# Hypothesis: 6h Williams Fractal breakout with 1d trend filter (EMA34) and volume confirmation (>2.0x 20-bar avg).
+# Uses weekly higher timeframe for regime (price > weekly EMA50 = bull regime, < = bear regime) to adjust fractal sensitivity.
+# In bull regime: buy breakouts above recent bullish fractal; in bear regime: sell breakdowns below recent bearish fractal.
+# Volume confirmation avoids false breakouts. Designed for low frequency (target 50-150 total trades over 4 years) to minimize fee drag.
+# Works in both bull and bear markets by adapting to weekly regime and requiring strong volume confirmation.
 
-name = "4h_Donchian20_Breakout_12hHMA21_VolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_WilliamsFractal_Breakout_1dEMA34_WeeklyEMA50_Regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_hma(series, period):
-    """Calculate Hull Moving Average"""
-    if len(series) < period:
-        return np.full_like(series, np.nan, dtype=float)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    wma_half = pd.Series(series).ewm(span=half_period, adjust=False, min_periods=half_period).mean().values
-    wma_full = pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
-    raw_hma = 2 * wma_half - wma_full
-    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean().values
-    return hma
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -34,17 +23,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h HMA21 for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    # Calculate 1d EMA34 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    hma_21_12h = calculate_hma(close_12h, 21)
-    hma_21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period) for breakout (primary TF)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate weekly EMA50 for regime filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate Williams Fractals on 1d (requires 2 extra bars for confirmation)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    # Align with 2 extra delay bars for fractal confirmation (needs 2 future 1d bars)
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
@@ -52,40 +58,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after lookback
+    for i in range(100, n):  # start after all lookbacks
         # Skip if any required data is NaN
-        if (np.isnan(hma_21_12h_aligned[i]) or 
-            np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(bearish_fractal_aligned[i]) or 
+            np.isnan(bullish_fractal_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
+        # Determine regime: bull if close > weekly EMA50, bear if close < weekly EMA50
+        bull_regime = close[i] > ema_50_1w_aligned[i]
+        bear_regime = close[i] < ema_50_1w_aligned[i]
+        
         if position == 0:
-            # LONG: Price breaks above Donchian upper channel, close > 12h HMA21, volume spike (>2.0x avg)
-            if (high[i] > highest_high[i] and 
-                close[i] > hma_21_12h_aligned[i] and 
-                volume[i] > 2.0 * avg_volume[i]):
+            # LONG: In bull regime, price breaks above recent bullish fractal with volume spike
+            if bull_regime and high[i] > bullish_fractal_aligned[i] and volume[i] > 2.0 * avg_volume[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian lower channel, close < 12h HMA21, volume spike (>2.0x avg)
-            elif (low[i] < lowest_low[i] and 
-                  close[i] < hma_21_12h_aligned[i] and 
-                  volume[i] > 2.0 * avg_volume[i]):
+            # SHORT: In bear regime, price breaks below recent bearish fractal with volume spike
+            elif bear_regime and low[i] < bearish_fractal_aligned[i] and volume[i] > 2.0 * avg_volume[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close position if price breaks below Donchian lower channel or volume drops
-            if (low[i] < lowest_low[i]) or (volume[i] < 0.5 * avg_volume[i]):
+            # EXIT LONG: Close if price breaks below recent bearish fractal or volume drops significantly
+            if low[i] < bearish_fractal_aligned[i] or volume[i] < 0.4 * avg_volume[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close position if price breaks above Donchian upper channel or volume drops
-            if (high[i] > highest_high[i]) or (volume[i] < 0.5 * avg_volume[i]):
+            # EXIT SHORT: Close if price breaks above recent bullish fractal or volume drops significantly
+            if high[i] > bullish_fractal_aligned[i] or volume[i] < 0.4 * avg_volume[i]:
                 signals[i] = 0.0
                 position = 0
             else:
