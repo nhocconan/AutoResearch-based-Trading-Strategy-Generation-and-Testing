@@ -1,16 +1,14 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla R1/S1 breakouts with 1d trend filter and volume confirmation work in both bull and bear markets.
-Breakout above R1 with 1d uptrend and volume spike = long.
-Breakdown below S1 with 1d downtrend and volume spike = short.
-Exit on opposite level touch or trend reversal.
-Uses 12h timeframe with 1d trend filter to reduce trade frequency and avoid overtrading.
-Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+4h_RSI_Divergence_Bullish_Bearish
+Hypothesis: RSI divergences on 4H timeframe combined with 1D trend filter and volume confirmation provide high-probability entries in both bull and bear markets.
+Bullish divergence: price makes lower low, RSI makes higher low. Bearish divergence: price makes higher high, RSI makes lower high.
+Enter on divergence confirmation with price action and volume spike. Exit on opposite divergence or trend change.
+Target: 20-40 trades/year per symbol.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_Divergence_Bullish_Bearish"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,19 +25,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Camarilla levels from previous day (using previous close)
-    prev_close = np.concatenate([[close[0]], close[:-1]])
-    cam_high = np.concatenate([[high[0]], high[:-1]])  # previous high
-    cam_low = np.concatenate([[low[0]], low[:-1]])    # previous low
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla levels
-    range_prev = cam_high - cam_low
-    r1 = prev_close + 1.1 * range_prev * 1.0 / 12
-    s1 = prev_close - 1.1 * range_prev * 1.0 / 12
-    r3 = prev_close + 1.1 * range_prev * 3.0 / 12
-    s3 = prev_close - 1.1 * range_prev * 3.0 / 12
-    
-    # 1d trend filter (EMA50)
+    # 1D trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -49,46 +44,70 @@ def generate_signals(prices):
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 2.0 * vol_ma
+    volume_conf = volume > 1.5 * vol_ma
+    
+    # Detect bullish and bearish divergences
+    bullish_div = np.zeros(n, dtype=bool)
+    bearish_div = np.zeros(n, dtype=bool)
+    
+    # Look for price lows and RSI lows for bullish divergence
+    for i in range(20, n-10):
+        # Find local price low in window [i-10, i+10]
+        if low[i] == np.min(low[i-10:i+11]):
+            # Look back for previous low
+            for j in range(i-20, i-10):
+                if low[j] == np.min(low[j-10:j+11]) and j >= 10:
+                    if low[i] < low[j] and rsi[i] > rsi[j]:  # Lower low, higher RSI low
+                        bullish_div[i] = True
+                    break
+    
+    # Look for price highs and RSI highs for bearish divergence
+    for i in range(20, n-10):
+        # Find local price high in window [i-10, i+10]
+        if high[i] == np.max(high[i-10:i+11]):
+            # Look back for previous high
+            for j in range(i-20, i-10):
+                if high[j] == np.max(high[j-10:j+11]) and j >= 10:
+                    if high[i] > high[j] and rsi[i] < rsi[j]:  # Higher high, lower RSI high
+                        bearish_div[i] = True
+                    break
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Get values
-        r1_val = r1[i]
-        s1_val = s1[i]
-        r3_val = r3[i]
-        s3_val = s3[i]
+        bull_div = bullish_div[i]
+        bear_div = bearish_div[i]
         uptrend = uptrend_1d_aligned[i]
         downtrend = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: break above R1 with 1d uptrend and volume confirmation
-            if close[i] > r1_val and uptrend and vol_conf:
+            # LONG: bullish divergence + 1D uptrend + volume confirmation
+            if bull_div and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1 with 1d downtrend and volume confirmation
-            elif close[i] < s1_val and downtrend and vol_conf:
+            # SHORT: bearish divergence + 1D downtrend + volume confirmation
+            elif bear_div and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch S3 or 1d trend turns down
-            if close[i] < s3_val or not uptrend:
+            # EXIT LONG: bearish divergence or 1D trend turns down
+            if bear_div or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch R3 or 1d trend turns up
-            if close[i] > r3_val or not downtrend:
+            # EXIT SHORT: bullish divergence or 1D trend turns up
+            if bull_div or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
