@@ -2,10 +2,10 @@
 # Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when price breaks above R1 and close > 1d EMA34 with volume > 2.0x 20-bar average.
 # Short when price breaks below S1 and close < 1d EMA34 with volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to target 75-150 total trades over 4 years on 4h timeframe.
-# R1/S1 levels are tighter breakout zones than R4/S4, reducing false breakouts when combined with 1d trend and volume spike.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 4h timeframe.
+# R1/S1 levels act as strong breakout zones; combined with 1d trend filter and volume spike reduces false breakouts.
 # Works in bull markets via breakouts and in bear markets via mean-reversion at extreme levels.
-# Uses proper MTF data loading: get_htf_data called once before loop.
+# Timeframe: 4h, HTF: 1d for trend and Camarilla levels.
 
 name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeSpike"
 timeframe = "4h"
