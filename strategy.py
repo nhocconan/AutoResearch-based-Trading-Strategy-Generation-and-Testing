@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
-Hypothesis: Daily EMA34 sets trend direction, Camarilla R1/S1 levels provide entry points for breakouts with volume confirmation. Designed for low trade frequency (20-40/year) to work in both bull and bear markets by combining trend-following with breakout logic.
+1d_Weekly_Pivot_MR_With_Volume
+Hypothesis: Weekly pivot levels act as strong support/resistance. Price tends to 
+mean revert from extreme levels (R4/S4) but continues when breaking R3/S3. 
+Volume confirmation filters false signals. Designed for low trade frequency 
+(15-25/year) to work in both bull and bear markets by capturing reversals 
+at extremes and breakouts in strong trends.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_MR_With_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for the day"""
-    typical = (high + low + close) / 3.0
-    range_val = high - low
-    r1 = close + range_val * 1.1 / 12
-    r2 = close + range_val * 1.1 / 6
-    r3 = close + range_val * 1.1 / 4
-    r4 = close + range_val * 1.1 / 2
-    s1 = close - range_val * 1.1 / 12
-    s2 = close - range_val * 1.1 / 6
-    s3 = close - range_val * 1.1 / 4
-    s4 = close - range_val * 1.1 / 2
-    return r1, r2, r3, r4, s1, s2, s3, s4
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points: P, R1-R4, S1-S4"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,58 +39,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and Camarilla calculation
-    df_daily = get_htf_data(prices, '1d')
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate daily EMA34 for trend direction
-    daily_close_series = pd.Series(df_daily['close'])
-    ema34_daily = daily_close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Calculate daily Camarilla levels
-    r1_d, r2_d, r3_d, r4_d, s1_d, s2_d, s3_d, s4_d = calculate_camarilla(
-        df_daily['high'].values, df_daily['low'].values, df_daily['close'].values
+    # Calculate weekly pivot points
+    pivot, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivot_points(
+        weekly_high, weekly_low, weekly_close
     )
     
-    # Align daily indicators to 4h timeframe
-    ema34_4h = align_htf_to_ltf(prices, df_daily, ema34_daily)
-    r1_4h = align_htf_to_ltf(prices, df_daily, r1_d)
-    r2_4h = align_htf_to_ltf(prices, df_daily, r2_d)
-    r3_4h = align_htf_to_ltf(prices, df_daily, r3_d)
-    r4_4h = align_htf_to_ltf(prices, df_daily, r4_d)
-    s1_4h = align_htf_to_ltf(prices, df_daily, s1_d)
-    s2_4h = align_htf_to_ltf(prices, df_daily, s2_d)
-    s3_4h = align_htf_to_ltf(prices, df_daily, s3_d)
-    s4_4h = align_htf_to_ltf(prices, df_daily, s4_d)
+    # Align weekly pivot levels to 1d timeframe
+    pivot_1d = align_htf_to_ltf(prices, df_weekly, pivot)
+    r3_1d = align_htf_to_ltf(prices, df_weekly, r3)
+    r4_1d = align_htf_to_ltf(prices, df_weekly, r4)
+    s3_1d = align_htf_to_ltf(prices, df_weekly, s3)
+    s4_1d = align_htf_to_ltf(prices, df_weekly, s4)
     
-    # Volume confirmation: > 1.3x 20-period average
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):
+    for i in range(20, n):
         if position == 0:
-            # LONG: Price above EMA34 (uptrend) and breaks above R1 with volume
-            if close[i] > ema34_4h[i] and close[i] > r1_4h[i] and close[i-1] <= r1_4h[i-1] and volume_confirm[i]:
+            # MEAN REVERSION LONG: Price at S4 with volume confirmation
+            if close[i] <= s4_1d[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below EMA34 (downtrend) and breaks below S1 with volume
-            elif close[i] < ema34_4h[i] and close[i] < s1_4h[i] and close[i-1] >= s1_4h[i-1] and volume_confirm[i]:
+            # MEAN REVERSION SHORT: Price at R4 with volume confirmation
+            elif close[i] >= r4_1d[i] and volume_confirm[i]:
+                signals[i] = -0.25
+                position = -1
+            # BREAKOUT LONG: Price breaks above R3 with volume confirmation
+            elif close[i] > r3_1d[i] and close[i-1] <= r3_1d[i-1] and volume_confirm[i]:
+                signals[i] = 0.25
+                position = 1
+            # BREAKOUT SHORT: Price breaks below S3 with volume confirmation
+            elif close[i] < s3_1d[i] and close[i-1] >= s3_1d[i-1] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches R2 (take profit) or breaks below EMA34 (trend change)
-            if close[i] >= r2_4h[i] or close[i] < ema34_4h[i]:
+            # EXIT LONG: Price reaches R3 (take profit) or breaks below S3 (stop)
+            if close[i] >= r3_1d[i] or close[i] < s3_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches S2 (take profit) or breaks above EMA34 (trend change)
-            if close[i] <= s2_4h[i] or close[i] > ema34_4h[i]:
+            # EXIT SHORT: Price reaches S3 (take profit) or breaks above R3 (stop)
+            if close[i] <= s3_1d[i] or close[i] > r3_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
