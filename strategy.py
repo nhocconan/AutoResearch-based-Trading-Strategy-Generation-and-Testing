@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_40_20_EMA_Crossover_With_Volume_Filter
-# Hypothesis: Use fast EMA (40) and slow EMA (20) crossover on 4h timeframe with volume confirmation.
-# Long when EMA40 crosses above EMA20 with volume spike. Short when EMA40 crosses below EMA20 with volume spike.
-# Exit on opposite crossover. Designed to capture medium-term trends with reduced whipsaw via volume filter.
-# Volume filter reduces false signals during low-volume consolidations, improving performance in both bull and bear markets.
+# 1d_KAMA_Trend_With_Volume_Filter
+# Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) for trend direction.
+# Long when price > KAMA(14,2,30) with volume spike >1.5x20-day average.
+# Short when price < KAMA with volume spike.
+# Exit when price crosses back to KAMA (mean reversion).
+# Uses daily timeframe for lower turnover and better trend capture in both bull and bear markets.
 
-name = "4h_40_20_EMA_Crossover_With_Volume_Filter"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,14 +20,45 @@ def generate_signals(prices):
         return np.zeros(n)
 
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
 
-    # Calculate EMAs
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_40 = close_series.ewm(span=40, adjust=False, min_periods=40).mean().values
+    # Get 1d data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
 
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # Calculate KAMA(14, 2, 30)
+    close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i < 14:
+            volatility[i] = np.nan
+        else:
+            volatility[i] = np.sum(np.abs(np.diff(close_1d[i-13:i+1])))
+
+    er = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i < 14 or volatility[i] == 0:
+            er[i] = 0
+        else:
+            er[i] = change[i] / volatility[i]
+
+    sc = (er * (0.6665 - 0.0645) + 0.0645) ** 2
+    kama = np.full_like(close_1d, np.nan)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+
+    # Align KAMA to 1d timeframe (same timeframe, no alignment needed, but for consistency)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+
+    # Volume confirmation: current volume > 1.5 x 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -35,9 +67,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(40, n):
+    for i in range(20, n):
         # Skip if data is not ready
-        if np.isnan(ema_20[i]) or np.isnan(ema_40[i]) or np.isnan(volume_spike[i]):
+        if np.isnan(kama_aligned[i]) or np.isnan(volume_spike[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -46,26 +78,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: EMA40 crosses above EMA20 with volume spike
-            if ema_40[i] > ema_20[i] and ema_40[i-1] <= ema_20[i-1] and volume_spike[i]:
+            # LONG: price > KAMA with volume spike
+            if close[i] > kama_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: EMA40 crosses below EMA20 with volume spike
-            elif ema_40[i] < ema_20[i] and ema_40[i-1] >= ema_20[i-1] and volume_spike[i]:
+            # SHORT: price < KAMA with volume spike
+            elif close[i] < kama_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: EMA40 crosses below EMA20
-            if ema_40[i] < ema_20[i] and ema_40[i-1] >= ema_20[i-1]:
+            # EXIT LONG: price crosses back to KAMA (mean reversion)
+            if close[i] <= kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: EMA40 crosses above EMA20
-            if ema_40[i] > ema_20[i] and ema_40[i-1] <= ema_20[i-1]:
+            # EXIT SHORT: price crosses back to KAMA
+            if close[i] >= kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
