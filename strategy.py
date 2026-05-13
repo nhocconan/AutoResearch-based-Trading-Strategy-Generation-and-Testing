@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_Volume_Reversal
-Hypothesis: In both bull and bear markets, price often reverses at daily Camarilla pivot levels (S3/R3) with volume exhaustion. 
-We fade extreme touches of S3/R3 when volume is below average, expecting mean reversion. 
-Trades only when price is near the 1-day VWAP to avoid strong trends. 
-Designed for low frequency (15-25 trades/year) with clear reversal logic.
+1h_Camarilla_R1_S1_Breakout_4hTrend_Filter
+Hypothesis: Camarilla pivot points on 1h with 4h trend filter provide high-probability breakout entries.
+In bull markets, buy R1 breaks; in bear markets, sell S1 breaks. Volume confirmation filters false breaks.
+Designed for low trade frequency (15-35/year) to minimize fee drag. Works in both bull and bear markets
+by using 4h trend to determine direction and 1h Camarilla levels for precise entries.
 """
 
-name = "6h_Pivot_Volume_Reversal"
-timeframe = "6h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -25,68 +25,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day VWAP for trend filter
-    typical_price = (high + low + close) / 3.0
-    vwap_num = (typical_price * volume).cumsum()
-    vwap_den = volume.cumsum()
-    vwap = vwap_num / vwap_den.replace(0, np.nan)
+    # Calculate 1h Camarilla levels (using previous bar's OHLC)
+    # Camarilla formulas: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # first bar uses current values
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Get daily data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
+    camarilla_width = (prev_high - prev_low) * 1.1 / 12
+    r1 = prev_close + camarilla_width
+    s1 = prev_close - camarilla_width
     
-    # Calculate Camarilla levels from previous day
-    # Using formula: 
-    # R4 = C + ((H-L)*1.1/2)
-    # R3 = C + ((H-L)*1.1/4)
-    # R2 = C + ((H-L)*1.1/6)
-    # R1 = C + ((H-L)*1.1/12)
-    # PP = (H+L+C)/3
-    # S1 = C - ((H-L)*1.1/12)
-    # S2 = C - ((H-L)*1.1/6)
-    # S3 = C - ((H-L)*1.1/4)
-    # S4 = C - ((H-L)*1.1/2)
-    # where C, H, L are from previous day
-    
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Calculate Camarilla S3 and R3 levels
-    rang = prev_high - prev_low
-    r3 = prev_close + (rang * 1.1 / 4)
-    s3 = prev_close - (rang * 1.1 / 4)
-    
-    # Align to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume confirmation: below average suggests exhaustion
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_exhausted = volume < (0.7 * vol_ma)  # Volume below 70% of average
+    volume_confirm = volume > (1.5 * vol_ma)
     
-    # Price near VWAP filter: avoid strong trends
-    vwap_diff_pct = np.abs((close - vwap) / vwap)
-    near_vwap = vwap_diff_pct < 0.015  # Within 1.5% of VWAP
+    # Get 4h trend filter (EMA 50)
+    df_4h = get_htf_data(prices, '4h')
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if VWAP or Camarilla levels not available
-        if np.isnan(vwap[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
-            signals[i] = 0.0
-            continue
-            
-        # LONG: Price touches or goes below S3 with volume exhaustion, near VWAP
-        if low[i] <= s3_aligned[i] and volume_exhausted[i] and near_vwap[i]:
-            # Additional confirmation: price closing back above S3 suggests reversal
-            if close[i] > s3_aligned[i]:
-                signals[i] = 0.25
-        # SHORT: Price touches or goes above R3 with volume exhaustion, near VWAP
-        elif high[i] >= r3_aligned[i] and volume_exhausted[i] and near_vwap[i]:
-            # Additional confirmation: price closing back below R3 suggests reversal
-            if close[i] < r3_aligned[i]:
-                signals[i] = -0.25
-        else:
-            signals[i] = 0.0
+        if position == 0:
+            # LONG: Price breaks above R1 with volume confirmation and 4h uptrend
+            if close[i] > r1[i] and volume_confirm[i] and close[i] > ema_50_4h_aligned[i]:
+                signals[i] = 0.20
+                position = 1
+            # SHORT: Price breaks below S1 with volume confirmation and 4h downtrend
+            elif close[i] < s1[i] and volume_confirm[i] and close[i] < ema_50_4h_aligned[i]:
+                signals[i] = -0.20
+                position = -1
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # EXIT LONG: Price closes below S1 (reversal) or 4h trend turns down
+            if close[i] < s1[i] or close[i] < ema_50_4h_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.20
+        elif position == -1:
+            # EXIT SHORT: Price closes above R1 (reversal) or 4h trend turns up
+            if close[i] > r1[i] or close[i] > ema_50_4h_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.20
     
     return signals
