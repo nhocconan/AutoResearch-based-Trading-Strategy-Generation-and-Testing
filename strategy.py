@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above upper Donchian channel and close > 1d EMA34 with volume > 1.5x 20-bar average.
 # Short when price breaks below lower Donchian channel and close < 1d EMA34 with volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 12h timeframe.
+# Uses discrete sizing 0.25 to target 75-200 total trades over 4 years on 4h timeframe.
 # Designed to capture strong trending moves while filtering choppy markets via 1d EMA trend and volume spike confirmation.
 
-name = "12h_Donchian20_1dEMA34_Trend_VolumeConfirm"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -42,7 +42,7 @@ def generate_signals(prices):
     else:
         ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 12h timeframe (wait for 1d bar to close)
+    # Align 1d EMA to 4h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate average volume for confirmation (20-period)
