@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Chaikin_Momentum_1dTrend_VolumeSurge
-# Hypothesis: Chaikin Oscillator (3,10) crossing zero identifies momentum shifts with less whipsaw.
-# Enter long when Chaikin crosses above zero with volume surge and 1d EMA50 uptrend.
-# Enter short when Chaikin crosses below zero with volume surge and 1d EMA50 downtrend.
-# Exit when Chaikin crosses back through zero.
-# Uses 4h timeframe with 1d trend filter to balance trade frequency and win rate.
-# Designed to work in both bull (buy in uptrend) and bear (sell in downtrend).
-# Target: 25-45 trades/year per symbol.
+# 1h_Engulfing_4hTrend_1dVolFilter
+# Hypothesis: Bullish/bearish engulfing candles on 1h capture momentum shifts, filtered by 4h trend (EMA50) and 1d volume surge to avoid false signals.
+# Works in bull markets by taking longs in uptrends and in bear markets by taking shorts in downtrends.
+# Volume filter ensures trades occur during periods of heightened interest, reducing whipsaw.
+# Target: 20-30 trades/year per symbol.
 
-name = "4h_Chaikin_Momentum_1dTrend_VolumeSurge"
-timeframe = "4h"
+name = "1h_Engulfing_4hTrend_1dVolFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,62 +21,42 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    close_4h = df_4h['close'].values
+
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    volume_1d = df_1d['volume'].values
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 4h EMA50 for trend
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
 
-    # Calculate Chaikin Oscillator (3,10) on 4h data
-    # Money Flow Multiplier
-    mfm = np.zeros(n)
-    for i in range(n):
-        if high[i] == low[i]:
-            mfm[i] = 0.0
-        else:
-            mfm[i] = ((close[i] - low[i]) - (high[i] - close[i])) / (high[i] - low[i])
+    # Calculate 1d average volume (20-period) for surge filter
+    vol_avg_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_avg_1d[i] = np.mean(volume_1d[i-20:i])
+    vol_surge_1d = volume_1d > (1.5 * vol_avg_1d)
+    vol_surge_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_surge_1d.astype(float))
 
-    # Money Flow Volume
-    mfv = mfm * volume
-
-    # Accumulation/Distribution Line
-    adl = np.cumsum(mfv)
-
-    # EMA of ADL (3 and 10)
-    ema3 = pd.Series(adl).ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10 = pd.Series(adl).ewm(span=10, adjust=False, min_periods=10).mean().values
-
-    # Chaikin Oscillator
-    chaikin = ema3 - ema10
-
-    # Chaikin zero cross signals
-    chaikin_cross_above = np.zeros(n, dtype=bool)
-    chaikin_cross_below = np.zeros(n, dtype=bool)
-    for i in range(1, n):
-        chaikin_cross_above[i] = (chaikin[i-1] <= 0) and (chaikin[i] > 0)
-        chaikin_cross_below[i] = (chaikin[i-1] >= 0) and (chaikin[i] < 0)
-
-    # Volume surge: current volume > 2.0 x 30-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_ma[i] = np.mean(volume[i-30:i])
-    volume_surge = volume > (2.0 * vol_ma)
-
-    # Get 1d EMA50 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Detect engulfing candles on 1h
+    bullish_engulfing = (close > open_price) & (open_price > np.roll(close, 1)) & (close > np.roll(open_price, 1))
+    bearish_engulfing = (close < open_price) & (open_price < np.roll(close, 1)) & (close < np.roll(open_price, 1))
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
-        # Skip if data is not ready
-        if (np.isnan(chaikin[i]) or np.isnan(volume_surge[i]) or np.isnan(ema_1d_aligned[i])):
+    for i in range(50, n):
+        # Skip if data not ready
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_surge_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,29 +65,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Chaikin crosses above zero with volume surge and 1d EMA uptrend
-            if chaikin_cross_above[i] and volume_surge[i] and close[i] > ema_1d_aligned[i]:
-                signals[i] = 0.25
+            # LONG: bullish engulfing + 4h uptrend + 1d volume surge
+            if bullish_engulfing[i] and close[i] > ema_4h_aligned[i] and vol_surge_1d_aligned[i] > 0.5:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Chaikin crosses below zero with volume surge and 1d EMA downtrend
-            elif chaikin_cross_below[i] and volume_surge[i] and close[i] < ema_1d_aligned[i]:
-                signals[i] = -0.25
+            # SHORT: bearish engulfing + 4h downtrend + 1d volume surge
+            elif bearish_engulfing[i] and close[i] < ema_4h_aligned[i] and vol_surge_1d_aligned[i] > 0.5:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Chaikin crosses below zero (momentum loss)
-            if chaikin_cross_below[i]:
+            # EXIT LONG: bearish engulfing or trend reversal
+            if bearish_engulfing[i] or close[i] < ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Chaikin crosses above zero (momentum loss)
-            if chaikin_cross_above[i]:
+            # EXIT SHORT: bullish engulfing or trend reversal
+            if bullish_engulfing[i] or close[i] > ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
