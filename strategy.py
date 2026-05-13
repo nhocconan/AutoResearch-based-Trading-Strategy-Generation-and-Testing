@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams Alligator + 1d EMA50 trend filter + volume confirmation (>1.3x avg volume). 
-# The Alligator (jaw/teeth/lips) identifies trend absence/presence via SMAs with offsets.
-# Long when lips > teeth > jaw (bullish alignment) + price > lips + 1d EMA50 up + volume spike.
-# Short when lips < teeth < jaw (bearish alignment) + price < lips + 1d EMA50 down + volume spike.
-# Uses ATR(20) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
-# Alligator filters choppy markets; EMA50 ensures higher timeframe trend alignment.
-# Works in bull markets via trend-following entries and in bear markets via shorting with trend filter.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 > EMA200 trend filter and volume confirmation (>1.8x avg volume).
+# Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# EMA trend filter ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
+# Camarilla R3/S3 levels provide strong breakout/breakdown points with proven efficacy on BTC/ETH.
+# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
 
-name = "6h_WilliamsAlligator_1dEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wEMATrend_VolumeSpike_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,38 +24,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(20) for trailing stop
+    # Calculate ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Williams Alligator: jaw(13,8), teeth(8,5), lips(5,3) - all SMAs with forward shift
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
-    jaw = jaw.shift(8)  # shift forward by 8 bars
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
-    teeth = teeth.shift(5)  # shift forward by 5 bars
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
-    lips = lips.shift(3)  # shift forward by 3 bars
+    # Get 1w data for Camarilla pivot calculation and EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    jaw = jaw.values
-    teeth = teeth.values
-    lips = lips.values
+    # Calculate Camarilla pivot levels from previous week
+    # R3 = close + ((high - low) * 1.1 / 4)
+    # S3 = close - ((high - low) * 1.1 / 4)
+    camarilla_r3 = np.full(len(close_1w), np.nan)
+    camarilla_s3 = np.full(len(close_1w), np.nan)
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    for i in range(1, len(close_1w)):
+        # Use previous week's data to calculate current week's levels
+        prev_high = high_1w[i-1]
+        prev_low = low_1w[i-1]
+        prev_close = close_1w[i-1]
+        
+        camarilla_r3[i] = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+        camarilla_s3[i] = prev_close - ((prev_high - prev_low) * 1.1 / 4)
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align Camarilla levels to 12h timeframe (wait for weekly bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
-    # Align 1d EMA50 to 6h timeframe (wait for daily bar to close)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 1w EMA50 and EMA200 for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align 1w EMAs to 12h timeframe (wait for weekly bar to close)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,25 +76,24 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema200_1w_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Lips > Teeth > Jaw (bullish alignment) AND price > lips AND 1d EMA50 up AND volume > 1.3x average
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
-                close[i] > lips[i] and 
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and 
-                volume[i] > 1.3 * avg_volume[i]):
+            # LONG: Price breaks above Camarilla R3 AND 1w EMA50 > EMA200 AND volume > 1.8x average
+            if (close[i] > camarilla_r3_aligned[i] and 
+                ema50_1w_aligned[i] > ema200_1w_aligned[i] and 
+                volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Lips < Teeth < Jaw (bearish alignment) AND price < lips AND 1d EMA50 down AND volume > 1.3x average
-            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
-                  close[i] < lips[i] and 
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and 
-                  volume[i] > 1.3 * avg_volume[i]):
+            # SHORT: Price breaks below Camarilla S3 AND 1w EMA50 < EMA200 AND volume > 1.8x average
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  ema50_1w_aligned[i] < ema200_1w_aligned[i] and 
+                  volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
