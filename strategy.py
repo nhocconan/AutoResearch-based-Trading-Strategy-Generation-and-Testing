@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# 6h_Monthly_Pivot_Breakout_1dTrend_Volume
-# Hypothesis: Monthly pivot levels act as significant support/resistance on 6h timeframe.
-# Breakout above monthly R1 with 1d uptrend and volume surge captures institutional momentum.
-# Breakdown below monthly S1 with 1d downtrend and volume surge captures breakdowns.
-# Monthly pivots are less noisy than daily and capture longer-term structure, working in both bull/bear markets.
+#/usr/bin/env python3
+# 1d_1w_Camarilla_R1S1_Breakout_Trend_Volume
+# Hypothesis: On daily timeframe, breakout beyond weekly Camarilla R1/S1 levels (weekly support/resistance)
+# with alignment to 1d trend (price vs EMA20) and volume confirmation captures strong momentum moves.
+# Weekly trend provides long-term filter reducing whipsaws in chop. Volume spike confirms institutional participation.
+# Designed for low-frequency, high-quality setups with minimal trade frequency to avoid fee drag.
 
-name = "6h_Monthly_Pivot_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "1d_1w_Camarilla_R1S1_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,33 +23,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter and Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly EMA20 for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
 
-    # Get monthly data for pivot calculation
-    df_1M = get_htf_data(prices, '1M')
-    high_1M = df_1M['high'].values
-    low_1M = df_1M['low'].values
-    close_1M = df_1M['close'].values
-
-    # Calculate Monthly Pivot levels (similar to Camarilla but using standard pivot)
+    # Calculate weekly Camarilla pivot levels
     # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    pivot_1M = (high_1M + low_1M + close_1M) / 3.0
-    r1_1M = 2 * pivot_1M - low_1M
-    s1_1M = 2 * pivot_1M - high_1M
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12.0
+    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12.0
 
-    # Align to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1M, r1_1M)
-    s1_aligned = align_htf_to_ltf(prices, df_1M, s1_1M)
+    # Align to daily timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
 
-    # Volume spike: volume > 2.0 * 20-period average (~6.6 days at 6h)
+    # Volume spike: volume > 2.0 * 20-period average (~20 days)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * vol_ma_20
 
@@ -60,7 +56,7 @@ def generate_signals(prices):
         # Skip if any required value is NaN
         if (np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i])):
+            np.isnan(ema20_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,26 +65,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Uptrend + breakout above monthly R1 + volume spike
-            if close[i] > ema34_1d_aligned[i] and close[i] > r1_aligned[i] and volume_spike[i]:
+            # LONG: Uptrend + breakout above R1 + volume spike
+            if close[i] > ema20_1w_aligned[i] and close[i] > r1_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend + breakdown below monthly S1 + volume spike
-            elif close[i] < ema34_1d_aligned[i] and close[i] < s1_aligned[i] and volume_spike[i]:
+            # SHORT: Downtrend + breakdown below S1 + volume spike
+            elif close[i] < ema20_1w_aligned[i] and close[i] < s1_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below monthly S1 or trend turns bearish
-            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price breaks below S1 or trend turns bearish
+            if close[i] < s1_aligned[i] or close[i] < ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above monthly R1 or trend turns bullish
-            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above R1 or trend turns bullish
+            if close[i] > r1_aligned[i] or close[i] > ema20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
