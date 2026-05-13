@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation + ATR trailing stop.
-# Long when price breaks above Donchian upper (20-period high) AND 1d EMA50 > prior 1d EMA50 (uptrend) AND volume > 2.0x 20-period average.
-# Short when price breaks below Donchian lower (20-period low) AND 1d EMA50 < prior 1d EMA50 (downtrend) AND volume > 2.0x 20-period average.
+# Hypothesis: 12h Williams Alligator with 1d trend filter and volume confirmation.
+# Long when price > Alligator Jaw (13-period SMMA) AND Jaw > Teeth > Lips (bullish alignment) AND volume > 1.5x 20-period average.
+# Short when price < Alligator Jaw AND Jaw < Teeth < Lips (bearish alignment) AND volume > 1.5x 20-period average.
 # Uses ATR(14) trailing stop (2.5x) for risk control.
-# Donchian channels provide robust structure in both trending and ranging markets.
-# 1d EMA50 ensures we trade with the dominant daily trend, reducing whipsaws in chop.
-# Volume confirmation filters weak breakouts. Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Williams Alligator identifies trend presence and direction via smoothed moving averages.
+# 1d EMA50 trend filter ensures we trade with the higher timeframe trend, reducing whipsaws in choppy markets.
+# Volume confirmation adds validity to breakouts. Target: 50-150 total trades over 4 years (12-37/year) on 12h.
 
-name = "4h_Donchian20_Breakout_1dEMA50_Trend_Volume_v2"
-timeframe = "4h"
+name = "12h_Williams_Alligator_1dEMA50_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -33,9 +33,32 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 12h data for Williams Alligator (SMMA = smoothed moving average)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Williams Alligator: three smoothed moving averages
+    # Jaw: 13-period SMMA, Teeth: 8-period SMMA, Lips: 5-period SMMA
+    # SMMA calculation: similar to EMA but with different smoothing
+    def smma(data, period):
+        if len(data) < period:
+            return np.full(len(data), np.nan)
+        result = np.full(len(data), np.nan)
+        # First value is SMA
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CLOSE) / period
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    jaw_12h = smma(close_12h, 13)
+    teeth_12h = smma(close_12h, 8)
+    lips_12h = smma(close_12h, 5)
+    
+    # Align 12h Alligator components to 12h timeframe (no additional delay needed)
+    jaw_12h_aligned = align_htf_to_ltf(prices, df_12h, jaw_12h)
+    teeth_12h_aligned = align_htf_to_ltf(prices, df_12h, teeth_12h)
+    lips_12h_aligned = align_htf_to_ltf(prices, df_12h, lips_12h)
     
     # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -44,12 +67,12 @@ def generate_signals(prices):
     # Calculate EMA(50) on 1d data
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 4h timeframe (wait for 1d bar to close)
+    # Align 1d EMA50 to 12h timeframe (wait for 1d bar to close)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate volume confirmation: volume > 2.0x 20-period average
+    # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,19 +81,27 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw_12h_aligned[i]) or np.isnan(teeth_12h_aligned[i]) or 
+            np.isnan(lips_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Donchian upper AND 1d EMA50 rising (uptrend) AND volume confirmation
-            if close[i] > donchian_upper[i] and ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and volume_confirm[i]:
+            # LONG: Price > Jaw AND Jaw > Teeth > Lips (bullish alignment) AND 1d EMA50 rising AND volume confirmation
+            if (close[i] > jaw_12h_aligned[i] and 
+                jaw_12h_aligned[i] > teeth_12h_aligned[i] and 
+                teeth_12h_aligned[i] > lips_12h_aligned[i] and
+                ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Donchian lower AND 1d EMA50 falling (downtrend) AND volume confirmation
-            elif close[i] < donchian_lower[i] and ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Price < Jaw AND Jaw < Teeth < Lips (bearish alignment) AND 1d EMA50 falling AND volume confirmation
+            elif (close[i] < jaw_12h_aligned[i] and 
+                  jaw_12h_aligned[i] < teeth_12h_aligned[i] and 
+                  teeth_12h_aligned[i] < lips_12h_aligned[i] and
+                  ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -83,9 +114,11 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
+            # EXIT LONG: trailing stop hit (2.5x ATR) OR Alligator alignment breaks
             trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
-            if trailing_stop:
+            alignment_break = not (jaw_12h_aligned[i] > teeth_12h_aligned[i] and 
+                                 teeth_12h_aligned[i] > lips_12h_aligned[i])
+            if trailing_stop or alignment_break:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
@@ -98,9 +131,11 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            # EXIT SHORT: trailing stop hit (2.5x ATR) OR Alligator alignment breaks
             trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
-            if trailing_stop:
+            alignment_break = not (jaw_12h_aligned[i] < teeth_12h_aligned[i] and 
+                                 teeth_12h_aligned[i] < lips_12h_aligned[i])
+            if trailing_stop or alignment_break:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
