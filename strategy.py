@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 level with 1w EMA50 uptrend and volume > 2.0x 20-bar average.
-# Short when price breaks below Camarilla S3 level with 1w EMA50 downtrend and volume > 2.0x average.
-# Exit when price reverses and crosses the Camarilla pivot point (PP).
-# Uses discrete position sizing 0.30. Target: 50-150 total trades over 4 years on 12h timeframe.
-# The 1w EMA50 filter ensures we only trade in the dominant weekly trend, reducing whipsaws.
-# Volume confirmation validates breakout strength. Camarilla pivot exit provides clear, objective stop.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band with price > 1d EMA34 (bullish trend) and volume > 2.0x 20-bar average.
+# Short when price breaks below Donchian lower band with price < 1d EMA34 (bearish trend) and volume > 2.0x average.
+# Exit when price reverses and closes below/above the midpoint of the Donchian channel.
+# Uses discrete position sizing 0.25. Target: 75-200 total trades over 4 years on 4h timeframe.
+# EMA trend filter ensures we trade with the higher timeframe trend, avoiding counter-trend whipsaws.
+# Volume confirmation validates breakout strength. Donchian midpoint exit provides clear, objective stop.
 
-name = "12h_Camarilla_R3_S3_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA34_Trend_Volume_Confirm_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,74 +25,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    # PP = (high + low + close) / 3
-    # R3 = PP + (high - low) * 1.1 / 2
-    # S3 = PP - (high - low) * 1.1 / 2
-    # We use the previous bar's values to avoid look-ahead
-    pp = (np.roll(high, 1) + np.roll(low, 1) + np.roll(close, 1)) / 3
-    r3 = pp + (np.roll(high, 1) - np.roll(low, 1)) * 1.1 / 2
-    s3 = pp - (np.roll(high, 1) - np.roll(low, 1)) * 1.1 / 2
+    # Calculate Donchian channel (20-period)
+    lookback = 20
+    if n < lookback + 1:
+        return np.zeros(n)
     
-    # Set first value to NaN since we don't have previous bar
-    pp[0] = np.nan
-    r3[0] = np.nan
-    s3[0] = np.nan
+    upper_band = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    lower_band = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    mid_band = (upper_band + lower_band) / 2
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1w data
-    if len(close_1w) < 50:
-        ema_50_1w = np.full(len(close_1w), np.nan)
+    # Calculate EMA(34) on 1d close
+    if len(close_1d) < 34:
+        ema_34_1d = np.full(len(close_1d), np.nan)
     else:
-        ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+        ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1w EMA50 to 12h timeframe (wait for 1w bar to close)
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d EMA to 4h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after sufficient data for volume average
+    for i in range(lookback + 20, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(pp[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 with 1w EMA50 uptrend and volume spike
-            if (close[i] > r3[i] and 
-                close[i] > ema_50_1w_aligned[i] and  # Uptrend: price above EMA50
+            # LONG: Price breaks above upper band with bullish 1d EMA trend and volume spike
+            if (close[i] > upper_band[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with 1w EMA50 downtrend and volume spike
-            elif (close[i] < s3[i] and 
-                  close[i] < ema_50_1w_aligned[i] and  # Downtrend: price below EMA50
+            # SHORT: Price breaks below lower band with bearish 1d EMA trend and volume spike
+            elif (close[i] < lower_band[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below PP (reversal signal)
-            if close[i] < pp[i]:
+            # EXIT LONG: Price closes below mid-band (reversal signal)
+            if close[i] < mid_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above PP (reversal signal)
-            if close[i] > pp[i]:
+            # EXIT SHORT: Price closes above mid-band (reversal signal)
+            if close[i] > mid_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
