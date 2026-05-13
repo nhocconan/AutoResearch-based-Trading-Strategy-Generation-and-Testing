@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray Power (Bull/Bear) with 1w trend filter and volume confirmation
-# Enters long when 6h Bull Power > 0, 1w EMA50 trend is up (close > EMA50), and volume > 1.3x MA20
-# Enters short when 6h Bear Power < 0, 1w EMA50 trend is down (close < EMA50), and volume > 1.3x MA20
-# Exits when Elder Power reverses sign or volume drops below average
-# Uses discrete position sizing (0.25) to limit fee churn
-# Elder Ray Power measures bull/bear strength relative to EMA13, effective in both trending and ranging markets
-# Weekly trend filter ensures alignment with higher timeframe direction, reducing counter-trend trades
-# Volume confirmation adds conviction to breakouts
-# Designed for low trade frequency (~12-37/year) by requiring confluence: Elder Power signal + HTF trend + volume spike
+# Hypothesis: 12h Camarilla R4/S4 breakout with 1d trend filter (close > EMA50), volume confirmation (1.8x MA20), and ATR volatility filter.
+# Enters long when price breaks above Camarilla R4 level with 1d bullish trend (close > EMA50), volume > 1.8x MA20, and ATR(14) > 0.4 * ATR(50).
+# Enters short when price breaks below Camarilla S4 level with 1d bearish trend (close < EMA50), volume > 1.8x MA20, and ATR(14) > 0.4 * ATR(50).
+# Exits when price reverts to the Camarilla pivot point or ATR-based stoploss (2.5 * ATR(14) from entry).
+# Uses discrete position sizing (0.28) to limit fee churn and manage drawdown.
+# Designed for low trade frequency (~12-37/year) by requiring strict confluence: price breakout + HTF trend + volume spike + volatility filter.
+# Camarilla levels provide strong support/resistance, while HTF trend filter ensures alignment with higher timeframe direction.
+# Higher volume threshold (1.8x) and volatility filter (0.4x) reduce false breakouts, improving signal quality in both bull and bear markets.
 
-name = "6h_ElderRay_Power_1wTrend_Volume_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R4_S4_Breakout_1dTrend_Volume_Volatility_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -27,58 +26,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Calculate EMA(50) on 1w close
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Get 1d data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Calculate EMA(50) on 1d close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Elder Ray Power on 6h timeframe
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla levels are calculated using previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values  # previous day high
+    prev_low = df_1d['low'].shift(1).values    # previous day low
+    prev_close = df_1d['close'].shift(1).values # previous day close
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # Calculate Camarilla levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
+    r4 = pivot + (range_hl * 1.1 / 2.0)  # Resistance 4
+    s4 = pivot - (range_hl * 1.1 / 2.0)  # Support 4
+    r3 = pivot + (range_hl * 1.1 / 4.0)  # Resistance 3
+    s3 = pivot - (range_hl * 1.1 / 4.0)  # Support 3
+    
+    # Align Camarilla levels to 12h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume filter: current volume > 1.8x 20-period average
     volume_series = pd.Series(volume)
     vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 1.3)
+    volume_spike = volume > (vol_ma20 * 1.8)
     
+    # ATR(14) and ATR(50) for volatility filter
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]  # first bar
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr14 > (0.4 * atr50)  # avoid low volatility breakouts
+    
+    # Track entry price for ATR-based stoploss
+    entry_price = np.full(n, np.nan)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(ema13[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(pivot_aligned[i]) or \
+           np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20[i]) or \
+           np.isnan(atr14[i]) or np.isnan(atr50[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Bull Power > 0 (bulls in control), 1w uptrend, volume spike
-            if bull_power[i] > 0 and close[i] > ema50_1w_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # LONG: Price breaks above Camarilla R4 with 1d bullish trend, volume spike, and sufficient volatility
+            if close[i] > r4_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i] and volatility_filter[i]:
+                signals[i] = 0.28
                 position = 1
-            # SHORT: Bear Power < 0 (bears in control), 1w downtrend, volume spike
-            elif bear_power[i] < 0 and close[i] < ema50_1w_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
+                entry_price[i] = close[i]  # record entry price at close of signal bar
+            # SHORT: Price breaks below Camarilla S4 with 1d bearish trend, volume spike, and sufficient volatility
+            elif close[i] < s4_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i] and volatility_filter[i]:
+                signals[i] = -0.28
                 position = -1
+                entry_price[i] = close[i]  # record entry price at close of signal bar
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power turns negative OR volume drops below average
-            if bull_power[i] <= 0 or volume[i] <= vol_ma20[i]:
+            # EXIT LONG: Price reverts to Camarilla pivot (mean reversion) OR ATR stoploss hit
+            if close[i] < pivot_aligned[i] or close[i] < entry_price[i-1] - 2.5 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price[i] = np.nan
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
+                entry_price[i] = entry_price[i-1]  # carry forward entry price
         elif position == -1:
-            # EXIT SHORT: Bear Power turns positive OR volume drops below average
-            if bear_power[i] >= 0 or volume[i] <= vol_ma20[i]:
+            # EXIT SHORT: Price reverts to Camarilla pivot (mean reversion) OR ATR stoploss hit
+            if close[i] > pivot_aligned[i] or close[i] > entry_price[i-1] + 2.5 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price[i] = np.nan
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
+                entry_price[i] = entry_price[i-1]  # carry forward entry price
     
     return signals
