@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla R1/S1 levels from daily act as intraday support/resistance.
-Breakouts with volume confirmation and daily trend filter yield high-probability moves.
-Designed for low trade frequency (<25/year) to avoid fee drag.
-Works in bull (breakouts continue) and bear (fades at S1/R1) via trend filter.
+6h_Weekly_Pivot_MR_With_Volume
+Hypothesis: Weekly pivot levels act as strong support/resistance. Price tends to 
+mean revert from extreme levels (R4/S4) but continues when breaking R3/S3. 
+Volume confirmation filters false signals. Designed for low trade frequency 
+(15-25/year) to work in both bull and bear markets by capturing reversals 
+at extremes and breakouts in strong trends.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_MR_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points: P, R1-R4, S1-S4"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,27 +39,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily OHLC for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Get weekly data for pivot points (using daily as proxy for weekly calculation)
+    df_weekly = get_htf_data(prices, '1d')
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Previous day's OHLC
-    prev_close = df_1d['close'].values[:-1]
-    prev_high = df_1d['high'].values[:-1]
-    prev_low = df_1d['low'].values[:-1]
+    # Calculate weekly pivot points
+    pivot, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivot_points(
+        weekly_high, weekly_low, weekly_close
+    )
     
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align to 4h (previous day's levels available at 00:00 UTC)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Daily trend filter: EMA34
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_weekly, pivot)
+    r3_6h = align_htf_to_ltf(prices, df_weekly, r3)
+    r4_6h = align_htf_to_ltf(prices, df_weekly, r4)
+    s3_6h = align_htf_to_ltf(prices, df_weekly, s3)
+    s4_6h = align_htf_to_ltf(prices, df_weekly, s4)
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,28 +64,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         if position == 0:
-            # LONG: Break above R1 with volume, above daily EMA34
-            if close[i] > r1_aligned[i] and volume_confirm[i] and close[i] > ema_34_aligned[i]:
+            # MEAN REVERSION LONG: Price at S4 with volume confirmation
+            if close[i] <= s4_6h[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 with volume, below daily EMA34
-            elif close[i] < s1_aligned[i] and volume_confirm[i] and close[i] < ema_34_aligned[i]:
+            # MEAN REVERSION SHORT: Price at R4 with volume confirmation
+            elif close[i] >= r4_6h[i] and volume_confirm[i]:
+                signals[i] = -0.25
+                position = -1
+            # BREAKOUT LONG: Price breaks above R3 with volume confirmation
+            elif close[i] > r3_6h[i] and close[i-1] <= r3_6h[i-1] and volume_confirm[i]:
+                signals[i] = 0.25
+                position = 1
+            # BREAKOUT SHORT: Price breaks below S3 with volume confirmation
+            elif close[i] < s3_6h[i] and close[i-1] >= s3_6h[i-1] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close back below R1 or trend fails
-            if close[i] < r1_aligned[i] or close[i] < ema_34_aligned[i]:
+            # EXIT LONG: Price reaches R3 (take profit) or breaks below S3 (stop)
+            if close[i] >= r3_6h[i] or close[i] < s3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close back above S1 or trend fails
-            if close[i] > s1_aligned[i] or close[i] > ema_34_aligned[i]:
+            # EXIT SHORT: Price reaches S3 (take profit) or breaks above R3 (stop)
+            if close[i] <= s3_6h[i] or close[i] > r3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
