@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Channel_Breakout_With_Volume_Spike
-Hypothesis: Keltner Channel (ATR-based volatility bands) captures volatility expansion during breakouts. A close above/below the upper/lower band with volume > 2x average and aligned weekly trend (close > EMA50) signals trend continuation. Uses 25% position size to limit risk and trade frequency (~10-25/year) to minimize fee drag in daily bars.
+4h_Williams_Alligator_Trend_With_Volume_Spike
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend direction. When Lips cross above Teeth with volume confirmation and price above Jaw (bullish alignment), go long. Reverse for short. Uses 25% position size to balance risk/return and limit trade frequency (~20-40/year) to minimize fee drag in 4-hour bars. Williams Alligator is less common than EMA-based systems, offering potential edge in both bull and bear markets via clear trend alignment signals.
 """
 
-name = "1d_Keltner_Channel_Breakout_With_Volume_Spike"
-timeframe = "1d"
+name = "4h_Williams_Alligator_Trend_With_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,66 +17,76 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate ATR (14)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Williams Alligator: Jaw (13-period SMMA, 8-bar shift), Teeth (8-period SMMA, 5-bar shift), Lips (5-period SMMA, 3-bar shift)
+    # SMMA = Smoothed Moving Average (similar to Wilder's smoothing)
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: (prev*(period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate EMA (20) for Keltner Channel middle line
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
     
-    # Keltner Channel: upper = EMA + 2*ATR, lower = EMA - 2*ATR
-    kc_upper = ema20 + 2 * atr
-    kc_lower = ema20 - 2 * atr
+    # Shift as per Williams Alligator specification
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
     
-    # Weekly trend filter: EMA(50) on weekly close
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 12h trend filter: EMA(50) on close
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Volume confirmation: current volume > 2x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after EMA20 warmup
+    for i in range(50, n):  # Start after Alligator warmup
         if position == 0:
-            # LONG: Close above upper Keltner band, volume spike, price above weekly EMA50 (uptrend)
-            if (close[i] > kc_upper[i] and 
-                volume_filter[i] and 
-                close[i] > ema50_1w_aligned[i]):
+            # LONG: Lips cross above Teeth, price above Jaw (bullish alignment), volume confirmation
+            if (lips[i] > teeth[i] and lips[i-1] <= teeth[i-1] and 
+                close[i] > jaw[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below lower Keltner band, volume spike, price below weekly EMA50 (downtrend)
-            elif (close[i] < kc_lower[i] and 
-                  volume_filter[i] and 
-                  close[i] < ema50_1w_aligned[i]):
+            # SHORT: Lips cross below Teeth, price below Jaw (bearish alignment), volume confirmation
+            elif (lips[i] < teeth[i] and lips[i-1] >= teeth[i-1] and 
+                  close[i] < jaw[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below middle line (EMA20) OR volume drops
-            if (close[i] < ema20[i]) or \
+            # EXIT LONG: Lips cross below Teeth OR price below Jaw OR volume drops
+            if (lips[i] < teeth[i] and lips[i-1] >= teeth[i-1]) or \
+               close[i] < jaw[i] or \
                not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above middle line (EMA20) OR volume drops
-            if (close[i] > ema20[i]) or \
+            # EXIT SHORT: Lips cross above Teeth OR price above Jaw OR volume drops
+            if (lips[i] > teeth[i] and lips[i-1] <= teeth[i-1]) or \
+               close[i] > jaw[i] or \
                not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
