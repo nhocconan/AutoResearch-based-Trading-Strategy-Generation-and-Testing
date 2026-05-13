@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_TRIX_Volume_Regime
-Hypothesis: TRIX (triple smoothed ROC) identifies momentum shifts with less whipsaw, combined with volume confirmation and regime filter (ADX > 25) to capture trends in both bull and bear markets. Designed for low trade frequency (15-30/year) on 6h timeframe.
+4h_ADX_Trend_With_Volume_Confirmation
+Hypothesis: Trend following with ADX filter and volume confirmation works in both bull and bear markets by capturing strong trends while avoiding choppy periods. ADX > 25 filters for trending markets, volume > 1.5x average confirms institutional participation. Designed for low trade frequency (20-40/year) with clear entry/exit rules.
 """
 
-name = "6h_TRIX_Volume_Regime"
-timeframe = "6h"
+name = "4h_ADX_Trend_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,75 +17,66 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate TRIX (15,9,9) - triple smoothed 1-period ROC
-    # ROC(1) = (close/tclose[-1] - 1) * 100
-    roc = np.diff(np.log(close), prepend=np.log(close[0])) * 100
-    # Threefold EMA smoothing
-    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix = ema3
+    # Calculate ADX (14)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
+        minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
     
-    # Calculate ADX(14) for regime filter
-    # +DM, -DM, TR
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    # Pad first element
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    tr = np.concatenate([[0], tr])
+    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(low, 1)), abs(low - np.roll(high, 1))))
+    tr[0] = high[0] - low[0]
     
-    # Smoothed averages
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).values / atr
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).values
+    
+    # Calculate EMA (20) for trend direction
+    ema = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma)
     
-    # Get 12h trend filter (EMA 50)
-    df_12h = get_htf_data(prices, '12h')
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Get 1-day trend filter (EMA 50)
+    df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         if position == 0:
-            # LONG: TRIX turns positive with volume confirmation and ADX > 25 (trending market)
-            if trix[i] > 0 and trix[i-1] <= 0 and volume_confirm[i] and adx[i] > 25:
-                # Additional filter: only take long if price above 12h EMA50 (uptrend filter)
-                if close[i] > ema_50_12h_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # SHORT: TRIX turns negative with volume confirmation and ADX > 25 (trending market)
-            elif trix[i] < 0 and trix[i-1] >= 0 and volume_confirm[i] and adx[i] > 25:
-                # Additional filter: only take short if price below 12h EMA50 (downtrend filter)
-                if close[i] < ema_50_12h_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # LONG: ADX > 25 (trending), price above EMA20, volume confirmation, and above 1-day EMA50
+            if adx[i] > 25 and close[i] > ema[i] and volume_confirm[i] and close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: ADX > 25 (trending), price below EMA20, volume confirmation, and below 1-day EMA50
+            elif adx[i] > 25 and close[i] < ema[i] and volume_confirm[i] and close[i] < ema_50_1d_aligned[i]:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX turns negative or ADX < 20 (range market)
-            if trix[i] < 0 or adx[i] < 20:
+            # EXIT LONG: ADX < 20 (losing trend) or price crosses below EMA20
+            if adx[i] < 20 or close[i] < ema[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX turns positive or ADX < 20 (range market)
-            if trix[i] > 0 or adx[i] < 20:
+            # EXIT SHORT: ADX < 20 (losing trend) or price crosses above EMA20
+            if adx[i] < 20 or close[i] > ema[i]:
                 signals[i] = 0.0
                 position = 0
             else:
