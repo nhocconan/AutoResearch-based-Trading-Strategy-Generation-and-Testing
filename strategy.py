@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Adaptive_Kelly_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Price breaking out of Camarilla R3/S3 levels on 12h with 1d trend and volume confirmation, using Kelly criterion for position sizing (capped at 0.30) to optimize risk-adjusted returns. Works in both bull and bear markets by filtering with 1d trend and avoiding whipsaws via volume confirmation. Uses adaptive position sizing to reduce drawdowns during high volatility periods.
+# 6h_WeeklyPivot_DailyTrend_Filter_v2
+# Hypothesis: Price breaking above/below weekly pivot resistance/support with daily trend filter and volume confirmation captures institutional momentum moves. Works in both bull and bear markets by using weekly pivot structure and daily trend alignment. Designed for low trade frequency on 6h timeframe to minimize fee drag.
 
-name = "12h_Adaptive_Kelly_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_WeeklyPivot_DailyTrend_Filter_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf  # Using align_ltf_to_htf if available, else align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,7 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate ATR for volatility normalization (14-period)
+    # Calculate ATR for volatility normalization and stop reference
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -30,41 +30,41 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
 
-    # 1d EMA34 for trend filter (load once, align)
+    # Daily EMA34 for trend filter (load once, align)
     df_1d = get_htf_data(prices, '1d')
     ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
 
-    # Volume confirmation: volume > 1.8x 30-period average
-    vol_avg_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Weekly pivot calculation (load once, align)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) == 0:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    
+    # Align weekly pivots to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
 
-    # Kelly criterion components: win rate and win/loss ratio (estimated from recent performance)
-    # Using 60-period lookback for adaptive sizing
-    returns = np.diff(close, prepend=close[0]) / close
-    wins = np.maximum(returns, 0)
-    losses = np.maximum(-returns, 0)
-    
-    win_rate = pd.Series(wins).rolling(window=60, min_periods=30).mean().values
-    avg_win = pd.Series(wins).rolling(window=60, min_periods=30).mean().values
-    avg_loss = pd.Series(losses).rolling(window=60, min_periods=30).mean().values
-    win_loss_ratio = np.where(avg_loss > 0, avg_win / avg_loss, 1.0)
-    
-    # Kelly fraction: f = (win_rate * win_loss_ratio - (1 - win_rate)) / win_loss_ratio
-    kelly_fraction = np.where(
-        (win_loss_ratio > 0) & (win_rate > 0),
-        (win_rate * win_loss_ratio - (1 - win_rate)) / win_loss_ratio,
-        0.0
-    )
-    # Cap Kelly at 0.30 and ensure non-negative
-    kelly_fraction = np.clip(kelly_fraction, 0.0, 0.30)
+    # Volume confirmation: volume > 1.8x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_30[i]) or 
-            np.isnan(kelly_fraction[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or 
+            np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,56 +72,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Calculate Camarilla levels for current 12h bar (using previous bar's range)
-        if i > 0:
-            prev_high = high[i-1]
-            prev_low = low[i-1]
-            prev_close = close[i-1]
-            range_val = prev_high - prev_low
-            
-            if range_val > 0:
-                camarilla_multiplier = 1.1 / 12
-                r3 = prev_close + range_val * camarilla_multiplier * 4
-                s3 = prev_close - range_val * camarilla_multiplier * 4
-            else:
-                r3 = prev_close
-                s3 = prev_close
-        else:
-            r3 = close[0]
-            s3 = close[0]
-
         if position == 0:
-            # LONG: Close above R3 + 1d EMA34 uptrend + volume spike
-            if (close[i] > r3 and 
+            # LONG: Close above weekly R1 + daily EMA34 uptrend + volume spike
+            if (close[i] > weekly_r1_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and
-                volume[i] > vol_avg_30[i] * 1.8):
-                # Use Kelly fraction for position sizing, capped at 0.30
-                signal_size = min(kelly_fraction[i], 0.30)
-                signals[i] = signal_size
+                volume[i] > vol_avg_20[i] * 1.8):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Close below S3 + 1d EMA34 downtrend + volume spike
-            elif (close[i] < s3 and 
+            # SHORT: Close below weekly S1 + daily EMA34 downtrend + volume spike
+            elif (close[i] < weekly_s1_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and
-                  volume[i] > vol_avg_30[i] * 1.8):
-                # Use Kelly fraction for position sizing, capped at 0.30
-                signal_size = min(kelly_fraction[i], 0.30)
-                signals[i] = -signal_size
+                  volume[i] > vol_avg_20[i] * 1.8):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below 1d EMA34 or volatility drop
-            if close[i] < ema34_1d_aligned[i] or volume[i] < vol_avg_30[i] * 1.2:
+            # EXIT LONG: Close below daily EMA34 or weekly pivot
+            if close[i] < ema34_1d_aligned[i] or close[i] < weekly_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = min(kelly_fraction[i], 0.30)
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above 1d EMA34 or volatility drop
-            if close[i] > ema34_1d_aligned[i] or volume[i] < vol_avg_30[i] * 1.2:
+            # EXIT SHORT: Close above daily EMA34 or weekly pivot
+            if close[i] > ema34_1d_aligned[i] or close[i] > weekly_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -min(kelly_fraction[i], 0.30)
+                signals[i] = -0.25
 
     return signals
