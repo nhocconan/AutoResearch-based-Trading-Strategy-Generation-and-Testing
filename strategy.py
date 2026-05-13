@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1D_Trend_v1
-Hypothesis: Breakouts above daily Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34) with volume confirmation (volume > 2.0x 20-period average). Designed for 12h timeframe to reduce trade frequency and improve generalization in both bull and bear markets.
+4h_KAMA_Direction_RSI_Chop_Filter_v1
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) to determine trend direction (price > KAMA = up, price < KAMA = down) on 4h timeframe. Enter long when RSI crosses above 50 in uptrend, short when RSI crosses below 50 in downtrend, with volume confirmation (volume > 1.5x 20-period average) and chop filter (Choppiness Index > 61.8 for ranging markets). Exit when RSI crosses back below 50 (long) or above 50 (short). Designed to capture momentum shifts with reduced whipsaw in both bull and bear markets.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1D_Trend_v1"
-timeframe = "12h"
+name = "4h_KAMA_Direction_RSI_Chop_Filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,75 +22,102 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # KAMA calculation
+    def kama(close, er_len=10, fast_len=2, slow_len=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) == 1 else np.convolve(np.abs(np.diff(close)), np.ones(er_len), 'same')
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1)) ** 2
+        kama_out = np.zeros_like(close)
+        kama_out[0] = close[0]
+        for i in range(1, len(close)):
+            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
+        return kama_out
     
-    # Calculate Camarilla levels for each 1d bar (based on previous day's range)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    kama_vals = kama(close, 10, 2, 30)
     
-    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
-    camarilla_r1 = np.full_like(prev_close, np.nan)
-    camarilla_s1 = np.full_like(prev_close, np.nan)
+    # RSI calculation
+    def rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[length] = np.mean(gain[1:length+1])
+        avg_loss[length] = np.mean(loss[1:length+1])
+        for i in range(length+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i]) / length
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_out = 100 - (100 / (1 + rs))
+        return rsi_out
     
-    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
-    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    rsi_vals = rsi(close, 14)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Choppiness Index calculation
+    def chop(high, low, close, length=14):
+        atr = np.zeros_like(close)
+        tr1 = np.abs(high - low)
+        tr2 = np.abs(np.roll(high, 1) - close)
+        tr3 = np.abs(np.roll(low, 1) - close)
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr = np.convolve(tr, np.ones(length), 'full')[:len(close)] / length
+        atr[:length-1] = np.nan
+        
+        highest_high = np.zeros_like(close)
+        lowest_low = np.zeros_like(close)
+        for i in range(length-1, len(close)):
+            highest_high[i] = np.max(high[i-length+1:i+1])
+            lowest_low[i] = np.min(low[i-length+1:i+1])
+        
+        sum_atr = np.nansum(atr[-length:]) if len(atr) >= length else np.nansum(atr)
+        range_hl = highest_high - lowest_low
+        chop_vals = 100 * np.log10(sum_atr / range_hl) / np.log10(length)
+        return chop_vals
     
-    # Get 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    chop_vals = chop(high, low, close, 14)
     
-    # Volume confirmation: volume > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = np.convolve(volume, np.ones(20)/20, 'same')
+    vol_ma[:19] = np.nan
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
-    for i in range(50, n):
-        # Decrease cooldown if active
-        if cooldown > 0:
-            cooldown -= 1
-        
-        if position == 0 and cooldown == 0:
-            # LONG: Price breaks above R1 with volume confirmation in uptrend
-            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and \
-               close[i] > ema_34_1d_aligned[i]:
+    for i in range(30, n):  # Start after warmup period
+        if np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or np.isnan(chop_vals[i]) or np.isnan(volume_confirmed[i]):
+            signals[i] = 0.0
+            continue
+            
+        # Only trade in ranging markets (Chop > 61.8) to avoid whipsaw in strong trends
+        if chop_vals[i] <= 61.8:
+            signals[i] = 0.0
+            continue
+            
+        if position == 0:
+            # LONG: Price above KAMA, RSI crosses above 50, volume confirmation
+            if close[i] > kama_vals[i] and rsi_vals[i] > 50 and rsi_vals[i-1] <= 50 and volume_confirmed[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with volume confirmation in downtrend
-            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and \
-                 close[i] < ema_34_1d_aligned[i]:
+            # SHORT: Price below KAMA, RSI crosses below 50, volume confirmation
+            elif close[i] < kama_vals[i] and rsi_vals[i] < 50 and rsi_vals[i-1] >= 50 and volume_confirmed[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below R1 or trend weakens
-            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               (low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1d_aligned[i]):
+            # EXIT LONG: RSI crosses back below 50
+            if rsi_vals[i] < 50 and rsi_vals[i-1] >= 50:
                 signals[i] = 0.0
                 position = 0
-                cooldown = 3  # 3-bar cooldown after exit
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above S1 or trend weakens
-            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-               (high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1d_aligned[i]):
+            # EXIT SHORT: RSI crosses back above 50
+            if rsi_vals[i] > 50 and rsi_vals[i-1] <= 50:
                 signals[i] = 0.0
                 position = 0
-                cooldown = 3  # 3-bar cooldown after exit
             else:
                 signals[i] = -0.25
     
