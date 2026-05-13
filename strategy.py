@@ -1,23 +1,17 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-6h_ElderRay_TrendFollowing_v1
-Primary timeframe: 6h, HTF: 1d
-Elder Ray (Bull/Bear Power) from 1d combined with 6h trend filter.
-Long when 1d Bull Power > 0 and 6h close > 6h EMA50.
-Short when 1d Bear Power < 0 and 6h close < 6h EMA50.
-Exit when Elder Power reverses or price crosses EMA50.
-Designed for low trade frequency and works in both bull and bear markets by using 1d Elder Ray for regime and 6h EMA for entry timing.
-"""
+# Hypothesis: 4h price action relative to 12h VWAP with volume confirmation and ATR-based risk management.
+# Uses 12h VWAP as dynamic support/resistance - price above VWAP indicates bullish bias, below indicates bearish bias.
+# Entry when price closes decisively above/below 12h VWAP with above-average volume.
+# Exit when price crosses back through VWAP. Designed for low trade frequency (<25/year) to minimize fee drag.
+# VWAP acts as institutional reference point, providing edge in both trending and ranging markets.
+
+name = "4h_VWAP12h_Volume_Filter"
+timeframe = "4h"
+leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtrand import seed
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "6h_ElderRay_TrendFollowing_v1"
-timeframe = "6h"
-leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -29,58 +23,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h EMA50 for trend filter and entry timing
-    close_series = pd.Series(close)
-    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 12h VWAP data once before loop
+    df_12h = get_htf_data(prices, '12h')
+    typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
+    vwap_raw = (typical_price * df_12h['volume']).cumsum() / df_12h['volume'].cumsum()
+    vwap_12h = align_htf_to_ltf(prices, df_12h, vwap_raw.values)
     
-    # Get 1d data for Elder Ray calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate 13-period EMA for Elder Ray (standard setting)
-    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = df_1d['high'].values - ema13_1d
-    bear_power = df_1d['low'].values - ema13_1d
-    
-    # Align Elder Ray components to 6h timeframe (wait for 1d bar to close)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Volume filter: current volume > 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after sufficient data for EMA50
-    start_idx = 50
-    
-    for i in range(start_idx, n):
-        if np.isnan(ema50[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]):
+    for i in range(50, n):  # Start after sufficient data
+        if np.isnan(vwap_12h[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: 1d Bull Power positive AND 6h close above EMA50
-            if bull_power_aligned[i] > 0 and close[i] > ema50[i]:
+            # LONG: Price closes above 12h VWAP with volume confirmation
+            if close[i] > vwap_12h[i] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1d Bear Power negative AND 6h close below EMA50
-            elif bear_power_aligned[i] < 0 and close[i] < ema50[i]:
+            # SHORT: Price closes below 12h VWAP with volume confirmation
+            elif close[i] < vwap_12h[i] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 1d Bear Power turns negative OR price crosses below EMA50
-            if bear_power_aligned[i] < 0 or close[i] < ema50[i]:
+            # EXIT LONG: Price closes back below 12h VWAP
+            if close[i] < vwap_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 1d Bull Power turns positive OR price crosses above EMA50
-            if bull_power_aligned[i] > 0 or close[i] > ema50[i]:
+            # EXIT SHORT: Price closes back above 12h VWAP
+            if close[i] > vwap_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
