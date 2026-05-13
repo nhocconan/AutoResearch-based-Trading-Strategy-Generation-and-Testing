@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation + ATR trailing stop.
-# Long when price breaks above Donchian(20) high AND 1d EMA34 up AND volume > 1.5x avg.
-# Short when price breaks below Donchian(20) low AND 1d EMA34 down AND volume > 1.5x avg.
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA34 trend filter + volume confirmation.
+# Long when price breaks above Donchian upper band AND close > 1d EMA34 AND volume > 1.5x average.
+# Short when price breaks below Donchian lower band AND close < 1d EMA34 AND volume > 1.5x average.
 # Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Donchian provides objective price channels; 1d EMA34 filters for higher timeframe trend.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Donchian channels provide clear structure, 1d EMA filters for higher-timeframe trend,
+# volume confirmation avoids false breakouts. Target: 100-200 total trades over 4 years (25-50/year) on 4h.
 
 name = "4h_Donchian20_1dEMA34_VolumeSpike_ATRStop_v1"
 timeframe = "4h"
@@ -39,7 +39,7 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Get 1d data for EMA34 trend filter (HTF = 1d)
+    # Get 1d data for EMA34 trend filter (HTF = 1d as specified)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
@@ -63,16 +63,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high AND 1d EMA34 up AND volume > 1.5x average
+            # LONG: Price > Donchian upper AND close > 1d EMA34 AND volume > 1.5x average
             if (close[i] > highest_high[i] and 
-                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and 
+                close[i] > ema34_1d_aligned[i] and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian low AND 1d EMA34 down AND volume > 1.5x average
+            # SHORT: Price < Donchian lower AND close < 1d EMA34 AND volume > 1.5x average
             elif (close[i] < lowest_low[i] and 
-                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
