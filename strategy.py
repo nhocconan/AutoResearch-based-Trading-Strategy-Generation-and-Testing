@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
 # Hypothesis: Camarilla pivot levels (R1/S1) from daily pivots act as strong support/resistance.
 # Breakout above R1 with uptrend (price > EMA50) and volume spike triggers long.
 # Breakdown below S1 with downtrend (price < EMA50) and volume spike triggers short.
@@ -7,8 +7,8 @@
 # Designed to work in both bull and bear markets by following daily trend direction.
 # Targets low-frequency, high-quality setups to minimize fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
     s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
 
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
 
@@ -47,7 +47,7 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume spike: volume > 2.0 * 20-period average (~5 days at 4h)
+    # Volume spike: volume > 2.0 * 20-period average (~10 days at 12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * vol_ma_20
 
