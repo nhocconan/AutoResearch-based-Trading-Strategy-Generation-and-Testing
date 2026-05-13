@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1D_Donchian20_WeeklyTrend_Filter
-# Hypothesis: On the daily timeframe, breakouts from the 20-period Donchian channel
-# in the direction of the weekly trend (EMA50) with volume confirmation capture
-# significant moves in both bull and bear markets. The weekly trend filter ensures
-# we trade with the higher-timeframe momentum, reducing whipsaws. Volume confirmation
-# adds conviction to breakouts. Target: 15-25 trades/year per symbol.
+# 1d_WeeklyTrend_DailyPullback
+# Hypothesis: In the direction of the weekly trend, buy pullbacks to daily support/resistance
+# with volume confirmation. Weekly trend filters out counter-trend noise, while daily
+# pullbacks provide better entry prices. Works in bull (buy dips in uptrend) and bear
+# (sell rallies in downtrend) by trading with the weekly trend. Target: 10-20 trades/year.
 
-name = "1D_Donchian20_WeeklyTrend_Filter"
+name = "1d_WeeklyTrend_DailyPullback"
 timeframe = "1d"
 leverage = 1.0
 
@@ -19,81 +18,78 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
 
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 30:
         return np.zeros(n)
-
     close_1w = df_1w['close'].values
 
-    # Weekly trend: 50-period EMA on weekly close
-    weekly_ema50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_uptrend = close_1w > weekly_ema50
-    weekly_downtrend = close_1w < weekly_ema50
+    # Get daily data for pullback and volume filters
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
 
-    # Daily Donchian channel (20-period)
-    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly trend: 34-period EMA on weekly close
+    weekly_ema34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    weekly_uptrend = close_1w > weekly_ema34
+    weekly_downtrend = close_1w < weekly_ema34
 
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Daily pullback: price near 20-period EMA on daily timeframe
+    daily_ema20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Allow 1% deviation from EMA for pullback
+    pullback_threshold = 0.01
+    near_ema = np.abs(close_1d - daily_ema20) / daily_ema20 < pullback_threshold
+
+    # Volume confirmation: current volume > 1.3 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.3 * vol_ma)
+
+    # Align weekly and daily indicators to 1d timeframe
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
+    near_ema_aligned = align_htf_to_ltf(prices, df_1d, near_ema)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
-        # Get aligned weekly values for current daily bar
-        if i < len(weekly_uptrend):
-            up_trend = weekly_uptrend[i]
-            down_trend = weekly_downtrend[i]
-        else:
-            up_trend = False
-            down_trend = False
-
-        if i < len(volume_spike):
-            vol_spike = volume_spike[i]
-        else:
-            vol_spike = False
-
-        # Skip if any required data is not available
-        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
-            np.isnan(vol_ma[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
+    for i in range(34, n):  # Start after weekly EMA warmup
+        # Get aligned values
+        uptrend = weekly_uptrend_aligned[i]
+        downtrend = weekly_downtrend_aligned[i]
+        pullback = near_ema_aligned[i]
+        vol_spike = volume_spike_aligned[i]
 
         if position == 0:
-            # LONG: Weekly uptrend + price breaks above Donchian high + volume spike
-            if (up_trend and 
-                close[i] > highest_high_20[i] and vol_spike):
+            # LONG: Weekly uptrend + daily pullback to EMA + volume spike
+            if uptrend and pullback and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Weekly downtrend + price breaks below Donchian low + volume spike
-            elif (down_trend and 
-                  close[i] < lowest_low_20[i] and vol_spike):
+            # SHORT: Weekly downtrend + daily pullback to EMA + volume spike
+            elif downtrend and pullback and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Donchian low or weekly trend changes to down
-            if (close[i] < lowest_low_20[i] or not up_trend):
+            # EXIT LONG: Price moves 1.5% above EMA or weekly trend changes
+            if (close[i] > daily_ema20[i] * 1.015 or not uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Donchian high or weekly trend changes to up
-            if (close[i] > highest_high_20[i] or not down_trend):
+            # EXIT SHORT: Price moves 1.5% below EMA or weekly trend changes
+            if (close[i] < daily_ema20[i] * 0.985 or not downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
