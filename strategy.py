@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h trend filter and session filter (08-20 UTC).
-# Enters long when price breaks above R1 level with 4h bullish trend (close > EMA20) during active session.
-# Enters short when price breaks below S1 level with 4h bearish trend (close < EMA20) during active session.
-# Exits when price reverts to the 4h EMA50 (mean reversion in range).
-# Uses discrete position sizing (0.20) to minimize fee drag and manage drawdown.
-# Designed for low trade frequency (~15-37/year) to work in both bull and bear markets by using 4h trend filter.
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter (price > weekly EMA50) and volume confirmation.
+# Enters long when price breaks above 6h Donchian upper channel with weekly bullish trend and volume > 2x MA20.
+# Enters short when price breaks below 6h Donchian lower channel with weekly bearish trend and volume > 2x MA20.
+# Exits when price crosses the 6h EMA20 (mean reversion within the channel).
+# Uses discrete position sizing (0.25) to minimize fee drag and manage drawdown.
+# Designed for low trade frequency (~12-30/year) to work in both bull and bear markets by filtering with weekly trend.
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_Session"
-timeframe = "1h"
+name = "6h_Donchian_Breakout_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,73 +24,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Get 1w data for weekly trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for Camarilla pivot levels (based on previous day)
+    # Calculate weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Get 1d data for volume confirmation (to avoid intraday noise)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # We'll use 6h volume but filter with 1d average volume ratio for stability
+    volume_series = pd.Series(volume)
+    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Camarilla levels: R1, S1 (based on previous 1d bar)
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate 6h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Get 4h data for trend filter (EMA20)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Calculate 4h EMA20 for trend filter
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    
-    # Calculate 4h EMA50 for exit condition
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate 6h EMA20 for exit condition
+    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or \
-           np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]):
-            signals[i] = 0.0
-            continue
-        
-        if not in_session[i]:
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(ema50_1w_aligned[i]) or np.isnan(ema20_6h[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 with 4h bullish trend
-            if close[i] > camarilla_r1_aligned[i] and close[i] > ema20_4h_aligned[i]:
-                signals[i] = 0.20
+            # LONG: Price breaks above Donchian upper channel with weekly bullish trend and volume spike
+            if close[i] > donchian_high[i] and close[i] > ema50_1w_aligned[i] and volume[i] > (vol_ma20[i] * 2.0):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with 4h bearish trend
-            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema20_4h_aligned[i]:
-                signals[i] = -0.20
+            # SHORT: Price breaks below Donchian lower channel with weekly bearish trend and volume spike
+            elif close[i] < donchian_low[i] and close[i] < ema50_1w_aligned[i] and volume[i] > (vol_ma20[i] * 2.0):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reverts to 4h EMA50 (mean reversion in range)
-            if close[i] < ema50_4h_aligned[i]:
+            # EXIT LONG: Price crosses below 6h EMA20 (mean reversion)
+            if close[i] < ema20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reverts to 4h EMA50 (mean reversion in range)
-            if close[i] > ema50_4h_aligned[i]:
+            # EXIT SHORT: Price crosses above 6h EMA20 (mean reversion)
+            if close[i] > ema20_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
