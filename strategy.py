@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter, volume confirmation, and ATR(14) stoploss.
-# Long when price breaks above 20-period high AND price > 1d EMA34 AND volume > 2.0x 20-period average.
-# Short when price breaks below 20-period low AND price < 1d EMA34 AND volume > 2.0x 20-period average.
-# Uses 12h primary timeframe and 1d HTF for trend alignment. Designed for BTC/ETH with strict entry to avoid overtrading.
-# Donchian channels provide clear structure, EMA34 filters intermediate trend, volume spike confirms breakout.
-# Target: 12-37 trades/year on 12h timeframe to minimize fee drag.
+# Hypothesis: 4h Williams %R with 1d EMA34 trend filter and volume spike confirmation.
+# Williams %R measures overbought/oversold conditions: long when %R crosses above -80 from below,
+# short when %R crosses below -20 from above. 1d EMA34 filters intermediate trend alignment.
+# Volume spike (>1.5x 20-period average) confirms breakout authenticity. Designed for BTC/ETH
+# with discrete position sizing (0.25) to limit fee drag and ensure <50 trades/year per symbol.
 
-name = "12h_Donchian20_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,9 +31,12 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) on 12h data
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
     # Get 1d data for EMA34 trend filter (MTF)
     df_1d = get_htf_data(prices, '1d')
@@ -43,33 +45,33 @@ def generate_signals(prices):
     # Calculate EMA34 on 1d close
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF arrays to 12h timeframe (wait for completed 1d bar)
+    # Align HTF arrays to 4h timeframe (wait for completed 1d bar)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current 12h volume > 2.0x 20-period average (spike confirmation)
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_12h)
+    # Volume filter: current 4h volume > 1.5x 20-period average (spike confirmation)
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
     lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(100, n):  # Start after sufficient data for indicators
+    for i in range(50, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_12h[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above 20-period high AND price > 1d EMA34 AND volume spike
-            if close[i] > highest_high[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
+            # LONG: Williams %R crosses above -80 from below AND price > 1d EMA34 AND volume spike
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price breaks below 20-period low AND price < 1d EMA34 AND volume spike
-            elif close[i] < lowest_low[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
+            # SHORT: Williams %R crosses below -20 from above AND price < 1d EMA34 AND volume spike
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
