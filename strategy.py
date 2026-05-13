@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d volume spike and choppiness regime filter.
-# Long when price breaks above Donchian high(20) AND volume > 1.5x 20-period average AND CHOP(14) > 61.8 (ranging market).
-# Short when price breaks below Donchian low(20) AND volume > 1.5x 20-period average AND CHOP(14) > 61.8.
-# Exit when price crosses Donchian midpoint OR CHOP < 38.2 (trending regime).
-# Uses discrete position sizing (0.25) to limit fee churn. Designed for BTC/ETH robustness by capturing breakouts in ranging markets while avoiding false signals in strong trends.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA50) and volume confirmation. 
+# Camarilla pivot levels (R3/S3) act as strong intraday support/resistance. 
+# Breakout above R3 with 1d EMA50 uptrend and volume > 1.5x 20-period average → long. 
+# Breakdown below S3 with 1d EMA50 downtrend and volume confirmation → short. 
+# Uses discrete position sizing (0.25) to limit fee churn. Designed for 12h timeframe to avoid overtrading while capturing strong momentum moves in both bull and bear markets.
 
-name = "4h_DonchianBreakout_VolumeChop_1D_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,121 +23,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    lookback = 20
-    if len(high) < lookback:
-        return np.zeros(n)
-    
-    # Vectorized Donchian calculation
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Calculate 1d HTF data for volume spike and chop regime
+    # Calculate 1d EMA50 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    
-    # 1d volume spike: current volume > 1.5x 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = np.where(vol_ma_20 > 0, vol_1d / vol_ma_20, 0)  # ratio
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    
-    # 1d Choppiness Index (CHOP) - measures ranging vs trending
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index 0
-    
-    # ATR(14) - smoothed TR
-    atr_period = 14
-    atr = np.zeros_like(tr)
-    for i in range(len(tr)):
-        if i < atr_period:
-            if i == 0:
-                atr[i] = np.nan
-            else:
-                atr[i] = np.nanmean(tr[1:i+1]) if not np.all(np.isnan(tr[1:i+1])) else np.nan
-        else:
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-    
-    # Sum of ATR over lookback period
-    chop_lookback = 14
-    atr_sum = np.zeros_like(close_1d)
-    for i in range(len(atr_sum)):
-        if i < chop_lookback:
-            atr_sum[i] = np.nan
-        else:
-            atr_sum[i] = np.nansum(atr[i-chop_lookback+1:i+1])
-    
-    # Max(high) - Min(low) over lookback period
-    max_high = np.zeros_like(close_1d)
-    min_low = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i < chop_lookback:
-            max_high[i] = np.nan
-            min_low[i] = np.nan
-        else:
-            max_high[i] = np.nanmax(high_1d[i-chop_lookback+1:i+1])
-            min_low[i] = np.nanmin(low_1d[i-chop_lookback+1:i+1])
-    
-    # Chop = 100 * log10(sum(ATR) / (max_high - min_low)) / log10(lookback)
-    range_val = max_high - min_low
-    chop = np.zeros_like(close_1d)
-    for i in range(len(chop)):
-        if np.isnan(atr_sum[i]) or np.isnan(range_val[i]) or range_val[i] <= 0:
-            chop[i] = np.nan
-        else:
-            chop[i] = 100 * np.log10(atr_sum[i] / range_val[i]) / np.log10(chop_lookback)
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate 20-period average volume for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(20, n):  # start after lookback for volume MA
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(volume_spike_aligned[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Need prior bar's high/low/close for Camarilla calculation
+        if i < 1:
+            signals[i] = 0.0
+            continue
+            
+        # Calculate Camarilla pivot levels from prior bar
+        ph = high[i-1]
+        pl = low[i-1]
+        pc = close[i-1]
+        
+        # Camarilla levels
+        R3 = pc + (ph - pl) * 1.1 / 4
+        S3 = pc - (ph - pl) * 1.1 / 4
+        
         if position == 0:
-            # LONG: Price breaks above Donchian high AND volume spike AND chop > 61.8 (ranging)
-            if (close[i] > donchian_high[i] and 
-                volume_spike_aligned[i] > 1.5 and 
-                chop_aligned[i] > 61.8):
+            # LONG: Break above R3 with 1d EMA50 uptrend and volume confirmation
+            if (close[i] > R3 and 
+                close[i] > ema_50_1d_aligned[i] and  # price above 1d EMA50 (uptrend)
+                volume[i] > 1.5 * vol_ma_20[i]):   # volume > 1.5x 20-period average
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low AND volume spike AND chop > 61.8 (ranging)
-            elif (close[i] < donchian_low[i] and 
-                  volume_spike_aligned[i] > 1.5 and 
-                  chop_aligned[i] > 61.8):
+            # SHORT: Break below S3 with 1d EMA50 downtrend and volume confirmation
+            elif (close[i] < S3 and 
+                  close[i] < ema_50_1d_aligned[i] and  # price below 1d EMA50 (downtrend)
+                  volume[i] > 1.5 * vol_ma_20[i]):   # volume > 1.5x 20-period average
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses Donchian mid OR chop < 38.2 (trending regime)
-            if (close[i] < donchian_mid[i] or 
-                chop_aligned[i] < 38.2):
+            # EXIT LONG: Price closes below prior bar's close (simple mean reversion exit)
+            if close[i] < pc:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses Donchian mid OR chop < 38.2 (trending regime)
-            if (close[i] > donchian_mid[i] or 
-                chop_aligned[i] < 38.2):
+            # EXIT SHORT: Price closes above prior bar's close
+            if close[i] > pc:
                 signals[i] = 0.0
                 position = 0
             else:
