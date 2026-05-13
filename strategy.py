@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Fractal breakout with 1w EMA34 trend filter and volume confirmation (>1.8x avg volume).
-# Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Williams Fractals identify significant swing points; breakouts above bearish fractals or below bullish fractals
-# capture momentum with institutional volume. 1w EMA34 filter ensures alignment with weekly trend, reducing whipsaw
-# in ranging markets. Works in bull markets via upside breakouts and in bear markets via downside breakdowns.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 > EMA200 trend filter and volume confirmation (>1.5x avg volume).
+# Uses ATR(20) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+# EMA trend filter ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
+# Donchian breakouts provide clear structure with proven edge in both bull and bear markets.
+# Volume spike confirmation (>1.5x) ensures breakouts have institutional participation.
 
-name = "12h_WilliamsFractal_Breakout_1wEMATrend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMATrend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,37 +24,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for trailing stop
+    # Calculate ATR(20) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for Williams Fractals and EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Williams Fractals on 1w data
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1w, low_1w)
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Align Williams Fractals to 12h timeframe with additional delay for confirmation
-    # Williams fractals need 2 extra 1w bars after the center bar for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
+    # Calculate 1d EMA50 and EMA200 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = close_1d_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate 1w EMA34 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1w EMA34 to 12h timeframe (wait for weekly bar to close)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Align 1d EMAs to 4h timeframe (wait for daily bar to close)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,23 +59,24 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Bearish Fractal (resistance) AND 1w EMA34 > close AND volume > 1.8x average
-            if (close[i] > bearish_fractal_aligned[i] and 
-                ema34_1w_aligned[i] > close[i] and 
-                volume[i] > 1.8 * avg_volume[i]):
+            # LONG: Price breaks above Donchian upper band AND 1d EMA50 > EMA200 AND volume > 1.5x average
+            if (close[i] > highest_high[i] and 
+                ema50_1d_aligned[i] > ema200_1d_aligned[i] and 
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Bullish Fractal (support) AND 1w EMA34 < close AND volume > 1.8x average
-            elif (close[i] < bullish_fractal_aligned[i] and 
-                  ema34_1w_aligned[i] < close[i] and 
-                  volume[i] > 1.8 * avg_volume[i]):
+            # SHORT: Price breaks below Donchian lower band AND 1d EMA50 < EMA200 AND volume > 1.5x average
+            elif (close[i] < lowest_low[i] and 
+                  ema50_1d_aligned[i] < ema200_1d_aligned[i] and 
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
