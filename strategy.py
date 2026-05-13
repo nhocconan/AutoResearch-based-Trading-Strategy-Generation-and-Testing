@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Rotation_Filter
-Hypothesis: Weekly pivot points act as strong support/resistance. Price tends to rotate between S1-R1 in ranging markets and break through R2/S2 in trending markets. 
-In bull/bear markets, we fade at R1/S1 when price is outside weekly CPR (central pivot range), and breakout at R2/S2 when inside CPR. Uses 1d trend filter to avoid counter-trend trades.
-Target: 15-30 trades/year per symbol. Works in both bull (breakouts) and bear (mean reversion at extremes).
+12h_Camarilla_Pivot_Reversal_1dTrend_Volume
+Hypothesis: Camarilla pivot reversals on 12h timeframe work in both bull and bear markets.
+Buy near S1/S2 when 1d trend is up and volume confirms; sell near R1/R2 when 1d trend is down and volume confirms.
+Uses 1d trend filter to avoid counter-trend trades in strong trends. Target: 15-30 trades/year per symbol.
 """
 
-name = "6h_WeeklyPivot_Rotation_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_Reversal_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,88 +19,95 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Weekly pivot points (using prior week's OHLC)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot from prior week's data
-    # We use shift(1) to ensure we only use completed weekly data
-    weekly_high = df_1w['high'].shift(1).values
-    weekly_low = df_1w['low'].shift(1).values
-    weekly_close = df_1w['close'].shift(1).values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    
-    # Support and resistance levels
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
-    
-    # Align weekly levels to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
-    
-    # 1d trend filter (to avoid counter-trend trades)
+    # Previous day's Camarilla levels (using 1d data)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
+    
+    # Calculate Camarilla levels from previous day's OHLC
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
+    
+    # Camarilla multipliers
+    H_L = prev_high - prev_low
+    R1 = prev_close + H_L * 1.1 / 12
+    R2 = prev_close + H_L * 1.1 / 6
+    R3 = prev_close + H_L * 1.1 / 4
+    S1 = prev_close - H_L * 1.1 / 12
+    S2 = prev_close - H_L * 1.1 / 6
+    S3 = prev_close - H_L * 1.1 / 4
+    
+    # Align levels to 12h timeframe (they change only at 1d boundaries)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    
+    # 1d trend filter: EMA50
+    ema_50_1d = pd.Series(prev_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = prev_close > ema_50_1d
+    downtrend_1d = prev_close < ema_50_1d
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # CPR (Central Pivot Range) - area between (H+L+C)/3 and (H+L)/2
-    weekly_cpr_top = (weekly_high + weekly_low) / 2
-    weekly_cpr_bottom = (weekly_high + weekly_low + weekly_close) / 3  # same as pivot
-    weekly_cpr_top_aligned = align_htf_to_ltf(prices, df_1w, weekly_cpr_top)
-    weekly_cpr_bottom_aligned = align_htf_to_ltf(prices, df_1w, weekly_cpr_bottom)
-    
-    # Determine if price is inside CPR (range) or outside (trend)
-    in_cpr = (close >= weekly_cpr_bottom_aligned) & (close <= weekly_cpr_top_aligned)
+    # Volume confirmation: volume > 1.5 * 24-period average (24*12h = 12 days)
+    vol_ma = np.zeros(n)
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if weekly data not available yet
-        if np.isnan(weekly_pivot_aligned[i]):
+    for i in range(24, n):
+        # Skip if any required data is not available
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]):
             signals[i] = 0.0
             continue
             
-        price = close[i]
-        in_cpr_now = in_cpr[i]
+        # Get current values
+        r1 = R1_aligned[i]
+        r2 = R2_aligned[i]
+        s1 = S1_aligned[i]
+        s2 = S2_aligned[i]
+        uptrend = uptrend_1d_aligned[i]
+        downtrend = downtrend_1d_aligned[i]
+        vol_conf = volume_conf[i]
         
-        # Fade at extremes when outside CPR (range behavior)
-        if not in_cpr_now:
-            # Price above CPR - look to fade at R1
-            if price <= weekly_r1_aligned[i] and uptrend_1d_aligned[i]:
-                # Potential sell at R1 in uptrend
-                signals[i] = -0.25
-            # Price below CPR - look to fade at S1
-            elif price >= weekly_s1_aligned[i] and downtrend_1d_aligned[i]:
-                # Potential buy at S1 in downtrend
+        if position == 0:
+            # LONG: price near S1 or S2, 1d uptrend, volume confirmation
+            if ((abs(close[i] - s1) / s1 < 0.005 or abs(close[i] - s2) / s2 < 0.005) and 
+                uptrend and vol_conf):
                 signals[i] = 0.25
+                position = 1
+            # SHORT: price near R1 or R2, 1d downtrend, volume confirmation
+            elif ((abs(close[i] - r1) / r1 < 0.005 or abs(close[i] - r2) / r2 < 0.005) and 
+                  downtrend and vol_conf):
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
-        else:
-            # Inside CPR - look for breakouts at R2/S2 (trend behavior)
-            # Breakout above R2
-            if price >= weekly_r2_aligned[i] and uptrend_1d_aligned[i]:
-                signals[i] = 0.25
-            # Breakdown below S2
-            elif price <= weekly_s2_aligned[i] and downtrend_1d_aligned[i]:
-                signals[i] = -0.25
-            else:
+        elif position == 1:
+            # EXIT LONG: price reaches midpoint or 1d trend turns down
+            midpoint = (s1 + r1) / 2  # Simple midpoint between S1 and R1
+            if close[i] >= midpoint or not uptrend:
                 signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: price reaches midpoint or 1d trend turns up
+            midpoint = (s1 + r1) / 2
+            if close[i] <= midpoint or not downtrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
