@@ -1,15 +1,14 @@
-#!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Price reacts to Camarilla pivot levels (R1/S1) derived from 1d timeframe.
-# Go long when price breaks above R1 with 1d uptrend and volume confirmation.
-# Go short when price breaks below S1 with 1d downtrend and volume confirmation.
-# Using 1d for Camarilla levels and trend provides more robust levels with fewer signals.
-# Volume spike confirms institutional participation, reducing false breakouts.
-# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
-# Target: 15-35 trades/year per symbol to minimize fee drag.
+# 6h_Camarilla_R4_S4_Breakout_1dTrend_Volume
+# Hypothesis: Price reacts strongly at extended Camarilla levels (R4/S4) derived from 1d timeframe.
+# R4 = C + (H-L) * 1.1/2, S4 = C - (H-L) * 1.1/2 represent breakout levels.
+# Go long when price breaks above R4 with 1d uptrend (close > EMA34) and volume confirmation.
+# Go short when price breaks below S4 with 1d downtrend (close < EMA34) and volume confirmation.
+# Uses 1d timeframe for structure and 6h for execution, targeting 12-37 trades/year.
+# Works in bull markets (breakouts above R4 in uptrend) and bear markets (breakdowns below S4 in downtrend).
+# Volume spike filters false breakouts, EMA34 ensures trend alignment.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,40 +25,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for Camarilla pivot calculation and trend
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous 1d bar
-    # R1 = C + (H-L) * 1.1/12
-    # S1 = C - (H-L) * 1.1/12
+    # Calculate Camarilla pivot levels (R4, S4) from previous 1d bar
+    # R4 = C + (H-L) * 1.1/2
+    # S4 = C - (H-L) * 1.1/2
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    camarilla_width = (high_1d - low_1d) * 1.1 / 12
-    r1 = close_1d + camarilla_width
-    s1 = close_1d - camarilla_width
+    camarilla_width = (high_1d - low_1d) * 1.1 / 2
+    r4 = close_1d + camarilla_width
+    s4 = close_1d - camarilla_width
     
-    # 1d trend: EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d trend: EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d indicators to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 1d indicators to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike: volume > 2.0 * 3-period average (1.5 days worth at 4h)
-    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
-    volume_spike = volume > 2.0 * vol_ma_3
+    # Volume spike: volume > 2.0 * 6-period average (1 day worth at 6h)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    volume_spike = volume > 2.0 * vol_ma_6
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,29 +67,31 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R1 + 1d uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > R4 + 1d uptrend + volume spike
+            if close[i] > r4_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S1 + 1d downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < S4 + 1d downtrend + volume spike
+            elif close[i] < s4_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S1 or trend reversal
-            if close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close below S4 or trend reversal
+            if close[i] < s4_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R1 or trend reversal
-            if close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close above R4 or trend reversal
+            if close[i] > r4_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
 
     return signals
+
+#!/usr/bin/env python3
