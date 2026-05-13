@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter (EMA34), volume confirmation (1.5x MA20), and ATR volatility filter.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA34), volume confirmation (1.5x MA20), and ATR volatility filter.
 # Enters long when price breaks above Camarilla R3 level with 1d bullish trend (close > EMA34), volume > 1.5x MA20, and ATR(14) > 0.3 * ATR(50).
 # Enters short when price breaks below Camarilla S3 level with 1d bearish trend (close < EMA34), volume > 1.5x MA20, and ATR(14) > 0.3 * ATR(50).
 # Exits when price reverts to the Camarilla pivot point or ATR-based stoploss (2 * ATR(14) from entry).
@@ -8,8 +8,8 @@
 # Camarilla levels provide intraday support/resistance effective in ranging markets, while HTF trend filter ensures alignment with higher timeframe direction.
 # Volatility filter avoids low volatility false breakouts, improving signal quality in both bull and bear markets.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Volatility_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Volatility_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -47,7 +47,7 @@ def generate_signals(prices):
     r4 = pivot + (range_hl * 1.1 / 2.0)  # Resistance 4
     s4 = pivot - (range_hl * 1.1 / 2.0)  # Support 4
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
