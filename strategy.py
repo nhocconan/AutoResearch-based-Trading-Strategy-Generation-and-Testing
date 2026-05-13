@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Use daily Camarilla pivot R3/S3 levels as breakout triggers with 1d EMA trend filter and volume confirmation.
-# Enter long when price breaks above R3 with 1d EMA uptrend and volume spike.
-# Enter short when price breaks below S3 with 1d EMA downtrend and volume spike.
-# Exit when price returns to central pivot point (PP) to avoid reversals.
-# Uses 4h timeframe for better trade frequency control and reduced fee drag.
-# Designed to work in both bull and bear markets via trend filter and volatility-based exits.
+# 4h_Donchian_Breakout_Volume_Regime
+# Hypothesis: Use Donchian(20) breakout on 4h with volume confirmation and chop regime filter.
+# Long when price breaks above upper band with volume > 1.5x 24-period avg and CHOP > 61.8 (range).
+# Short when price breaks below lower band with volume > 1.5x 24-period avg and CHOP > 61.8.
+# Exit when price returns to the middle of the Donchian channel.
+# This avoids whipsaws in strong trends and focuses on mean reversion in ranging markets.
+# Target: 20-40 trades/year on 4h to minimize fee drag while capturing range-bound moves.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+name = "4h_Donchian_Breakout_Volume_Regime"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,41 +25,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian(20) on 4h
+    period = 20
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    middle = (upper + lower) / 2.0
 
-    # Calculate Camarilla pivot levels for each day
-    # Based on previous day's OHLC
-    range_1d = high_1d - low_1d
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    r3 = pp + (high_1d - low_1d) * 1.1 / 2.0
-    s3 = pp - (high_1d - low_1d) * 1.1 / 2.0
+    # Chop regime filter (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((highest_high - lowest_low) / (atr * 14)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) > 0, chop, 50)  # avoid div by zero
 
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # Volume confirmation: volume > 1.8x 20-period average (to filter weak moves)
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5x 24-period average
+    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(24, n):
         # Skip if any required value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(middle[i]) or
+            np.isnan(chop[i]) or np.isnan(vol_avg_24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +62,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above R3 + price > 1d EMA34 + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.8):
+            # LONG: Break above upper band + volume chop + range market
+            if (close[i] > upper[i] and
+                volume[i] > vol_avg_24[i] * 1.5 and
+                chop[i] > 61.8):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S3 + price < 1d EMA34 + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.8):
+            # SHORT: Break below lower band + volume chop + range market
+            elif (close[i] < lower[i] and
+                  volume[i] > vol_avg_24[i] * 1.5 and
+                  chop[i] > 61.8):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses back below pivot point (mean reversion to fair value)
-            if close[i] < pp_aligned[i]:
+            # EXIT LONG: Return to middle of channel
+            if close[i] < middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses back above pivot point
-            if close[i] > pp_aligned[i]:
+            # EXIT SHORT: Return to middle of channel
+            if close[i] > middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
