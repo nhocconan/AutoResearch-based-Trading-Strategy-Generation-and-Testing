@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h strategy using 4h Donchian breakout with volume confirmation and session filter (08-20 UTC).
-# Long when price breaks above 4h Donchian upper (20) AND volume > 1.5x 20-period average AND session 08-20 UTC.
-# Short when price breaks below 4h Donchian lower (20) AND volume > 1.5x 20-period average AND session 08-20 UTC.
-# Exit on close crossing 4h Donchian middle (10-period average of upper/lower).
-# Uses 4h for signal direction (structure), 1h only for entry timing and session filter.
-# Designed for BTC/ETH with tight entries to avoid overtrading and fee drag.
+# Hypothesis: 6h Williams %R mean reversion with 1d EMA50 trend filter and volume spike confirmation.
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 2.0x 20-period average.
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 2.0x 20-period average.
+# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
+# Uses 6h primary timeframe and 1d HTF for trend alignment. Williams %R captures short-term extremes,
+# EMA50 filters intermediate trend direction, volume spike confirms rejection of extremes.
+# Designed for BTC/ETH with strict entry conditions to avoid overtrading (target: 12-37 trades/year).
 
-name = "1h_Donchian20_4hTrend_Volume_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_MeanReversion_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,66 +25,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Calculate Williams %R(14) on 6h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Get 4h data for Donchian channels (MTF)
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get 1d data for EMA50 trend filter (MTF)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_ma_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).mean().values
-    low_ma_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).mean().values
-    upper_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    middle_20 = (upper_20 + lower_20) / 2.0  # Middle band
+    # Calculate EMA50 on 1d close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF arrays to 1h timeframe (wait for completed 4h bar)
-    upper_20_aligned = align_htf_to_ltf(prices, df_4h, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_4h, lower_20)
-    middle_20_aligned = align_htf_to_ltf(prices, df_4h, middle_20)
+    # Align HTF arrays to 6h timeframe (wait for completed 1d bar)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume filter: current 1h volume > 1.5x 20-period average (spike confirmation)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_20)
+    # Volume filter: current 6h volume > 2.0x 20-period average (spike confirmation)
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or 
-            np.isnan(middle_20_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price > 4h Donchian upper AND volume spike AND session
-            if close[i] > upper_20_aligned[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = 0.20
+            # LONG: Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume spike
+            if williams_r[i] < -80 and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: price < 4h Donchian lower AND volume spike AND session
-            elif close[i] < lower_20_aligned[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = -0.20
+            # SHORT: Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume spike
+            elif williams_r[i] > -20 and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price < 4h Donchian middle
-            if close[i] < middle_20_aligned[i]:
+            # EXIT LONG: Williams %R crosses above -50 (recovering from oversold)
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price > 4h Donchian middle
-            if close[i] > middle_20_aligned[i]:
+            # EXIT SHORT: Williams %R crosses below -50 (declining from overbought)
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
