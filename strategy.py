@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-# 1d_Pivot_R1_S1_Breakout_WeeklyTrend_Volume
-# Hypothesis: Enter long when price breaks above weekly Camarilla R1 level in the direction of weekly EMA20 trend, confirmed by volume spike. Enter short when price breaks below S1 level in downtrend with volume confirmation. Weekly pivot levels provide institutional support/resistance. Trend filter aligns with higher timeframe momentum. Volume spike confirms breakout strength. Works in bull (breakouts above R1 in uptrend) and bear (breakdowns below S1 in downtrend). Low frequency due to pivot level requirement and volume confirmation.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Enter long when price breaks above Camarilla R1 level during low volatility in the direction of 1d EMA50 trend, confirmed by volume spike.
+# Enter short when price breaks below Camarilla S1 level during low volatility in the direction of 1d EMA50 trend, confirmed by volume spike.
+# Camarilla pivot levels from 1d provide precise support/resistance zones.
+# Bollinger Band Width identifies low volatility periods preceding breakouts.
+# Volume surge confirms institutional participation.
+# Trend filter ensures alignment with higher timeframe momentum, reducing false breakouts.
+# Works in bull (breakouts above R1 in uptrend) and bear (breakdowns below S1 in downtrend).
+# Low frequency due to squeeze requirement and strict volume confirmation.
 
-name = "1d_Pivot_R1_S1_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,42 +27,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot levels and trend
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla and Bollinger Bands
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly Camarilla pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Camarilla pivot levels (based on previous day's high, low, close)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Pivot point calculation
-    pivot = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
+    # Calculate pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_ = high_1d - low_1d
     
     # Camarilla levels
-    r1 = close_1w + (range_1w * 1.1 / 12)
-    s1 = close_1w - (range_1w * 1.1 / 12)
+    R1 = pivot + (range_ * 1.1 / 12)
+    S1 = pivot - (range_ * 1.1 / 12)
     
-    # Weekly trend: EMA20
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Bollinger Band Width for squeeze detection (20, 2)
+    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper = sma20 + 2 * std20
+    lower = sma20 - 2 * std20
+    bb_width = (upper - lower) / sma20
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
     
-    # Align weekly indicators to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Daily trend: EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume spike: volume > 2.0 * 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Align daily indicators to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume spike: volume > 2.0 * 6-period average (1 day worth at 4h)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    volume_spike = volume > 2.0 * vol_ma_6
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema20_1w_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or 
+            np.isnan(squeeze_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,26 +82,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R1 + weekly uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema20_1w_aligned[i] and volume_spike[i]:
+            # LONG: Close > R1 + squeeze + daily uptrend + volume spike
+            if close[i] > R1_aligned[i] and squeeze_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S1 + weekly downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema20_1w_aligned[i] and volume_spike[i]:
+            # SHORT: Close < S1 + squeeze + daily downtrend + volume spike
+            elif close[i] < S1_aligned[i] and squeeze_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S1 or trend reversal
-            if close[i] < s1_aligned[i] or close[i] < ema20_1w_aligned[i]:
+            # EXIT LONG: Close below S1 OR trend reversal
+            if close[i] < S1_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R1 or trend reversal
-            if close[i] > r1_aligned[i] or close[i] > ema20_1w_aligned[i]:
+            # EXIT SHORT: Close above R1 OR trend reversal
+            if close[i] > R1_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
