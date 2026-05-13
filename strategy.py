@@ -1,12 +1,11 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_1dCloud_Filter
-Hypothesis: Ichimoku Tenkan-Kijun cross (9,26) with daily cloud filter (Senkou Span A/B) and volume confirmation captures momentum with trend alignment. Works in bull/bear via cloud color (green=uptrend, red=downtrend) and avoids false signals in chop. Designed for low trade frequency on 6h timeframe.
+12h_TRIX_VolumeSpike_WeeklyTrend
+Hypothesis: TRIX (15-period) momentum with volume spike confirmation and weekly trend filter captures strong momentum moves in both bull and bear markets. Weekly trend ensures alignment with higher timeframe direction, while volume spike filters low-probability signals. TRIX smooths price to reduce whipsaws, making it suitable for 12h timeframe with low trade frequency.
 """
 
-name = "6h_Ichimoku_TK_Cross_1dCloud_Filter"
-timeframe = "6h"
+name = "12h_TRIX_VolumeSpike_WeeklyTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,83 +14,64 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Get 1d data for Ichimoku cloud (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate Ichimoku components on 1d data
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    high_9 = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (high_9 + low_9) / 2
+    # Calculate 15-period EMA of close for TRIX (triple smoothed EMA)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    # TRIX = percentage change of triple EMA
+    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
+    trix = trix.fillna(0).values  # first value is 0 due to shift
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    high_26 = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (high_26 + low_26) / 2
+    # Weekly EMA34 for trend filter
+    ema34_weekly = pd.Series(df_weekly['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2, plotted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2, plotted 26 periods ahead
-    high_52 = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):
+    for i in range(30, n):  # start after TRIX warmup
         if position == 0:
-            # LONG: Tenkan crosses above Kijun, price above cloud (green cloud), volume spike
-            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and
-                tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1] and  # cross just happened
-                close[i] > max(senkou_a_aligned[i], senkou_b_aligned[i]) and  # above cloud
-                senkou_a_aligned[i] > senkou_b_aligned[i] and  # green cloud (bullish)
-                volume_spike[i]):
+            # LONG: TRIX crosses above zero with volume spike and above weekly EMA34 (uptrend)
+            if (trix[i] > 0 and trix[i-1] <= 0 and 
+                volume_spike[i] and 
+                close[i] > trend_weekly_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Tenkan crosses below Kijun, price below cloud (red cloud), volume spike
-            elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and
-                  tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1] and  # cross just happened
-                  close[i] < min(senkou_a_aligned[i], senkou_b_aligned[i]) and  # below cloud
-                  senkou_a_aligned[i] < senkou_b_aligned[i] and  # red cloud (bearish)
-                  volume_spike[i]):
+            # SHORT: TRIX crosses below zero with volume spike and below weekly EMA34 (downtrend)
+            elif (trix[i] < 0 and trix[i-1] >= 0 and 
+                  volume_spike[i] and 
+                  close[i] < trend_weekly_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Tenkan crosses below Kijun or price drops below cloud
-            if (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and
-                tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1]) or \
-               close[i] < min(senkou_a_aligned[i], senkou_b_aligned[i]):
+            # EXIT LONG: TRIX crosses below zero or trend turns down
+            if (trix[i] < 0 and trix[i-1] >= 0) or \
+               (close[i] < trend_weekly_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Tenkan crosses above Kijun or price rises above cloud
-            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and
-                tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1]) or \
-               close[i] > max(senkou_a_aligned[i], senkou_b_aligned[i]):
+            # EXIT SHORT: TRIX crosses above zero or trend turns up
+            if (trix[i] > 0 and trix[i-1] <= 0) or \
+               (close[i] > trend_weekly_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
