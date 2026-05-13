@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Donchian20_1dTrend_Volume
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
-# Uses daily trend to filter breakouts (long when price > EMA(34), short when price < EMA(34)).
-# Volume > 1.5x 20-period average required for entry.
-# Works in bull (follows breakouts in bullish daily trend) and bear (avoids bullish breakouts in bearish daily trend).
-# Target: 50-150 total trades over 4 years = 12-37/year.
+# 4h_WeeklyVWAP_Pullback_RSI_Trend
+# Hypothesis: Buy pullbacks to weekly VWAP in bullish weekly trend (price > weekly VWAP) and sell rallies to weekly VWAP in bearish weekly trend (price < weekly VWAP), using 4h RSI for entry timing and volume confirmation. Works in bull (buys dips in uptrend) and bear (sells rallies in downtrend). Target: 20-50 trades/year.
 
-name = "12h_Donchian20_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_WeeklyVWAP_Pullback_RSI_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,19 +20,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for Donchian channel
-    df_12h = get_htf_data(prices, '12h')
-    donchian_high = df_12h['high'].rolling(window=20, min_periods=20).max().values
-    donchian_low = df_12h['low'].rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # Get weekly data for VWAP and trend
+    df_1w = get_htf_data(prices, '1w')
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
+    vwap = (typical_price * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
+    vwap = vwap.values
+    weekly_vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
 
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly trend: price above/below VWAP
+    weekly_trend = df_1w['close'] > vwap  # True for bullish, False for bearish
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend.astype(float))
 
-    # Volume filter: >1.5x 20-period average
+    # 4h RSI for entry timing
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
+
+    # Volume filter: >1.3x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
@@ -44,8 +49,8 @@ def generate_signals(prices):
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(weekly_vwap_aligned[i]) or np.isnan(weekly_trend_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,30 +59,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price breaks above Donchian high + price above daily EMA(34) + volume spike
-            if (close[i] > donchian_high_aligned[i] and 
-                close[i] > ema_34_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: price near weekly VWAP (pullback) in bullish weekly trend + RSI oversold + volume
+            if (close[i] <= weekly_vwap_aligned[i] * 1.005 and  # within 0.5% above VWAP
+                weekly_trend_aligned[i] > 0.5 and              # bullish weekly trend
+                rsi[i] < 35 and                                # oversold
+                volume[i] > vol_avg_20[i] * 1.3):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below Donchian low + price below daily EMA(34) + volume spike
-            elif (close[i] < donchian_low_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: price near weekly VWAP (pullback) in bearish weekly trend + RSI overbought + volume
+            elif (close[i] >= weekly_vwap_aligned[i] * 0.995 and  # within 0.5% below VWAP
+                  weekly_trend_aligned[i] < 0.5 and              # bearish weekly trend
+                  rsi[i] > 65 and                                # overbought
+                  volume[i] > vol_avg_20[i] * 1.3):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below Donchian low or daily EMA turns bearish
-            if (close[i] < donchian_low_aligned[i] or close[i] < ema_34_aligned[i]):
+            # EXIT LONG: price crosses below weekly VWAP or RSI overbought
+            if close[i] < weekly_vwap_aligned[i] * 0.995 or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above Donchian high or daily EMA turns bullish
-            if (close[i] > donchian_high_aligned[i] or close[i] > ema_34_aligned[i]):
+            # EXIT SHORT: price crosses above weekly VWAP or RSI oversold
+            if close[i] > weekly_vwap_aligned[i] * 1.005 or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
