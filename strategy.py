@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_ExponentialTrend_Pullback
-Hypothesis: In trending markets (identified by 1d EMA alignment), 
-price pulls back to the 6-day exponential moving average (EMA) on 6h chart 
-provide high-probability entries in the direction of the daily trend. 
-Volume confirmation filters out weak pulls. Works in both bull and bear 
-by only trading with the dominant daily trend. Target: 20-30 trades/year.
+12h_Pivot_Breakout_Trend
+Hypothesis: On 12H timeframe, combine weekly trend filter with daily Pivot Point (Classic) support/resistance levels.
+Enter long when price breaks above weekly uptrend + R1 pivot level with volume confirmation.
+Enter short when price breaks below weekly downtrend + S1 pivot level with volume confirmation.
+Exit on trend reversal or price crossing opposite pivot level.
+Uses weekly trend to avoid counter-trend trades, pivot levels for structure, and volume to filter breakouts.
+Designed for low trade frequency (~20-40/year) to minimize fee drag while capturing meaningful moves in both bull and bear markets.
 """
 
-name = "6h_ExponentialTrend_Pullback"
-timeframe = "6h"
+name = "12h_Pivot_Breakout_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,61 +27,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
+    # Get daily data for Pivot Points (classic formula)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
 
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
 
-    # Daily trend: 20 EMA and 50 EMA alignment
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_uptrend = ema20_1d > ema50_1d
-    daily_downtrend = ema20_1d < ema50_1d
+    # Calculate daily Pivot Points: P = (H + L + C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2.0 * pivot - low_1d
+    s1 = 2.0 * pivot - high_1d
 
-    # 6h EMA: 6-period (approx 1 day of 6h bars)
-    ema6_6h = pd.Series(close).ewm(span=6, adjust=False, min_periods=6).mean().values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
 
-    # Volume confirmation: current volume > 1.3 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.3 * vol_ma)
+    close_1w = df_1w['close'].values
+    # Weekly trend: 20-period EMA on weekly close
+    weekly_ema20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    weekly_uptrend = close_1w > weekly_ema20
+    weekly_downtrend = close_1w < weekly_ema20
 
-    # Align daily trend to 6h
-    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend)
-    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend)
+    # Volume confirmation: current volume > 1.8 * 30-period average (higher threshold for lower frequency)
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (1.8 * vol_ma)
+
+    # Align HTF arrays to 12L timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)  # align volume MA for comparison
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(30, n):  # Start after warmup for weekly EMA and volume MA
         # Get aligned values
-        uptrend = daily_uptrend_aligned[i]
-        downtrend = daily_downtrend_aligned[i]
-        vol_spike = volume_spike[i]
+        p = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        up_trend = weekly_uptrend_aligned[i]
+        down_trend = weekly_downtrend_aligned[i]
+        vol_ma_val = vol_ma_aligned[i]
+        vol_spike = volume_spike[i]  # volume_spike is already LTF aligned
+
+        # Skip if any critical value is NaN
+        if (np.isnan(p) or np.isnan(r1_val) or np.isnan(s1_val) or
+            np.isnan(vol_ma_val)):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
 
         if position == 0:
-            # LONG: Daily uptrend + price at or near 6h EMA + volume spike
-            if uptrend and close[i] <= ema6_6h[i] * 1.005 and vol_spike:
+            # LONG: Weekly uptrend + price breaks above R1 + volume spike
+            if (up_trend and close[i] > r1_val and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Daily downtrend + price at or near 6h EMA + volume spike
-            elif downtrend and close[i] >= ema6_6h[i] * 0.995 and vol_spike:
+            # SHORT: Weekly downtrend + price breaks below S1 + volume spike
+            elif (down_trend and close[i] < s1_val and vol_spike):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above 6h EMA or trend changes
-            if close[i] >= ema6_6h[i] * 1.01 or not uptrend:
+            # EXIT LONG: Price closes below pivot OR weekly trend turns down
+            if (close[i] < p or not up_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below 6h EMA or trend changes
-            if close[i] <= ema6_6h[i] * 0.99 or not downtrend:
+            # EXIT SHORT: Price closes above pivot OR weekly trend turns up
+            if (close[i] > p or not down_trend):
                 signals[i] = 0.0
                 position = 0
             else:
