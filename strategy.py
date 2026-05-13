@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Ichimoku_Cloud_Turn_Signal"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,87 +9,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Ichimoku components (9, 26, 52)
-    conversion_period = 9
-    base_period = 26
-    lagging_span_period = 52
-    
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    max_high_9 = pd.Series(high).rolling(window=conversion_period, min_periods=conversion_period).max().values
-    min_low_9 = pd.Series(low).rolling(window=conversion_period, min_periods=conversion_period).min().values
-    tenkan_sen = (max_high_9 + min_low_9) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    max_high_26 = pd.Series(high).rolling(window=base_period, min_periods=base_period).max().values
-    min_low_26 = pd.Series(low).rolling(window=base_period, min_periods=base_period).min().values
-    kijun_sen = (max_high_26 + min_low_26) / 2
-    
-    # Senkou Span A (Leading Span A): (Conversion Line + Base Line)/2
-    senkou_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    max_high_52 = pd.Series(high).rolling(window=lagging_span_period, min_periods=lagging_span_period).max().values
-    min_low_52 = pd.Series(low).rolling(window=lagging_span_period, min_periods=lagging_span_period).min().values
-    senkou_b = (max_high_52 + min_low_52) / 2
-    
-    # Chikou Span (Lagging Span): Close shifted back 26 periods
-    chikou_span = np.roll(close, base_period)  # shifted right by 26
-    chikou_span[:base_period] = np.nan  # first 26 values invalid
-    
-    # Weekly trend filter (1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Daily high/low/close for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla R1 and S1 for previous day
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    prev_high = np.concatenate([[high_1d[0]], high_1d[:-1]])
+    prev_low = np.concatenate([[low_1d[0]], low_1d[:-1]])
+    prev_close = np.concatenate([[close_1d[0]], close_1d[:-1]])
+    
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    
+    # Align to 4h timeframe
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Daily trend filter: EMA(34) on close
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter: current volume > 1.5 x 20-period average
+    vol_sum_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_sum_20[i] = np.sum(volume[i-19:i+1])
+    vol_ma_20 = np.divide(vol_sum_20, 20, out=np.full_like(vol_sum_20, np.nan), where=~np.isnan(vol_sum_20))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # need Senkou B values
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
-            np.isnan(chikou_span[i]) or np.isnan(sma50_1w_aligned[i])):
+    for i in range(20, n):
+        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Cloud top and bottom
-        cloud_top = max(senkou_a[i], senkou_b[i])
-        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        vol_condition = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Price above cloud, Tenkan > Kijun, Chikou above price 26 periods ago
-            if (close[i] > cloud_top and 
-                tenkan_sen[i] > kijun_sen[i] and 
-                chikou_span[i] > close[i - base_period]):
+            # LONG: Price breaks above R1 with bullish trend and volume
+            if close[i] > R1_4h[i] and close[i] > ema34_1d_aligned[i] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below cloud, Tenkan < Kijun, Chikou below price 26 periods ago
-            elif (close[i] < cloud_bottom and 
-                  tenkan_sen[i] < kijun_sen[i] and 
-                  chikou_span[i] < close[i - base_period]):
+            # SHORT: Price breaks below S1 with bearish trend and volume
+            elif close[i] < S1_4h[i] and close[i] < ema34_1d_aligned[i] and vol_condition:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price falls below cloud or Tenkan < Kijun
-            if close[i] < cloud_top or tenkan_sen[i] < kijun_sen[i]:
+            # EXIT LONG: Price falls back below R1 or trend turns bearish
+            if close[i] < R1_4h[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price rises above cloud or Tenkan > Kijun
-            if close[i] > cloud_bottom or tenkan_sen[i] > kijun_sen[i]:
+            # EXIT SHORT: Price rises back above S1 or trend turns bullish
+            if close[i] > S1_4h[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
