@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Keltner_Bollinger_Squeeze_With_Volume_Confirmation
-Hypothesis: Combines Keltner Channel volatility breakout with Bollinger Band squeeze
-to identify low-volatility breakouts in the direction of the 1d trend. Volume spike
-confirms institutional participation. Designed to work in both bull and bear markets
-by following the 1d trend direction. Targets low-frequency, high-quality setups
-to minimize fee drift.
+12h_Weekly_Camarilla_R3_S3_Breakout_1wTrend_VolumeConfirmation
+Hypothesis: Weekly Camarilla R3/S3 levels act as strong support/resistance.
+Breakouts above R3 or below S3 with weekly trend alignment (price above/below 200 EMA)
+and volume confirmation capture institutional moves. Designed for low-frequency,
+high-probability setups to minimize fee drag in both bull and bear markets.
 """
-name = "6h_Keltner_Bollinger_Squeeze_With_Volume_Confirmation"
-timeframe = "6h"
+
+name = "12h_Weekly_Camarilla_R3_S3_Breakout_1wTrend_VolumeConfirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -25,48 +25,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter and squeeze calculation
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get weekly data for Camarilla levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly Camarilla levels (based on prior week's range)
+    pivot = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r3 = pivot + (range_1w * 1.1 / 2)
+    s3 = pivot - (range_1w * 1.1 / 2)
 
-    # Bollinger Bands (20, 2) on 1d
-    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle
+    # Weekly trend filter: 200-period EMA on weekly close
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
 
-    # Keltner Channel (20, 1.5) on 1d
-    kc_middle = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_1d = pd.Series(high_1d - low_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = kc_middle + 1.5 * atr_1d
-    kc_lower = kc_middle - 1.5 * atr_1d
+    # Align weekly levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
 
-    # Squeeze condition: Bollinger Bands inside Keltner Channel
-    squeeze = (bb_upper <= kc_upper) & (bb_lower >= kc_lower)
-
-    # Align to 6h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # 60-period (5-day) volume average for volume confirmation
-    vol_ma_60 = pd.Series(volume).rolling(window=60, min_periods=60).mean().values
-    volume_spike = volume > 2.0 * vol_ma_60
+    # Volume spike: volume > 2.0 * 24-period average (~12 days at 12h)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 2.0 * vol_ma_24
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(200, n):
         # Skip if any required value is NaN
-        if (np.isnan(squeeze_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(vol_ma_60[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
+            np.isnan(ema200_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,29 +65,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LOCK: Bollinger Bands inside Keltner Channel (squeeze) + volume spike
-            # Direction from 1d EMA50
-            if squeeze_aligned[i] and volume_spike[i]:
-                if close[i] > ema50_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < ema50_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # LONG: Uptrend + price breaks above R3 + volume spike
+            if close[i] > ema200_1w_aligned[i] and close[i] > r3_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Downtrend + price breaks below S3 + volume spike
+            elif close[i] < ema200_1w_aligned[i] and close[i] < s3_aligned[i] and volume_spike[i]:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Squeeze ends or trend turns bearish
-            if not squeeze_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price falls below R3 or trend turns bearish
+            if close[i] < r3_aligned[i] or close[i] < ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Squeeze ends or trend turns bullish
-            if not squeeze_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price rises above S3 or trend turns bullish
+            if close[i] > s3_aligned[i] or close[i] > ema200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
