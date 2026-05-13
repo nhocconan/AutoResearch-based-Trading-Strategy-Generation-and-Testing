@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_RSI_Extreme_Trend_Filter
-Hypothesis: Use RSI(14) extremes (overbought/oversold) combined with trend filters from higher timeframes. 
-Go long when RSI < 30 (oversold) and price > daily EMA50, short when RSI > 70 (overbought) and price < daily EMA50. 
-Use weekly trend filter (price > weekly EMA200 for longs, price < weekly EMA200 for shorts) to avoid counter-trend trades.
-This captures mean reversion in strong trends, working in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
-Designed for 6h timeframe to limit trades and avoid fee drag.
+4h_KAMA_Direction_RSI_TrendFilter_Volume
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) direction as primary trend filter, combined with RSI momentum and volume confirmation. KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends. RSI (14) avoids overbought/oversold extremes, and volume surge confirms institutional participation. Designed for 4h timeframe to target 20-50 trades/year, balancing signal quality with low frequency to overcome fee drag in both bull and bear markets.
 """
 
-name = "6h_RSI_Extreme_Trend_Filter"
-timeframe = "6h"
+name = "4h_KAMA_Direction_RSI_TrendFilter_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,69 +14,66 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate RSI(14) on 6h closes
+    # Calculate KAMA (2-period ER, 30-period smoothing)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI (14)
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Get daily EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Get weekly EMA200 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
-    
-    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Volume moving average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(ema_200_1w_aligned[i])):
+    for i in range(20, n):  # Start after warmup for KAMA/RSI/volume
+        # Skip if any data is NaN
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: RSI oversold (<30) and price above daily EMA50 and weekly EMA200
-            if rsi[i] < 30 and close[i] > ema_50_1d_aligned[i] and close[i] > ema_200_1w_aligned[i]:
+            # LONG: KAMA upward (close > KAMA), RSI not overbought (<60), volume above average
+            if close[i] > kama[i] and rsi[i] < 60 and volume[i] > vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought (>70) and price below daily EMA50 and weekly EMA200
-            elif rsi[i] > 70 and close[i] < ema_50_1d_aligned[i] and close[i] < ema_200_1w_aligned[i]:
+            # SHORT: KAMA downward (close < KAMA), RSI not oversold (>40), volume above average
+            elif close[i] < kama[i] and rsi[i] > 40 and volume[i] > vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (>45) or price breaks below daily EMA50
-            if rsi[i] > 45 or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: KAMA turns downward or RSI overbought
+            if close[i] < kama[i] or rsi[i] >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (<55) or price breaks above daily EMA50
-            if rsi[i] < 55 or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: KAMA turns upward or RSI oversold
+            if close[i] > kama[i] or rsi[i] <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
