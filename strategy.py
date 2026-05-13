@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume spike.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume spike confirmation.
 # Enters long when price breaks above R3 level with 1d bullish trend (close > EMA34) and volume > 2.0x MA20.
 # Enters short when price breaks below S3 level with 1d bearish trend (close < EMA34) and volume > 2.0x MA20.
-# Exits when price reverts to the 12h EMA50 (adaptive mean reversion).
+# Exits when price reverts to the 4h EMA50 (adaptive mean reversion).
 # Uses discrete position sizing (0.25) to minimize fee drag and manage drawdown.
-# Designed for low trade frequency (~12-37/year) to work in both bull and bear markets by requiring strong volume confirmation and trend alignment.
+# Designed for low trade frequency (~19-50/year) to work in both bull and bear markets by requiring strong volume confirmation and trend alignment.
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -42,11 +42,11 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Get 12h data for exit condition (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Get 4h data for exit condition (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
     # Volume filter: current volume > 2.0x 20-period average (stricter to reduce trades)
     volume_series = pd.Series(volume)
@@ -58,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for all indicators
         if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or \
-           np.isnan(ema34_1d_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i]):
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
@@ -74,15 +74,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reverts to 12h EMA50 (mean reversion in range)
-            if close[i] < ema50_12h_aligned[i]:
+            # EXIT LONG: Price reverts to 4h EMA50 (mean reversion in range)
+            if close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reverts to 12h EMA50 (mean reversion in range)
-            if close[i] > ema50_12h_aligned[i]:
+            # EXIT SHORT: Price reverts to 4h EMA50 (mean reversion in range)
+            if close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
