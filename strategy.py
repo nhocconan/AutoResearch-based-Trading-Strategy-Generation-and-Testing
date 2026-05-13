@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band (20-period high) and close > 1w EMA50 with volume > 1.5x 20-bar average.
-# Short when price breaks below Donchian lower band (20-period low) and close < 1w EMA50 with volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 12h timeframe.
-# Donchian channels provide robust structure; 1w EMA50 filters counter-trend noise on weekly timeframe; volume confirms momentum.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band and close > 1w EMA50 with volume > 1.5x 20-bar average.
+# Short when price breaks below Donchian lower band and close < 1w EMA50 with volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to target 30-100 total trades over 4 years on 1d timeframe.
+# Donchian provides price channel structure; 1w EMA50 filters counter-trend noise; volume confirms momentum.
 # Designed for fewer, higher-quality trades to avoid fee drag while working in both bull and bear markets.
 
-name = "12h_Donchian20_1wEMA50_Trend_VolumeConfirm"
-timeframe = "12h"
+name = "1d_Donchian20_1wEMA50_Trend_VolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -31,7 +31,7 @@ def generate_signals(prices):
     ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian channels (20-period) - using prior candle only to avoid look-ahead
+    # Calculate Donchian channels (20-period)
     lookback_dc = 20
     upper_band = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().shift(1).values
     lower_band = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().shift(1).values
@@ -51,13 +51,13 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper band, close > 1w EMA50, volume spike
+            # LONG: Price breaks above upper band, close > 1w EMA50, volume spike
             if (high[i] > upper_band[i] and 
                 close[i] > ema_50_1w_aligned[i] and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian lower band, close < 1w EMA50, volume spike
+            # SHORT: Price breaks below lower band, close < 1w EMA50, volume spike
             elif (low[i] < lower_band[i] and 
                   close[i] < ema_50_1w_aligned[i] and 
                   volume[i] > 1.5 * avg_volume[i]):
@@ -66,7 +66,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian lower band OR volume drops below average
+            # EXIT LONG: Price breaks below lower band OR volume drops below average
             if (low[i] < lower_band[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
@@ -74,7 +74,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian upper band OR volume drops below average
+            # EXIT SHORT: Price breaks above upper band OR volume drops below average
             if (high[i] > upper_band[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
