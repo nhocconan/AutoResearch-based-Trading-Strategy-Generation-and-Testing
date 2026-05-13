@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 1d_WeeklyPivot_Camarilla_Breakout_TrendFilter_Volume
-# Hypothesis: Combining weekly Pivot/Camarilla levels with daily trend and volume confirmation reduces false breakouts and captures strong directional moves. The weekly timeframe provides robust structure while daily trend filters ensure alignment with higher timeframe momentum. Volume confirmation ensures breakouts have institutional participation. Designed to work in both bull and bear markets by using symmetric long/short logic with proper risk controls. Target: 15-25 trades per year to minimize fee drag and improve generalization.
+# 6h_ElderRay_BullBearPower_1dTrend_Filter
+# Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) captures bull/bear strength.
+# Combined with 1d EMA50 trend filter to align with higher timeframe direction.
+# In bull markets (price > 1d EMA50), take long when Bull Power > 0 and rising.
+# In bear markets (price < 1d EMA50), take short when Bear Power > 0 and rising.
+# Uses EMA13 for sensitivity and avoids whipsaws. Target: 15-30 trades per year per symbol.
 
-name = "1d_WeeklyPivot_Camarilla_Breakout_TrendFilter_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,46 +24,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # ATR for volatility context
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # EMA13 for Elder Ray calculation
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
 
-    # Get weekly data for Pivot and Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high - ema13
+    bear_power = ema13 - low
+
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly Pivot and Camarilla levels from previous week
-    # Using typical pivot: (H+L+C)/3
-    # R1 = Pivot + (H-L)*1.1/12, S1 = Pivot - (H-L)*1.1/12
-    prev_week_close = df_1w['close'].shift(1).values
-    prev_week_high = df_1w['high'].shift(1).values
-    prev_week_low = df_1w['low'].shift(1).values
-    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
-    weekly_r1 = weekly_pivot + (prev_week_high - prev_week_low) * 1.1 / 12
-    weekly_s1 = weekly_pivot - (prev_week_high - prev_week_low) * 1.1 / 12
-    
-    # Align to daily timeframe (available after previous week close)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-
-    # Daily EMA50 for trend filter
-    ema50_d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-
-    # Volume filter: >1.5x 20-day average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(13, n):
         # Skip if any required value is NaN
-        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(ema50_d[i]) or np.isnan(vol_avg_20[i])):
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,31 +51,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Determine trend from 1d EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
+
         if position == 0:
-            # LONG: Close above weekly R1 + daily EMA50 uptrend + volume spike
-            if (close[i] > weekly_r1_aligned[i] and 
-                close[i] > ema50_d[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Uptrend + Bull Power positive and rising (bullish momentum)
+            if uptrend and bull_power[i] > 0 and bull_power[i] > bull_power[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below weekly S1 + daily EMA50 downtrend + volume spike
-            elif (close[i] < weekly_s1_aligned[i] and 
-                  close[i] < ema50_d[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Downtrend + Bear Power positive and rising (bearish momentum)
+            elif downtrend and bear_power[i] > 0 and bear_power[i] > bear_power[i-1]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below weekly S1 or trend reversal
-            if close[i] < weekly_s1_aligned[i] or close[i] < ema50_d[i]:
+            # EXIT LONG: Trend reversal or Bull Power weakening
+            if not uptrend or bull_power[i] <= 0 or bull_power[i] < bull_power[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above weekly R1 or trend reversal
-            if close[i] > weekly_r1_aligned[i] or close[i] > ema50_d[i]:
+            # EXIT SHORT: Trend reversal or Bear Power weakening
+            if not downtrend or bear_power[i] <= 0 or bear_power[i] < bear_power[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
