@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_RSI_TrendFilter
-Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) direction on daily timeframe to capture trend, combined with RSI(14) for momentum confirmation and volume spike filter. Go long when KAMA is rising, RSI > 50, and volume > 1.5x 20-day average; short when KAMA is falling, RSI < 50, and volume spike. This filters false signals in choppy markets and works in both bull (catching trends) and bear (catching reversals) by aligning with adaptive trend and momentum.
+6h_Liquidity_Area_Reversal_with_OrderFlow
+Hypothesis: In 6h timeframe, price often reverses at liquidity areas (equal highs/lows) when order flow shows exhaustion. 
+Look for price touching recent equal highs/lows (within 0.5%) with declining volume (signaling exhaustion) and RSI divergence.
+Works in both bull (selling exhaustion at resistance) and bear (buying exhaustion at support) markets.
+Target: 20-40 trades/year on 6f to stay under fee drag limits.
 """
 
-name = "1d_KAMA_Direction_RSI_TrendFilter"
-timeframe = "1d"
+name = "6h_Liquidity_Area_Reversal_with_OrderFlow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,102 +20,89 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get daily data for KAMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # ER (Efficiency Ratio) = |change| / sum(|changes|) over period
-    change = np.abs(np.diff(close_1d))
-    volatility = np.sum(change.reshape(-1, 1), axis=0)  # placeholder, will compute properly
-    
-    # Proper ER calculation
-    diff = np.diff(close_1d)
-    abs_diff = np.abs(diff)
-    change_over_period = np.abs(np.diff(close_1d, 10))  # 10-period net change
-    sum_abs_diff = np.convolve(abs_diff, np.ones(10), mode='same')
-    sum_abs_diff[:9] = np.sum(abs_diff[:10])  # adjust for edges
-    
-    # Avoid division by zero
-    er = np.where(sum_abs_diff > 0, change_over_period / sum_abs_diff, 0)
-    # Smooth ER with smoothing constants
-    sc = (er * (0.66 - 0.06) + 0.06) ** 2
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[9] = close_1d[9]  # start at index 9
-    for i in range(10, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Align KAMA to daily timeframe (no extra delay needed)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Calculate RSI(14) on daily close
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.convolve(gain, np.ones(14)/14, mode='same')
-    avg_loss = np.convolve(loss, np.ones(14)/14, mode='same')
-    # Handle first values
-    avg_gain[:13] = np.nan
-    avg_loss[:13] = np.nan
-    # Wilder smoothing
-    for i in range(13, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    # Calculate RSI(14) for divergence detection
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(rs == 0, 100, rsi)
-    rsi = np.where(rs == np.inf, 0, rsi)
+    rsi_values = rsi.values
     
-    # Align RSI to daily timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Calculate volume average (20-day) for volume spike filter
-    vol_ma_20 = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_ma_20[:19] = np.nan
+    # Volume moving average for exhaustion detection
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    # Lookback period for finding equal highs/lows
+    lookback = 20
+    
+    for i in range(lookback, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(kama_aligned[i-1]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(rsi_values[i]) or np.isnan(rsi_values[i-1]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-day average
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Find recent equal highs and lows (within 0.5% tolerance)
+        recent_highs = high[i-lookback:i]
+        recent_lows = low[i-lookback:i]
+        
+        # Current price levels
+        curr_high = high[i]
+        curr_low = low[i]
+        
+        # Check for equal high (resistance level)
+        equal_high = False
+        if len(recent_highs) > 0:
+            max_recent = np.max(recent_highs)
+            if abs(curr_high - max_recent) / max_recent < 0.005:  # Within 0.5%
+                equal_high = True
+        
+        # Check for equal low (support level)
+        equal_low = False
+        if len(recent_lows) > 0:
+            min_recent = np.min(recent_lows)
+            if abs(curr_low - min_recent) / min_recent < 0.005:  # Within 0.5%
+                equal_low = True
+        
+        # Volume exhaustion: current volume < 70% of 20-period average
+        vol_exhaustion = volume[i] < 0.7 * vol_ma_20[i]
+        
+        # RSI conditions for divergence
+        rsi_overbought = rsi_values[i] > 70
+        rsi_oversold = rsi_values[i] < 30
+        rsi_bearish_div = (rsi_values[i] < rsi_values[i-1]) and rsi_values[i] > 60
+        rsi_bullish_div = (rsi_values[i] > rsi_values[i-1]) and rsi_values[i] < 40
         
         if position == 0:
-            # LONG: KAMA rising (bullish trend), RSI > 50 (bullish momentum), volume spike
-            if kama_aligned[i] > kama_aligned[i-1] and rsi_aligned[i] > 50 and vol_spike:
+            # LONG setup: price at equal low + bullish RSI divergence + volume exhaustion
+            if equal_low and rsi_bullish_div and vol_exhaustion:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA falling (bearish trend), RSI < 50 (bearish momentum), volume spike
-            elif kama_aligned[i] < kama_aligned[i-1] and rsi_aligned[i] < 50 and vol_spike:
+            # SHORT setup: price at equal high + bearish RSI divergence + volume exhaustion
+            elif equal_high and rsi_bearish_div and vol_exhaustion:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA falling or RSI < 50
-            if kama_aligned[i] < kama_aligned[i-1] or rsi_aligned[i] < 50:
+            # EXIT LONG: RSI overbought or volume surges (distribution)
+            if rsi_values[i] > 70 or volume[i] > 1.5 * vol_ma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA rising or RSI > 50
-            if kama_aligned[i] > kama_aligned[i-1] or rsi_aligned[i] > 50:
+            # EXIT SHORT: RSI oversold or volume surges (accumulation)
+            if rsi_values[i] < 30 or volume[i] > 1.5 * vol_ma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
