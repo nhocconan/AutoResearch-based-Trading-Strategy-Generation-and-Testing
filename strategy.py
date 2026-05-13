@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout + 12h EMA50 trend filter + volume spike filter.
-# Long when price breaks above Donchian upper channel AND 12h EMA50 is rising AND volume > 1.5 * avg volume.
-# Short when price breaks below Donchian lower channel AND 12h EMA50 is falling AND volume > 1.5 * avg volume.
-# Exit when price touches Donchian midpoint OR ATR-based stoploss (2 * ATR).
-# Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
-# Designed for low trade frequency (~20-50/year) by requiring confluence of breakout, trend, and volume.
-# Donchian channels provide structure, EMA50 filters trend direction, volume spike confirms conviction.
-# Effective in both bull and bear markets by capturing strong directional moves with filters.
+# Hypothesis: 1h strategy using 4h RSI for trend direction and 1d volume spike for confirmation, with 1h RSI for entry timing precision.
+# Long when: 4h RSI > 50 (bullish trend), 1d volume > 1.5x 20-period average (volume confirmation), and 1h RSI crosses above 30 from below (oversold bounce).
+# Short when: 4h RSI < 50 (bearish trend), 1d volume > 1.5x 20-period average (volume confirmation), and 1h RSI crosses below 70 from above (overbought rejection).
+# Exit when 4h RSI crosses back to neutral zone (40-60) or 1h RSI reaches opposite extreme (70 for long exit, 30 for short exit).
+# Uses discrete position sizing (0.20) to limit fee churn. Target: 15-37 trades/year by requiring confluence of HTF trend, volume spike, and LTF timing.
+# Designed to work in both bull and bear markets: 4h RSI trend filter captures major directional moves, volume confirmation ensures participation,
+# and 1h RSI provides precise entries during pullbacks in trending markets.
 
-name = "4h_Donchian20_Breakout_12hTrend_Volume_v2"
-timeframe = "4h"
+name = "1h_RSI_Trend_Volume_Timing_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,86 +21,86 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 4h data for trend filter (RSI)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate EMA(50) on 12h close for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    ema50_12h_rising = np.zeros(n, dtype=bool)
-    ema50_12h_falling = np.zeros(n, dtype=bool)
-    for i in range(1, n):
-        if not np.isnan(ema50_12h_aligned[i]) and not np.isnan(ema50_12h_aligned[i-1]):
-            ema50_12h_rising[i] = ema50_12h_aligned[i] > ema50_12h_aligned[i-1]
-            ema50_12h_falling[i] = ema50_12h_aligned[i] < ema50_12h_aligned[i-1]
+    # Calculate RSI(14) on 4h close
+    delta_4h = np.diff(close_4h, prepend=close_4h[0])
+    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
+    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
+    avg_gain_4h = pd.Series(gain_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss_4h = pd.Series(loss_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
+    rsi_4h = 100 - (100 / (1 + rs_4h))
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # Donchian(20) channels
-    lookback = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    mid = np.full(n, np.nan)
-    for i in range(lookback-1, n):
-        upper[i] = np.max(high[i-lookback+1:i+1])
-        lower[i] = np.min(low[i-lookback+1:i+1])
-        mid[i] = (upper[i] + lower[i]) / 2
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     
-    # Average volume for volume spike filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    # Calculate volume ratio: current volume / 20-period average
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = volume_1d / (vol_ma_1d + 1e-10)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # ATR(14) for stoploss
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate 1h RSI for entry timing
+    delta_1h = np.diff(close, prepend=close[0])
+    gain_1h = np.where(delta_1h > 0, delta_1h, 0)
+    loss_1h = np.where(delta_1h < 0, -delta_1h, 0)
+    avg_gain_1h = pd.Series(gain_1h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss_1h = pd.Series(loss_1h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs_1h = avg_gain_1h / (avg_loss_1h + 1e-10)
+    rsi_1h = 100 - (100 / (1 + rs_1h))
     
-    # Track entry price for stoploss
-    entry_price = np.full(n, np.nan)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
-        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema50_12h_aligned[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+    for i in range(100, n):
+        if np.isnan(rsi_4h_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(rsi_1h[i]):
             signals[i] = 0.0
             continue
         
+        # Entry conditions
+        long_entry = (rsi_4h_aligned[i] > 50 and 
+                      vol_ratio_1d_aligned[i] > 1.5 and 
+                      rsi_1h[i] > 30 and rsi_1h[i-1] <= 30)
+        
+        short_entry = (rsi_4h_aligned[i] < 50 and 
+                       vol_ratio_1d_aligned[i] > 1.5 and 
+                       rsi_1h[i] < 70 and rsi_1h[i-1] >= 70)
+        
+        # Exit conditions
+        long_exit = (position == 1 and 
+                     (rsi_4h_aligned[i] < 40 or rsi_4h_aligned[i] > 60 or 
+                      rsi_1h[i] >= 70))
+        
+        short_exit = (position == -1 and 
+                      (rsi_4h_aligned[i] > 40 or rsi_4h_aligned[i] < 60 or 
+                       rsi_1h[i] <= 30))
+        
         if position == 0:
-            # LONG: price > upper channel, 12h EMA50 rising, volume spike
-            if close[i] > upper[i] and ema50_12h_rising[i] and vol_spike[i]:
-                signals[i] = 0.25
+            if long_entry:
+                signals[i] = 0.20
                 position = 1
-                entry_price[i] = close[i]
-            # SHORT: price < lower channel, 12h EMA50 falling, volume spike
-            elif close[i] < lower[i] and ema50_12h_falling[i] and vol_spike[i]:
-                signals[i] = -0.25
+            elif short_entry:
+                signals[i] = -0.20
                 position = -1
-                entry_price[i] = close[i]
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price < mid channel OR price < entry_price - 2*ATR (stoploss)
-            if close[i] < mid[i] or close[i] < entry_price[i] - 2.0 * atr[i]:
+            if long_exit:
                 signals[i] = 0.0
                 position = 0
-                entry_price[i] = np.nan
             else:
-                signals[i] = 0.25
-                entry_price[i] = entry_price[i-1]
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: price > mid channel OR price > entry_price + 2*ATR (stoploss)
-            if close[i] > mid[i] or close[i] > entry_price[i] + 2.0 * atr[i]:
+            if short_exit:
                 signals[i] = 0.0
                 position = 0
-                entry_price[i] = np.nan
             else:
-                signals[i] = -0.25
-                entry_price[i] = entry_price[i-1]
+                signals[i] = -0.20
     
     return signals
