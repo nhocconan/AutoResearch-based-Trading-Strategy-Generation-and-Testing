@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 1D_WeeklyPivot_Breakout_1wTrend
-# Hypothesis: Use weekly pivot points from prior week's daily OHLC to identify key support/resistance.
-# Long when price breaks above weekly R1 with volume spike and 1w EMA10 uptrend.
-# Short when price breaks below weekly S1 with volume spike and 1w EMA10 downtrend.
-# Exit on mean reversion to weekly pivot (PP). Weekly pivots reset every week, providing
-# fresh levels that adapt to market regime. Designed for low turnover (~10-20/year) to avoid fee drag.
-# Uses 1d timeframe with 1w trend filter for higher reliability.
+# 6h_EqualHighLow_Breakout_1dTrend
+# Hypothesis: Identify equal highs/lows (liquidity pools) on 1d and trade breakouts.
+# Equal highs form resistance, equal lows form support. Breakouts with volume
+# and 1d EMA trend filter capture institutional moves. Works in bull/bear by
+# following the dominant 1d trend. Low turnover expected (~20-40/year).
 
-name = "1D_WeeklyPivot_Breakout_1wTrend"
-timeframe = "1d"
+name = "6h_EqualHighLow_Breakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,48 +23,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get 1d data for weekly pivot calculation
+    # Get 1d data for equal highs/lows and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 30:
         return np.zeros(n)
-    
-    # Calculate weekly high, low, close from prior 5 trading days (1 week)
-    # Use rolling window of 5 on daily data
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
-    
-    # Weekly pivot points
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    
-    # Align weekly pivots to 1d timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # Calculate equal highs and lows on 1d (within 0.5% tolerance)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    equal_high = np.zeros(len(df_1d), dtype=bool)
+    equal_low = np.zeros(len(df_1d), dtype=bool)
+
+    for i in range(2, len(df_1d)):
+        # Equal high: current high within 0.5% of previous high
+        if abs(high_1d[i] - high_1d[i-1]) / high_1d[i-1] < 0.005:
+            equal_high[i] = True
+        # Equal low: current low within 0.5% of previous low
+        if abs(low_1d[i] - low_1d[i-1]) / low_1d[i-1] < 0.005:
+            equal_low[i] = True
+
+    # Get the most recent equal high/low levels
+    eq_high_level = np.full(len(df_1d), np.nan)
+    eq_low_level = np.full(len(df_1d), np.nan)
+    last_eq_high = np.nan
+    last_eq_low = np.nan
+    for i in range(len(df_1d)):
+        if equal_high[i]:
+            last_eq_high = high_1d[i]
+        if equal_low[i]:
+            last_eq_low = low_1d[i]
+        eq_high_level[i] = last_eq_high
+        eq_low_level[i] = last_eq_low
+
+    # Align equal high/low levels to 6h timeframe
+    eq_high_aligned = align_htf_to_ltf(prices, df_1d, eq_high_level)
+    eq_low_aligned = align_htf_to_ltf(prices, df_1d, eq_low_level)
+
+    # Volume confirmation: current volume > 2.0 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2.0 * vol_ma)
 
-    # Get 1w EMA10 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Get 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if data is not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(eq_high_aligned[i]) or np.isnan(eq_low_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,26 +85,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: break above weekly R1 with volume spike and 1w EMA10 uptrend
-            if close[i] > r1_aligned[i] and volume_spike[i] and close[i] > ema_1w_aligned[i]:
+            # LONG: break above equal high with volume spike and 1d EMA50 uptrend
+            if close[i] > eq_high_aligned[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below weekly S1 with volume spike and 1w EMA10 downtrend
-            elif close[i] < s1_aligned[i] and volume_spike[i] and close[i] < ema_1w_aligned[i]:
+            # SHORT: break below equal low with volume spike and 1d EMA50 downtrend
+            elif close[i] < eq_low_aligned[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below weekly pivot (mean reversion to center)
-            if close[i] < pp_aligned[i]:
+            # EXIT LONG: price falls back below equal high (failed breakout)
+            if close[i] < eq_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above weekly pivot
-            if close[i] > pp_aligned[i]:
+            # EXIT SHORT: price rises back above equal low (failed breakout)
+            if close[i] > eq_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
