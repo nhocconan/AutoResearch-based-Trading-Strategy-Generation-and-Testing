@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Donchian_Breakout_VolumeTrend
-# Hypothesis: Enter long when price breaks above 4h Donchian upper channel (20-period high) during high volume and bullish 1d trend (price above EMA50).
-# Enter short when price breaks below 4h Donchian lower channel (20-period low) during high volume and bearish 1d trend (price below EMA50).
-# Donchian breakouts capture volatility expansion; volume confirms institutional participation; 1d EMA50 filters for higher timeframe trend alignment.
-# Works in bull (breakouts above upper channel in uptrend) and bear (breakdowns below lower channel in downtrend).
-# Low frequency due to combined breakout+volume+trend conditions.
+# 6h_Relative_Strength_Index_Divergence_Trend_Filter
+# Hypothesis: Enter long when RSI(14) shows bullish divergence (price makes lower low, RSI makes higher low) 
+# with price above 200-period EMA and bullish weekly trend. Enter short on bearish divergence with price 
+# below 200 EMA and bearish weekly trend. Divergence signals potential reversals with reduced false signals 
+# in trending markets. Weekly trend filter ensures alignment with higher timeframe momentum.
+# Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend). Low frequency due to strict 
+# divergence requirement and trend filter.
 
-name = "4h_Donchian_Breakout_VolumeTrend"
-timeframe = "4h"
+name = "6h_Relative_Strength_Index_Divergence_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,30 +25,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d trend: EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly trend: EMA50
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 4h Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # RSI(14) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume filter: volume > 1.5 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * vol_ma_20
+    # Wilder's smoothing (alpha = 1/14)
+    alpha = 1.0 / 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    
+    for i in range(1, len(gain)):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 200-period EMA for trend filter
+    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(14, n):
         # Skip if any required value is NaN
-        if (np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or 
+            np.isnan(ema200[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,28 +71,58 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above upper Donchian + volume filter + bullish 1d trend
-            if close[i] > high_20[i] and volume_filter[i] and close[i] > ema50_1d_aligned[i]:
+            # Check for bullish divergence: price lower low, RSI higher low
+            bullish_div = False
+            if i >= 20:  # Need sufficient lookback
+                # Look for recent swing low in price
+                for lookback in range(5, min(20, i)):
+                    if low[i] < low[i-lookback] and rsi[i] > rsi[i-lookback]:
+                        # Confirm with higher low in RSI
+                        bullish_div = True
+                        break
+            
+            # Check for bearish divergence: price higher high, RSI lower high
+            bearish_div = False
+            if i >= 20:  # Need sufficient lookback
+                # Look for recent swing high in price
+                for lookback in range(5, min(20, i)):
+                    if high[i] > high[i-lookback] and rsi[i] < rsi[i-lookback]:
+                        # Confirm with lower high in RSI
+                        bearish_div = True
+                        break
+
+            # LONG: Bullish divergence + price above EMA200 + weekly uptrend
+            if bullish_div and close[i] > ema200[i] and close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below lower Donchian + volume filter + bearish 1d trend
-            elif close[i] < low_20[i] and volume_filter[i] and close[i] < ema50_1d_aligned[i]:
+            # SHORT: Bearish divergence + price below EMA200 + weekly downtrend
+            elif bearish_div and close[i] < ema200[i] and close[i] < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price below 10-period low or trend reversal
-            low_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
-            if close[i] < low_10[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price below EMA200 or bearish divergence
+            exit_condition = False
+            if i >= 20:
+                for lookback in range(5, min(20, i)):
+                    if high[i] > high[i-lookback] and rsi[i] < rsi[i-lookback]:
+                        exit_condition = True
+                        break
+            if close[i] < ema200[i] or exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above 10-period high or trend reversal
-            high_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-            if close[i] > high_10[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price above EMA200 or bullish divergence
+            exit_condition = False
+            if i >= 20:
+                for lookback in range(5, min(20, i)):
+                    if low[i] < low[i-lookback] and rsi[i] > rsi[i-lookback]:
+                        exit_condition = True
+                        break
+            if close[i] > ema200[i] or exit_condition:
                 signals[i] = 0.0
                 position = 0
             else:
