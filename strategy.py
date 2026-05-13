@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 1h_4h_Donchian_Breakout_1dTrend_VolumeSpike
-# Hypothesis: On 1h timeframe, breakout beyond 4h Donchian channels (20-period) with alignment to 1d trend (price vs EMA50) and volume confirmation captures strong momentum moves.
-# The 1d trend provides longer-term filter to reduce whipsaws, while 4h structure gives intermediate-term context.
-# Volume spike confirms institutional participation. Session filter (08-20 UTC) reduces noise.
-# Designed for moderate-frequency, high-quality setups targeting 15-37 trades/year.
+# 4h_Donchian_Breakout_20_Trix_50_Volume_Spike
+# Hypothesis: On 4h timeframe, breakout beyond Donchian(20) channels with TRIX(50) momentum confirmation and volume spike captures sustained momentum moves in both bull and bear markets. The TRIX filter reduces whipsaws by ensuring momentum alignment, while volume confirms institutional participation. Designed for low-frequency, high-quality setups.
 
-name = "1h_4h_Donchian_Breakout_1dTrend_VolumeSpike"
-timeframe = "1h"
+name = "4h_Donchian_Breakout_20_Trix_50_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,50 +20,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-
-    # Calculate 4h Donchian channels (20-period)
-    high_max_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_high = align_htf_to_ltf(prices, df_4h, high_max_20)
-    donchian_low = align_htf_to_ltf(prices, df_4h, low_min_20)
-
-    # Get 1d data for trend filter
+    # Get 1d data for TRIX calculation
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
 
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate TRIX(50) on daily close
+    # TRIX = EMA(EMA(EMA(close, 50), 50), 50) - 1
+    ema1 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema2 = pd.Series(ema1).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema3 = pd.Series(ema2).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trix_raw = (ema3 / np.roll(ema3, 1)) - 1  # % change
+    trix_raw[0] = 0  # first value has no previous
+    trix = trix_raw  # already in percent form
 
-    # Volume spike: volume > 2.0 * 24-period average (~1 day at 1h)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > 2.0 * vol_ma_24
+    # Align TRIX to 4h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
 
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Calculate Donchian channels (20-period) on 4h data
+    # Upper = max(high, 20), Lower = min(low, 20)
+    df = pd.DataFrame({'high': high, 'low': low})
+    donch_high = df['high'].rolling(window=20, min_periods=20).max().values
+    donch_low = df['low'].rolling(window=20, min_periods=20).min().values
+
+    # Volume spike: volume > 2.0 * 20-period average (~3.3 days at 4h)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 2.0 * vol_ma_20
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
-            np.isnan(ema50_1d_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-
-        # Apply session filter
-        if not session_filter[i]:
+        if (np.isnan(trix_aligned[i]) or 
+            np.isnan(donch_high[i]) or 
+            np.isnan(donch_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,29 +62,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Uptrend + breakout above Donchian high + volume spike
-            if close[i] > ema50_1d_aligned[i] and close[i] > donchian_high[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # LONG: Uptrend momentum + breakout above Donchian high + volume spike
+            if trix_aligned[i] > 0 and close[i] > donch_high[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend + breakdown below Donchian low + volume spike
-            elif close[i] < ema50_1d_aligned[i] and close[i] < donchian_low[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # SHORT: Downtrend momentum + breakdown below Donchian low + volume spike
+            elif trix_aligned[i] < 0 and close[i] < donch_low[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low or trend turns bearish
-            if close[i] < donchian_low[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price breaks below Donchian low or momentum turns negative
+            if close[i] < donch_low[i] or trix_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high or trend turns bullish
-            if close[i] > donchian_high[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above Donchian high or momentum turns positive
+            if close[i] > donch_high[i] or trix_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
