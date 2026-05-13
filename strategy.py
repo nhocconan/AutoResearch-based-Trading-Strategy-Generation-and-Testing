@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Trend_RSI_MeanReversion
-# Hypothesis: KAMA identifies trend direction on 12h, RSI(14) identifies overbought/oversold conditions for mean reversion entries.
-# Works in bull (trend-following: long when KAMA up, RSI < 30) and bear (counter-trend: short when KAMA down, RSI > 70).
-# Volume confirmation filters false signals. Target: 50-150 total trades over 4 years = 12-37/year.
+# 1d_KAMA_Trend_RSI_Momentum
+# Hypothesis: Use daily KAMA for trend direction, RSI for momentum confirmation, and volume spike for entry timing.
+# Works in bull (KAMA rising, RSI > 50) and bear (KAMA falling, RSI < 50) by following the trend with momentum filters.
+# Target: 30-100 total trades over 4 years = 7-25/year.
 
-name = "12h_KAMA_Trend_RSI_MeanReversion"
-timeframe = "12h"
+name = "1d_KAMA_Trend_RSI_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -20,40 +19,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for KAMA trend
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    change = abs(np.diff(df_1d['close'], prepend=df_1d['close'][0]))
-    volatility = np.abs(np.diff(df_1d['close']))
-    er = np.where(volatility > 0, change / volatility, 0)
-    sc = (er * (0.66 - 0.06) + 0.06) ** 2
-    kama = np.zeros_like(df_1d['close'])
-    kama[0] = df_1d['close'][0]
-    for i in range(1, len(df_1d)):
-        kama[i] = kama[i-1] + sc[i] * (df_1d['close'][i] - kama[i-1])
-    kama = kama.astype(np.float64)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # KAMA calculation (10-period ER, 2/30 fast/slow SC)
+    price_change = np.abs(np.diff(close, prepend=close[0]))
+    direction = np.abs(np.subtract(close, np.roll(close, 10)))
+    volatility = np.cumsum(price_change) - np.roll(np.cumsum(price_change), 10)
+    volatility = np.where(volatility == 0, 1, volatility)
+    er = direction / volatility
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
 
-    # Get 1d data for RSI
-    delta = np.diff(df_1d['close'], prepend=df_1d['close'][0])
+    # RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
 
-    # Volume filter: >1.3x 20-period average
-    vol_avg_20 = pd.Series(volume).ewm(span=20, adjust=False).mean().values
+    # Volume filter: >1.5x 20-period average
+    vol_avg_20 = np.zeros_like(volume)
+    for i in range(20, len(volume)):
+        vol_avg_20[i] = np.mean(volume[i-20:i])
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        # Skip if any required value is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+    for i in range(20, n):
+        # Skip if any required value is NaN or invalid
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg_20[i]) or vol_avg_20[i] == 0):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,30 +64,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: KAMA trending up + RSI oversold + volume confirmation
-            if (close[i] > kama_aligned[i] and 
-                rsi_aligned[i] < 30 and
-                volume[i] > vol_avg_20[i] * 1.3):
+            # LONG: KAMA rising (trend up) + RSI > 50 (bullish momentum) + volume spike
+            if (kama[i] > kama[i-1] and 
+                rsi[i] > 50 and
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA trending down + RSI overbought + volume confirmation
-            elif (close[i] < kama_aligned[i] and 
-                  rsi_aligned[i] > 70 and
-                  volume[i] > vol_avg_20[i] * 1.3):
+            # SHORT: KAMA falling (trend down) + RSI < 50 (bearish momentum) + volume spike
+            elif (kama[i] < kama[i-1] and 
+                  rsi[i] < 50 and
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA turns down or RSI overbought
-            if (close[i] < kama_aligned[i] or rsi_aligned[i] > 70):
+            # EXIT LONG: KAMA turns down or RSI < 50
+            if (kama[i] < kama[i-1] or rsi[i] < 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA turns up or RSI oversold
-            if (close[i] > kama_aligned[i] or rsi_aligned[i] < 30):
+            # EXIT SHORT: KAMA turns up or RSI > 50
+            if (kama[i] > kama[i-1] or rsi[i] > 50):
                 signals[i] = 0.0
                 position = 0
             else:
