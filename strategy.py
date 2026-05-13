@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Vortex_Trend_With_WeeklyTrend_Filter
-# Hypothesis: The Vortex indicator identifies trend direction (VI+ > VI- for uptrend, VI- > VI+ for downtrend).
-# Trades only in the direction of the weekly trend (price above/below weekly EMA200) to avoid counter-trend whipsaws.
-# Uses volume confirmation (volume > 1.5x 20-period average) to filter low-quality breakouts.
-# Designed for low-frequency, high-quality signals on 12h timeframe to minimize fee drag and work in both bull and bear markets.
+# 1d_Camarilla_R1_S1_Breakout_WeeklyTrend_VolumeSpike
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily pivots act as strong support/resistance.
+# Breakout above R1 with weekly uptrend (price > weekly EMA50) and volume spike triggers long.
+# Breakdown below S1 with weekly downtrend (price < weekly EMA50) and volume spike triggers short.
+# Weekly trend filter reduces whipsaw in sideways markets, while daily entries capture trend continuation.
+# Designed for low-frequency, high-quality setups (target: 10-25 trades/year) to minimize fee drag.
 
-name = "12h_Vortex_Trend_With_WeeklyTrend_Filter"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -27,45 +28,37 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
 
-    # Weekly EMA200 for trend filter (needs minimum period)
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Calculate Vortex Indicator (VI) on 12h data
-    # True Range (TR)
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
+    # Calculate Camarilla pivot levels for each day
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
 
-    # Positive and Negative Vortex Movement
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = 0
-    vm_minus[0] = 0
+    # Align daily pivot levels to daily timeframe (identity but required for consistency)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
 
-    # Sum over 14 periods (standard Vortex period)
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
 
-    # VI+ and VI-
-    vi_plus = vm_plus14 / tr14
-    vi_minus = vm_minus14 / tr14
-
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume spike: volume > 2.0 * 20-period average (~20 days)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * vol_ma_20
+    volume_spike = volume > 2.0 * vol_ma_20
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(vi_plus[i]) or 
-            np.isnan(vi_minus[i]) or
-            np.isnan(ema200_1w_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,26 +67,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: VI+ > VI- (uptrend) + price above weekly EMA200 + volume spike
-            if vi_plus[i] > vi_minus[i] and close[i] > ema200_1w_aligned[i] and volume_spike[i]:
+            # LONG: Weekly uptrend + breakout above R1 + volume spike
+            if close[i] > ema50_1w_aligned[i] and close[i] > r1_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: VI- > VI+ (downtrend) + price below weekly EMA200 + volume spike
-            elif vi_minus[i] > vi_plus[i] and close[i] < ema200_1w_aligned[i] and volume_spike[i]:
+            # SHORT: Weekly downtrend + breakdown below S1 + volume spike
+            elif close[i] < ema50_1w_aligned[i] and close[i] < s1_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend turns down (VI- > VI+) or price crosses below weekly EMA200
-            if vi_minus[i] > vi_plus[i] or close[i] < ema200_1w_aligned[i]:
+            # EXIT LONG: Price breaks below S1 or weekly trend turns bearish
+            if close[i] < s1_aligned[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend turns up (VI+ > VI-) or price crosses above weekly EMA200
-            if vi_plus[i] > vi_minus[i] or close[i] > ema200_1w_aligned[i]:
+            # EXIT SHORT: Price breaks above R1 or weekly trend turns bullish
+            if close[i] > r1_aligned[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
