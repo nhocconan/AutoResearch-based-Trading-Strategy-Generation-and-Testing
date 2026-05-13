@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper channel, 1d EMA34 is rising, and volume > 1.5x 20-period average.
-# Short when price breaks below Donchian lower channel, 1d EMA34 is falling, and volume > 1.5x 20-period average.
-# Uses ATR(14) trailing stop (2.0x) for risk control.
-# Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Long when price breaks above Donchian upper channel, 1d EMA34 is rising, and volume > 1.8x 20-period average.
+# Short when price breaks below Donchian lower channel, 1d EMA34 is falling, and volume > 1.8x 20-period average.
+# Uses ATR(14) trailing stop (2.5x) for risk control.
+# Uses discrete position sizing (0.30) to minimize fee churn.
+# Target: 100-200 total trades over 4 years (25-50/year) on 4h.
+# Works in both bull and bear: trend filter avoids counter-trend trades, volume confirms breakout strength.
 
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_Volume_v1"
+name = "4h_Donchian20_Breakout_1dEMA34_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,7 +33,7 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) on 4h data
+    # Calculate Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -46,9 +47,9 @@ def generate_signals(prices):
     # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate volume confirmation: volume > 1.5x 20-period average
+    # Calculate volume confirmation: volume > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,14 +64,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price > Donchian upper channel AND 1d EMA34 rising (trending up) AND volume confirmation
+            # LONG: Price > Donchian upper AND 1d EMA34 rising (trending up) AND volume confirmation
             if close[i] > highest_high[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_confirm[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Donchian lower channel AND 1d EMA34 falling (trending down) AND volume confirmation
+            # SHORT: Price < Donchian lower AND 1d EMA34 falling (trending down) AND volume confirmation
             elif close[i] < lowest_low[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_confirm[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
@@ -82,30 +83,30 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
+            # EXIT LONG: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
