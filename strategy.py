@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high AND price > 1d EMA34 AND volume > 1.5x average.
-# Short when price breaks below 20-period Donchian low AND price < 1d EMA34 AND volume > 1.5x average.
-# Exit when price crosses the opposite Donchian level (e.g., long exit on break below Donchian low).
-# Uses 4h timeframe for lower frequency, Donchian for structure, 1d EMA for trend filter, volume for confirmation.
-# Target: 75-200 total trades over 4 years (19-50/year). Works in bull via breakout continuation, bear via faded rallies.
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 12h Trend Filter and Volume Confirmation.
+# Uses Bollinger Band Width percentile to detect low volatility squeeze (regime filter).
+# Breakout occurs when price closes outside Bollinger Bands after squeeze.
+# Trend filter: 12h EMA50 direction (price > EMA50 = bullish, price < EMA50 = bearish).
+# Volume confirmation: current 6h volume > 1.5x 20-period average.
+# Works in bull via breakout continuation, bear via faded rallies (mean reversion in squeeze).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "4h_Donchian20_1dTrend_Volume_v1"
-timeframe = "4h"
+name = "6h_BollingerSqueeze_Breakout_12hTrend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,59 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Donchian calculation
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    volume_4h = df_4h['volume'].values
+    # Get 6h data for Bollinger Bands
+    df_6h = get_htf_data(prices, '6h')
+    close_6h = df_6h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    volume_6h = df_6h['volume'].values
     
-    # Calculate Donchian(20) on 4h high/low
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2) on 6h close
+    bb_period = 20
+    bb_std = 2
+    ma_6h = pd.Series(close_6h).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_6h = pd.Series(close_6h).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = ma_6h + (bb_std * std_6h)
+    lower_bb = ma_6h - (bb_std * std_6h)
     
-    # Volume filter: current 4h volume > 1.5x 20-period average
-    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    volume_filter_4h = volume_4h > (1.5 * vol_ma_4h)
+    # Bollinger Band Width for squeeze detection
+    bb_width = (upper_bb - lower_bb) / ma_6h
+    # Percentile of BB width over 50 periods to identify squeeze (low volatility)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False
+    ).values
+    squeeze_condition = bb_width_percentile < 20  # Bottom 20% = squeeze
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Breakout condition: price closes outside Bollinger Bands
+    breakout_up = close_6h > upper_bb
+    breakout_down = close_6h < lower_bb
     
-    # Calculate EMA(34) on 1d close for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Volume filter: current 6h volume > 1.5x 20-period average
+    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_filter_6h = volume_6h > (1.5 * vol_ma_6h)
+    
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # Calculate EMA(50) on 12h close for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_4h[i])):
+        if (np.isnan(ma_6h[i]) or np.isnan(std_6h[i]) or
+            np.isnan(bb_width_percentile[i]) or np.isnan(ema50_12h_aligned[i]) or
+            np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high AND price > 1d EMA34 AND volume confirmation
-            if close[i] > donchian_high[i] and close[i] > ema34_1d_aligned[i] and volume_filter_4h[i]:
+            # LONG: Breakout above upper BB during squeeze AND bullish trend (price > 12h EMA50) AND volume confirmation
+            if squeeze_condition[i] and breakout_up[i] and close[i] > ema50_12h_aligned[i] and volume_filter_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low AND price < 1d EMA34 AND volume confirmation
-            elif close[i] < donchian_low[i] and close[i] < ema34_1d_aligned[i] and volume_filter_4h[i]:
+            # SHORT: Breakout below lower BB during squeeze AND bearish trend (price < 12h EMA50) AND volume confirmation
+            elif squeeze_condition[i] and breakout_down[i] and close[i] < ema50_12h_aligned[i] and volume_filter_6h[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low (opposite breakout)
-            if close[i] < donchian_low[i]:
+            # EXIT LONG: Price re-enters Bollinger Bands (mean reversion) OR trend reversal
+            if close[i] < ma_6h[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high (opposite breakout)
-            if close[i] > donchian_high[i]:
+            # EXIT SHORT: Price re-enters Bollinger Bands (mean reversion) OR trend reversal
+            if close[i] > ma_6h[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
