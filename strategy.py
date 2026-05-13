@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Ichimoku_Bullish_Bearish_Balance
-Hypothesis: Ichimoku Cloud components provide multi-timeframe equilibrium signals. Price above/below cloud with TK cross and Kumo twist gives high-probability trend continuation. Uses 1w trend filter and 1d volume confirmation to reduce false signals. Targets 15-25 trades/year on 12h timeframe with 0.25 position size for controlled risk.
+4h_Supertrend_RSI_Momentum
+Hypothesis: Supertrend (ATR=10, multiplier=3) defines trend direction. RSI(14) measures momentum strength. Entry occurs when Supertrend confirms trend and RSI shows strong momentum (RSI>55 for long, RSI<45 for short) with volume confirmation. Exit when Supertrend reverses or momentum weakens. Designed for low trade frequency (target 20-40/year) to minimize fee drag in 4-hour bars.
 """
 
-name = "12h_Ichimoku_Bullish_Bearish_Balance"
-timeframe = "12h"
+name = "4h_Supertrend_RSI_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,93 +22,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    # Get 1d data for volume confirmation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # ATR calculation for Supertrend
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max()
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan = ((period9_high + period9_low) / 2).values
+    # Supertrend calculation
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (3 * atr)
+    lower_band = hl2 - (3 * atr)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max()
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun = ((period26_high + period26_low) / 2).values
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max()
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min()
-    senkou_b = ((period52_high + period52_low) / 2)
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
     
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    # For signal generation, we compare current price with Chikou (which is past close)
-    chikou = close  # We'll use current price vs price 26 periods ago
+    for i in range(1, n):
+        if close[i] > supertrend[i-1]:
+            supertrend[i] = lower_band[i]
+            direction[i] = 1
+        else:
+            supertrend[i] = upper_band[i]
+            direction[i] = -1
     
-    # 1w trend filter: EMA(50) on weekly close
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # 1d volume confirmation: current volume > 2.0x 24-period average (2 days)
-    vol_ma_1d = pd.Series(df_1d['volume']).ewm(span=24, adjust=False, min_periods=24).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_filter = volume > (2.0 * vol_ma_1d_aligned)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values  # Neutral RSI for warmup period
+    
+    # Volume confirmation: current volume > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Start after Ichimoku warmup
-        # Current Ichimoku values
-        tenkan_i = tenkan[i]
-        kijun_i = kijun[i]
-        # Senkou spans need to be offset for cloud calculation
-        senkou_a_i = senkou_a[i] if i < len(senkou_a) else senkou_a[-1]
-        senkou_b_i = senkou_b[i] if i < len(senkou_b) else senkou_b[-1]
-        # Cloud top and bottom
-        cloud_top = max(senkou_a_i, senkou_b_i)
-        cloud_bottom = min(senkou_a_i, senkou_b_i)
-        # Chikou comparison: current price vs price 26 periods ago
-        chikow_value = close[i - 26] if i >= 26 else close[0]
-        
+    for i in range(20, n):  # Start after warmup
         if position == 0:
-            # LONG: Price above cloud, TK cross up, Chikou above price 26 periods ago, 1w uptrend, volume confirmation
-            if (close[i] > cloud_top and 
-                tenkan_i > kijun_i and 
-                tenkan[i-1] <= kijun[i-1] and  # TK cross just happened
-                close[i] > chikow_value and
-                close[i] > ema50_1w_aligned[i] and
+            # LONG: Supertrend uptrend, RSI > 55 (bullish momentum), volume confirmation
+            if (direction[i] == 1 and 
+                rsi_values[i] > 55 and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below cloud, TK cross down, Chikou below price 26 periods ago, 1w downtrend, volume confirmation
-            elif (close[i] < cloud_bottom and 
-                  tenkan_i < kijun_i and 
-                  tenkan[i-1] >= kijun[i-1] and  # TK cross just happened
-                  close[i] < chikow_value and
-                  close[i] < ema50_1w_aligned[i] and
+            # SHORT: Supertrend downtrend, RSI < 45 (bearish momentum), volume confirmation
+            elif (direction[i] == -1 and 
+                  rsi_values[i] < 45 and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price below cloud OR TK cross down OR 1w trend change
-            if (close[i] < cloud_top or 
-                tenkan_i < kijun_i or
-                close[i] < ema50_1w_aligned[i]):
+            # EXIT LONG: Supertrend reverses OR RSI drops below 50 (momentum loss)
+            if (direction[i] == -1) or (rsi_values[i] < 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above cloud OR TK cross up OR 1w trend change
-            if (close[i] > cloud_bottom or 
-                tenkan_i > kijun_i or
-                close[i] > ema50_1w_aligned[i]):
+            # EXIT SHORT: Supertrend reverses OR RSI rises above 50 (momentum loss)
+            if (direction[i] == 1) or (rsi_values[i] > 50):
                 signals[i] = 0.0
                 position = 0
             else:
