@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Channel_Breakout_Trend_Volume
-Hypothesis: Keltner Channel (20, ATR=2) breakouts with 4h trend (EMA50) and volume confirmation work in both bull and bear markets.
-Breakout above upper band with uptrend and volume spike = long.
-Breakdown below lower band with downtrend and volume spike = short.
-Exit on opposite band touch or trend reversal. Uses 1d trend filter for higher timeframe bias.
-Target: 20-50 trades/year per symbol.
+6h_Pivot_Bounce_Momentum
+Hypothesis: Price bouncing off daily pivot levels (R1/S1) with 6h momentum (MACD) and volume confirmation captures mean reversion in ranging markets and continuation in trending markets. Works in both bull and bear by using pivot as dynamic S/R and momentum as filter.
+Target: 15-35 trades/year per symbol.
 """
 
-name = "4h_Keltner_Channel_Breakout_Trend_Volume"
-timeframe = "4h"
+name = "6h_Pivot_Bounce_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,74 +23,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Keltner Channel: 20 EMA, ATR(20) * 2
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0.0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    upper_band = ema_20 + 2 * atr_20
-    lower_band = ema_20 - 2 * atr_20
-    
-    # 4h trend: EMA50
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_4h = close > ema_50
-    downtrend_4h = close < ema_50
-    
-    # 1d trend filter (HTF)
+    # Daily pivot levels from previous day
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Calculate pivot points for each day using previous day's OHLC
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*Pivot - L
+    # S1 = 2*Pivot - H
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 6h momentum: MACD histogram (12,26,9)
+    close_series = pd.Series(close)
+    ema12 = close_series.ewm(span=12, adjust=False, min_periods=12).values
+    ema26 = close_series.ewm(span=26, adjust=False, min_periods=26).values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).values
+    macd_hist = macd_line - signal_line
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 2.0 * vol_ma
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Get values
-        upband = upper_band[i]
-        lowband = lower_band[i]
-        uptrend = uptrend_4h[i]
-        downtrend = downtrend_4h[i]
-        uptrend_htf = uptrend_1d_aligned[i]
-        downtrend_htf = downtrend_1d_aligned[i]
-        vol_conf = volume_conf[i]
+        px = close[i]
+        piv = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        macd = macd_hist[i]
+        vol_ok = volume_conf[i]
         
         if position == 0:
-            # LONG: break above upper band, 4h uptrend, 1d uptrend filter, volume confirmation
-            if close[i] > upband and uptrend and uptrend_htf and vol_conf:
+            # LONG: price near S1 with bullish momentum and volume
+            if px >= s1_val * 0.995 and px <= s1_val * 1.005 and macd > 0 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below lower band, 4h downtrend, 1d downtrend filter, volume confirmation
-            elif close[i] < lowband and downtrend and downtrend_htf and vol_conf:
+            # SHORT: price near R1 with bearish momentum and volume
+            elif px <= r1_val * 1.005 and px >= r1_val * 0.995 and macd < 0 and vol_ok:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch lower band or 4h trend turns down
-            if close[i] < lowband or not uptrend:
+            # EXIT LONG: price reaches pivot or momentum turns bearish
+            if px >= piv * 0.995 or macd < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch upper band or 4h trend turns up
-            if close[i] > upband or not downtrend:
+            # EXIT SHORT: price reaches pivot or momentum turns bullish
+            if px <= piv * 1.005 or macd > 0:
                 signals[i] = 0.0
                 position = 0
             else:
