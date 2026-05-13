@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Donchian breakout with 4h trend filter and 1d volume confirmation.
-# Long when price breaks above 20-bar Donchian high AND 4h EMA50 is rising AND 1d volume > 1.5 * 20-day average volume.
-# Short when price breaks below 20-bar Donchian low AND 4h EMA50 is falling AND 1d volume > 1.5 * 20-day average volume.
-# Exit on opposite Donchian break or when 4h EMA50 flips direction.
-# Uses discrete position sizing (0.20) to limit fee churn. Designed for 1h timeframe with HTF filters to reduce overtrading.
-# Target: 80-150 total trades over 4 years (20-37/year) for 1h timeframe.
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 1w trend filter and 1d volume confirmation.
+# Long when price breaks above upper BB(20,2) AND BBWidth < 20th percentile (squeeze) AND 1w close > 1w EMA50 (uptrend) AND 1d volume > 1.5 * 20-period average volume.
+# Short when price breaks below lower BB(20,2) AND BBWidth < 20th percentile (squeeze) AND 1w close < 1w EMA50 (downtrend) AND 1d volume > 1.5 * 20-period average volume.
+# Exit when price crosses back inside the Bollinger Bands (middle band).
+# Uses discrete position sizing (0.25) to limit fee churn. Designed for BTC/ETH robustness by capturing low-volatility breakouts in trending markets with volume confirmation.
+# Target: 60-100 total trades over 4 years (15-25/year) for 6h timeframe.
 
-name = "1h_Donchian20_4hEMA50_1dVolumeSpike_v1"
-timeframe = "1h"
+name = "6h_BollingerSqueezeBreakout_1wTrend_1dVolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,22 +16,34 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA50 for trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate Bollinger Bands (20,2) on primary timeframe
+    close_s = pd.Series(close)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_s.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    
+    # Calculate BBWidth percentile (20th) for squeeze condition
+    bb_width_s = pd.Series(bb_width)
+    bb_width_percentile_20 = bb_width_s.rolling(window=50, min_periods=50).quantile(0.20).values
+    is_squeeze = bb_width < bb_width_percentile_20
+    
+    # Calculate 1w trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    ema_50_4h_rising = np.gradient(ema_50_4h_aligned) > 0  # True if rising
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate 1d volume spike filter (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -42,51 +54,50 @@ def generate_signals(prices):
     volume_spike = volume_1d > (1.5 * vol_ma_20)
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
-    # Calculate Donchian channels (20-period) on primary timeframe
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(20, n):  # Start after BB warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_50_4h_rising[i]) or
-            np.isnan(volume_spike_aligned[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i])):
+        if (np.isnan(bb_middle[i]) or 
+            np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or
+            np.isnan(is_squeeze[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(volume_spike_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price > Donchian high AND 4h EMA50 rising AND volume spike
-            if (close[i] > highest_high[i] and 
-                ema_50_4h_rising[i] and 
+            # LONG: Break above upper BB AND squeeze AND 1w uptrend AND volume spike
+            if (close[i] > bb_upper[i] and 
+                is_squeeze[i] and 
+                close[i] > ema_50_1w_aligned[i] and  # Price above 1w EMA50 (uptrend)
                 volume_spike_aligned[i] > 0.5):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: price < Donchian low AND 4h EMA50 falling AND volume spike
-            elif (close[i] < lowest_low[i] and 
-                  not ema_50_4h_rising[i] and 
+            # SHORT: Break below lower BB AND squeeze AND 1w downtrend AND volume spike
+            elif (close[i] < bb_lower[i] and 
+                  is_squeeze[i] and 
+                  close[i] < ema_50_1w_aligned[i] and  # Price below 1w EMA50 (downtrend)
                   volume_spike_aligned[i] > 0.5):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price < Donchian low OR 4h EMA50 stops rising
-            if (close[i] < lowest_low[i] or not ema_50_4h_rising[i]):
+            # EXIT LONG: Price crosses back inside BB (below middle band)
+            if close[i] < bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price > Donchian high OR 4h EMA50 starts rising
-            if (close[i] > highest_high[i] or ema_50_4h_rising[i]):
+            # EXIT SHORT: Price crosses back inside BB (above middle band)
+            if close[i] > bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
