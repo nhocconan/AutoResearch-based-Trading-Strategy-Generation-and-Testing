@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_Trend_4h
-Hypothesis: Camarilla R1/S1 breakouts with 4h trend filter and volume confirmation work in both bull and bear markets.
-Buy when price breaks above R1 with 4h uptrend and volume spike; sell when breaks below S1 with 4h downtrend and volume spike.
-Use 1d trend filter for higher timeframe bias. Target: 15-35 trades/year per symbol.
+6h_WeeklyPivot_DailyTrend_Volume
+Hypothesis: Combine weekly pivot points (from 1w) for structural bias with daily EMA trend filter and volume confirmation on 6h.
+- Long when price breaks above weekly R1 with daily uptrend and volume spike
+- Short when price breaks below weekly S1 with daily downtrend and volume spike
+- Exit on opposite pivot level (S1 for long, R1 for short) or trend reversal
+Weekly pivots provide strong support/resistance; daily trend filters avoid counter-trend trades; volume confirms conviction.
+Designed for low frequency (12-30 trades/year) to minimize fee impact in 6s timeframe.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_Trend_4h"
-timeframe = "1h"
+name = "6h_WeeklyPivot_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,106 +27,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Previous day's high, low, close for Camarilla calculation
-    # We'll calculate daily high/low/close from 1h data by resampling conceptually
-    # But per rules, we must use get_htf_data for actual 1d data
+    # Daily trend filter: EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_daily = close > ema_50
+    downtrend_daily = close < ema_50
     
-    # 4h trend: EMA34
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
-        return np.zeros(n)
-    ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    uptrend_4h = close > ema_34_4h_aligned
-    downtrend_4h = close < ema_34_4h_aligned
-    
-    # 1d trend filter: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = df_1d['close'].values > ema_34_1d
-    downtrend_1d = df_1d['close'].values < ema_34_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    
-    # Calculate Camarilla levels using previous day's OHLC from 1d data
-    # We need to align the previous day's values to each 1h bar
-    if len(df_1d) < 2:
+    # Weekly data for pivot points (calculate once per week)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Get previous day's high, low, close for each 1d bar
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    # Set first day's values to zero (will be handled by alignment)
-    prev_high[0] = 0
-    prev_low[0] = 0
-    prev_close[0] = 0
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate Camarilla R1 and S1 for each day
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    rng = prev_high - prev_low
-    r1 = prev_close + 1.1 * rng / 12
-    s1 = prev_close - 1.1 * rng / 12
+    # Avoid division by zero or invalid calculations
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align to 1h timeframe (these levels are valid for the entire day)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align weekly pivots to 6h timeframe (wait for weekly close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    # Volume confirmation: volume > 1.5 * 24-period average (1 day)
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     volume_conf = volume > 1.5 * vol_ma
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):  # Start after warmup for volume MA
-        # Skip if outside trading session
-        if not session_filter[i]:
-            signals[i] = 0.0
-            continue
-            
-        # Get values
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        uptrend = uptrend_4h[i]
-        downtrend = downtrend_4h[i]
-        uptrend_htf = uptrend_1d_aligned[i]
-        downtrend_htf = downtrend_1d_aligned[i]
-        vol_conf = volume_conf[i]
+    for i in range(50, n):
+        # Get current values
+        price = close[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        uptrend = uptrend_daily[i]
+        downtrend = downtrend_daily[i]
+        vol_ok = volume_conf[i]
         
         if position == 0:
-            # LONG: break above R1, 4h uptrend, 1d uptrend filter, volume confirmation
-            if close[i] > r1_val and uptrend and uptrend_htf and vol_conf:
-                signals[i] = 0.20
+            # LONG: break above weekly R1, daily uptrend, volume confirmation
+            if price > r1 and uptrend and vol_ok:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1, 4h downtrend, 1d downtrend filter, volume confirmation
-            elif close[i] < s1_val and downtrend and downtrend_htf and vol_conf:
-                signals[i] = -0.20
+            # SHORT: break below weekly S1, daily downtrend, volume confirmation
+            elif price < s1 and downtrend and vol_ok:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch S1 or 4h trend turns down
-            if close[i] < s1_val or not uptrend:
+            # EXIT LONG: price touches weekly S1 or daily trend turns down
+            if price < s1 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch R1 or 4h trend turns up
-            if close[i] > r1_val or not downtrend:
+            # EXIT SHORT: price touches weekly R1 or daily trend turns up
+            if price > r1 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
