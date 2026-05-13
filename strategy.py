@@ -1,131 +1,134 @@
 #!/usr/bin/env python3
 """
-4h_Pivot_Reversion_Volume_Trend
-Hypothesis: In range-bound markets (Chop > 61.8), price reverts to daily pivot (S2/R2) with volume confirmation. In trending markets (Chop < 38.2), price follows 1d EMA50 trend. Combines mean reversion and trend following with regime filter to work in both bull and bear markets. Target: 20-40 trades/year.
+1d_WeeklyTrend_RSIDivergence_v1
+Hypothesis: For 1d timeframe, use weekly trend filter (EMA34) combined with daily RSI divergence signals. In bull markets (price > weekly EMA34), look for bullish RSI divergence (price making lower low, RSI making higher low) to go long. In bear markets (price < weekly EMA34), look for bearish RSI divergence (price making higher high, RSI making lower high) to go short. Uses volume confirmation to filter false signals. Designed for low trade frequency (5-15/year) with strong directional moves, minimizing fee impact while capturing major trend reversals.
 """
 
-name = "4h_Pivot_Reversion_Volume_Trend"
-timeframe = "4h"
+name = "1d_WeeklyTrend_RSIDivergence_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def rsi(close, period=14):
+    """Calculate RSI with proper Wilder's smoothing"""
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss
+    rs = rs.replace([np.inf, -np.inf], 100)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+def find_divergence(close, rsi_vals, lookback=10):
+    """
+    Find bullish/bearish divergence over lookback period
+    Returns: 1 for bullish div, -1 for bearish div, 0 otherwise
+    """
+    n = len(close)
+    bullish_div = np.zeros(n)
+    bearish_div = np.zeros(n)
+    
+    for i in range(lookback, n):
+        # Get lookback window
+        window_close = close[i-lookback:i+1]
+        window_rsi = rsi_vals[i-lookback:i+1]
+        
+        # Find local minima and maxima in window
+        min_idx = np.argmin(window_close)
+        max_idx = np.argmax(window_close)
+        
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        if min_idx == lookback:  # Current point is lowest in window
+            if i > lookback:  # Need previous point to compare
+                # Find previous low in window (excluding current)
+                prev_window_close = close[i-lookback:i]
+                prev_min_idx = np.argmin(prev_window_close)
+                if prev_min_idx == len(prev_window_close) - 1:  # Previous point was lowest
+                    if window_close[-1] < window_close[-2] and window_rsi[-1] > window_rsi[-2]:
+                        bullish_div[i] = 1
+        
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        if max_idx == lookback:  # Current point is highest in window
+            if i > lookback:
+                prev_window_close = close[i-lookback:i]
+                prev_max_idx = np.argmax(prev_window_close)
+                if prev_max_idx == len(prev_window_close) - 1:
+                    if window_close[-1] > window_close[-2] and window_rsi[-1] < window_rsi[-2]:
+                        bearish_div[i] = -1
+    
+    return bullish_div + bearish_div  # Returns 1 for bullish, -1 for bearish
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily pivot points (standard formula)
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily RSI
+    rsi_vals = rsi(close, 14)
     
-    # Calculate Choppiness Index (14-period) on 1d for regime filter
-    atr_1d = pd.Series(np.maximum(
-        high_1d - low_1d,
-        np.maximum(
-            np.abs(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])),
-            np.abs(low_1d - np.concatenate([[low_1d[0]], low_1d[:-1]]))
-        )
-    )).rolling(window=14, min_periods=14).mean()
+    # Find RSI divergences
+    divergence_signal = find_divergence(close, rsi_vals, lookback=8)
     
-    true_range_sum = atr_1d * 14
-    max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
-    min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(true_range_sum / (max_high - min_low)) / np.log10(14)
-    chop = chop.values
-    
-    # Align 1d indicators to 4h timeframe
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Volume average (20-period) for volume confirmation
+    # Volume confirmation: volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirmed = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(35, n):  # Start after warmup
         # Skip if any required data is NaN
-        if (np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_aligned[i]) or
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(rsi_vals[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
-        
-        chop_val = chop_aligned[i]
-        price = close[i]
+        # Determine market regime: bullish if price > weekly EMA34, bearish if price < weekly EMA34
+        is_bullish = close[i] > ema_34_1w_aligned[i]
+        is_bearish = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Range market (Chop > 61.8): mean reversion to S2/R2
-            if chop_val > 61.8:
-                # Long near S2 with volume confirmation
-                if price <= s2_aligned[i] * 1.005 and vol_confirm:
-                    signals[i] = 0.25
-                    position = 1
-                # Short near R2 with volume confirmation
-                elif price >= r2_aligned[i] * 0.995 and vol_confirm:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            # Trending market (Chop < 38.2): follow 1d EMA50 trend
-            elif chop_val < 38.2:
-                # Long in uptrend
-                if price > ema_50_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short in downtrend
-                elif price < ema_50_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            # Neutral chop: stay flat
+            # LONG: Bullish market + bullish RSI divergence + volume confirmation
+            if is_bullish and divergence_signal[i] == 1 and vol_confirmed[i]:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Bearish market + bearish RSI divergence + volume confirmation
+            elif is_bearish and divergence_signal[i] == -1 and vol_confirmed[i]:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long conditions
-            if chop_val > 61.8 and price >= pivot[i] * 0.995:  # Return to pivot in range
-                signals[i] = 0.0
-                position = 0
-            elif chop_val < 38.2 and price < ema_50_1d_aligned[i]:  # Trend reversal
+            # EXIT LONG: Bearish divergence appears or trend turns bearish
+            if divergence_signal[i] == -1 or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short conditions
-            if chop_val > 61.8 and price <= pivot[i] * 1.005:  # Return to pivot in range
-                signals[i] = 0.0
-                position = 0
-            elif chop_val < 38.2 and price > ema_50_1d_aligned[i]:  # Trend reversal
+            # EXIT SHORT: Bullish divergence appears or trend turns bullish
+            if divergence_signal[i] == 1 or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
