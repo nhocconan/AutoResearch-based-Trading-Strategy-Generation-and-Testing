@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_R3_S3_Breakout_Trend_Volume
-# Hypothesis: Breakouts above daily Camarilla R3 in uptrend (price > EMA34) and breakdowns below S3 in downtrend (price < EMA34), with volume confirmation.
-# Uses 12h primary timeframe with 1d trend filter. Designed for low trade frequency to avoid fee drag in both bull and bear markets.
+# 1d_Weekly_Camarilla_R1S1_Breakout_WeekTrend_Volume
+# Hypothesis: Breakouts above weekly Camarilla R1 in weekly uptrend (price > weekly EMA34) and breakdowns below S1 in weekly downtrend (price < weekly EMA34), with volume confirmation.
+# Uses 1d primary timeframe with 1w trend filter. Designed for low trade frequency to avoid fee drag in both bull and bear markets.
 
-name = "12h_1d_Camarilla_R3_S3_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "1d_Weekly_Camarilla_R1S1_Breakout_WeekTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,30 +21,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels (based on previous day's range)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Camarilla levels (based on previous week's range)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar (based on previous day's range)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Camarilla levels for each 1w bar (based on previous week's range)
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_close = df_1w['close'].shift(1).values
     
     valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
-    camarilla_r3 = np.full_like(prev_close, np.nan)
-    camarilla_s3 = np.full_like(prev_close, np.nan)
+    camarilla_r1 = np.full_like(prev_close, np.nan)
+    camarilla_s1 = np.full_like(prev_close, np.nan)
     
-    camarilla_r3[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 4
-    camarilla_s3[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 4
+    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 1d timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
     
-    # Get 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -55,30 +55,30 @@ def generate_signals(prices):
     
     for i in range(50, n):
         if position == 0:
-            # LONG: Price breaks above R3 with volume confirmation in uptrend (price > EMA34)
-            if camarilla_r3_aligned[i] > 0 and not np.isnan(camarilla_r3_aligned[i]) and \
-               high[i] > camarilla_r3_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1d_aligned[i]:
+            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with volume confirmation in downtrend (price < EMA34)
-            elif camarilla_s3_aligned[i] > 0 and not np.isnan(camarilla_s3_aligned[i]) and \
-                 low[i] < camarilla_s3_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1d_aligned[i]:
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34)
+            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below R3 or trend weakens (price < EMA34)
-            if camarilla_r3_aligned[i] > 0 and not np.isnan(camarilla_r3_aligned[i]) and \
-               low[i] < camarilla_r3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # EXIT LONG: Price crosses back below R1 or trend weakens (price < EMA34)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above S3 or trend weakens (price > EMA34)
-            if camarilla_s3_aligned[i] > 0 and not np.isnan(camarilla_s3_aligned[i]) and \
-               high[i] > camarilla_s3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # EXIT SHORT: Price crosses back above S1 or trend weakens (price > EMA34)
+            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+               high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
