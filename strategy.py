@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1d_WeeklyPivot_MeanReversion
-# Hypothesis: Trade reversals at weekly pivot points (R1/S1) on daily timeframe.
-# In ranging markets, price tends to revert from weekly support/resistance levels.
-# In trending markets, breakouts of these levels can be filtered by weekly trend.
-# Combines mean reversion at pivot points with trend filter to work in both bull and bear markets.
-# Target: 15-25 trades/year to minimize fee drag while capturing meaningful moves.
+# 12h_RSI_Overbought_Oversold_With_Trend_And_Volume
+# Hypothesis: On 12h timeframe, use RSI(14) for mean-reversion entries when price is
+# extremely overbought/oversold (>70/<30), filtered by 1d EMA50 trend and volume spike.
+# Works in bull/bear by following 1d trend direction. Targets 15-30 trades/year
+# to minimize fee drag on 12h timeframe.
 
-name = "1d_WeeklyPivot_MeanReversion"
-timeframe = "1d"
+name = "12h_RSI_Overbought_Oversold_With_Trend_And_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,46 +23,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot points and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
 
-    # Calculate weekly pivot points (standard formula)
-    high_w = df_1w['high'].values
-    low_w = df_1w['low'].values
-    close_w = df_1w['close'].values
+    # Calculate RSI(14) on 12h close
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    pivot = (high_w + low_w + close_w) / 3.0
-    r1 = 2 * pivot - low_w
-    s1 = 2 * pivot - high_w
-    r2 = pivot + (high_w - low_w)
-    s2 = pivot - (high_w - low_w)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    
+    # Initialize first average
+    avg_gain[13] = np.mean(gain[0:14])
+    avg_loss[13] = np.mean(loss[0:14])
+    
+    # Wilder smoothing
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+    
+    rs = np.full(n, np.nan)
+    rsi = np.full(n, np.nan)
+    for i in range(14, n):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi[i] = 100.0
 
-    # Align weekly pivot levels to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-
-    # Weekly trend filter: EMA21
-    ema_21 = pd.Series(close_w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
-
-    # Daily volume confirmation: volume > 1.5 x 20-day average
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_confirmed = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
+
+    # Get 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if data is not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_21_aligned[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(rsi[i]) or np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,26 +79,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price touches S1 with volume confirmation and above weekly EMA21 (uptrend)
-            if low[i] <= s1_aligned[i] and volume_confirmed[i] and close[i] > ema_21_aligned[i]:
+            # LONG: RSI oversold (<30) with volume spike and 1d EMA50 uptrend
+            if rsi[i] < 30 and volume_spike[i] and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price touches R1 with volume confirmation and below weekly EMA21 (downtrend)
-            elif high[i] >= r1_aligned[i] and volume_confirmed[i] and close[i] < ema_21_aligned[i]:
+            # SHORT: RSI overbought (>70) with volume spike and 1d EMA50 downtrend
+            elif rsi[i] > 70 and volume_spike[i] and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price reaches pivot or shows weakness
-            if close[i] >= pivot_aligned[i] or low[i] < s1_aligned[i] * 0.995:  # 0.5% buffer
+            # EXIT LONG: RSI returns to neutral (>50) or trend changes
+            if rsi[i] > 50 or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price reaches pivot or shows strength
-            if close[i] <= pivot_aligned[i] or high[i] > r1_aligned[i] * 1.005:  # 0.5% buffer
+            # EXIT SHORT: RSI returns to neutral (<50) or trend changes
+            if rsi[i] < 50 or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
