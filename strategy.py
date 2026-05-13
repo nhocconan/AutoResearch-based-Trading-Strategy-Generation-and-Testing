@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_Pivot_Squeeze_Breakout
-# Hypothesis: In 12h timeframe, enter long when price breaks above Camarilla R3 level during low volatility (BB squeeze) with volume spike, aligned with 1d EMA50 trend; enter short when price breaks below S3 level under same conditions. Camarilla levels provide institutional support/resistance, squeeze indicates low volatility breakout setup, volume confirms institutional interest. Works in bull (breakouts above R3 in uptrend) and bear (breakdowns below S3 in downtrend). Low frequency due to squeeze + level break + volume confirmation requirements.
+# 4h_Keltner_Breakout_Trend_Filter
+# Hypothesis: Enter long when price breaks above Keltner upper band during low volatility, with trend filter from 12h EMA50. Enter short when price breaks below Keltner lower band with trend filter. Uses ATR-based bands for volatility adaptation, reducing false breakouts in choppy markets. Works in bull (breakouts above upper band in uptrend) and bear (breakdowns below lower band in downtrend). Low frequency due to volatility-based entry and trend confirmation.
 
-name = "12h_Camarilla_Pivot_Squeeze_Breakout"
-timeframe = "12h"
+name = "4h_Keltner_Breakout_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,59 +20,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels, Bollinger Bands and trend
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for Keltner Channels and trend
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily OHLC for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Keltner Channels (20, 2.0) on 12h
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Camarilla levels (based on previous day)
-    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    range_1d = high_1d - low_1d
-    R3 = close_1d + range_1d * 1.1 / 4
-    S3 = close_1d - range_1d * 1.1 / 4
+    # Typical Price and ATR
+    tp = (high_12h + low_12h + close_12h) / 3
+    atr = np.zeros(len(tp))
+    tr = np.zeros(len(tp))
+    tr[0] = high_12h[0] - low_12h[0]
+    for i in range(1, len(tp)):
+        tr[i] = max(high_12h[i] - low_12h[i], 
+                    abs(high_12h[i] - close_12h[i-1]), 
+                    abs(low_12h[i] - close_12h[i-1]))
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
     
-    # Bollinger Bands (20, 2) for squeeze detection
-    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper = sma20 + 2 * std20
-    lower = sma20 - 2 * std20
+    # EMA of Typical Price for middle line
+    ema_tp = pd.Series(tp).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Bollinger Band Width for squeeze detection
-    bb_width = (upper - lower) / sma20
-    # Squeeze: BB width below 20-period average (low volatility)
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bb_width_ma
+    # Keltner Bands
+    upper = ema_tp + 2 * atr
+    lower = ema_tp - 2 * atr
     
-    # Daily trend: EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 12h EMA50 trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily indicators to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align indicators to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_12h, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_12h, lower)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Volume spike: volume > 2.0 * 2-period average (1 day worth at 12h)
-    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
-    volume_spike = volume > 2.0 * vol_ma_2
+    # Volume confirmation: volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_conf = volume > 1.5 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or 
-            np.isnan(upper_aligned[i]) or 
+        if (np.isnan(upper_aligned[i]) or 
             np.isnan(lower_aligned[i]) or 
-            np.isnan(squeeze_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+            np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(volume_conf[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,26 +75,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R3 + squeeze + daily uptrend + volume spike
-            if close[i] > R3_aligned[i] and squeeze_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > upper band + uptrend + volume confirmation
+            if close[i] > upper_aligned[i] and close[i] > ema50_12h_aligned[i] and volume_conf[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S3 + squeeze + daily downtrend + volume spike
-            elif close[i] < S3_aligned[i] and squeeze_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < lower band + downtrend + volume confirmation
+            elif close[i] < lower_aligned[i] and close[i] < ema50_12h_aligned[i] and volume_conf[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below daily EMA50 OR price < S3 (failed breakout)
-            if close[i] < ema50_1d_aligned[i] or close[i] < S3_aligned[i]:
+            # EXIT LONG: Close below middle band OR trend reversal
+            if close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above daily EMA50 OR price > R3 (failed breakdown)
-            if close[i] > ema50_1d_aligned[i] or close[i] > R3_aligned[i]:
+            # EXIT SHORT: Close above middle band OR trend reversal
+            if close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
