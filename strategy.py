@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w EMA50 trend filter.
-# Long when price breaks above 20-bar high with 1d volume > 1.5x 20-bar average and 1w EMA50 rising.
-# Short when price breaks below 20-bar low with 1d volume > 1.5x 20-bar average and 1w EMA50 falling.
-# Exit when price crosses the 20-bar EMA10 in opposite direction.
-# Uses discrete position sizing 0.25. Target: 75-200 total trades over 4 years on 4h timeframe.
-# 1w EMA50 ensures we trade with the higher timeframe trend, reducing false breakouts in ranging markets.
-# Volume confirmation ensures breakouts have conviction.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
+# Long when price closes above 20-day high with 1w EMA200 uptrend and volume > 1.5x average.
+# Short when price closes below 20-day low with 1w EMA200 downtrend and volume > 1.5x average.
+# Exit when price reverts to 10-day EMA (mean reversion within trend).
+# Uses discrete position sizing 0.25. Target: 30-100 total trades over 4 years on 1d timeframe.
+# 1w EMA200 ensures we only trade in the direction of the weekly trend, avoiding counter-trend whipsaws.
+# Volume confirmation filters out low-conviction breakouts.
 
-name = "4h_Donchian20_1wEMA50_Trend_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA200_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -30,25 +30,25 @@ def generate_signals(prices):
     if n < lookback + 1:
         return np.zeros(n)
     
-    # Rolling high/low for Donchian channels
+    # Rolling high/low for Donchian
     high_roll = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
     low_roll = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
     
-    # Calculate 20-bar EMA for exit
-    ema10 = pd.Series(close).ewm(span=10, min_periods=10, adjust=False).mean().values
+    # 10-day EMA for exit (mean reversion target)
+    ema_10 = pd.Series(close).ewm(span=10, min_periods=10, adjust=False).mean().values
     
-    # Calculate average volume for confirmation (20-period)
+    # Average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for EMA50 trend filter
+    # Get 1w data for EMA200 trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate EMA50 on 1w data
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate EMA200 on 1w data
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Align 1w EMA50 to 4h timeframe (wait for 1w bar to close)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align 1w EMA200 to 1d timeframe (wait for 1w bar to close)
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,40 +56,36 @@ def generate_signals(prices):
     for i in range(lookback + 20, n):  # Start after sufficient data
         # Skip if any required data is NaN
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema10[i]) or np.isnan(avg_volume[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+            np.isnan(ema_10[i]) or np.isnan(avg_volume[i]) or 
+            np.isnan(ema_200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # Check if 1w EMA50 is rising/falling (trend filter)
-            ema50_rising = ema50_1w_aligned[i] > ema50_1w_aligned[i-1]
-            ema50_falling = ema50_1w_aligned[i] < ema50_1w_aligned[i-1]
-            
-            # LONG: Price breaks above Donchian high with volume confirmation and rising 1w EMA50
+            # LONG: Price closes above 20-day high with 1w EMA200 uptrend and volume spike
             if (close[i] > high_roll[i] and 
-                volume[i] > 1.5 * avg_volume[i] and 
-                ema50_rising):
+                close_1w[i] > ema_200_1w_aligned[i] and  # Weekly close above EMA200 = uptrend
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low with volume confirmation and falling 1w EMA50
+            # SHORT: Price closes below 20-day low with 1w EMA200 downtrend and volume spike
             elif (close[i] < low_roll[i] and 
-                  volume[i] > 1.5 * avg_volume[i] and 
-                  ema50_falling):
+                  close_1w[i] < ema_200_1w_aligned[i] and  # Weekly close below EMA200 = downtrend
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below 20-bar EMA10
-            if close[i] < ema10[i]:
+            # EXIT LONG: Price reverts to 10-day EMA (mean reversion within trend)
+            if close[i] <= ema_10[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above 20-bar EMA10
-            if close[i] > ema10[i]:
+            # EXIT SHORT: Price reverts to 10-day EMA (mean reversion within trend)
+            if close[i] >= ema_10[i]:
                 signals[i] = 0.0
                 position = 0
             else:
