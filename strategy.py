@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter, volume confirmation (1.8x MA20), and ATR stoploss (2.0 * ATR14).
-# Enters long when price breaks above Camarilla R3 with 4h bullish trend (close > EMA50), volume > 1.8x MA20.
-# Enters short when price breaks below Camarilla S3 with 4h bearish trend (close < EMA50), volume > 1.8x MA20.
-# Exits when price reverts to Camarilla pivot point or ATR-based stoploss hit (2.0 * ATR14 from entry).
-# Uses discrete position sizing (0.20) to limit fee churn and manage drawdown.
-# Designed for low trade frequency (~15-37/year) by requiring strict confluence: price breakout + HTF trend + volume spike.
-# Camarilla levels provide precise intraday support/resistance, while 4h EMA50 filter ensures alignment with higher timeframe momentum.
-# Volume threshold (1.8x) reduces false breakouts, improving signal quality in both bull and bear markets.
+# Hypothesis: 6h Williams %R reversal with 1d trend filter and volume confirmation.
+# Enters long when Williams %R(14) crosses above -80 from below (oversold reversal) with 1d bullish trend (close > EMA50) and volume > 1.5x MA20.
+# Enters short when Williams %R(14) crosses below -20 from above (overbought reversal) with 1d bearish trend (close < EMA50) and volume > 1.5x MA20.
+# Exits when Williams %R crosses above -20 (for longs) or below -80 (for shorts) or ATR stoploss hit (2.0 * ATR14).
+# Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
+# Designed for low trade frequency (~12-37/year) by requiring confluence: momentum reversal + HTF trend + volume spike.
+# Williams %R captures short-term reversals, while 1d EMA50 filter ensures alignment with higher timeframe momentum.
+# Volume threshold reduces false reversals, improving signal quality in both bull and bear markets.
 
-name = "1h_Camarilla_R3_S3_Breakout_4hTrend_Volume_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_Reversal_1dTrend_Volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,33 +26,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (EMA50) and Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # Calculate EMA(50) on 4h close
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Get 1d data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Calculate EMA(50) on 1d close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla levels from 4h OHLC
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    pivot = (high_4h + low_4h + close_4h) / 3.0
-    range_4h = high_4h - low_4h
-    r3 = pivot + (range_4h * 1.1 / 4)
-    s3 = pivot - (range_4h * 1.1 / 4)
-    r4 = pivot + (range_4h * 1.1 / 2)
-    s4 = pivot - (range_4h * 1.1 / 2)
+    # Calculate Williams %R(14) on 6h data
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r[highest_high == lowest_low] = -50.0
     
-    # Align Camarilla levels to 1h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
-    pivot_aligned = align_htf_to_ltf(prices, df_4h, pivot)
-    
-    # Volume filter: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
     vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma20 * 1.8)
+    volume_spike = volume > (vol_ma20 * 1.5)
     
     # ATR(14) for stoploss
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
@@ -67,42 +58,41 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pivot_aligned[i]) or \
-           np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma20[i]) or \
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ma20[i]) or \
            np.isnan(atr14[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R3 with 4h bullish trend and volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema50_4h_aligned[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # LONG: Williams %R crosses above -80 from below with 1d bullish trend and volume spike
+            if williams_r[i] > -80 and williams_r[i-1] <= -80 and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
-            # SHORT: Price breaks below Camarilla S3 with 4h bearish trend and volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema50_4h_aligned[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # SHORT: Williams %R crosses below -20 from above with 1d bearish trend and volume spike
+            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reverts to Camarilla pivot point OR ATR stoploss hit
-            if close[i] < pivot_aligned[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
+            # EXIT LONG: Williams %R crosses above -20 (overbought) OR ATR stoploss hit
+            if williams_r[i] > -20 or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 entry_price[i] = entry_price[i-1]  # carry forward entry price
         elif position == -1:
-            # EXIT SHORT: Price reverts to Camarilla pivot point OR ATR stoploss hit
-            if close[i] > pivot_aligned[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
+            # EXIT SHORT: Williams %R crosses below -80 (oversold) OR ATR stoploss hit
+            if williams_r[i] < -80 or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 entry_price[i] = entry_price[i-1]  # carry forward entry price
     
     return signals
