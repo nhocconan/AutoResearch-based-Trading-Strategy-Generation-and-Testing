@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R4 and close > 1d EMA50 with volume > 1.5x 20-bar average.
-# Short when price breaks below Camarilla S4 and close < 1d EMA50 with volume > 1.5x 20-bar average.
-# Uses discrete sizing 0.25 to target 50-100 total trades over 4 years on 4h timeframe.
-# Camarilla R4/S4 are stronger intraday levels than R1/S1/R3/S3, reducing false breakouts and overtrading.
-# 1d EMA50 ensures higher timeframe trend alignment; volume confirmation filters weak momentum.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w HMA50 trend filter and volume spike confirmation.
+# Long when price breaks above Camarilla R3 and close > 1w HMA50 with volume > 2.0x 20-bar average.
+# Short when price breaks below Camarilla S3 and close < 1w HMA50 with volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to target 30-100 total trades over 4 years on 1d timeframe.
+# Camarilla R3/S3 are stronger intraday levels than R1/S1, reducing false breakouts and overtrading.
+# 1w HMA50 ensures higher timeframe trend alignment; volume spike confirms momentum.
 # This variant targets fewer, higher-quality trades to avoid fee drag while maintaining edge in both bull and bear markets.
 
-name = "4h_Camarilla_R4_S4_Breakout_1dEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_1wHMA50_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,23 +25,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 1w HMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    hma_50_1w = calculate_hma(df_1w['close'].values, 50)
+    hma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_50_1w)
     
     # Calculate Camarilla levels from previous day
-    # Camarilla R4 = close_prev + (high_prev - low_prev) * 1.1/2
-    # Camarilla S4 = close_prev - (high_prev - low_prev) * 1.1/2
-    close_prev = df_1d['close'].shift(1).values
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    camarilla_r4 = close_prev + (high_prev - low_prev) * 1.1 / 2
-    camarilla_s4 = close_prev - (high_prev - low_prev) * 1.1 / 2
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Camarilla R3 = close_prev + (high_prev - low_prev) * 1.1/4
+    # Camarilla S3 = close_prev - (high_prev - low_prev) * 1.1/4
+    close_prev = df_1w['close'].shift(1).values  # Using 1w data for previous week's close
+    high_prev = df_1w['high'].shift(1).values
+    low_prev = df_1w['low'].shift(1).values
+    camarilla_r3 = close_prev + (high_prev - low_prev) * 1.1 / 4
+    camarilla_s3 = close_prev - (high_prev - low_prev) * 1.1 / 4
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     
     # Calculate average volume for confirmation (20-period)
     lookback = 20
@@ -52,37 +52,37 @@ def generate_signals(prices):
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(hma_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R4, close > 1d EMA50, volume confirmation
-            if (high[i] > camarilla_r4_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Price breaks above Camarilla R3, close > 1w HMA50, volume spike
+            if (high[i] > camarilla_r3_aligned[i] and 
+                close[i] > hma_50_1w_aligned[i] and 
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S4, close < 1d EMA50, volume confirmation
-            elif (low[i] < camarilla_s4_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Price breaks below Camarilla S3, close < 1w HMA50, volume spike
+            elif (low[i] < camarilla_s3_aligned[i] and 
+                  close[i] < hma_50_1w_aligned[i] and 
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S4 OR volume drops below average
-            if (low[i] < camarilla_s4_aligned[i] or 
+            # EXIT LONG: Price breaks below Camarilla S3 OR volume drops below average
+            if (low[i] < camarilla_s3_aligned[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R4 OR volume drops below average
-            if (high[i] > camarilla_r4_aligned[i] or 
+            # EXIT SHORT: Price breaks above Camarilla R3 OR volume drops below average
+            if (high[i] > camarilla_r3_aligned[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
@@ -90,3 +90,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
+
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
+    if len(close) < period:
+        return np.full_like(close, np.nan)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    wma_half = pd.Series(close).ewm(span=half_period, adjust=False).mean()
+    wma_full = pd.Series(close).ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma_half - wma_full
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
+    return hma.values
