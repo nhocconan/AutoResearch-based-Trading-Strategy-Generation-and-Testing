@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_Zone_Reversal_with_12hTrend_and_Volume
-Hypothesis: Price reversals at 12-hour pivot zones (S1/R1, S2/R2) with 12h trend filter and volume confirmation.
-In ranging markets, price tends to revert from S1/R1; in trending markets, breaks of S2/R2 with 12h trend continuation.
-Works in both bull and bear via trend filter and pivot structure.
-Target: 15-30 trades/year per symbol.
+12h_Donchian_Breakout_Trend_Volume
+Hypothesis: Donchian channel (20) breakouts with 1d trend (EMA50) and volume confirmation work in both bull and bear markets.
+Breakout above upper channel with uptrend and volume spike = long.
+Breakdown below lower channel with downtrend and volume spike = short.
+Exit on opposite channel touch or trend reversal. Uses 1w trend filter for higher timeframe bias.
+Target: 12-37 trades/year per symbol.
 """
 
-name = "6h_Pivot_Zone_Reversal_with_12hTrend_and_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,94 +26,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h pivot points (classic)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Donchian Channel: 20-period high/low
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 12h trend: EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_12h = close > ema_50
+    downtrend_12h = close < ema_50
+    
+    # 1d trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Calculate pivot points from previous 12h bar
-    prev_high = df_12h['high'].shift(1).values
-    prev_low = df_12h['low'].shift(1).values
-    prev_close = df_12h['close'].shift(1).values
+    # 1w trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1w = df_1w['close'].values > ema_50_1w
+    downtrend_1w = df_1w['close'].values < ema_50_1w
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
-    # Avoid look-ahead: use only prior bar data
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
-    
-    # Align to 6h timeframe (wait for 12h bar close)
-    pivot_12h = align_htf_to_ltf(prices, df_12h, pivot)
-    r1_12h = align_htf_to_ltf(prices, df_12h, r1)
-    s1_12h = align_htf_to_ltf(prices, df_12h, s1)
-    r2_12h = align_htf_to_ltf(prices, df_12h, r2)
-    s2_12h = align_htf_to_ltf(prices, df_12h, s2)
-    
-    # 12h trend filter: EMA50 on 12h close
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = df_12h['close'].values > ema_50_12h
-    downtrend_12h = df_12h['close'].values < ema_50_12h
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
-    
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.5 * vol_ma
+    volume_conf = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Get values
-        px = close[i]
-        vol_ok = volume_conf[i]
-        uptrend = uptrend_12h_aligned[i]
-        downtrend = downtrend_12h_aligned[i]
+        upper_ch = highest_20[i]
+        lower_ch = lowest_20[i]
+        uptrend = uptrend_12h[i]
+        downtrend = downtrend_12h[i]
+        uptrend_htf_1d = uptrend_1d_aligned[i]
+        downtrend_htf_1d = downtrend_1d_aligned[i]
+        uptrend_htf_1w = uptrend_1w_aligned[i]
+        downtrend_htf_1w = downtrend_1w_aligned[i]
+        vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG setup: bounce from S1 with volume OR break above S2 with uptrend
-            long_setup = False
-            # Reversal from S1 (range-bound behavior)
-            if px > s1_12h[i] and px < s1_12h[i] + (r1_12h[i] - s1_12h[i]) * 0.1:  # near S1
-                if px > close[i-1] and vol_ok:  # bullish candle with volume
-                    long_setup = True
-            # Breakout above S2 with trend (trending behavior)
-            elif px > s2_12h[i] and uptrend and vol_ok:
-                long_setup = True
-            
-            # SHORT setup: rejection at R1 OR breakdown below R2 with downtrend
-            short_setup = False
-            # Rejection at R1 (range-bound behavior)
-            if px < r1_12h[i] and px > r1_12h[i] - (r1_12h[i] - s1_12h[i]) * 0.1:  # near R1
-                if px < close[i-1] and vol_ok:  # bearish candle with volume
-                    short_setup = True
-            # Breakdown below R2 with trend (trending behavior)
-            elif px < r2_12h[i] and downtrend and vol_ok:
-                short_setup = True
-            
-            if long_setup:
+            # LONG: break above upper channel, 12h uptrend, 1d/1w uptrend filter, volume confirmation
+            if close[i] > upper_ch and uptrend and uptrend_htf_1d and uptrend_htf_1w and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            elif short_setup:
+            # SHORT: break below lower channel, 12h downtrend, 1d/1w downtrend filter, volume confirmation
+            elif close[i] < lower_ch and downtrend and downtrend_htf_1d and downtrend_htf_1w and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
-                
         elif position == 1:
-            # EXIT LONG: rejection at R1 or stop below S1
-            if px < r1_12h[i] or px < s1_12h[i]:
+            # EXIT LONG: touch lower channel or 12h trend turns down
+            if close[i] < lower_ch or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-                
         elif position == -1:
-            # EXIT SHORT: bounce at S1 or stop above R1
-            if px > s1_12h[i] or px > r1_12h[i]:
+            # EXIT SHORT: touch upper channel or 12h trend turns up
+            if close[i] > upper_ch or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
