@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Chaikin_Oscillator_Breakout_1dTrend_Volume
-# Hypothesis: Chaikin Oscillator (MACD of ADL) identifies institutional accumulation/distribution.
-# Enter long when Chaikin Oscillator crosses above zero with volume spike and 1d EMA50 uptrend.
-# Enter short when Chaikin Oscillator crosses below zero with volume spike and 1d EMA50 downtrend.
-# Exit when Chaikin Oscillator crosses back across zero (mean reversion).
-# Uses 4h timeframe with 1d trend filter to balance trade frequency and win rate.
-# Designed to work in both bull (accumulation) and bear (distribution) regimes.
+# 4h_ADX_Trend_With_Volume_Spike
+# Hypothesis: ADX > 25 identifies strong trends, and volume spikes confirm institutional participation.
+# Enter long when ADX > 25, +DI crosses above -DI, and volume > 1.5x 20-period average.
+# Enter short when ADX > 25, -DI crosses above +DI, and volume > 1.5x 20-period average.
+# Exit when ADX < 20 (trend weakens) or opposite DI crossover occurs.
+# Uses 4h timeframe with volume confirmation to filter false breakouts.
+# Designed to work in both bull (trend following long) and bear (trend following short).
 # Target: 20-40 trades/year per symbol.
 
-name = "4h_Chaikin_Oscillator_Breakout_1dTrend_Volume"
+name = "4h_ADX_Trend_With_Volume_Spike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -26,37 +26,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate ADX and DI components
+    # True Range
+    tr0 = np.abs(high - low)
+    tr1 = np.abs(high - np.roll(close, 1))
+    tr2 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr0, np.maximum(tr1, tr2))
+    tr[0] = tr0[0]
 
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
 
-    # Calculate Chaikin Oscillator (3,10) on 4h data
-    # Money Flow Multiplier
-    mfm = np.where((high - low) != 0, ((close - low) - (high - close)) / (high - low), 0)
-    # Money Flow Volume
-    mfv = mfm * volume
+    # Smooth TR, +DM, -DM over 14 periods (Wilder's smoothing)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.mean(data[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
 
-    # Accumulation Distribution Line
-    adl = np.cumsum(mfv)
+    atr = wilders_smooth(tr, 14)
+    plus_dm_smooth = wilders_smooth(plus_dm, 14)
+    minus_dm_smooth = wilders_smooth(minus_dm, 14)
 
-    # Chaikin Oscillator = EMA(3, ADL) - EMA(10, ADL)
-    adl_series = pd.Series(adl)
-    ema3 = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10 = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin = ema3 - ema10
+    # Calculate +DI and -DI
+    plus_di = np.full(n, np.nan)
+    minus_di = np.full(n, np.nan)
+    for i in range(14, n):
+        if atr[i] != 0:
+            plus_di[i] = (plus_dm_smooth[i] / atr[i]) * 100
+            minus_di[i] = (minus_dm_smooth[i] / atr[i]) * 100
 
-    # Zero crossover signals
-    chaikin_cross_above = np.zeros(n, dtype=bool)
-    chaikin_cross_below = np.zeros(n, dtype=bool)
-    for i in range(1, n):
-        if not np.isnan(chaikin[i]) and not np.isnan(chaikin[i-1]):
-            chaikin_cross_above[i] = (chaikin[i-1] <= 0) and (chaikin[i] > 0)
-            chaikin_cross_below[i] = (chaikin[i-1] >= 0) and (chaikin[i] < 0)
+    # Calculate DX and ADX
+    dx = np.full(n, np.nan)
+    for i in range(14, n):
+        if (plus_di[i] + minus_di[i]) != 0:
+            dx[i] = (np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
+
+    adx = wilders_smooth(dx, 14)
 
     # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -64,17 +78,13 @@ def generate_signals(prices):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (1.5 * vol_ma)
 
-    # Get 1d EMA50 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(28, n):  # Start after ADX is ready
         # Skip if data is not ready
-        if (np.isnan(chaikin[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,26 +93,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Chaikin crosses above zero with volume spike and 1d EMA uptrend
-            if chaikin_cross_above[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+            # LONG: ADX > 25, +DI crosses above -DI, volume spike
+            if (adx[i] > 25 and 
+                plus_di[i] > minus_di[i] and 
+                plus_di[i-1] <= minus_di[i-1] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Chaikin crosses below zero with volume spike and 1d EMA downtrend
-            elif chaikin_cross_below[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+            # SHORT: ADX > 25, -DI crosses above +DI, volume spike
+            elif (adx[i] > 25 and 
+                  minus_di[i] > plus_di[i] and 
+                  minus_di[i-1] <= plus_di[i-1] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Chaikin crosses below zero (distribution)
-            if chaikin_cross_below[i]:
+            # EXIT LONG: ADX < 20 (trend weak) OR -DI crosses above +DI
+            if (adx[i] < 20) or (minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Chaikin crosses above zero (accumulation)
-            if chaikin_cross_above[i]:
+            # EXIT SHORT: ADX < 20 (trend weak) OR +DI crosses above -DI
+            if (adx[i] < 20) or (plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
