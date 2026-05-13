@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Squeeze
-# Hypothesis: Use Camarilla pivot points from daily data for breakout entries, filtered by daily trend and volume squeeze conditions.
-# Long when price breaks above R1 during daily uptrend with volume squeeze release.
-# Short when price breaks below S1 during daily downtrend with volume squeeze release.
-# Exit on opposite Camarilla level touch or trend reversal.
-# Designed for low trade frequency (<40 total/year) to minimize fee drag and work in both bull and bear markets.
+# 6h_Keltner_Breakout_1dTrend_Volume
+# Hypothesis: Trade Keltner channel breakouts on 6h timeframe filtered by 1d EMA trend and volume spike.
+# Long when price breaks above upper Keltner band (EMA + 2*ATR) during 1d uptrend with volume > 2x average.
+# Short when price breaks below lower Keltner band (EMA - 2*ATR) during 1d downtrend with volume > 2x average.
+# Exit when price crosses back through the EMA (middle band) or trend reverses.
+# Designed to capture strong trending moves with volatility expansion, avoiding choppy markets.
+# Works in bull markets (trend continuation) and bear markets (trend continuation shorts).
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Squeeze"
-timeframe = "4h"
+name = "6h_Keltner_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,48 +25,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivots and trend filter
+    # Get 1d data for trend filter and Keltner calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels from daily OHLC
-    # R4 = C + ((H-L) * 1.5000), R3 = C + ((H-L) * 1.2500)
-    # R2 = C + ((H-L) * 1.1666), R1 = C + ((H-L) * 1.0833)
-    # PP = (H+L+C)/3, S1 = C - ((H-L) * 1.0833)
-    # S2 = C - ((H-L) * 1.1666), S3 = C - ((H-L) * 1.2500)
-    # S4 = C - ((H-L) * 1.5000)
-    H = df_1d['high'].values
-    L = df_1d['low'].values
-    C = df_1d['close'].values
+    # 1d EMA20 for middle band and trend
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 1d ATR(10) for band width
+    tr_1d = np.maximum(np.maximum(
+        df_1d['high'] - df_1d['low'],
+        np.abs(df_1d['high'] - df_1d['close'].shift(1)),
+        np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    )).values
+    atr_10_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    R1 = C + (H - L) * 1.0833
-    S1 = C - (H - L) * 1.0833
+    # Calculate Keltner bands
+    upper_1d = ema_20_1d + 2 * atr_10_1d
+    lower_1d = ema_20_1d - 2 * atr_10_1d
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(C).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Volume squeeze: Bollinger Bands width < 20th percentile indicates low volatility
-    vol_series = pd.Series(volume)
-    vol_ma_20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_std_20 = vol_series.rolling(window=20, min_periods=20).std().values
-    vol_upper = vol_ma_20 + 2 * vol_std_20
-    vol_lower = vol_ma_20 - 2 * vol_std_20
-    bb_width = (vol_upper - vol_lower) / vol_ma_20
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=10).rank(pct=True).values
-    volatility_squeeze = bb_width_percentile < 0.2  # Bottom 20% = squeeze
-    
-    # Align all daily data to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    volatility_squeeze_aligned = align_htf_to_ltf(prices, df_1d, volatility_squeeze.astype(float))
+    # Align to 6h timeframe
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+
+    # Volume filter: >2x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volatility_squeeze_aligned[i])):
+        if (np.isnan(ema_20_1d_aligned[i]) or np.isnan(upper_1d_aligned[i]) or 
+            np.isnan(lower_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,34 +65,28 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above R1 during daily uptrend with volatility squeeze release
-            if close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]:
-                if close[i] > ema_34_1d_aligned[i] and volatility_squeeze_aligned[i] > 0.3:  # Squeeze releasing
+            # LONG: Price breaks above upper Keltner band in 1d uptrend with volume spike
+            if close[i] > upper_1d_aligned[i] and close[i] > ema_20_1d_aligned[i]:
+                if volume[i] > vol_avg_20[i] * 2.0:
                     signals[i] = 0.25
                     position = 1
-            # SHORT: Break below S1 during daily downtrend with volatility squeeze release
-            elif close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]:
-                if close[i] < ema_34_1d_aligned[i] and volatility_squeeze_aligned[i] > 0.3:  # Squeeze releasing
+            # SHORT: Price breaks below lower Keltner band in 1d downtrend with volume spike
+            elif close[i] < lower_1d_aligned[i] and close[i] < ema_20_1d_aligned[i]:
+                if volume[i] > vol_avg_20[i] * 2.0:
                     signals[i] = -0.25
                     position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Touch S1 or trend turns down
-            if close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i-1]:
-                signals[i] = 0.0
-                position = 0
-            elif close[i] < ema_34_1d_aligned[i]:  # Trend turned down
+            # EXIT LONG: Price crosses below EMA (middle band) or trend turns down
+            if close[i] < ema_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Touch R1 or trend turns up
-            if close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i-1]:
-                signals[i] = 0.0
-                position = 0
-            elif close[i] > ema_34_1d_aligned[i]:  # Trend turned up
+            # EXIT SHORT: Price crosses above EMA (middle band) or trend turns up
+            if close[i] > ema_20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
