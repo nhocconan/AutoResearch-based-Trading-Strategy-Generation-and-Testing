@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_RSI_Chop_Reversal_v2"
-timeframe = "1d"
+name = "6h_WeeklyPivot_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,110 +9,123 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - trend direction
-    def kama(price, period=10, fast=2, slow=30):
-        change = np.abs(np.diff(price, n=period))
-        volatility = np.sum(np.abs(np.diff(price)), axis=1)
-        er = np.zeros_like(price)
-        er[period:] = change[period-1:] / np.maximum(volatility[period-1:], 1e-10)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(price)
-        kama[:period] = price[:period]
-        for i in range(period, len(price)):
-            kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
-        return kama
+    # Calculate weekly pivot points from Monday's OHLC (00:00 UTC Monday)
+    weekly_pivot = np.full(n, np.nan)
+    weekly_R1 = np.full(n, np.nan)
+    weekly_S1 = np.full(n, np.nan)
+    weekly_R2 = np.full(n, np.nan)
+    weekly_S2 = np.full(n, np.nan)
     
-    # RSI
-    def rsi(price, period=14):
-        delta = np.diff(price)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(price)
-        avg_loss = np.zeros_like(price)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(price)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Get Monday 00:00 UTC timestamps for each week
+    open_time = pd.to_datetime(prices['open_time'])
+    # Find start of week (Monday 00:00 UTC)
+    week_start = open_time - pd.to_timedelta(open_time.dt.weekday, unit='D') 
+    week_start = week_start.dt.normalize()  # Set to 00:00:00
     
-    # Choppiness Index
-    def choppiness_index(high, low, close, period=14):
-        atr = np.zeros(len(close))
-        for i in range(1, len(close)):
-            atr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        sum_atr = np.zeros(len(close))
-        for i in range(period, len(close)):
-            sum_atr[i] = np.sum(atr[i-period+1:i+1])
-        max_high = np.zeros(len(close))
-        min_low = np.zeros(len(close))
-        for i in range(period-1, len(close)):
-            max_high[i] = np.max(high[i-period+1:i+1])
-            min_low[i] = np.min(low[i-period+1:i+1])
-        chop = np.zeros(len(close))
-        for i in range(period-1, len(close)):
-            if max_high[i] != min_low[i]:
-                chop[i] = 100 * np.log10(sum_atr[i] / (max_high[i] - min_low[i])) / np.log10(period)
-            else:
-                chop[i] = 50
-        return chop
+    # Group by week start to get weekly OHLC
+    weekly_data = {}
+    for i in range(n):
+        ws = week_start.iloc[i]
+        if ws not in weekly_data:
+            weekly_data[ws] = {'high': high[i], 'low': low[i], 'close': close[i], 'open': open_time[i]}
+        else:
+            weekly_data[ws]['high'] = max(weekly_data[ws]['high'], high[i])
+            weekly_data[ws]['low'] = min(weekly_data[ws]['low'], low[i])
+            weekly_data[ws]['close'] = close[i]
     
-    kama_vals = kama(close, 10, 2, 30)
-    rsi_vals = rsi(close, 14)
-    chop_vals = choppiness_index(high, low, close, 14)
+    # Calculate pivot points for each week
+    for ws, data in weekly_data.items():
+        # Use previous week's data for current week's pivot (avoid look-ahead)
+        pass  # Will handle in loop below
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Simpler approach: calculate pivot from previous week's OHLC
+    weekly_high = np.full(n, np.nan)
+    weekly_low = np.full(n, np.nan)
+    weekly_close = np.full(n, np.nan)
+    
+    for i in range(n):
+        ws = week_start.iloc[i]
+        if ws in weekly_data:
+            weekly_high[i] = weekly_data[ws]['high']
+            weekly_low[i] = weekly_data[ws]['low']
+            weekly_close[i] = weekly_data[ws]['close']
+    
+    # Shift by one week to use previous week's data
+    weekly_high = np.roll(weekly_high, 1)
+    weekly_low = np.roll(weekly_low, 1)
+    weekly_close = np.roll(weekly_close, 1)
+    # Set first week's values to NaN (no prior week)
+    weekly_high[:7*24//6] = np.nan  # Approximate first week
+    weekly_low[:7*24//6] = np.nan
+    weekly_close[:7*24//6] = np.nan
+    
+    # Calculate pivot points using previous week's OHLC
+    for i in range(n):
+        if not (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or np.isnan(weekly_close[i])):
+            pp = (weekly_high[i] + weekly_low[i] + weekly_close[i]) / 3
+            weekly_pivot[i] = pp
+            weekly_R1[i] = 2 * pp - weekly_low[i]
+            weekly_S1[i] = 2 * pp - weekly_high[i]
+            weekly_R2[i] = pp + (weekly_high[i] - weekly_low[i])
+            weekly_S2[i] = pp - (weekly_high[i] - weekly_low[i])
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # 12h EMA50 trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Volume filter: current volume > 1.8 x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
-        if (np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or 
-            np.isnan(chop_vals[i]) or np.isnan(ema20_1w_aligned[i])):
+    for i in range(20, n):
+        # Skip if any required data is NaN
+        if (np.isnan(weekly_R2[i]) or np.isnan(weekly_S2[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Chop filter: range-bound market (chop > 61.8) for mean reversion
-        chop_condition = chop_vals[i] > 61.8
+        # Volume condition
+        vol_condition = volume[i] > 1.8 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: RSI oversold + price above KAMA + choppy market
-            if rsi_vals[i] < 30 and close[i] > kama_vals[i] and chop_condition:
+            # LONG: Break above weekly R2 with 12h uptrend and volume
+            if close[i] > weekly_R2[i] and close[i] > ema50_12h_aligned[i] and vol_condition:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought + price below KAMA + choppy market
-            elif rsi_vals[i] > 70 and close[i] < kama_vals[i] and chop_condition:
+            # SHORT: Break below weekly S2 with 12h downtrend and volume
+            elif close[i] < weekly_S2[i] and close[i] < ema50_12h_aligned[i] and vol_condition:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought or price below KAMA
-            if rsi_vals[i] > 70 or close[i] < kama_vals[i]:
+            # EXIT LONG: Price re-enters weekly pivot range (below R2) or trend reversal
+            if close[i] < weekly_R2[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold or price above KAMA
-            if rsi_vals[i] < 30 or close[i] > kama_vals[i]:
+            # EXIT SHORT: Price re-enters weekly pivot range (above S2) or trend reversal
+            if close[i] > weekly_S2[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
