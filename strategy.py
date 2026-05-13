@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Donchian_Breakout_Volume_Trend
-# Hypothesis: Breakout of 20-period Donchian channel with volume confirmation and 1d trend filter.
-# Works in bull markets by capturing breakouts, in bear markets by avoiding false breakouts via trend filter.
-# Volume confirmation reduces false signals. Trend filter ensures alignment with higher timeframe momentum.
-# Designed for low trade frequency (<30/year) to minimize fee drag on 12h timeframe.
+# 1d_1w_RSI_Pullback_Trend_Follower
+# Hypothesis: Capture multi-week trends in BTC/ETH by buying pullbacks to weekly VWAP during strong weekly uptrends (and vice versa for shorts), using daily RSI for entry timing and volume confirmation to avoid false signals. Weekly trend filter prevents counter-trend trades. Designed to work in both bull and bear markets by following the dominant weekly trend.
 
-name = "12h_Donchian_Breakout_Volume_Trend"
-timeframe = "12h"
+name = "1d_1w_RSI_Pullback_Trend_Follower"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,39 +20,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    
-    # Donchian channels (20-period) on 12h high/low
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Upper band: 20-period rolling max of high
-    upperband = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    # Lower band: 20-period rolling min of low
-    lowerband = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    
-    # Get 1d data for trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume average (20-period) for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get weekly data for trend filter and VWAP
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
 
-    # Align indicators to 12h timeframe
-    upperband_aligned = align_htf_to_ltf(prices, df_12h, upperband)
-    lowerband_aligned = align_htf_to_ltf(prices, df_12h, lowerband)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma)
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly VWAP (volume-weighted average price)
+    vwap_1w = (np.cumsum(volume_1w * (high_1w + low_1w + close_1w) / 3) / np.cumsum(volume_1w))
+    vwap_1w = np.where(np.cumsum(volume_1w) == 0, np.nan, vwap_1w)
+
+    # Align weekly indicators to daily timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+
+    # Daily RSI(14) for entry timing
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+
+    # Daily volume confirmation: volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_surge = volume > 1.5 * vol_ma  # 50% above average
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(20, n):  # Start after warmup
         # Skip if any required value is NaN
-        if (np.isnan(upperband_aligned[i]) or np.isnan(lowerband_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(vwap_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_surge[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,38 +65,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Breakout conditions
-        bullish_breakout = high[i] > upperband_aligned[i]
-        bearish_breakout = low[i] < lowerband_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
-        
-        # Trend filter: price above/below 1d EMA50
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
+        # Determine weekly trend
+        weekly_uptrend = close[i] > ema50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+
+        # Price relative to weekly VWAP
+        price_near_vwap = abs(close[i] - vwap_1w_aligned[i]) / vwap_1w_aligned[i] < 0.02  # Within 2% of VWAP
 
         if position == 0:
-            # LONG: Bullish breakout + volume confirmation + uptrend
-            if bullish_breakout and volume_confirm and uptrend:
+            # LONG: Weekly uptrend + price near weekly VWAP (pullback) + RSI < 40 (not overbought) + volume surge
+            if weekly_uptrend and price_near_vwap and rsi[i] < 40 and vol_surge[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish breakout + volume confirmation + downtrend
-            elif bearish_breakout and volume_confirm and downtrend:
+            # SHORT: Weekly downtrend + price near weekly VWAP (pullback) + RSI > 60 (not oversold) + volume surge
+            elif weekly_downtrend and price_near_vwap and rsi[i] > 60 and vol_surge[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters Donchian channel (below upper band) OR trend reversal
-            if close[i] < upperband_aligned[i] or not uptrend:
+            # EXIT LONG: Weekly trend turns down OR price moves 2% above VWAP (take profit) OR RSI > 70 (overbought)
+            if not weekly_uptrend or close[i] > vwap_1w_aligned[i] * 1.02 or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters Donchian channel (above lower band) OR trend reversal
-            if close[i] > lowerband_aligned[i] or not downtrend:
+            # EXIT SHORT: Weekly trend turns up OR price moves 2% below VWAP (take profit) OR RSI < 30 (oversold)
+            if not weekly_downtrend or close[i] < vwap_1w_aligned[i] * 0.98 or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
