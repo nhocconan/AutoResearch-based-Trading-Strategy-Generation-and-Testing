@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 6h_Donchian20_WeeklyPivotDirection_VolumeConfirmation
-# Hypothesis: Donchian channel (20) breakouts on 6h timeframe, filtered by weekly pivot direction (from weekly close),
-# and confirmed by volume spikes, provide high-probability entries in both bull and bear markets.
-# Weekly pivot direction acts as a regime filter: bullish when weekly close > weekly pivot, bearish when below.
-# This avoids counter-trend trades and reduces whipsaw. Volume spike ensures institutional participation.
-# Targets 15-35 trades per year per symbol to minimize fee drag.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily pivots act as strong support/resistance.
+# Breakout above R1 with uptrend (price > EMA50) and volume spike triggers long.
+# Breakdown below S1 with downtrend (price < EMA50) and volume spike triggers short.
+# Uses EMA50 for trend filter and volume spike for institutional confirmation.
+# Designed to work in both bull and bear markets by following daily trend direction.
+# Targets low-frequency, high-quality setups to minimize fee drag.
 
-name = "6h_Donchian20_WeeklyPivotDirection_VolumeConfirmation"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,40 +25,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot direction (weekly close vs weekly pivot)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
 
-    # Weekly pivot = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Weekly bullish if close > pivot, bearish if close < pivot
-    weekly_bullish = close_1w > pivot_1w
-    weekly_bearish = close_1w < pivot_1w
+    # Calculate Camarilla pivot levels for each day
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
 
-    # Align weekly bias to 6h timeframe
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # Align to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
 
-    # Donchian channel (20) on 6h
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume spike: volume > 2.0 * 20-period average (~6.6 days at 6h)
+    # Volume spike: volume > 2.0 * 20-period average (~10 days at 12h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * vol_ma_20
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or
-            np.isnan(weekly_bearish_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,26 +67,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Weekly bullish + breakout above Donchian high + volume spike
-            if weekly_bullish_aligned[i] > 0.5 and close[i] > highest_high[i] and volume_spike[i]:
+            # LONG: Uptrend + breakout above R1 + volume spike
+            if close[i] > ema50_aligned[i] and close[i] > r1_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Weekly bearish + breakdown below Donchian low + volume spike
-            elif weekly_bearish_aligned[i] > 0.5 and close[i] < lowest_low[i] and volume_spike[i]:
+            # SHORT: Downtrend + breakdown below S1 + volume spike
+            elif close[i] < ema50_aligned[i] and close[i] < s1_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low or weekly bias turns bearish
-            if close[i] < lowest_low[i] or weekly_bearish_aligned[i] > 0.5:
+            # EXIT LONG: Price breaks below S1 or trend turns bearish
+            if close[i] < s1_aligned[i] or close[i] < ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high or weekly bias turns bullish
-            if close[i] > highest_high[i] or weekly_bullish_aligned[i] > 0.5:
+            # EXIT SHORT: Price breaks above R1 or trend turns bullish
+            if close[i] > r1_aligned[i] or close[i] > ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
