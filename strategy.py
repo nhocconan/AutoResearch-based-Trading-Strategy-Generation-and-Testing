@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter, volume confirmation (1.5x MA20), and ATR(14) volatility filter.
-# Enters long when price breaks above Donchian upper channel with 12h bullish trend (close > EMA50), volume > 1.5x MA20, and ATR(14) > 0.3 * ATR(50).
-# Enters short when price breaks below Donchian lower channel with 12h bearish trend (close < EMA50), volume > 1.5x MA20, and ATR(14) > 0.3 * ATR(50).
-# Exits when price crosses the Donchian midline (average of upper/lower) or ATR-based stoploss (2 * ATR(14) from entry).
-# Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
-# Designed for low trade frequency (~19-50/year) by requiring strict confluence: price breakout + HTF trend + volume spike + volatility filter.
-# Donchian channels provide clear trend-following structure with defined support/resistance levels.
-# The 12h trend filter ensures alignment with higher timeframe direction, while volatility filter avoids low volatility false breakouts.
+# Hypothesis: 1h Donchian(20) breakout with 4h EMA50 trend filter, volume confirmation (1.5x MA20), and ATR(14) > 0.3*ATR(50) volatility filter.
+# Enters long when price breaks above Donchian upper channel with 4h bullish trend (close > EMA50), volume > 1.5x MA20, and ATR(14) > 0.3 * ATR(50).
+# Enters short when price breaks below Donchian lower channel with 4h bearish trend (close < EMA50), volume > 1.5x MA20, and ATR(14) > 0.3 * ATR(50).
+# Exits when price crosses the Donchian midpoint or ATR-based stoploss (2 * ATR(14) from entry).
+# Uses discrete position sizing (0.20) to limit fee churn and manage drawdown.
+# Designed for low trade frequency (~15-37/year) by requiring strict confluence: price breakout + HTF trend + volume spike + volatility filter.
+# Uses 4h for signal direction and 1h only for entry timing to avoid overtrading.
+# Session filter (08-20 UTC) to reduce noise trades.
 
-name = "4h_Donchian_Breakout_12hTrend_Volume_Volatility_v1"
-timeframe = "4h"
+name = "1h_Donchian_Breakout_4hTrend_Volume_Volatility_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -25,20 +25,23 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    # Calculate EMA(50) on 12h close
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Donchian Channel on 4h: upper(20), lower(20), midline
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donch_lower = low_series.rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_upper + donch_lower) / 2
+    # Get 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    # Calculate EMA(50) on 4h close
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # Donchian Channel (20) on 1h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0
     
     # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
@@ -60,42 +63,54 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(donch_mid[i]) or \
-           np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i]) or \
-           np.isnan(atr14[i]) or np.isnan(atr50[i]):
+        # Skip if any required data is NaN
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
+           np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma20[i]) or \
+           np.isnan(atr14[i]) or np.isnan(atr50[i]) or \
+           np.isnan(in_session[i]):
             signals[i] = 0.0
             continue
         
+        # Only trade during session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+                entry_price[i] = np.nan
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # LONG: Price breaks above Donchian upper with 12h bullish trend, volume spike, and sufficient volatility
-            if close[i] > donch_upper[i] and close[i] > ema50_12h_aligned[i] and volume_spike[i] and volatility_filter[i]:
-                signals[i] = 0.25
+            # LONG: Price breaks above Donchian upper with 4h bullish trend, volume spike, and sufficient volatility
+            if close[i] > highest_high[i] and close[i] > ema50_4h_aligned[i] and volume_spike[i] and volatility_filter[i]:
+                signals[i] = 0.20
                 position = 1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
-            # SHORT: Price breaks below Donchian lower with 12h bearish trend, volume spike, and sufficient volatility
-            elif close[i] < donch_lower[i] and close[i] < ema50_12h_aligned[i] and volume_spike[i] and volatility_filter[i]:
-                signals[i] = -0.25
+            # SHORT: Price breaks below Donchian lower with 4h bearish trend, volume spike, and sufficient volatility
+            elif close[i] < lowest_low[i] and close[i] < ema50_4h_aligned[i] and volume_spike[i] and volatility_filter[i]:
+                signals[i] = -0.20
                 position = -1
                 entry_price[i] = close[i]  # record entry price at close of signal bar
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below Donchian midline (mean reversion) OR ATR stoploss hit
-            if close[i] < donch_mid[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
+            # EXIT LONG: Price crosses below Donchian midpoint OR ATR stoploss hit
+            if close[i] < donchian_mid[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 entry_price[i] = entry_price[i-1]  # carry forward entry price
         elif position == -1:
-            # EXIT SHORT: Price crosses above Donchian midline (mean reversion) OR ATR stoploss hit
-            if close[i] > donch_mid[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
+            # EXIT SHORT: Price crosses above Donchian midpoint OR ATR stoploss hit
+            if close[i] > donchian_mid[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price[i] = np.nan
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 entry_price[i] = entry_price[i-1]  # carry forward entry price
     
     return signals
