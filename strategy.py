@@ -35,25 +35,15 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 4h data for Camarilla pivot calculation (using daily data for pivot points)
+    # Get 1d data for Camarilla pivot calculation and EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla pivot levels from previous day
-    # Camarilla equations:
-    # R4 = close + ((high - low) * 1.1 / 2)
     # R3 = close + ((high - low) * 1.1 / 4)
-    # R2 = close + ((high - low) * 1.1 / 6)
-    # R1 = close + ((high - low) * 1.1 / 12)
-    # PP = (high + low + close) / 3
-    # S1 = close - ((high - low) * 1.1 / 12)
-    # S2 = close - ((high - low) * 1.1 / 6)
     # S3 = close - ((high - low) * 1.1 / 4)
-    # S4 = close - ((high - low) * 1.1 / 2)
-    
-    # Calculate for each day using previous day's OHLC
     camarilla_r3 = np.full(len(close_1d), np.nan)
     camarilla_s3 = np.full(len(close_1d), np.nan)
     
