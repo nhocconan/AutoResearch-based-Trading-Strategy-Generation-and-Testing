@@ -1,10 +1,9 @@
-#2025-06-14T18:00:00
-# 12h_KAMA_Direction_1dTrend_Volume
-# Hypothesis: KAMA on 12h indicates price direction; confirm with daily EMA trend and volume spike. KAMA adapts to market noise, reducing whipsaws in sideways markets while capturing trends. Volume spike confirms institutional participation. Works in bull (KAMA up + uptrend) and bear (KAMA down + downtrend).
-# Low frequency due to KAMA smoothing and strict volume confirmation.
+#!/usr/bin/env python3
+# 4h_Donchian_Breakout_12hTrend_Volume
+# Hypothesis: Breakout above/below 4h Donchian channel (20) in the direction of 12h trend (EMA50), confirmed by volume spike (volume > 2.0 * 24-period average). Works in bull (breakouts above upper band in uptrend) and bear (breakdowns below lower band in downtrend). Low frequency due to strict entry conditions and volume confirmation.
 
-name = "12h_KAMA_Direction_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,38 +20,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Daily trend: EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 12h trend: EMA50
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # KAMA on 12h
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close - close_10|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of absolute changes over 10 periods
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Volume spike: volume > 2.0 * 24-period average (2 days worth at 12h)
+    # Volume spike: volume > 2.0 * 24-period average (2 days worth at 4h)
     vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > 2.0 * vol_ma_24
+    
+    # 4h Donchian channel (20)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after KAMA warmup
+    for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(kama[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(high_20[i]) or 
+            np.isnan(low_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,26 +51,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: KAMA up (close > KAMA) + daily uptrend + volume spike
-            if close[i] > kama[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > 4h Donchian upper + 12h uptrend + volume spike
+            if close[i] > high_20[i] and close[i] > ema50_12h_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA down (close < KAMA) + daily downtrend + volume spike
-            elif close[i] < kama[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < 4h Donchian lower + 12h downtrend + volume spike
+            elif close[i] < low_20[i] and close[i] < ema50_12h_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA down OR trend reversal
-            if close[i] < kama[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Close below 4h Donchian lower OR trend reversal
+            if close[i] < low_20[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA up OR trend reversal
-            if close[i] > kama[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Close above 4h Donchian upper OR trend reversal
+            if close[i] > high_20[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
