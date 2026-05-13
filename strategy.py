@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla pivot levels (R1/S1) on 1d act as strong support/resistance. A breakout above R1 or below S1 with volume confirmation and aligned 1d trend (close > EMA34) signals continuation. Uses 25% position size to balance risk/return. Designed for low trade frequency (~15-35/year) to minimize fee drag in 12-hour bars.
+4h_Keltner_Breakout_T2_WMA200_Trend_Volume
+Hypothesis: Keltner Channel upper/lower bands (ATR-based) act as dynamic support/resistance. Breakouts above upper band or below lower band with volume confirmation and aligned 1d WMA200 trend signal continuation. Designed for 4h timeframe with low trade frequency (~20-40/year) to minimize fee drag. Works in both bull and bear markets by using trend-aligned breakouts and volatility-based channels that adapt to market conditions.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Keltner_Breakout_T2_WMA200_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,63 +22,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter (once before loop)
+    # Get 1d data for WMA200 trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # Typical Price = (H + L + C) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Range = H - L
-    range_ = df_1d['high'] - df_1d['low']
+    # Keltner Channel: ATR(10) * 2
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    keltner_upper = close + (2 * atr)
+    keltner_lower = close - (2 * atr)
     
-    # Camarilla levels
-    # R1 = Close + (Range * 1.1/12)
-    # S1 = Close - (Range * 1.1/12)
-    camarilla_r1 = df_1d['close'] + (range_ * 1.1 / 12)
-    camarilla_s1 = df_1d['close'] - (range_ * 1.1 / 12)
+    # 1d trend filter: WMA(200) on close
+    close_1d = df_1d['close'].values
+    wma200_1d = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i < 199:
+            wma200_1d[i] = np.nan
+        else:
+            weights = np.arange(1, 201)
+            wma200_1d[i] = np.dot(close_1d[i-199:i+1], weights) / weights.sum()
+    wma200_1d = np.where(np.isnan(wma200_1d), close_1d, wma200_1d)  # fill NaN with close for early periods
+    wma200_1d_aligned = align_htf_to_ltf(prices, df_1d, wma200_1d)
     
-    # Align to 12h - use previous day's levels (available at 12h open)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
-    
-    # 1d trend filter: EMA(34) on close
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: current volume > 2.0x 24-period average (4 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    # Volume confirmation: current volume > 1.5x 20-period average (5 days in 4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
+    for i in range(20, n):
         if position == 0:
-            # LONG: Price breaks above R1, volume confirmation, price above 1d EMA34 (uptrend)
-            if (close[i] > camarilla_r1_aligned[i] and 
+            # LONG: Price breaks above Keltner upper band, volume confirmation, price above 1d WMA200 (uptrend)
+            if (close[i] > keltner_upper[i] and 
                 volume_filter[i] and 
-                close[i] > ema34_1d_aligned[i]):
+                close[i] > wma200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1, volume confirmation, price below 1d EMA34 (downtrend)
-            elif (close[i] < camarilla_s1_aligned[i] and 
+            # SHORT: Price breaks below Keltner lower band, volume confirmation, price below 1d WMA200 (downtrend)
+            elif (close[i] < keltner_lower[i] and 
                   volume_filter[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+                  close[i] < wma200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below R1 (failed breakout) OR volume drops
-            if (close[i] < camarilla_r1_aligned[i] or 
+            # EXIT LONG: Price re-enters below Keltner upper band (failed breakout) OR volume drops
+            if (close[i] < keltner_upper[i] or 
                 not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above S1 (failed breakdown) OR volume drops
-            if (close[i] > camarilla_s1_aligned[i] or 
+            # EXIT SHORT: Price re-enters above Keltner lower band (failed breakdown) OR volume drops
+            if (close[i] > keltner_lower[i] or 
                 not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
