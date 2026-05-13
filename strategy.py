@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Breakout_Volume_Trend
-Hypothesis: Weekly pivot points provide strong institutional support/resistance. 
-Breakouts above R1 or below S1 with volume confirmation and aligned daily trend 
-capture major moves in both bull and bear markets. Weekly timeframe reduces noise, 
-while 6h timeframe captures timely entries with lower trade frequency.
+4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS
+Hypothesis: Camarilla R1/S1 breakout with 1-day EMA trend filter and volume confirmation.
+Camarilla levels provide institutional support/resistance; EMA50 filters trend direction.
+Volume breakout confirms institutional participation. Designed for 20-40 trades/year
+to work in both bull and bear markets by following established trends with institutional validation.
 """
 
-name = "6h_Weekly_Pivot_Breakout_Volume_Trend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,29 +25,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    df_1w = get_htf_data(prices, '1w')
+    # Calculate Camarilla levels from previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high + low + close) / 3
+    # Use previous day's typical price for Camarilla calculation
+    typical_price_prev = np.roll(typical_price, 1)
+    typical_price_prev[0] = typical_price[0]  # handle first element
     
-    # Prior week's high, low, close
-    ph = df_1w['high'].values
-    pl = df_1w['low'].values
-    pc = df_1w['close'].values
+    # Camarilla R1 and S1 levels
+    # R1 = close + (high - low) * 1.1 / 12
+    # S1 = close - (high - low) * 1.1 / 12
+    r1 = close + (high - low) * 1.1 / 12
+    s1 = close - (high - low) * 1.1 / 12
     
-    # Pivot point and support/resistance levels
-    pp = (ph + pl + pc) / 3.0
-    r1 = 2 * pp - pl
-    s1 = 2 * pp - ph
-    r2 = pp + (ph - pl)
-    s2 = pp - (ph - pl)
+    # Calculate RSI(14) for momentum confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = (100 - (100 / (1 + rs))).fillna(50).values
     
-    # Align weekly levels to 6h timeframe (values update only after weekly close)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Daily trend filter: EMA 50 on 1d
+    # Get 1-day trend filter (EMA 50)
     df_1d = get_htf_data(prices, '1d')
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
@@ -61,28 +61,30 @@ def generate_signals(prices):
     
     for i in range(20, n):
         if position == 0:
-            # LONG: Break above R1 with volume confirmation and uptrend
-            if close[i] > r1_aligned[i] and volume_confirm[i]:
-                if close[i] > ema_50_1d_aligned[i]:  # Daily uptrend filter
+            # LONG: Price breaks above R1 with RSI > 50 and volume confirmation
+            if close[i] > r1[i] and rsi[i] > 50 and volume_confirm[i]:
+                # Additional filter: only take long if price above 1-day EMA50 (uptrend filter)
+                if close[i] > ema_50_1d_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-            # SHORT: Break below S1 with volume confirmation and downtrend
-            elif close[i] < s1_aligned[i] and volume_confirm[i]:
-                if close[i] < ema_50_1d_aligned[i]:  # Daily downtrend filter
+            # SHORT: Price breaks below S1 with RSI < 50 and volume confirmation
+            elif close[i] < s1[i] and rsi[i] < 50 and volume_confirm[i]:
+                # Additional filter: only take short if price below 1-day EMA50 (downtrend filter)
+                if close[i] < ema_50_1d_aligned[i]:
                     signals[i] = -0.25
                     position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below pivot point or R2 break fails
-            if close[i] < pp_aligned[i]:
+            # EXIT LONG: Price crosses below S1 or RSI < 40
+            if close[i] < s1[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above pivot point or S2 break fails
-            if close[i] > pp_aligned[i]:
+            # EXIT SHORT: Price crosses above R1 or RSI > 60
+            if close[i] > r1[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
