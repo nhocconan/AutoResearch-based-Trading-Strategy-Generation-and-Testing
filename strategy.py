@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike confirmation (>1.8x 20-bar avg volume).
-# Uses daily EMA34 for trend alignment (more responsive than 50-period), 4h Donchian breakout for entry,
-# and volume spike for confirmation. Designed for moderate trade frequency (target 75-200 total over 4 years)
-# to balance signal quality and fee drag. Works in bull markets via breakouts and in bear markets via
-# short entries when price breaks below Donchian lower band in downtrend (close < daily EMA34).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation (>2.0x 20-bar avg volume).
+# Uses Donchian breakout for entry, 1d EMA34 for trend alignment, and volume spike for confirmation.
+# Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee drag while capturing strong momentum moves.
+# Works in both bull and bear markets by following the daily trend direction and requiring volume confirmation to avoid false breakouts.
 
-name = "4h_Donchian20_1dEMA34_VolumeSpike_v1"
+name = "4h_Donchian20_1dEMA34_VolumeConfirm_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -52,30 +51,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper, close > 1d EMA34, volume spike (>1.8x avg)
+            # LONG: Price breaks above Donchian upper, close > 1d EMA34, volume spike (>2.0x avg)
             if (high[i] > highest_high[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 1.8 * avg_volume[i]):
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian lower, close < 1d EMA34, volume spike (>1.8x avg)
+            # SHORT: Price breaks below Donchian lower, close < 1d EMA34, volume spike (>2.0x avg)
             elif (low[i] < lowest_low[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 1.8 * avg_volume[i]):
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close position if price breaks below Donchian lower or volume drops significantly
-            if (low[i] < lowest_low[i]) or (volume[i] < 0.4 * avg_volume[i]):
+            # EXIT LONG: Close position if price breaks below Donchian lower or volume drops
+            if (low[i] < lowest_low[i]) or (volume[i] < 0.5 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close position if price breaks above Donchian upper or volume drops significantly
-            if (high[i] > highest_high[i]) or (volume[i] < 0.4 * avg_volume[i]):
+            # EXIT SHORT: Close position if price breaks above Donchian upper or volume drops
+            if (high[i] > highest_high[i]) or (volume[i] < 0.5 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
