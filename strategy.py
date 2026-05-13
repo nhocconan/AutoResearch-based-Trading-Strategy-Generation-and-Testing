@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Donchian_Breakout_12hTrend_Volume
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA50 trend filter and volume confirmation.
-# Long when price breaks above upper band with 12h EMA uptrend and volume > 1.5x 24-period average.
-# Short when price breaks below lower band with 12h EMA downtrend and volume spike.
-# Exit when price returns to the middle band (mean reversion) or opposite band breakout.
-# Designed for 4h timeframe to balance trade frequency and signal quality, targeting 20-50 trades/year.
+# 1h_HeikinAshi_Trend_Breakout_4h1d
+# Hypothesis: Use Heikin-Ashi smoothed candles to filter noise on 1h, with 4h trend and 1d momentum confirmation.
+# Long when: HA close > HA open (bullish candle), price > 4h EMA50, and 1d RSI > 50.
+# Short when: HA close < HA open (bearish candle), price < 4h EMA50, and 1d RSI < 50.
+# Exit when HA candle reverses color.
+# Designed for 1-3 trades per week, targeting 15-30/year to avoid fee drag.
+# Works in bull (trend continuation) and bear (mean reversion via RSI filter).
 
-name = "4h_Donchian_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_HeikinAshi_Trend_Breakout_4h1d"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,31 +25,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Calculate Heikin-Ashi
+    ha_close = (high + low + close + close) / 4.0
+    ha_open = np.zeros(n)
+    ha_open[0] = (high[0] + low[0]) / 2.0
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2.0
+    ha_high = np.maximum(high, np.maximum(ha_open, ha_close))
+    ha_low = np.minimum(low, np.minimum(ha_open, ha_close))
+
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
 
-    # Calculate Donchian channels (20-period) on 4h data
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    mid_channel = (high_max_20 + low_min_20) / 2.0
-
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-
-    # Volume confirmation: volume > 1.5x 24-period average
-    vol_avg_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # 1d RSI for momentum filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if any required value is NaN
-        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_avg_24[i])):
+        if (np.isnan(ha_open[i]) or np.isnan(ha_close[i]) or 
+            np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,34 +70,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        ha_bullish = ha_close[i] > ha_open[i]
+        ha_bearish = ha_close[i] < ha_open[i]
+
         if position == 0:
-            # LONG: Close breaks above upper Donchian + 12h EMA uptrend + volume spike
-            if (close[i] > high_max_20[i] and 
-                close[i] > ema50_12h_aligned[i] and
-                volume[i] > vol_avg_24[i] * 1.5):
-                signals[i] = 0.25
+            # LONG: Bullish HA + price > 4h EMA50 + 1d RSI > 50
+            if ha_bullish and close[i] > ema50_4h_aligned[i] and rsi_1d_aligned[i] > 50:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Close breaks below lower Donchian + 12h EMA downtrend + volume spike
-            elif (close[i] < low_min_20[i] and 
-                  close[i] < ema50_12h_aligned[i] and
-                  volume[i] > vol_avg_24[i] * 1.5):
-                signals[i] = -0.25
+            # SHORT: Bearish HA + price < 4h EMA50 + 1d RSI < 50
+            elif ha_bearish and close[i] < ema50_4h_aligned[i] and rsi_1d_aligned[i] < 50:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below middle band (mean reversion)
-            if close[i] < mid_channel[i]:
+            # EXIT LONG: HA turns bearish
+            if ha_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Close crosses above middle band
-            if close[i] > mid_channel[i]:
+            # EXIT SHORT: HA turns bullish
+            if ha_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
