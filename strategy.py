@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance. A breakout above R3 or below S3 with volume confirmation and aligned 1d trend (close > EMA34) signals continuation. Uses 0.30 position size to balance risk/return and limit trade frequency (~20-40/year) to minimize fee drag in 4-hour bars. Works in both bull and bear markets by following the dominant 1d trend.
+1d_Keltner_Channel_Breakout_With_Volume_Spike
+Hypothesis: Keltner Channel (ATR-based volatility bands) captures volatility expansion during breakouts. A close above/below the upper/lower band with volume > 2x average and aligned weekly trend (close > EMA50) signals trend continuation. Uses 25% position size to limit risk and trade frequency (~10-25/year) to minimize fee drag in daily bars.
 """
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Keltner_Channel_Breakout_With_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,67 +22,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d trend filter: EMA(34) on close
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate ATR (14)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Calculate Camarilla levels from previous 1d bar
-    # R3 = close + 1.1*(high - low)
-    # S3 = close - 1.1*(high - low)
-    # Note: We use the previous day's HLC to avoid look-ahead
-    camarilla_high = df_1d['high'].values
-    camarilla_low = df_1d['low'].values
-    camarilla_close = df_1d['close'].values
+    # Calculate EMA (20) for Keltner Channel middle line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    camarilla_range = camarilla_high - camarilla_low
-    r3 = camarilla_close + 1.1 * camarilla_range
-    s3 = camarilla_close - 1.1 * camarilla_range
+    # Keltner Channel: upper = EMA + 2*ATR, lower = EMA - 2*ATR
+    kc_upper = ema20 + 2 * atr
+    kc_lower = ema20 - 2 * atr
     
-    # Align Camarilla levels to 4h timeframe (they update only when new 1d bar forms)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Weekly trend filter: EMA(50) on weekly close
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
+    volume_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have previous bar for breakout
+    for i in range(20, n):  # Start after EMA20 warmup
         if position == 0:
-            # LONG: Close breaks above R3, volume confirmation, price above 1d EMA34 (uptrend)
-            if (close[i] > r3_aligned[i] and 
+            # LONG: Close above upper Keltner band, volume spike, price above weekly EMA50 (uptrend)
+            if (close[i] > kc_upper[i] and 
                 volume_filter[i] and 
-                close[i] > ema34_1d_aligned[i]):
-                signals[i] = 0.30
+                close[i] > ema50_1w_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below S3, volume confirmation, price below 1d EMA34 (downtrend)
-            elif (close[i] < s3_aligned[i] and 
+            # SHORT: Close below lower Keltner band, volume spike, price below weekly EMA50 (downtrend)
+            elif (close[i] < kc_lower[i] and 
                   volume_filter[i] and 
-                  close[i] < ema34_1d_aligned[i]):
-                signals[i] = -0.30
+                  close[i] < ema50_1w_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close breaks below S3 (reversal) OR volume drops significantly
-            if (close[i] < s3_aligned[i]) or \
+            # EXIT LONG: Close below middle line (EMA20) OR volume drops
+            if (close[i] < ema20[i]) or \
                not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close breaks above R3 (reversal) OR volume drops significantly
-            if (close[i] > r3_aligned[i]) or \
+            # EXIT SHORT: Close above middle line (EMA20) OR volume drops
+            if (close[i] > ema20[i]) or \
                not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
