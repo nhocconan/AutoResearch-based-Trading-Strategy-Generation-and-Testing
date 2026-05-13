@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_TripleBarrier_Breakout_12hTrend_Volume
-# Hypothesis: Combines Donchian channel breakout with 12h trend filter and volume confirmation.
-# Uses triple barrier: entry only when price breaks Donchian(20) high/low, closes outside 1.5*ATR band,
-# and volume exceeds 2x 20-period average. Designed for low-frequency, high-conviction trades
-# that work in both bull and bear markets by requiring strong momentum and volume confirmation.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily chart act as key support/resistance.
+# Break above R1 with daily uptrend and volume spike = long. Break below S1 with daily downtrend and volume spike = short.
+# Uses volume spike filter to reduce trades and increase conviction. Designed for low-frequency, high-conviction trades in both bull and bear markets.
 
-name = "6h_TripleBarrier_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -23,37 +22,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 1d data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # 12h trend: EMA50
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate Camarilla pivot levels for each day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    typical_close = df_1d['close'].values
+    typical_high = df_1d['high'].values
+    typical_low = df_1d['low'].values
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    camarilla_r1 = typical_close + (typical_high - typical_low) * 1.1 / 12
+    camarilla_s1 = typical_close - (typical_high - typical_low) * 1.1 / 12
     
-    # ATR for volatility band (14-period)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume confirmation: volume > 2 * 20-period average
+    # 1d trend filter: EMA34
+    ema34_1d = pd.Series(typical_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume spike: volume > 2.0 * 20-period average (high threshold for fewer trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * vol_ma_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,38 +61,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Triple barrier conditions
-        price_above_donchian = close[i] > donchian_high[i]
-        price_below_donchian = close[i] < donchian_low[i]
-        close_outside_upper = close[i] > (donchian_high[i] + 1.5 * atr[i])
-        close_outside_lower = close[i] < (donchian_low[i] - 1.5 * atr[i])
-        vol_spike = volume_spike[i]
+        # Breakout conditions
+        price_above_r1 = close[i] > camarilla_r1_aligned[i]
+        price_below_s1 = close[i] < camarilla_s1_aligned[i]
         
         # Trend conditions
-        uptrend = close[i] > ema50_12h_aligned[i]
-        downtrend = close[i] < ema50_12h_aligned[i]
+        uptrend = close[i] > ema34_1d_aligned[i]
+        downtrend = close[i] < ema34_1d_aligned[i]
+        
+        # Volume confirmation
+        vol_spike = volume_spike[i]
 
         if position == 0:
-            # LONG: Price breaks above Donchian high, closes outside upper band, uptrend, volume spike
-            if price_above_donchian and close_outside_upper and uptrend and vol_spike:
+            # LONG: Price breaks above R1 + uptrend + volume spike
+            if price_above_r1 and uptrend and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low, closes outside lower band, downtrend, volume spike
-            elif price_below_donchian and close_outside_lower and downtrend and vol_spike:
+            # SHORT: Price breaks below S1 + downtrend + volume spike
+            elif price_below_s1 and downtrend and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Donchian low OR trend reversal
-            if close[i] < donchian_low[i] or not uptrend:
+            # EXIT LONG: Price breaks below S1 OR trend reversal
+            if price_below_s1 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Donchian high OR trend reversal
-            if close[i] > donchian_high[i] or not downtrend:
+            # EXIT SHORT: Price breaks above R1 OR trend reversal
+            if price_above_r1 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
