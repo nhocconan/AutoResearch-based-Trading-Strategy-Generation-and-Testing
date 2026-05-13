@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_1W_Multiplier_Band_Trend_Follow
-# Hypothesis: In strong trends, price remains outside the 1W Bollinger Bands (20, 2.0).
-# Go long when price closes above upper band with volume confirmation.
-# Go short when price closes below lower band with volume confirmation.
-# Exit when price re-enters the bands or volatility drops.
-# Uses 1W timeframe for trend context, 12h for entry/exit. Works in bull/bear by following higher timeframe volatility expansion/contraction.
+# 12h_RSI_Extreme_With_Trend_Filter
+# Hypothesis: RSI extremes on 12h timeframe combined with 1-day trend filter (EMA50) 
+# captures mean-reversion in ranging markets and trend continuation in strong trends.
+# Long when RSI < 30 and price above daily EMA50 (bullish bias).
+# Short when RSI > 70 and price below daily EMA50 (bearish bias).
+# Exit when RSI returns to neutral range (40-60).
+# Works in bull markets by buying dips in uptrends, and in bear markets by selling rallies in downtrends.
 
-name = "12h_1W_Multiplier_Band_Trend_Follow"
+name = "12h_RSI_Extreme_With_Trend_Filter"
 timeframe = "12h"
 leverage = 1.0
 
@@ -24,31 +25,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1w data for Bollinger Bands
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for EMA50 calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Bollinger Bands on 1w close (20, 2.0)
-    close_1w = pd.Series(df_1w['close'])
-    sma_20 = close_1w.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_1w.rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2.0 * std_20
-    lower_band = sma_20 - 2.0 * std_20
+    # Calculate EMA50 on 1d close
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align Bollinger Bands to 12h timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    # Align 1d EMA50 to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (~10 days at 12h)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * vol_ma_20
-    
+    # Calculate RSI on 12h close
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if any required value is NaN
-        if (np.isnan(upper_band_aligned[i]) or 
-            np.isnan(lower_band_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,26 +59,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close above upper band + volume spike
-            if close[i] > upper_band_aligned[i] and volume_spike[i]:
+            # LONG: RSI oversold (<30) and price above 1d EMA50 (bullish bias)
+            if rsi[i] < 30 and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close below lower band + volume spike
-            elif close[i] < lower_band_aligned[i] and volume_spike[i]:
+            # SHORT: RSI overbought (>70) and price below 1d EMA50 (bearish bias)
+            elif rsi[i] > 70 and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters bands (below upper band)
-            if close[i] < upper_band_aligned[i]:
+            # EXIT LONG: RSI returns to neutral (>=40)
+            if rsi[i] >= 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters bands (above lower band)
-            if close[i] > lower_band_aligned[i]:
+            # EXIT SHORT: RSI returns to neutral (<=60)
+            if rsi[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
