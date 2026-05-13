@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above 12h Donchian upper band AND close > 1d EMA50 AND volume > 1.8x average
-# Short when price breaks below 12h Donchian lower band AND close < 1d EMA50 AND volume > 1.8x average
-# Exit when price crosses the opposite Donchian band OR trend reversal (price crosses 1d EMA50)
-# Uses 12h timeframe (target: 50-150 total trades over 4 years = 12-37/year) with daily trend filter for BTC/ETH resilience.
-# Donchian channels provide clear breakout levels; EMA50 filters trend; volume spike confirms breakout authenticity.
-# Works in bull markets via breakouts and in bear markets via short breakdowns with trend alignment.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above Camarilla R3 AND close > 1d EMA34 AND volume > 2.0x average
+# Short when price breaks below Camarilla S3 AND close < 1d EMA34 AND volume > 2.0x average
+# Exit when price crosses Camarilla H3/L3 (mean reversion) OR trend reversal (price crosses 1d EMA34)
+# Uses 4h timeframe (target: 75-200 total trades over 4 years = 19-50/year) with daily trend filter for BTC/ETH resilience.
+# Camarilla levels provide intraday support/resistance; EMA34 filters trend; volume spike confirms breakout authenticity.
 
-name = "12h_Donchian20_1dEMA50_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,74 +24,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian calculation (primary timeframe)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Get 4h data for Camarilla calculation (primary timeframe)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate Donchian(20) on 12h data (using previous 20 bars' OHLC)
-    if len(high_12h) >= 20:
-        # Use rolling window on 12h data to avoid look-ahead
-        high_ma_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-        low_ma_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-        # Shift by 1 to use only completed bars (previous 20 bars, not including current)
-        upper_band = np.roll(high_ma_20, 1)
-        lower_band = np.roll(low_ma_20, 1)
-        upper_band[0] = np.nan
-        lower_band[0] = np.nan
+    # Calculate Camarilla levels on 4h data (using previous bar's OHLC)
+    if len(high_4h) >= 2:
+        # Use previous bar's OHLC to avoid look-ahead
+        prev_high = np.roll(high_4h, 1)
+        prev_low = np.roll(low_4h, 1)
+        prev_close = np.roll(close_4h, 1)
+        prev_high[0] = np.nan
+        prev_low[0] = np.nan
+        prev_close[0] = np.nan
+        
+        # Camarilla formulas: H3/L3, R3/S3
+        rang = prev_high - prev_low
+        h3 = prev_close + (rang * 1.1 / 4)
+        l3 = prev_close - (rang * 1.1 / 4)
+        r3 = prev_close + (rang * 1.1 / 2)
+        s3 = prev_close - (rang * 1.1 / 2)
+        h4 = prev_close + (rang * 1.1 / 2) * 1.166
+        l4 = prev_close - (rang * 1.1 / 2) * 1.166
     else:
-        upper_band = np.full_like(high_12h, np.nan)
-        lower_band = np.full_like(low_12h, np.nan)
+        h3 = np.full_like(high_4h, np.nan)
+        l3 = np.full_like(low_4h, np.nan)
+        r3 = np.full_like(high_4h, np.nan)
+        s3 = np.full_like(low_4h, np.nan)
+        h4 = np.full_like(high_4h, np.nan)
+        l4 = np.full_like(low_4h, np.nan)
     
-    # Align Donchian bands to 12h timeframe (already aligned since calculated on 12h)
-    upper_band_aligned = align_htf_to_ltf(prices, df_12h, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_12h, lower_band)
+    # Align Camarilla levels to 4h timeframe (already aligned since calculated on 4h)
+    h3_aligned = align_htf_to_ltf(prices, df_4h, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_4h, l3)
+    r3_aligned = align_htf_to_ltf(prices, df_4h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_4h, s3)
+    h4_aligned = align_htf_to_ltf(prices, df_4h, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_4h, l4)
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d close for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate EMA(34) on 1d close for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current 12h volume > 1.8x 20-period average (spike confirmation)
-    # Use 12h volume data for consistency
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_20)
+    # Volume filter: current 4h volume > 2.0x 20-period average (spike confirmation)
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):  # Start after sufficient data for EMA and Donchian
+    for i in range(50, n):  # Start after sufficient data for EMA and volume
         # Skip if any required data is NaN
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price > upper band AND close > 1d EMA50 AND volume spike
-            if close[i] > upper_band_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
+            # LONG: price > R3 AND close > 1d EMA34 AND volume spike
+            if close[i] > r3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price < lower band AND close < 1d EMA50 AND volume spike
-            elif close[i] < lower_band_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
+            # SHORT: price < S3 AND close < 1d EMA34 AND volume spike
+            elif close[i] < s3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price < lower band (mean reversion) OR trend reversal (close < 1d EMA50)
-            if close[i] < lower_band_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: price < H3 (mean reversion) OR trend reversal (close < 1d EMA34)
+            if close[i] < h3_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price > upper band (mean reversion) OR trend reversal (close > 1d EMA50)
-            if close[i] > upper_band_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: price > L3 (mean reversion) OR trend reversal (close > 1d EMA34)
+            if close[i] > l3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
