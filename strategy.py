@@ -1,6 +1,15 @@
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v3
+# Hypothesis: Camarilla pivot breakout (R1/S1) with daily trend filter and volume spike
+# works in bull/bear by capturing breakouts with trend alignment and filtering false breakouts
+# via volume confirmation. Target 20-40 trades/year to avoid fee drag.
+# Uses 1d trend (EMA34) and volume spike (>2x 20-period average) for confirmation.
+# Entry: Close breaks R1 (long) or S1 (short) with 1d trend alignment and volume spike.
+# Exit: Close crosses back through Camarilla pivot point (PP).
+# Position size: 0.25 to limit drawdown.
+
 #!/usr/bin/env python3
-name = "6h_RSI_Stochastic_Combo_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,75 +26,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA(50)
+    # Calculate Camarilla levels from previous day
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    # We need previous day's H, L, C - using daily data
+    
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # RSI(14) - standard calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # Calculate daily Camarilla levels
+    # Use previous day's data to avoid look-ahead
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Wilder's smoothing (alpha = 1/period)
-    alpha = 1.0 / 14
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:15]) if n >= 15 else np.nan
-    avg_loss[13] = np.mean(loss[1:15]) if n >= 15 else np.nan
+    # Previous day's values (shifted by 1 to avoid look-ahead)
+    prev_high = np.concatenate([[np.nan], daily_high[:-1]])
+    prev_low = np.concatenate([[np.nan], daily_low[:-1]])
+    prev_close = np.concatenate([[np.nan], daily_close[:-1]])
     
-    for i in range(14, n):
-        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
-        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    # Camarilla calculations
+    pp = (prev_high + prev_low + prev_close) / 3.0
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Align daily levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Stochastic Oscillator %K(14,3,3)
-    lowest_low = np.full(n, np.nan)
-    highest_high = np.full(n, np.nan)
-    for i in range(13, n):
-        lowest_low[i] = np.min(low[i-13:i+1])
-        highest_high[i] = np.max(high[i-13:i+1])
+    # 1d trend filter: EMA(34) on daily close
+    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    stoch_k_raw = np.divide(close - lowest_low, highest_high - lowest_low, 
-                            out=np.full_like(close, np.nan), 
-                            where=(highest_high - lowest_low) != 0) * 100
-    
-    # %K smoothed (3-period SMA)
-    stoch_k = np.full(n, np.nan)
-    for i in range(2, n):
-        if not np.isnan(stoch_k_raw[i-2:i+1]).any():
-            stoch_k[i] = np.mean(stoch_k_raw[i-2:i+1])
-    
-    # %D (3-period SMA of %K)
-    stoch_d = np.full(n, np.nan)
-    for i in range(2, n):
-        if not np.isnan(stoch_k[i-2:i+1]).any():
-            stoch_d[i] = np.mean(stoch_k[i-2:i+1])
+    # Volume filter: current volume > 2.0 x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        if (np.isnan(rsi[i]) or np.isnan(stoch_k[i]) or np.isnan(stoch_d[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # LONG: RSI < 30 AND Stochastic %K < 20 AND %K crossing above %D AND price above 1d EMA50
-        if (rsi[i] < 30 and stoch_k[i] < 20 and 
-            stoch_k[i] > stoch_d[i] and 
-            close[i] > ema50_1d_aligned[i]):
-            signals[i] = 0.25
-        # SHORT: RSI > 70 AND Stochastic %K > 80 AND %K crossing below %D AND price below 1d EMA50
-        elif (rsi[i] > 70 and stoch_k[i] > 80 and 
-              stoch_k[i] < stoch_d[i] and 
-              close[i] < ema50_1d_aligned[i]):
-            signals[i] = -0.25
-        else:
-            signals[i] = 0.0
+        vol_spike = volume[i] > 2.0 * vol_ma_20[i]
+        
+        if position == 0:
+            # LONG: Break above R1 with 1d uptrend and volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Break below S1 with 1d downtrend and volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_spike:
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # EXIT LONG: Close below pivot point (PP)
+            if close[i] < pp_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: Close above pivot point (PP)
+            if close[i] > pp_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
