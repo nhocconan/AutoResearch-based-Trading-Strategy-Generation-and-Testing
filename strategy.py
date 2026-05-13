@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R extreme reversal with 1d ADX trend filter and volume spike confirmation.
-# Williams %R identifies overbought/oversold conditions. ADX > 25 confirms trend strength for continuation.
-# Volume spike > 1.5x average validates institutional participation.
-# Long: %R < -80 (oversold) AND ADX > 25 AND volume > 1.5 * volume_ma20
-# Short: %R > -20 (overbought) AND ADX > 25 AND volume > 1.5 * volume_ma20
-# Position size: 0.25 (discrete level to minimize fee churn). Target: 15-25 trades/year by requiring confluence of three filters.
-# Works in bull markets via oversold bounces in uptrend, in bear markets via overbought reversals in downtrend.
+# Hypothesis: 12h Williams Alligator with 1w EMA50 trend filter and ATR-based position sizing.
+# Williams Alligator: Jaw (EMA13 of median price, 8-bar shift), Teeth (EMA8 of median price, 5-bar shift), Lips (EMA5 of median price, 3-bar shift).
+# Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1w EMA50.
+# Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1w EMA50.
+# Position size scaled by ATR regime: 0.30 in high volatility (ATR20 > ATR60), 0.15 in low volatility.
+# Uses discrete levels to minimize fee churn. Designed for 12-37 trades/year by requiring strong Alligator alignment and weekly trend filter.
+# Works in bull markets via bullish Alligator alignment and in bear markets via bearish Alligator alignment.
 
-name = "6h_WilliamsR_1dADX_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wTrend_ATR_Regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,84 +23,71 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for HTF ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Median price for Alligator
+    median_price = (high + low) / 2.0
     
-    # Calculate ADX(14) on 1d data for trend filter
-    # True Range
-    tr1 = np.maximum(high_1d - low_1d, np.absolute(high_1d - np.roll(close_1d, 1)))
-    tr2 = np.absolute(low_1d - np.roll(close_1d, 1))
+    # Williams Alligator components
+    jaw = pd.Series(median_price).ewm(span=13, adjust=False, min_periods=13).mean().values
+    jaw = np.roll(jaw, 8)  # 8-bar shift
+    teeth = pd.Series(median_price).ewm(span=8, adjust=False, min_periods=8).mean().values
+    teeth = np.roll(teeth, 5)  # 5-bar shift
+    lips = pd.Series(median_price).ewm(span=5, adjust=False, min_periods=5).mean().values
+    lips = np.roll(lips, 3)  # 3-bar shift
+    
+    # Get 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA(50) on 1w close for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # ATR(20) and ATR(60) for volatility regime
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
     tr = np.maximum(tr1, tr2)
-    tr[0] = high_1d[0] - low_1d[0]  # first bar
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    tr[0] = high[0] - low[0]  # first bar
+    atr20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr60 = pd.Series(tr).rolling(window=60, min_periods=60).mean().values
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    
-    # DX and ADX
-    dx = 100 * np.absolute(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Williams %R(14) on 6h data
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Volume confirmation: volume > 1.5 * 20-period MA
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma20)
+    # Volatility regime: ATR20 > ATR60 (high volatility) -> full size, else half size
+    vol_regime = atr20 > atr60
+    position_size = np.where(vol_regime, 0.30, 0.15)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(adx_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(volume_ma20[i]):
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
+           np.isnan(ema50_1w_aligned[i]) or np.isnan(atr20[i]) or np.isnan(atr60[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Oversold (%R < -80) AND strong trend (ADX > 25) AND volume spike
-            if williams_r[i] < -80 and adx_aligned[i] > 25 and volume_spike[i]:
-                signals[i] = 0.25
+            # LONG: Bullish Alligator alignment (Lips > Teeth > Jaw) AND price > 1w EMA50
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema50_1w_aligned[i]:
+                signals[i] = position_size[i]
                 position = 1
-            # SHORT: Overbought (%R > -20) AND strong trend (ADX > 25) AND volume spike
-            elif williams_r[i] > -20 and adx_aligned[i] > 25 and volume_spike[i]:
-                signals[i] = -0.25
+            # SHORT: Bearish Alligator alignment (Lips < Teeth < Jaw) AND price < 1w EMA50
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and close[i] < ema50_1w_aligned[i]:
+                signals[i] = -position_size[i]
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Overbought (%R > -50) OR trend weakening (ADX < 20) OR volume dry up
-            if williams_r[i] > -50 or adx_aligned[i] < 20 or not volume_spike[i]:
+            # EXIT LONG: Alligator alignment breaks (Lips <= Teeth or Teeth <= Jaw) OR price < 1w EMA50 (trend break)
+            if lips[i] <= teeth[i] or teeth[i] <= jaw[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = position_size[i]
         elif position == -1:
-            # EXIT SHORT: Oversold (%R < -50) OR trend weakening (ADX < 20) OR volume dry up
-            if williams_r[i] < -50 or adx_aligned[i] < 20 or not volume_spike[i]:
+            # EXIT SHORT: Alligator alignment breaks (Lips >= Teeth or Teeth >= Jaw) OR price > 1w EMA50 (trend break)
+            if lips[i] >= teeth[i] or teeth[i] >= jaw[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -position_size[i]
     
     return signals
