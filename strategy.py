@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 1d_KAMA_Trend_With_RSI_Momentum
-Hypothesis: KAMA (14) provides adaptive trend direction, RSI(2) identifies short-term momentum extremes.
-Long when KAMA trending up and RSI<15 (oversold), short when KAMA trending down and RSI>85 (overbought).
-Weekly trend filter ensures alignment with higher timeframe trend. Works in both bull and bear markets by
-capturing mean-reversion within the trend. Target: 10-25 trades/year per symbol.
+Hypothesis: KAMA direction + RSI momentum + volume confirmation works in both bull and bear markets.
+KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends.
+RSI confirms momentum strength, volume validates breakout strength.
+Target: 10-25 trades/year per symbol.
 """
 
 name = "1d_KAMA_Trend_With_RSI_Momentum"
@@ -23,39 +23,33 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # KAMA (14) - Kaufman Adaptive Moving Average
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=14))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.zeros(n)
-    er[14:] = change[14:] / np.where(volatility[14:] == 0, 1, volatility[14:])
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    
-    # KAMA calculation
+    # KAMA: Adaptive Moving Average
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = np.power(er * (2/2 - 2/30) + 2/30, 2)  # fast=2, slow=30
     kama = np.zeros(n)
-    kama[13] = close[13]  # seed
-    for i in range(14, n):
+    kama[0] = close[0]
+    for i in range(1, n):
         kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # RSI (2) - short-term momentum
-    delta = np.diff(close)
+    kama_dir = kama > np.roll(kama, 1)  # upward slope
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[1] = np.mean(gain[:1])
-    avg_loss[1] = np.mean(loss[:1])
-    
-    for i in range(2, n):
-        avg_gain[i] = (avg_gain[i-1] * 1 + gain[i-1]) / 2
-        avg_loss[i] = (avg_loss[i-1] * 1 + loss[i-1]) / 2
-    
-    rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
     rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: volume > 1.5 * 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_conf = volume > 1.5 * vol_ma
     
     # Weekly trend filter (HTF)
     df_1w = get_htf_data(prices, '1w')
@@ -72,33 +66,33 @@ def generate_signals(prices):
     
     for i in range(30, n):
         # Get values
-        kama_now = kama[i]
-        kama_prev = kama[i-1]
-        rsi_now = rsi[i]
-        uptrend_htf = uptrend_1w_aligned[i]
-        downtrend_htf = downtrend_1w_aligned[i]
+        kama_up = kama_dir[i]
+        rsi_val = rsi[i]
+        vol_conf = volume_conf[i]
+        uptrend_weekly = uptrend_1w_aligned[i]
+        downtrend_weekly = downtrend_1w_aligned[i]
         
         if position == 0:
-            # LONG: KAMA trending up, RSI oversold, weekly uptrend
-            if kama_now > kama_prev and rsi_now < 15 and uptrend_htf:
+            # LONG: KAMA up, RSI > 50, volume confirmation, weekly uptrend
+            if kama_up and rsi_val > 50 and vol_conf and uptrend_weekly:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA trending down, RSI overbought, weekly downtrend
-            elif kama_now < kama_prev and rsi_now > 85 and downtrend_htf:
+            # SHORT: KAMA down, RSI < 50, volume confirmation, weekly downtrend
+            elif not kama_up and rsi_val < 50 and vol_conf and downtrend_weekly:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA turns down or RSI overbought
-            if kama_now < kama_prev or rsi_now > 70:
+            # EXIT LONG: KAMA down or RSI < 40
+            if not kama_up or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA turns up or RSI oversold
-            if kama_now > kama_prev or rsi_now < 30:
+            # EXIT SHORT: KAMA up or RSI > 60
+            if kama_up or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
