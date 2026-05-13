@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_12h_Keltner_Channel_Breakout_Trend_Filter
-Hypothesis: Keltner Channel (ATR-based) breakouts on 6h with 12h EMA50 trend filter and volume confirmation capture sustained moves in both bull and bear markets. The ATR-based bands adapt to volatility, reducing false breakouts in ranging markets while capturing true trends. Volume confirmation ensures breakouts have participation. Target: 15-40 trades/year per symbol.
+12h_1d_200ema_Touch_With_Volume_and_1wTrend
+Hypothesis: Price touching the 200-day EMA on the daily chart acts as strong support/resistance.
+A touch above with bullish weekly trend and volume confirmation signals long.
+A touch below with bearish weekly trend and volume confirmation signals short.
+This strategy avoids frequent whipsaws by requiring alignment with the weekly trend,
+making it effective in both bull and bear markets. Targets 12-37 trades/year.
 """
 
-name = "6h_12h_Keltner_Channel_Breakout_Trend_Filter"
-timeframe = "6h"
+name = "12h_1d_200ema_Touch_With_Volume_and_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,87 +18,85 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for 200 EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    # Calculate 200 EMA on daily close
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Proximity threshold: 0.5% of price
+    proximity = 0.005 * ema_200_1d
+    # Define touch zones
+    touch_above = (close_1d >= ema_200_1d) & (close_1d <= ema_200_1d + proximity)
+    touch_below = (close_1d <= ema_200_1d) & (close_1d >= ema_200_1d - proximity)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = close_12h > ema_50_12h
-    downtrend_12h = close_12h < ema_50_12h
+    # Align touch zones to 12h
+    touch_above_aligned = align_htf_to_ltf(prices, df_1d, touch_above)
+    touch_below_aligned = align_htf_to_ltf(prices, df_1d, touch_below)
     
-    # Align 12h trend to 6h
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Keltner Channel on 6h: 20 EMA ± 2*ATR(10)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    close_1w = df_1w['close'].values
+    # 50 EMA on weekly close for trend
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Uptrend: weekly close above 50 EMA
+    uptrend_1w = close_1w > ema_50_1w
+    # Downtrend: weekly close below 50 EMA
+    downtrend_1w = close_1w < ema_50_1w
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]  # first bar
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Align weekly trend to 12h
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
-    # ATR(10)
-    atr = np.zeros(n)
-    for i in range(10, n):
-        atr[i] = np.mean(tr[i-10:i])
-    
-    # Keltner Bands
-    keltner_upper = ema_20 + 2 * atr
-    keltner_lower = ema_20 - 2 * atr
-    
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.3 * vol_ma
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(200, n):
         # Get aligned values for current bar
-        uptrend = uptrend_12h_aligned[i]
-        downtrend = downtrend_12h_aligned[i]
+        touch_abv = touch_above_aligned[i]
+        touch_blw = touch_below_aligned[i]
+        uptrend = uptrend_1w_aligned[i]
+        downtrend = downtrend_1w_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: price breaks above Keltner upper, 12h uptrend, volume confirmation
-            if close[i] > keltner_upper[i] and uptrend and vol_conf:
+            # LONG: price touches above 200 EMA, weekly uptrend, volume confirmation
+            if touch_abv and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below Keltner lower, 12h downtrend, volume confirmation
-            elif close[i] < keltner_lower[i] and downtrend and vol_conf:
+            # SHORT: price touches below 200 EMA, weekly downtrend, volume confirmation
+            elif touch_blw and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price closes below 20 EMA or 12h trend turns down
-            if close[i] < ema_20[i] or not uptrend:
+            # EXIT LONG: price touches below 200 EMA or weekly trend turns down
+            if touch_blw or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price closes above 20 EMA or 12h trend turns up
-            if close[i] > ema_20[i] or not downtrend:
+            # EXIT SHORT: price touches above 200 EMA or weekly trend turns up
+            if touch_abv or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
