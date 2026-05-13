@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) combined with ADX regime filter and volume confirmation.
-# Elder Ray measures bullish/bearish power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# In strong trends (ADX > 25): go long when Bull Power > 0 and rising, short when Bear Power < 0 and falling.
-# In ranging markets (ADX < 20): fade extremes - long when Bear Power < -0.5*ATR and turning up, short when Bull Power > 0.5*ATR and turning down.
-# Volume confirmation requires 1.5x average volume to avoid false signals.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 level with 1d EMA34 uptrend and volume > 1.5x average.
+# Short when price breaks below Camarilla S3 level with 1d EMA34 downtrend and volume > 1.5x average.
 # Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
-# Works in both bull (trend following) and bear (mean reversion in ranges) markets via regime adaptation.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Based on proven 4h Camarilla winners showing resilience in both bull and bear markets.
 
-name = "6h_ElderRay_ADX_Regime_VolumeSpike_ATRStop_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,108 +24,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for stops and regime filters
+    # Calculate ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Get 4h data for Camarilla pivot calculation (using daily data for pivot points)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Elder Ray components
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
+    # Calculate Camarilla pivot levels from previous day
+    # Camarilla equations:
+    # R4 = close + ((high - low) * 1.1 / 2)
+    # R3 = close + ((high - low) * 1.1 / 4)
+    # R2 = close + ((high - low) * 1.1 / 6)
+    # R1 = close + ((high - low) * 1.1 / 12)
+    # PP = (high + low + close) / 3
+    # S1 = close - ((high - low) * 1.1 / 12)
+    # S2 = close - ((high - low) * 1.1 / 6)
+    # S3 = close - ((high - low) * 1.1 / 4)
+    # S4 = close - ((high - low) * 1.1 / 2)
     
-    # Calculate ADX(14) for regime detection
-    # +DM and -DM
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # Calculate for each day using previous day's OHLC
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
     
-    # Smoothed +DM, -DM, TR
-    tr_rma = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm_rma = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm_rma = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    for i in range(1, len(close_1d)):
+        # Use previous day's data to calculate today's levels
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        
+        camarilla_r3[i] = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+        camarilla_s3[i] = prev_close - ((prev_high - prev_low) * 1.1 / 4)
     
-    # +DI and -DI
-    plus_di = 100 * plus_dm_rma / tr_rma
-    minus_di = 100 * minus_dm_rma / tr_rma
+    # Align Camarilla levels to 4h timeframe (wait for daily bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Get 1d data for EMA34 trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA34 to 4h timeframe (wait for daily bar to close)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = np.full(n, np.nan)
-    lowest_since_entry = np.full(n, np.nan)
-    prev_bull_power = np.full(n, np.nan)
-    prev_bear_power = np.full(n, np.nan)
+    highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
+    lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(100, n):
+    for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx[i]) or np.isnan(atr[i]) or 
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
-            if i > 0:
-                prev_bull_power[i] = prev_bull_power[i-1]
-                prev_bear_power[i] = prev_bear_power[i-1]
             continue
         
-        # Store previous values for power change detection
-        if i > 0:
-            prev_bull_power[i] = bull_power[i-1]
-            prev_bear_power[i] = bear_power[i-1]
-        else:
-            prev_bull_power[i] = bull_power[i]
-            prev_bear_power[i] = bear_power[i]
-        
         if position == 0:
-            # Regime-based entry logic
-            if adx[i] > 25:  # Strong trend - trend following
-                # LONG: Bull Power positive AND rising AND volume confirmation
-                if (bull_power[i] > 0 and 
-                    bull_power[i] > prev_bull_power[i] and 
-                    volume[i] > 1.5 * avg_volume[i]):
-                    signals[i] = 0.25
-                    position = 1
-                    highest_since_entry[i] = high[i]
-                # SHORT: Bear Power negative AND falling AND volume confirmation
-                elif (bear_power[i] < 0 and 
-                      bear_power[i] < prev_bear_power[i] and 
-                      volume[i] > 1.5 * avg_volume[i]):
-                    signals[i] = -0.25
-                    position = -1
-                    lowest_since_entry[i] = low[i]
-                else:
-                    signals[i] = 0.0
-            else:  # Ranging market (ADX < 25) - mean reversion at extremes
-                # LONG: Bear Power deeply negative AND turning up AND volume confirmation
-                if (bear_power[i] < -0.5 * atr[i] and 
-                    bear_power[i] > prev_bear_power[i] and  # Turning up from extreme
-                    volume[i] > 1.5 * avg_volume[i]):
-                    signals[i] = 0.25
-                    position = 1
-                    highest_since_entry[i] = high[i]
-                # SHORT: Bull Power deeply positive AND turning down AND volume confirmation
-                elif (bull_power[i] > 0.5 * atr[i] and 
-                      bull_power[i] < prev_bull_power[i] and  # Turning down from extreme
-                      volume[i] > 1.5 * avg_volume[i]):
-                    signals[i] = -0.25
-                    position = -1
-                    lowest_since_entry[i] = low[i]
-                else:
-                    signals[i] = 0.0
+            # LONG: Price breaks above Camarilla R3 AND 1d EMA34 uptrend AND volume > 1.5x average
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and  # Price above 1d EMA34 confirms uptrend
+                volume[i] > 1.5 * avg_volume[i]):
+                signals[i] = 0.25
+                position = 1
+                highest_since_entry[i] = high[i]  # Initialize tracking
+            # SHORT: Price breaks below Camarilla S3 AND 1d EMA34 downtrend AND volume > 1.5x average
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and  # Price below 1d EMA34 confirms downtrend
+                  volume[i] > 1.5 * avg_volume[i]):
+                signals[i] = -0.25
+                position = -1
+                lowest_since_entry[i] = low[i]  # Initialize tracking
+            else:
+                signals[i] = 0.0
+                # Carry forward tracking values when flat
+                if i > 0:
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
@@ -136,9 +118,11 @@ def generate_signals(prices):
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
+                # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
                 signals[i] = 0.25
+                # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
         elif position == -1:
@@ -149,9 +133,11 @@ def generate_signals(prices):
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
+                # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
                 signals[i] = -0.25
+                # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
     
