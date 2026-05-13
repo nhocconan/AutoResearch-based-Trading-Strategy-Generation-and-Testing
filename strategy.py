@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R3 and close > 1d EMA34 with volume > 2.0x 20-bar average.
-# Short when price breaks below S3 and close < 1d EMA34 with volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 12h timeframe.
-# R3/S3 levels act as strong breakout zones; combined with 1d trend filter and volume spike reduces false breakouts.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above R3 and close > 12h EMA34 with volume > 2.0x 20-bar average.
+# Short when price breaks below S3 and close < 12h EMA34 with volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 4h timeframe.
+# R3/S3 levels act as strong breakout zones; combined with 12h trend filter and volume spike reduces false breakouts.
 # Works in bull markets via breakouts and in bear markets via mean-reversion at extreme levels.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -41,13 +41,16 @@ def generate_signals(prices):
     R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Get 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 12h EMA34 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
@@ -58,20 +61,20 @@ def generate_signals(prices):
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
         if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3, close > 1d EMA34, volume spike
+            # LONG: Price breaks above R3, close > 12h EMA34, volume spike
             if (high[i] > R3_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+                close[i] > ema_34_12h_aligned[i] and 
                 volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3, close < 1d EMA34, volume spike
+            # SHORT: Price breaks below S3, close < 12h EMA34, volume spike
             elif (low[i] < S3_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < ema_34_12h_aligned[i] and 
                   volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
