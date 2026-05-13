@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 6h_ADX_DMI_Trend_Filter_1dEMA89_Trend
-# Hypothesis: Strong trending conditions identified by ADX > 25 and DMI crossover, filtered by 1d EMA89 trend, capture sustained moves while avoiding chop. Works in both bull and bear by only taking longs in uptrend and shorts in downtrend.
+# 12h_Camarilla_R1S1_Breakout_1wTrend_Volume
+# Hypothesis: Price breaking out of Camarilla R1/S1 levels on 12h with 1w trend filter and volume confirmation captures strong momentum moves while avoiding whipsaws. Works in both bull and bear markets by using weekly trend filter to avoid counter-trend trades.
 
-name = "6h_ADX_DMI_Trend_Filter_1dEMA89_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,8 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate ADX and DMI
-    # True Range
+    # Calculate ATR for volatility normalization
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -29,41 +28,22 @@ def generate_signals(prices):
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr_smooth = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
 
-    # 1d EMA89 for trend filter (load once, align)
-    df_1d = get_htf_data(prices, '1d')
-    ema89_1d = pd.Series(df_1d['close'].values).ewm(span=89, adjust=False, min_periods=89).mean().values
-    ema89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
+    # 1w EMA34 for trend filter (load once, align)
+    df_1w = get_htf_data(prices, '1w')
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+
+    # Volume confirmation: volume > 2.0x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(adx[i]) or np.isnan(di_plus[i]) or np.isnan(di_minus[i]) or 
-            np.isnan(ema89_1d_aligned[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,35 +51,49 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Calculate Camarilla levels for current 12h bar (using previous bar's range)
+        if i > 0:
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_close = close[i-1]
+            range_val = prev_high - prev_low
+            
+            if range_val > 0:
+                camarilla_multiplier = 1.1 / 12
+                r1 = prev_close + range_val * camarilla_multiplier * 1
+                s1 = prev_close - range_val * camarilla_multiplier * 1
+            else:
+                r1 = prev_close
+                s1 = prev_close
+        else:
+            r1 = close[0]
+            s1 = close[0]
+
         if position == 0:
-            # LONG: ADX > 25, DI+ > DI-, and price above 1d EMA89
-            if (adx[i] > 25 and 
-                di_plus[i] > di_minus[i] and
-                close[i] > ema89_1d_aligned[i]):
+            # LONG: Close above R1 + 1w EMA34 uptrend + volume spike
+            if (close[i] > r1 and 
+                close[i] > ema34_1w_aligned[i] and
+                volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: ADX > 25, DI- > DI+, and price below 1d EMA89
-            elif (adx[i] > 25 and 
-                  di_minus[i] > di_plus[i] and
-                  close[i] < ema89_1d_aligned[i]):
+            # SHORT: Close below S1 + 1w EMA34 downtrend + volume spike
+            elif (close[i] < s1 and 
+                  close[i] < ema34_1w_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 2.0):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: ADX < 20 or DI- > DI+ or price below 1d EMA89
-            if (adx[i] < 20 or 
-                di_minus[i] > di_plus[i] or
-                close[i] < ema89_1d_aligned[i]):
+            # EXIT LONG: Close below 1w EMA34 or volatility drop
+            if close[i] < ema34_1w_aligned[i] or volume[i] < vol_avg_20[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: ADX < 20 or DI+ > DI- or price above 1d EMA89
-            if (adx[i] < 20 or 
-                di_plus[i] > di_minus[i] or
-                close[i] > ema89_1d_aligned[i]):
+            # EXIT SHORT: Close above 1w EMA34 or volatility drop
+            if close[i] > ema34_1w_aligned[i] or volume[i] < vol_avg_20[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
