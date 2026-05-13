@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band with price > 1d EMA34 (bullish trend) and volume > 2.0x 20-bar average.
-# Short when price breaks below Donchian lower band with price < 1d EMA34 (bearish trend) and volume > 2.0x average.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(34) trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band with price > 1w EMA34 (bullish trend) and volume > 1.5x 20-bar average.
+# Short when price breaks below Donchian lower band with price < 1w EMA34 (bearish trend) and volume > 1.5x average.
 # Exit when price reverses and closes below/above the midpoint of the Donchian channel.
-# Uses discrete position sizing 0.25. Target: 75-200 total trades over 4 years on 4h timeframe.
+# Uses discrete position sizing 0.25. Target: 30-100 total trades over 4 years on 1d timeframe.
 # EMA trend filter ensures we trade with the higher timeframe trend, avoiding counter-trend whipsaws.
 # Volume confirmation validates breakout strength. Donchian midpoint exit provides clear, objective stop.
 
-name = "4h_Donchian20_1dEMA34_Trend_Volume_Confirm_v3"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA34_Trend_Volume_Confirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -37,18 +37,18 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(34) on 1d close
-    if len(close_1d) < 34:
-        ema_34_1d = np.full(len(close_1d), np.nan)
+    # Calculate EMA(34) on 1w close
+    if len(close_1w) < 34:
+        ema_34_1w = np.full(len(close_1w), np.nan)
     else:
-        ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+        ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA to 4h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1w EMA to 1d timeframe (wait for 1w bar to close)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,21 +56,21 @@ def generate_signals(prices):
     for i in range(lookback + 20, n):  # Start after sufficient data
         # Skip if any required data is NaN
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume[i])):
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper band with bullish 1d EMA trend and volume spike
+            # LONG: Price breaks above upper band with bullish 1w EMA trend and volume spike
             if (close[i] > upper_band[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 2.0 * avg_volume[i]):
+                close[i] > ema_34_1w_aligned[i] and 
+                volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower band with bearish 1d EMA trend and volume spike
+            # SHORT: Price breaks below lower band with bearish 1w EMA trend and volume spike
             elif (close[i] < lower_band[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 2.0 * avg_volume[i]):
+                  close[i] < ema_34_1w_aligned[i] and 
+                  volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
