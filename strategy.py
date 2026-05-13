@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Direction_With_Trend_and_Volume
-Hypothesis: Kaufman Adaptive Moving Average (KAMA) identifies trend direction with low whipsaw.
-Trend filter from 1d EMA34 ensures alignment with higher timeframe momentum.
-Volume spike confirms institutional participation.
-Long when KAMA rising, price > KAMA, volume > 1.5x average, and 1d uptrend.
-Short when KAMA falling, price < KAMA, volume > 1.5x average, and 1d downtrend.
-Designed for 12h timeframe to target 12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets via trend filter and volume confirmation.
+4h_KAMA_Trend_RSI_Momentum
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets. 
+Combined with RSI momentum and 12h trend filter to avoid whipsaws. 
+Long when KAMA rising, RSI > 50, and 12h uptrend. Short when KAMA falling, RSI < 50, and 12h downtrend.
+Designed for 4-6 trades per month per symbol (~50-72/year).
 """
 
-name = "12h_KAMA_Direction_With_Trend_and_Volume"
-timeframe = "12h"
+name = "4h_KAMA_Trend_RSI_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,69 +17,87 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Kaufman Adaptive Moving Average (KAMA)
-    def kama(close, er_period=10, fast=2, slow=30):
-        change = np.abs(np.diff(close, n=er_period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=1)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # KAMA: Kaufman Adaptive Moving Average
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(close - np.roll(close, 10))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # will fix below
+    # Recompute volatility properly with loop for clarity and correctness
+    volatility = np.zeros(n)
+    for i in range(10, n):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Initialize KAMA
+    kama = np.zeros(n)
+    kama[:10] = close[:10]
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    kama_vals = kama(close, er_period=10, fast=2, slow=30)
-    kama_rising = kama_vals > np.roll(kama_vals, 1)
-    kama_falling = kama_vals < np.roll(kama_vals, 1)
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    for i in range(15, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_avg = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_spike = volume > (1.5 * vol_avg)
-    
-    # 1d trend filter: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 12h trend filter: EMA50
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = df_1d['close'].values > ema_34_1d
-    downtrend_1d = df_1d['close'].values < ema_34_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_12h = df_12h['close'].values > ema_50_12h
+    downtrend_12h = df_12h['close'].values < ema_50_12h
+    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
+    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(30, n):  # Start after KAMA/RSI warmup
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
+        rsi_val = rsi[i]
+        uptrend_htf = uptrend_12h_aligned[i]
+        downtrend_htf = downtrend_12h_aligned[i]
+        
         if position == 0:
-            # LONG: KAMA rising, price > KAMA, volume spike, 1d uptrend
-            if kama_rising[i] and close[i] > kama_vals[i] and vol_spike[i] and uptrend_1d_aligned[i]:
+            # LONG: KAMA rising, RSI > 50, 12h uptrend
+            if kama_rising and rsi_val > 50 and uptrend_htf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA falling, price < KAMA, volume spike, 1d downtrend
-            elif kama_falling[i] and close[i] < kama_vals[i] and vol_spike[i] and downtrend_1d_aligned[i]:
+            # SHORT: KAMA falling, RSI < 50, 12h downtrend
+            elif kama_falling and rsi_val < 50 and downtrend_htf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA falling or price < KAMA
-            if kama_falling[i] or close[i] < kama_vals[i]:
+            # EXIT LONG: KAMA falling or RSI < 50
+            if not kama_rising or rsi_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA rising or price > KAMA
-            if kama_rising[i] or close[i] > kama_vals[i]:
+            # EXIT SHORT: KAMA rising or RSI > 50
+            if not kama_falling or rsi_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
