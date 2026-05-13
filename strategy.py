@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Supertrend_RSI_Momentum
-Hypothesis: Supertrend (ATR=10, multiplier=3) defines trend direction. RSI(14) measures momentum strength. Entry occurs when Supertrend confirms trend and RSI shows strong momentum (RSI>55 for long, RSI<45 for short) with volume confirmation. Exit when Supertrend reverses or momentum weakens. Designed for low trade frequency (target 20-40/year) to minimize fee drag in 4-hour bars.
+12h_KAMA_Trend_Filter
+Hypothesis: KAMA adapts to market noise, providing reliable trend signals in both trending and ranging markets. Combined with volume confirmation and 1-day trend filter, it produces high-probability entries with low trade frequency suitable for 12h timeframe, working in both bull and bear markets.
 """
 
-name = "4h_Supertrend_RSI_Momentum"
-timeframe = "4h"
+name = "12h_KAMA_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,48 +17,35 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR calculation for Supertrend
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Get 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Supertrend calculation
-    hl2 = (high + low) / 2
-    upper_band = hl2 + (3 * atr)
-    lower_band = hl2 - (3 * atr)
-    
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, n):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = lower_band[i]
-            direction[i] = 1
+    # Calculate KAMA (10, 2, 30)
+    # ER = |net change| / sum(|changes|)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    abs_change = np.abs(np.diff(close, prepend=close[0]))
+    er = np.zeros_like(close)
+    for i in range(10, n):
+        net_change = np.abs(close[i] - close[i-10])
+        sum_change = np.sum(abs_change[i-9:i+1])
+        if sum_change != 0:
+            er[i] = net_change / sum_change
         else:
-            supertrend[i] = upper_band[i]
-            direction[i] = -1
+            er[i] = 0
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # RSI calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(50).values  # Neutral RSI for warmup period
+    # 1d trend filter: EMA(34) on close
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: current volume > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,32 +54,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after KAMA warmup
         if position == 0:
-            # LONG: Supertrend uptrend, RSI > 55 (bullish momentum), volume confirmation
-            if (direction[i] == 1 and 
-                rsi_values[i] > 55 and 
-                volume_filter[i]):
+            # LONG: Price crosses above KAMA, volume confirmation, price above 1d EMA34 (uptrend)
+            if (close[i] > kama[i] and close[i-1] <= kama[i-1] and 
+                volume_filter[i] and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Supertrend downtrend, RSI < 45 (bearish momentum), volume confirmation
-            elif (direction[i] == -1 and 
-                  rsi_values[i] < 45 and 
-                  volume_filter[i]):
+            # SHORT: Price crosses below KAMA, volume confirmation, price below 1d EMA34 (downtrend)
+            elif (close[i] < kama[i] and close[i-1] >= kama[i-1] and 
+                  volume_filter[i] and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Supertrend reverses OR RSI drops below 50 (momentum loss)
-            if (direction[i] == -1) or (rsi_values[i] < 50):
+            # EXIT LONG: Price crosses below KAMA OR volume drops
+            if (close[i] < kama[i] and close[i-1] >= kama[i-1]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Supertrend reverses OR RSI rises above 50 (momentum loss)
-            if (direction[i] == 1) or (rsi_values[i] > 50):
+            # EXIT SHORT: Price crosses above KAMA OR volume drops
+            if (close[i] > kama[i] and close[i-1] <= kama[i-1]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
