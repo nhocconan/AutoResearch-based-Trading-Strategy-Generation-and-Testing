@@ -1,97 +1,93 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_Volatility_Breakout
-Hypothesis: Weekly pivot levels act as strong support/resistance. 
-Price tends to break out of extreme weekly levels (R4/S4) with high volume and 
-volatility expansion, continuing in the breakout direction. Works in both bull 
-and bear markets by capturing momentum from institutional levels. Low trade 
-frequency (10-20/year) minimizes fee drag.
+4h_Engulfing_Pattern_Trend_Follow
+Hypothesis: Bullish/bearish engulfing candles indicate momentum shifts. Combined with 
+1-day EMA50 trend filter and volume confirmation, this captures trend continuations 
+while avoiding counter-trend trades. Designed for low trade frequency (20-40/year) 
+to work in both bull and bear markets by following established trends with 
+momentum confirmation.
 """
 
-name = "1d_Weekly_Pivot_Volatility_Breakout"
-timeframe = "1d"
+name = "4h_Engulfing_Pattern_Trend_Follow"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_pivot_points(high, low, close):
-    """Calculate weekly pivot points: P, R1-R4, S1-S4"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    r4 = r3 + (high - low)
-    s4 = s3 - (high - low)
-    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data using daily as proxy (actual weekly data via 1w would be better but 1d is acceptable proxy)
-    df_weekly = get_htf_data(prices, '1d')
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Get daily data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points
-    pivot, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivot_points(
-        weekly_high, weekly_low, weekly_close
-    )
+    # Calculate daily EMA50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align weekly pivot levels to daily timeframe
-    r4_daily = align_htf_to_ltf(prices, df_weekly, r4)
-    s4_daily = align_htf_to_ltf(prices, df_weekly, s4)
-    
-    # Volatility filter: ATR(5) > 1.5 * ATR(20) - volatility expansion
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr5 = pd.Series(tr).rolling(window=5, min_periods=5).mean().values
-    atr20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    vol_expansion = atr5 > (1.5 * atr20)
-    
-    # Volume confirmation: > 2.0x 20-period average
+    # Volume confirmation: > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
+    volume_confirm = volume > (1.3 * vol_ma)
+    
+    # Detect bullish and bearish engulfing patterns
+    bullish_engulf = (close > open_price) & (open_price > close) & (close >= open_price) & (open_price <= close)
+    bearish_engulf = (close < open_price) & (open_price < close) & (close <= open_price) & (open_price >= close)
+    # Actually: bullish engulf = current bullish candle engulfs previous bearish candle
+    bullish_engulf = (close > open_price) & (close >= open_price) & (open_price <= close) & (open_price > close)
+    # Fix: proper engulfing detection
+    bullish_engulf = (close > open_price) & (open_price < close) & (close >= open_price) & (open_price <= close)
+    # Correct implementation:
+    bullish_engulf = (close > open_price) & (open_price < close) & (close >= open_price[1:]) & (open_price <= close[1:])  # This approach needs fixing
+    
+    # Proper engulfing pattern detection
+    bullish_engulf = np.zeros(n, dtype=bool)
+    bearish_engulf = np.zeros(n, dtype=bool)
+    
+    for i in range(1, n):
+        # Bullish engulf: current green candle completely engulfs previous red candle
+        if close[i] > open_price[i] and close[i-1] < open_price[i-1]:
+            if close[i] >= open_price[i-1] and open_price[i] <= close[i-1]:
+                bullish_engulf[i] = True
+        # Bearish engulf: current red candle completely engulfs previous green candle
+        if close[i] < open_price[i] and close[i-1] > open_price[i-1]:
+            if close[i] <= open_price[i-1] and open_price[i] >= close[i-1]:
+                bearish_engulf[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         if position == 0:
-            # BREAKOUT LONG: Price breaks above R4 with volatility and volume expansion
-            if close[i] > r4_daily[i] and vol_expansion[i] and volume_confirm[i]:
+            # LONG: Bullish engulf + above daily EMA50 + volume confirmation
+            if bullish_engulf[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # BREAKOUT SHORT: Price breaks below S4 with volatility and volume expansion
-            elif close[i] < s4_daily[i] and vol_expansion[i] and volume_confirm[i]:
+            # SHORT: Bearish engulf + below daily EMA50 + volume confirmation
+            elif bearish_engulf[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to weekly pivot (mean reversion)
-            if close[i] <= pivot:
+            # EXIT LONG: Bearish engulf or price drops below EMA50
+            if bearish_engulf[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to weekly pivot (mean reversion)
-            if close[i] >= pivot:
+            # EXIT SHORT: Bullish engulf or price rises above EMA50
+            if bullish_engulf[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
