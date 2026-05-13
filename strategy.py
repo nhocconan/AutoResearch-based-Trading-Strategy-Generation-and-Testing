@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 6H_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R3/S3 breakouts on 6h filtered by 1d trend and volume spikes.
-# R3/S3 levels represent stronger support/resistance than R1/S1, reducing false breakouts.
-# Trend filter uses 1-day EMA34 to ensure alignment with higher timeframe momentum.
-# Volume confirmation requires >2x 20-period average to confirm institutional participation.
-# Works in bull/bear by following 1d trend direction; avoids range-bound whipsaws.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag.
+# 12h_ParabolicSAR_1dTrend_Filter
+# Hypothesis: Parabolic SAR on 12h with 1d EMA trend filter for trend-following entries.
+# Works in bull/bear by following 1d trend; SAR provides dynamic stop/reversal.
+# Target: 20-50 trades/year per symbol to minimize fee drag.
 
-name = "6H_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_ParabolicSAR_1dTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,41 +20,53 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get 1d data for HTF trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
 
-    # Calculate Camarilla pivot levels for 6h (based on previous 6h bar)
-    # Camarilla: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Parabolic SAR on 12h
+    # Initialize
+    psar = np.zeros(n)
+    psar[0] = low[0]
+    trend = 1  # 1 for up, -1 for down
+    af = 0.02  # acceleration factor
+    max_af = 0.2
+    ep = high[0] if trend == 1 else low[0]  # extreme point
 
-    rang = prev_high - prev_low
-    r3 = prev_close + rang * 1.1 / 4
-    s3 = prev_close - rang * 1.1 / 4
+    for i in range(1, n):
+        psar[i] = psar[i-1] + af * (ep - psar[i-1])
+        # Reverse trend if price crosses SAR
+        if trend == 1 and low[i] < psar[i]:
+            trend = -1
+            psar[i] = ep
+            af = 0.02
+            ep = low[i]
+        elif trend == -1 and high[i] > psar[i]:
+            trend = 1
+            psar[i] = ep
+            af = 0.02
+            ep = high[i]
+        else:
+            # Update extreme point and acceleration factor
+            if trend == 1:
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + 0.02, max_af)
+            else:
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + 0.02, max_af)
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
 
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-
-    # Volume confirmation: current volume > 2.0 x 20-period average (strong spike)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Trend filter: 1d EMA50
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after sufficient warmup
-        # Skip if any required value is NaN
-        if (np.isnan(r3[i]) or 
-            np.isnan(s3[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+    for i in range(1, n):
+        if (np.isnan(psar[i]) or np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,30 +75,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above R3 in uptrend with volume spike
-            if (close[i] > r3[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume_spike[i]):
+            # LONG: Price above SAR and above 1d EMA50
+            if close[i] > psar[i] and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S3 in downtrend with volume spike
-            elif (close[i] < s3[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: Price below SAR and below 1d EMA50
+            elif close[i] < psar[i] and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 or trend turns down
-            if close[i] < s3[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price crosses below SAR or trend turns down
+            if close[i] < psar[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 or trend turns up
-            if close[i] > r3[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price crosses above SAR or trend turns up
+            if close[i] > psar[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
