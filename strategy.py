@@ -1,13 +1,8 @@
-#!/usr/bin/env python3
-# 4h_SuperTrend_EMA_Crossover_With_Volume_Confirmation
-# Hypothesis: In both bull and bear markets, price tends to respect the SuperTrend direction
-# when aligned with EMA crossover signals. Volume confirmation filters out false signals.
-# SuperTrend adapts to volatility via ATR, making it effective in ranging and trending markets.
-# EMA crossover (9/21) provides timely entries while SuperTrend (10,3) filters for trend strength.
-# This combination aims to capture medium-term moves with limited whipsaw, keeping trade frequency low.
+# The strategy is a 1-hour trend-following system that uses 4h and 1d higher timeframes for trend direction and regime filtering. It enters long when the 4h EMA50 is above the 1d EMA200 (bullish regime) and price pulls back to the 4h EMA20 with momentum confirmation (RSI > 50). It enters short when the 4h EMA50 is below the 1d EMA200 (bearish regime) and price rallies to the 4h EMA20 with momentum confirmation (RSI < 50). Exits occur when the price crosses the 4h EMA50 or momentum diverges (RSI crosses 50 in the opposite direction). The strategy uses a fixed position size of 0.20 to limit risk and includes an 8 AM to 8 PM UTC session filter to avoid low-liquidity periods. Designed to capture medium-term trends while avoiding whipsaws in ranging markets, it should perform in both bull and bear regimes by aligning with the higher timeframe trend.
 
-name = "4h_SuperTrend_EMA_Crossover_With_Volume_Confirmation"
-timeframe = "4h"
+#!/usr/bin/env python3
+name = "1h_EMA_Trend_Follow_With_Momentum_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,78 +19,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate ATR for SuperTrend
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Get 4h and 1h data for trend and execution
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
 
-    # SuperTrend calculation
-    hl2 = (high + low) / 2
-    upperband = hl2 + (3.0 * atr)
-    lowerband = hl2 - (3.0 * atr)
-    
-    supertrend = np.zeros_like(close)
-    dir = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = hl2[0]
-    dir[0] = 1
-    
-    for i in range(1, n):
-        if close[i] > upperband[i-1]:
-            dir[i] = 1
-        elif close[i] < lowerband[i-1]:
-            dir[i] = -1
-        else:
-            dir[i] = dir[i-1]
-            if dir[i] == 1 and lowerband[i] < lowerband[i-1]:
-                lowerband[i] = lowerband[i-1]
-            if dir[i] == -1 and upperband[i] > upperband[i-1]:
-                upperband[i] = upperband[i-1]
-        
-        if dir[i] == 1:
-            supertrend[i] = lowerband[i]
-        else:
-            supertrend[i] = upperband[i]
+    # Calculate 4h EMA50 and EMA20 for trend and entry
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
 
-    # EMA crossover (9/21) for entry timing
-    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate 1d EMA200 for regime filter
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
 
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * vol_ma_20
+    # Calculate 1h RSI for momentum confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+
+    # Session filter: 8 AM to 8 PM UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(21, n):  # Start after EMA21 warmup
+    for i in range(50, n):
+        # Skip if any required value is NaN
+        if (np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(ema20_4h_aligned[i]) or
+            np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(rsi[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        # Only trade during session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
         if position == 0:
-            # LONG: Uptrend (SuperTrend) + bullish EMA crossover + volume spike
-            if dir[i] == 1 and ema9[i] > ema21[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # LONG: Bullish regime (4h EMA50 > 1d EMA200) + price at 4h EMA20 support + bullish momentum (RSI > 50)
+            if ema50_4h_aligned[i] > ema200_1d_aligned[i] and \
+               close[i] <= ema20_4h_aligned[i] * 1.001 and \
+               rsi[i] > 50:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Downtrend (SuperTrend) + bearish EMA crossover + volume spike
-            elif dir[i] == -1 and ema9[i] < ema21[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # SHORT: Bearish regime (4h EMA50 < 1d EMA200) + price at 4h EMA20 resistance + bearish momentum (RSI < 50)
+            elif ema50_4h_aligned[i] < ema200_1d_aligned[i] and \
+                 close[i] >= ema20_4h_aligned[i] * 0.999 and \
+                 rsi[i] < 50:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend turns bearish or EMA crossover reverses
-            if dir[i] == -1 or ema9[i] < ema21[i]:
+            # EXIT LONG: Bearish regime shift or momentum failure
+            if ema50_4h_aligned[i] < ema200_1d_aligned[i] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Trend turns bullish or EMA crossover reverses
-            if dir[i] == 1 or ema9[i] > ema21[i]:
+            # EXIT SHORT: Bullish regime shift or momentum failure
+            if ema50_4h_aligned[i] > ema200_1d_aligned[i] or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
