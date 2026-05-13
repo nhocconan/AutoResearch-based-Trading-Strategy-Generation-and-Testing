@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_LongOnly_Pullback_To_EMA21_With_Volume_Confirmation
-# Hypothesis: In trending markets, price pulls back to the 21-period EMA on 6h charts.
-# Long entries occur when price touches EMA21 with bullish momentum (close > open) and volume > 1.5x 20-period average.
-# Exit on close below EMA21 or bearish engulfing candle. Works in bull trends (buying dips) and avoids shorts in bear markets.
-# Target: 50-150 total trades over 4 years = 12-37/year.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Use 4-hour Camarilla pivot level breakouts with 1-day EMA trend filter and volume confirmation.
+# Camarilla levels provide high-probability support/resistance; EMA filter ensures alignment with higher timeframe trend.
+# Works in bull markets by buying breakouts above R3 in uptrends and in bear markets by selling breakdowns below S3 in downtrends.
+# Volume confirmation filters out false breakouts. Target: 20-50 trades per year.
 
-name = "6h_LongOnly_Pullback_To_EMA21_With_Volume_Confirmation"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,21 +21,40 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_ = prices['open'].values
     volume = prices['volume'].values
 
-    # Calculate EMA21 on close
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1-day EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
 
     # Volume filter: >1.5x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    # Calculate Camarilla levels from previous day's OHLC
+    # Camarilla levels require previous day's data, so we shift by 1
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
 
-    for i in range(21, n):
+    # Calculate Camarilla levels
+    R3 = prev_close + 1.1 * prev_range * 1.1 / 2  # Previous close + 1.1 * range * 1.1/2
+    S3 = prev_close - 1.1 * prev_range * 1.1 / 2  # Previous close - 1.1 * range * 1.1/2
+
+    # Align Camarilla levels to 4h timeframe (wait for previous day to complete)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if np.isnan(ema_21[i]) or np.isnan(vol_avg_20[i]):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(vol_avg_20[i]) or 
+            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -44,23 +63,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG ENTRY: price touches EMA21 (within 0.5%), bullish candle, volume spike
-            ema_touch = low[i] <= ema_21[i] * 1.005 and high[i] >= ema_21[i] * 0.995
-            bullish_candle = close[i] > open_[i]
-            volume_spike = volume[i] > vol_avg_20[i] * 1.5
-
-            if ema_touch and bullish_candle and volume_spike:
+            # LONG: price breaks above R3 + price above 1d EMA (bullish trend) + volume spike
+            if (close[i] > R3_aligned[i] and 
+                close[i] > ema_34_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
+            # SHORT: price breaks below S3 + price below 1d EMA (bearish trend) + volume spike
+            elif (close[i] < S3_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.5):
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: close below EMA21 or bearish engulfing candle
-            bearish_engulfing = close[i] < open_[i] and open_[i] < close[i-1] and close[i] < open_[i-1]
-            if close[i] < ema_21[i] or bearish_engulfing:
+            # EXIT LONG: price breaks below S3 or price below 1d EMA
+            if (close[i] < S3_aligned[i] or close[i] < ema_34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: price breaks above R3 or price above 1d EMA
+            if (close[i] > R3_aligned[i] or close[i] > ema_34_aligned[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
 
     return signals
