@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_MeanReversion_With_Trend_Protection
-Hypothesis: Buy when price is significantly below VWAP in a downtrend with high volume (panic), sell when price returns to VWAP. Short when price is significantly above VWAP in an uptrend with high volume (euphoria), cover when price returns to VWAP. Uses 1d trend filter to align with higher timeframe bias and avoid counter-trend trades. VWAP calculated from session open (00:00 UTC) to current bar. Target: 20-40 trades/year per symbol.
+1d_1w_1wCopper_Cross_Crossover
+Hypothesis: Weekly Copper Cross (MACD-style) on 1w with 1d price action confirmation.
+Long when weekly MACD crosses above signal line and price > daily VWAP.
+Short when weekly MACD crosses below signal line and price < daily VWAP.
+Exit on opposite cross or price reversion to VWAP. Uses volume confirmation.
+Target: 10-25 trades/year per symbol.
 """
 
-name = "4h_MeanReversion_With_Trend_Protection"
-timeframe = "4h"
+name = "1d_1w_1wCopper_Cross_Crossover"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,59 +26,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP from session start (00:00 UTC) for each day
-    # Since we don't have datetime in values, we'll use a rolling window approximation
-    # VWAP approximation: cumulative (price * volume) / cumulative volume, reset when volume is low (new session)
-    # Simpler: use typical price * volume for VWAP calculation
+    # 1d VWAP approximation: typical price * volume cumsum / volume cumsum
     typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
+    vol_cumsum = np.cumsum(volume)
+    tp_vol_cumsum = np.cumsum(typical_price * volume)
+    vwap = np.where(vol_cumsum > 0, tp_vol_cumsum / vol_cumsum, typical_price)
     
-    # Cumulative VWAP with reset condition (when volume is very low, indicating new session)
-    # We'll use a 24-period lookback for VWAP (24 * 4h = 4 days, but we reset based on volume)
-    # Instead, use a rolling VWAP with period=24 to approximate session VWAP
-    vwap = np.zeros(n)
-    vol_sum = np.zeros(n)
-    pv_sum = np.zeros(n)
-    
-    # Use expanding window with reset when volume drops significantly (new session)
-    # Simpler approach: use 24-period rolling VWAP
-    for i in range(n):
-        if i == 0:
-            pv_sum[i] = pv[i]
-            vol_sum[i] = volume[i]
-        else:
-            # Reset if current volume is very low compared to recent average (new session)
-            if i >= 24 and volume[i] < 0.1 * np.mean(volume[max(0, i-24):i]):
-                pv_sum[i] = pv[i]
-                vol_sum[i] = volume[i]
-            else:
-                pv_sum[i] = pv_sum[i-1] + pv[i]
-                vol_sum[i] = vol_sum[i-1] + volume[i]
-        
-        if vol_sum[i] > 0:
-            vwap[i] = pv_sum[i] / vol_sum[i]
-        else:
-            vwap[i] = typical_price[i]
-    
-    # Deviation from VWAP as percentage
-    dev_pct = (close - vwap) / vwap
-    
-    # 4h trend: EMA50
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_4h = close > ema_50
-    downtrend_4h = close < ema_50
-    
-    # 1d trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly MACD (12,26,9) - using weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 1.5 * 20-period average (to avoid noise)
+    weekly_close = df_1w['close'].values
+    # EMA12
+    ema12 = pd.Series(weekly_close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA26
+    ema26 = pd.Series(weekly_close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    # MACD line
+    macd_line = ema12 - ema26
+    # Signal line (9)
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Histogram
+    macd_hist = macd_line - signal_line
+    
+    # Align weekly indicators to daily
+    macd_hist_aligned = align_htf_to_ltf(prices, df_1w, macd_hist)
+    
+    # Detect crosses
+    macd_hist_prev = np.roll(macd_hist_aligned, 1)
+    macd_hist_prev[0] = 0
+    bullish_cross = (macd_hist_aligned > 0) & (macd_hist_prev <= 0)
+    bearish_cross = (macd_hist_aligned < 0) & (macd_hist_prev >= 0)
+    
+    # Volume confirmation: volume > 1.5 * 20-day average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -83,36 +67,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(35, n):
         # Get values
-        dev = dev_pct[i]
-        uptrend = uptrend_4h[i]
-        downtrend = downtrend_4h[i]
-        uptrend_htf = uptrend_1d_aligned[i]
-        downtrend_htf = downtrend_1d_aligned[i]
+        price = close[i]
+        vw = vwap[i]
+        bull_cross = bullish_cross[i]
+        bear_cross = bearish_cross[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: price significantly below VWAP (-2%), in 4h downtrend (panic sell), 1d uptrend (higher timeframe bullish), volume confirmation
-            if dev < -0.02 and downtrend and uptrend_htf and vol_conf:
+            # LONG: bullish MACD cross and price above VWAP and volume confirmation
+            if bull_cross and price > vw and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price significantly above VWAP (+2%), in 4h uptrend (euphoria buy), 1d downtrend (higher timeframe bearish), volume confirmation
-            elif dev > 0.02 and uptrend and downtrend_htf and vol_conf:
+            # SHORT: bearish MACD cross and price below VWAP and volume confirmation
+            elif bear_cross and price < vw and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to VWAP (within 0.5%) or 4h trend turns up
-            if abs(dev) < 0.005 or uptrend:
+            # EXIT LONG: bearish cross or price crosses below VWAP
+            if bear_cross or price < vw:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to VWAP (within 0.5%) or 4h trend turns down
-            if abs(dev) < 0.005 or downtrend:
+            # EXIT SHORT: bullish cross or price crosses above VWAP
+            if bull_cross or price > vw:
                 signals[i] = 0.0
                 position = 0
             else:
