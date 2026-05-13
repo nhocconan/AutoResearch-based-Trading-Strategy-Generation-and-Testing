@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation (>1.5x avg volume) and 12h EMA50 trend filter. Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.30.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
-# EMA trend filter on 12h ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Donchian breakouts capture momentum; volume confirmation filters false breakouts.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation (>1.5x avg volume). Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+# EMA200 trend filter on 1w ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
+# Donchian(20) breakout captures strong momentum moves. Volume confirmation ensures institutional participation.
 # Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
 
-name = "4h_Donchian20_12hEMA50_VolumeConfirm_ATRStop_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA200_VolumeConfirm_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -34,20 +34,23 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1w data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA200 for trend filter
+    close_1w_series = pd.Series(close_1w)
+    ema200_1w = close_1w_series.ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align 12h EMA50 to 4h timeframe (wait for 12h bar to close)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align 1w EMA200 to 1d timeframe (wait for 1w bar to close)
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Calculate Donchian channels (20-period) on 4h
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian(20) channels from prior 1d bar
+    # Upper = max(high of last 20 days), Lower = min(low of last 20 days)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,24 +59,24 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND 12h EMA50 > 0 (rising trend) AND volume > 1.5x average
-            if (close[i] > highest_high[i] and 
-                ema50_12h_aligned[i] > np.roll(ema50_12h_aligned, 1)[i] and  # EMA50 rising
+            # LONG: Price breaks above Donchian upper AND 1w EMA200 rising AND volume > 1.5x average
+            if (close[i] > donchian_upper[i] and 
+                ema200_1w_aligned[i] > np.roll(ema200_1w_aligned, 1)[i] and  # EMA200 rising
                 volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian lower AND 12h EMA50 < 0 (falling trend) AND volume > 1.5x average
-            elif (close[i] < lowest_low[i] and 
-                  ema50_12h_aligned[i] < np.roll(ema50_12h_aligned, 1)[i] and  # EMA50 falling
+            # SHORT: Price breaks below Donchian lower AND 1w EMA200 falling AND volume > 1.5x average
+            elif (close[i] < donchian_lower[i] and 
+                  ema200_1w_aligned[i] < np.roll(ema200_1w_aligned, 1)[i] and  # EMA200 falling
                   volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
@@ -93,7 +96,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
@@ -108,7 +111,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
