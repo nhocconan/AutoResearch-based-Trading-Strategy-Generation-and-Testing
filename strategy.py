@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-# 6h_Daily_WMA_Cross_Volume_Regime
-# Hypothesis: Daily WMA(9) crossing above/below WMA(21) indicates trend direction on 6h chart.
-# Enter long when fast WMA crosses above slow WMA with volume confirmation and price above 6h VWAP.
-# Enter short when fast WMA crosses below slow WMA with volume confirmation and price below 6h VWAP.
-# Uses daily WMA for trend (updated once per day) and 6h VWAP for entry filtering to avoid whipsaws.
-# Works in bull (trend-following with momentum) and bear (mean-reversion during low volatility).
+# 4h_Donchian_20_Upper_Lower_Breakout_Volume_Trend_Filter
+# Hypothesis: Donchian channel breakouts (20-period high/low) with volume confirmation and EMA trend filter capture strong momentum.
+# Works in bull (breakouts with trend) and bear (breakdowns against trend filtered by EMA). Uses 4h for execution and daily EMA for trend.
 
-name = "6h_Daily_WMA_Cross_Volume_Regime"
-timeframe = "6h"
+name = "4h_Donchian_20_Upper_Lower_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,62 +21,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for WMA trend
+    # Calculate Donchian channels (20-period) on 4h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Get daily EMA for trend filter
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate daily WMA(9) and WMA(21)
     close_1d = df_1d['close'].values
-    wma_9 = pd.Series(close_1d).ewm(span=9, adjust=False).mean().values
-    wma_21 = pd.Series(close_1d).ewm(span=21, adjust=False).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Align daily WMA to 6h chart (wait for daily close)
-    wma_9_aligned = align_htf_to_ltf(prices, df_1d, wma_9)
-    wma_21_aligned = align_htf_to_ltf(prices, df_1d, wma_21)
-    
-    # 6h VWAP for entry filtering
-    typical_price = (high + low + close) / 3.0
-    vwap_num = (typical_price * volume).cumsum()
-    vwap_den = volume.cumsum()
-    vwap = vwap_num / vwap_den
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.3 * vol_ma)
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
-        # Detect WMA crossovers
-        wma9_prev = wma_9_aligned[i-1]
-        wma21_prev = wma_21_aligned[i-1]
-        wma9_curr = wma_9_aligned[i]
-        wma21_curr = wma_21_aligned[i]
-        
-        bullish_cross = wma9_prev <= wma21_prev and wma9_curr > wma21_curr
-        bearish_cross = wma9_prev >= wma21_prev and wma9_curr < wma21_curr
-        
+    for i in range(20, n):  # Start after Donchian warmup
         if position == 0:
-            # LONG: Bullish WMA cross with volume confirmation and price above VWAP
-            if bullish_cross and volume_filter[i] and close[i] > vwap[i]:
+            # LONG: Breakout above Donchian high with volume and EMA uptrend
+            if close[i] > donchian_high[i] and volume_filter[i] and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bearish WMA cross with volume confirmation and price below VWAP
-            elif bearish_cross and volume_filter[i] and close[i] < vwap[i]:
+            # SHORT: Breakdown below Donchian low with volume and EMA downtrend
+            elif close[i] < donchian_low[i] and volume_filter[i] and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bearish WMA cross or price breaks below VWAP
-            if bearish_cross or close[i] < vwap[i]:
+            # EXIT LONG: Price returns below Donchian low or EMA turns down
+            if close[i] < donchian_low[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bullish WMA cross or price breaks above VWAP
-            if bullish_cross or close[i] > vwap[i]:
+            # EXIT SHORT: Price returns above Donchian high or EMA turns up
+            if close[i] > donchian_high[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
