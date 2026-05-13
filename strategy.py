@@ -1,18 +1,31 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
-# Hypothesis: Enter long when price breaks above Camarilla R1 level during 4h uptrend with volume confirmation, short when breaks below S1 during 4h downtrend.
-# Uses Camarilla pivot levels (H4/L4 and R1/S1) from 4h for structure, 1h for entry timing.
-# Volume filter ensures institutional participation. Trend filter from 4h EMA50 reduces false signals in chop.
-# Designed for low frequency: Camarilla levels are strong S/R, breakouts require momentum.
-# Works in bull (breakouts above R1 in uptrend) and bear (breakdowns below S1 in downtrend).
+# 6h_Weekly_Pivot_Swing_Rejection_1dTrend
+# Hypothesis: Fade at weekly pivot R4/S4 levels when price shows rejection (wick rejection) in the direction of the 1d EMA100 trend.
+# Weekly pivots act as strong support/resistance on higher timeframe. Wick rejection indicates institutional defense of levels.
+# Trend filter ensures trades align with weekly momentum, avoiding counter-trend trades in strong trends.
+# Works in bull (buy R4 rejection in uptrend) and bear (sell S4 rejection in downtrend).
+# Low frequency due to requirement of weekly pivot levels and clear price action rejection.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Swing_Rejection_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_weekly_pivots(high, low, close):
+    """Calculate weekly pivot points: P, R1-S1, R2-S2, R3-S3, R4-S4"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pivot, r1, s1, r2, s2, r3, s3, r4, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,51 +37,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for Camarilla pivot and trend
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Typical price for Camarilla calculation
-    typical_price = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
-    tp_h = typical_price.values
-    tp_l = df_4h['low'].values
-    tp_c = df_4h['close'].values
+    # Calculate weekly pivots
+    wk_high = df_1w['high'].values
+    wk_low = df_1w['low'].values
+    wk_close = df_1w['close'].values
     
-    # Calculate Camarilla levels (based on previous day's OHLC)
-    # Using 4h bar's high/low/close as session equivalent
-    H = tp_h
-    L = tp_l
-    C = tp_c
+    # Initialize pivot arrays
+    r4 = np.full_like(wk_close, np.nan)
+    s4 = np.full_like(wk_close, np.nan)
     
-    # Camarilla formulas
-    R4 = C + ((H - L) * 1.1 / 2)
-    R3 = C + ((H - L) * 1.1 / 4)
-    R2 = C + ((H - L) * 1.1 / 6)
-    R1 = C + ((H - L) * 1.1 / 12)
-    S1 = C - ((H - L) * 1.1 / 12)
-    S2 = C - ((H - L) * 1.1 / 6)
-    S3 = C - ((H - L) * 1.1 / 4)
-    S4 = C - ((H - L) * 1.1 / 2)
+    # Calculate pivots for each weekly bar
+    for i in range(len(wk_close)):
+        if i == 0:
+            # First bar: need previous week data, but we don't have it
+            # Use current bar as placeholder (will be overwritten when real data available)
+            pivot, r1, s1, r2, s2, r3, s3, r4_val, s4_val = calculate_weekly_pivots(
+                wk_high[i], wk_low[i], wk_close[i]
+            )
+        else:
+            pivot, r1, s1, r2, s2, r3, s3, r4_val, s4_val = calculate_weekly_pivots(
+                wk_high[i-1], wk_low[i-1], wk_close[i-1]  # Use previous week's data
+            )
+        r4[i] = r4_val
+        s4[i] = s4_val
     
-    # 4h trend: EMA50
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get daily data for trend
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Align 4h indicators to 1h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_4h, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_4h, S1)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Daily trend: EMA100
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
     
-    # Volume spike: volume > 1.5 * 12-period average (equivalent to 6h)
-    vol_ma_12 = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
-    volume_spike = volume > 1.5 * vol_ma_12
+    # Align weekly pivots and daily trend to 6h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    
+    # Wick rejection detection: long tail in opposite direction of move
+    # Bullish rejection: long lower wick, close near high
+    body_size = np.abs(close - open_)
+    lower_wick = np.minimum(open_, close) - low
+    upper_wick = high - np.maximum(open_, close)
+    
+    # Need open prices
+    open_ = prices['open'].values
+    
+    bullish_rejection = (lower_wick > 2 * body_size) & (close > open_)  # Long lower wick, bullish close
+    bearish_rejection = (upper_wick > 2 * body_size) & (close < open_)  # Long upper wick, bearish close
+    
+    # Align rejection signals
+    bullish_rejection_aligned = align_htf_to_ltf(prices, prices, bullish_rejection.astype(float))
+    bearish_rejection_aligned = align_htf_to_ltf(prices, prices, bearish_rejection.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
+            np.isnan(ema100_1d_aligned[i]) or
+            np.isnan(bullish_rejection_aligned[i]) or
+            np.isnan(bearish_rejection_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,29 +110,38 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R1 + 4h uptrend + volume spike
-            if close[i] > R1_aligned[i] and close[i] > ema50_4h_aligned[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # LONG: Price at S4 with bullish rejection + daily uptrend
+            if close[i] <= s4_aligned[i] * 1.005 and bullish_rejection_aligned[i] and close[i] > ema100_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S1 + 4h downtrend + volume spike
-            elif close[i] < S1_aligned[i] and close[i] < ema50_4h_aligned[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # SHORT: Price at R4 with bearish rejection + daily downtrend
+            elif close[i] >= r4_aligned[i] * 0.995 and bearish_rejection_aligned[i] and close[i] < ema100_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below EMA50 or below S1 (stop)
-            if close[i] < ema50_4h_aligned[i] or close[i] < S1_aligned[i]:
+            # EXIT LONG: Price reaches R2 or trend reversal
+            # Calculate R2 for exit
+            _, _, _, r2, _, _, _, _, _ = calculate_weekly_pivots(
+                wk_high[0] if len(wk_high) > 0 else 0, 
+                wk_low[0] if len(wk_low) > 0 else 0, 
+                wk_close[0] if len(wk_close) > 0 else 0
+            )
+            # Simplified: exit at midpoint between S4 and R4 or trend change
+            midpoint = (s4_aligned[i] + r4_aligned[i]) / 2
+            if close[i] >= midpoint or close[i] < ema100_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above EMA50 or above R1 (stop)
-            if close[i] > ema50_4h_aligned[i] or close[i] > R1_aligned[i]:
+            # EXIT SHORT: Price reaches S2 or trend reversal
+            midpoint = (s4_aligned[i] + r4_aligned[i]) / 2
+            if close[i] <= midpoint or close[i] > ema100_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
