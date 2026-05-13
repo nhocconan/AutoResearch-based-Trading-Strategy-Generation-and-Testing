@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and 1d volume confirmation.
-# Enters long when price breaks above Camarilla R1 level with 4h bullish trend (close > EMA50) and 1d volume > 1.5x MA20.
-# Enters short when price breaks below Camarilla S1 level with 4h bearish trend (close < EMA50) and 1d volume > 1.5x MA20.
-# Exits when price reverts to the Camarilla pivot point.
-# Uses discrete position sizing (0.20) to limit fee churn and manage drawdown.
-# Designed for low trade frequency (~15-37/year) by requiring strict confluence: price breakout + HTF trend + volume confirmation.
-# Camarilla R1/S1 levels provide strong intraday support/resistance, while 4h EMA50 filter ensures alignment with higher timeframe momentum.
-# Volume confirmation on 1d timeframe reduces false breakouts, improving signal quality in both bull and bear markets.
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter (price > weekly EMA50) and volume confirmation (volume > 1.5x MA20).
+# Enters long when price breaks above the 20-period Donchian high with weekly bullish trend (close > weekly EMA50) and volume confirmation.
+# Enters short when price breaks below the 20-period Donchian low with weekly bearish trend (close < weekly EMA50) and volume confirmation.
+# Exits when price reverts to the 10-period Donchian midpoint (mean reversion) or ATR-based stoploss (2.0 * ATR14 from entry).
+# Uses discrete position sizing (0.25) to limit fee churn and manage drawdown.
+# Designed for low trade frequency (~12-37/year) by requiring strict confluence: price breakout + weekly trend + volume spike.
+# Donchian channels provide objective breakout levels, while weekly EMA50 filter ensures alignment with higher timeframe momentum.
+# Volume threshold (1.5x) reduces false breakouts, improving signal quality in both bull and bear markets.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume_v1"
-timeframe = "1h"
+name = "6h_Donchian20_Breakout_WeeklyTrend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,75 +26,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # Calculate EMA(50) on 4h close
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Calculate EMA(50) on 1w close
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Get 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    # Calculate 20-period MA on 1d volume
-    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (highest_high + lowest_low) / 2.0  # 10-period midpoint for exit
     
-    # Calculate Camarilla levels from previous 1d bar
-    prev_high = df_1d['high'].shift(1).values  # previous day high
-    prev_low = df_1d['low'].shift(1).values    # previous day low
-    prev_close = df_1d['close'].shift(1).values # previous day close
+    # Volume filter: current volume > 1.5x 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 1.5)
     
-    # Calculate Camarilla levels
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
-    r1 = pivot + (range_hl * 1.1 / 12.0)  # Resistance 1
-    s1 = pivot - (range_hl * 1.1 / 12.0)  # Support 1
-    r4 = pivot + (range_hl * 1.1 / 2.0)   # Resistance 4
-    s4 = pivot - (range_hl * 1.1 / 2.0)   # Support 4
+    # ATR(14) for volatility and stoploss
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]  # first bar
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    
-    # Volume filter: current 1d volume > 1.5x 20-period average
-    volume_spike = volume_1d > (vol_ma20_1d * 1.5)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    
+    # Track entry price for ATR-based stoploss
+    entry_price = np.full(n, np.nan)
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(pivot_aligned[i]) or \
-           np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_spike_aligned[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(donchian_mid[i]) or \
+           np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma20[i]) or np.isnan(atr14[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 with 4h bullish trend and 1d volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema50_4h_aligned[i] and volume_spike_aligned[i]:
-                signals[i] = 0.20
+            # LONG: Price breaks above Donchian high with weekly bullish trend and volume spike
+            if close[i] > highest_high[i] and close[i] > ema50_1w_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S1 with 4h bearish trend and 1d volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema50_4h_aligned[i] and volume_spike_aligned[i]:
-                signals[i] = -0.20
+                entry_price[i] = close[i]  # record entry price at close of signal bar
+            # SHORT: Price breaks below Donchian low with weekly bearish trend and volume spike
+            elif close[i] < lowest_low[i] and close[i] < ema50_1w_aligned[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
+                entry_price[i] = close[i]  # record entry price at close of signal bar
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reverts to Camarilla pivot (mean reversion)
-            if close[i] < pivot_aligned[i]:
+            # EXIT LONG: Price reverts to Donchian midpoint (mean reversion) OR ATR stoploss hit
+            if close[i] < donchian_mid[i] or close[i] < entry_price[i-1] - 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price[i] = np.nan
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
+                entry_price[i] = entry_price[i-1]  # carry forward entry price
         elif position == -1:
-            # EXIT SHORT: Price reverts to Camarilla pivot (mean reversion)
-            if close[i] > pivot_aligned[i]:
+            # EXIT SHORT: Price reverts to Donchian midpoint (mean reversion) OR ATR stoploss hit
+            if close[i] > donchian_mid[i] or close[i] > entry_price[i-1] + 2.0 * atr14[i]:
                 signals[i] = 0.0
                 position = 0
+                entry_price[i] = np.nan
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
+                entry_price[i] = entry_price[i-1]  # carry forward entry price
     
     return signals
