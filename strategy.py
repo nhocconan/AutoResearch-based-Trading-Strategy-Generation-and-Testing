@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Momentum_v2
-# Hypothesis: Breakouts above daily Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34), with volume confirmation and momentum filter (ROC>0). Reduced trade frequency by tightening volume confirmation (2.0x avg) and adding a 3-bar cooldown after exits to avoid whipsaw and overtrading. Designed for low trade frequency to avoid fee drag in both bull and bear markets.
+# 1d_Donchian_20_1wTrend_Volume_Spike
+# Hypothesis: 1d Donchian(20) breakout with weekly EMA34 trend filter and volume spike (2.0x 20-day avg). Designed for low trade frequency (<=25/year) to avoid fee drag. Works in bull (breakouts with momentum) and bear (mean reversion via trend filter) by requiring trend alignment, reducing false breakouts.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Momentum_v2"
-timeframe = "4h"
+name = "1d_Donchian_20_1wTrend_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,79 +20,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels (based on previous day's range)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar (based on previous day's range)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
-    camarilla_r1 = np.full_like(prev_close, np.nan)
-    camarilla_s1 = np.full_like(prev_close, np.nan)
+    # Calculate daily Donchian channels (20-period)
+    # Upper band: highest high of last 20 days
+    # Lower band: lowest low of last 20 days
+    roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
-    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Get 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: volume > 2.0x 20-period average (tighter to reduce trades)
+    # Volume confirmation: volume > 2.0x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma)
-    
-    # Momentum filter: ROC > 0 (positive momentum)
-    roc = np.zeros_like(close)
-    roc[10:] = (close[10:] - close[:-10]) / close[:-10]  # 10-period ROC
-    momentum_filter = roc > 0
+    volume_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
-    for i in range(50, n):
-        # Decrease cooldown if active
-        if cooldown > 0:
-            cooldown -= 1
-        
-        if position == 0 and cooldown == 0:
-            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34) and positive momentum
-            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1d_aligned[i] and momentum_filter[i]:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34) and negative momentum
-            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1d_aligned[i] and not momentum_filter[i]:
-                signals[i] = -0.25
-                position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # EXIT LONG: Price crosses back below R1 or trend weakens (price < EMA34)
-            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                cooldown = 3  # 3-bar cooldown after exit
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # EXIT SHORT: Price crosses back above S1 or trend weakens (price > EMA34)
-            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-               high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                cooldown = 3  # 3-bar cooldown after exit
-            else:
-                signals[i] = -0.25
+    for i in range(20, n):
+        # LONG: Price breaks above Donchian upper band with volume spike in weekly uptrend
+        if position == 0 and roll_max[i] > 0 and not np.isnan(roll_max[i]) and \
+           high[i] > roll_max[i] and volume_spike[i] and close[i] > ema_34_1w_aligned[i]:
+            signals[i] = 0.25
+            position = 1
+        # SHORT: Price breaks below Donchian lower band with volume spike in weekly downtrend
+        elif position == 0 and roll_min[i] > 0 and not np.isnan(roll_min[i]) and \
+             low[i] < roll_min[i] and volume_spike[i] and close[i] < ema_34_1w_aligned[i]:
+            signals[i] = -0.25
+            position = -1
+        # EXIT LONG: Price falls below Donchian lower band
+        elif position == 1 and roll_min[i] > 0 and not np.isnan(roll_min[i]) and \
+             low[i] < roll_min[i]:
+            signals[i] = 0.0
+            position = 0
+        # EXIT SHORT: Price rises above Donchian upper band
+        elif position == -1 and roll_max[i] > 0 and not np.isnan(roll_max[i]) and \
+             high[i] > roll_max[i]:
+            signals[i] = 0.0
+            position = 0
+        else:
+            signals[i] = 0.0
     
     return signals
