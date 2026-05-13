@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Direction_1dTrend_VolumeSpike
-# Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a smooth trend line.
-# In trending markets, price stays close to KAMA; in ranging markets, it diverges.
-# We go long when price crosses above KAMA with volume spike and 1d uptrend (price > 1d EMA34).
-# We go short when price crosses below KAMA with volume spike and 1d downtrend (price < 1d EMA34).
-# Exit when price crosses back over KAMA.
-# Uses 12h timeframe with 1d trend filter to reduce whipsaw and capture major trends.
-# Designed to work in bull (buy in uptrend) and bear (sell in downtrend) markets.
-# Target: 15-30 trades/year per symbol.
+# 1d_Keltner_Breakout_1wTrend
+# Hypothesis: Keltner Channel breakout with weekly trend filter captures strong trends
+# while avoiding whipsaws. Enter long when price closes above upper KC with weekly
+# uptrend (price > weekly EMA50). Enter short when price closes below lower KC with
+# weekly downtrend. Exit on opposite KC touch. Designed for low-frequency, high-conviction
+# trades on daily timeframe to minimize fee drag and work in both bull and bear markets.
+# Target: 10-25 trades/year per symbol.
 
-name = "12h_KAMA_Direction_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Keltner_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,56 +23,50 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
 
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 12h close
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close[i] - close[i-1]| over 10 periods
-    # Avoid division by zero
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
+    # Keltner Channel (20, 2.0) on daily data
+    atr_period = 20
+    kc_multiplier = 2.0
+    ema_period = 20
 
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # True Range
+    tr0 = np.abs(high - low)
+    tr1 = np.abs(high - np.roll(close, 1))
+    tr2 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr0, np.maximum(tr1, tr2))
+    tr[0] = tr0[0]
 
-    # Initialize KAMA
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # Start after first ER calculation
+    # ATR
+    atr = np.zeros(n)
+    for i in range(atr_period, n):
+        atr[i] = np.mean(tr[i-atr_period:i])
 
-    for i in range(10, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # EMA (middle line)
+    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
 
-    # Get 1d EMA34 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Upper and Lower KC
+    kc_upper = ema + kc_multiplier * atr
+    kc_lower = ema - kc_multiplier * atr
 
-    # Volume confirmation: current volume > 2.0 x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    # Weekly EMA50 for trend filter
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(10, n):
-        # Skip if data is not ready
-        if (np.isnan(kama[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(ema_1d_aligned[i])):
+    for i in range(max(atr_period, ema_period) + 1, n):
+        # Skip if data not ready
+        if np.isnan(atr[i]) or np.isnan(ema[i]) or np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,26 +75,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price crosses above KAMA with volume spike and 1d EMA uptrend
-            if close[i] > kama[i] and close[i-1] <= kama[i-1] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+            # LONG: Close above upper KC with weekly uptrend
+            if close[i] > kc_upper[i] and close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price crosses below KAMA with volume spike and 1d EMA downtrend
-            elif close[i] < kama[i] and close[i-1] >= kama[i-1] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+            # SHORT: Close below lower KC with weekly downtrend
+            elif close[i] < kc_lower[i] and close[i] < ema_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below KAMA
-            if close[i] < kama[i] and close[i-1] >= kama[i-1]:
+            # EXIT LONG: Touch or cross below lower KC
+            if close[i] < kc_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above KAMA
-            if close[i] > kama[i] and close[i-1] <= kama[i-1]:
+            # EXIT SHORT: Touch or cross above upper KC
+            if close[i] > kc_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
