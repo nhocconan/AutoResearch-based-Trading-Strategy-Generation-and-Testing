@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels (R1, S1) from 1d with 1d trend filter (EMA34) and volume confirmation work in both bull and bear markets.
-Breakout above R1 with 1d uptrend and volume spike = long.
-Breakdown below S1 with 1d downtrend and volume spike = short.
-Exit on opposite level (S1 for long, R1 for short) or trend reversal.
-Uses 1d Camarilla levels for structure and 1w trend filter for higher timeframe bias.
-Target: 15-30 trades/year per symbol.
+1d_WeeklyPivot_SupportResistance_Trend_Filter
+Hypothesis: Weekly pivot points (support/resistance) act as strong daily-level barriers. 
+Price breaking above weekly R1 with bullish weekly trend and volume confirmation = long.
+Price breaking below weekly S1 with bearish weekly trend and volume confirmation = short.
+Exit on return to weekly pivot (PP) or trend reversal. Uses weekly trend filter for higher timeframe bias.
+Target: 10-25 trades/year per symbol to minimize fee decay in ranging markets.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_WeeklyPivot_SupportResistance_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -27,43 +26,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Camarilla pivot levels (R1, S1)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels for each 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 12
-    s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align to 12h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # 1d trend filter: EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = close_1d > ema_34_1d
-    downtrend_1d = close_1d < ema_34_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    
-    # 1w trend filter (higher timeframe bias)
+    # Weekly pivot points (calculated from prior week)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 1:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1w = close_1w > ema_34_1w
-    downtrend_1w = close_1w < ema_34_1w
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    
+    # Align weekly pivot levels to daily timeframe (available after weekly bar closes)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Weekly trend filter: EMA50 on weekly close
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_uptrend = weekly_close > weekly_ema50
+    weekly_downtrend = weekly_close < weekly_ema50
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
+    
+    # Volume confirmation: volume > 1.5 * 20-day average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -74,35 +63,34 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get values
-        r1 = r1_1d_aligned[i]
-        s1 = s1_1d_aligned[i]
-        uptrend_1d_val = uptrend_1d_aligned[i]
-        downtrend_1d_val = downtrend_1d_aligned[i]
-        uptrend_1w_val = uptrend_1w_aligned[i]
-        downtrend_1w_val = downtrend_1w_aligned[i]
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        weekly_uptrend = weekly_uptrend_aligned[i]
+        weekly_downtrend = weekly_downtrend_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: break above R1, 1d uptrend, 1w uptrend filter, volume confirmation
-            if close[i] > r1 and uptrend_1d_val and uptrend_1w_val and vol_conf:
+            # LONG: break above weekly R1, weekly uptrend, volume confirmation
+            if close[i] > r1_val and weekly_uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1, 1d downtrend, 1w downtrend filter, volume confirmation
-            elif close[i] < s1 and downtrend_1d_val and downtrend_1w_val and vol_conf:
+            # SHORT: break below weekly S1, weekly downtrend, volume confirmation
+            elif close[i] < s1_val and weekly_downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch S1 or 1d trend turns down
-            if close[i] < s1 or not uptrend_1d_val:
+            # EXIT LONG: return to weekly pivot (PP) or weekly trend turns down
+            if close[i] <= pp_val or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch R1 or 1d trend turns up
-            if close[i] > r1 or not downtrend_1d_val:
+            # EXIT SHORT: return to weekly pivot (PP) or weekly trend turns up
+            if close[i] >= pp_val or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
