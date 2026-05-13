@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 6h_Pivot_Reversal_1dTrend_Volume
-# Hypothesis: Daily pivot point reversal on 6h timeframe with 1d trend filter and volume confirmation.
-# Uses previous day's pivot (PP), resistance (R1), and support (S1) levels.
-# Long when price crosses above PP in uptrend (close > EMA50) with volume spike.
-# Short when price crosses below PP in downtrend (close < EMA50) with volume spike.
-# Works in bull markets (buying dips above PP) and bear markets (selling rallies below PP).
-# Target: 12-37 trades/year on 6h timeframe.
+# 12h_Camarilla_R1S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Uses Camarilla pivot levels (R1/S1) on 12h chart with 1d trend filter (EMA34) and volume confirmation.
+# Works in bull markets by buying breakouts above R1 in uptrend, and in bear markets by selling breakdowns below S1 in downtrend.
+# Target: 12-30 trades/year to minimize fee drag on 12h timeframe.
 
-name = "6h_Pivot_Reversal_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,77 +22,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot point calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for Camarilla calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate daily pivot points using previous day's OHLC
-    # PP = (High + Low + Close) / 3
-    # R1 = 2*PP - Low
-    # S1 = 2*PP - High
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Camarilla levels for each 12h bar (based on previous bar's range)
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # Use the PREVIOUS completed bar's range to avoid look-ahead
+    prev_high = df_12h['high'].shift(1).values
+    prev_low = df_12h['low'].shift(1).values
+    prev_close = df_12h['close'].shift(1).values
     
     # Avoid NaN from shift
     valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
-    pivot_point = np.full_like(prev_close, np.nan)
-    r1 = np.full_like(prev_close, np.nan)
-    s1 = np.full_like(prev_close, np.nan)
+    camarilla_r1 = np.full_like(prev_close, np.nan)
+    camarilla_s1 = np.full_like(prev_close, np.nan)
     
-    pivot_point[valid_idx] = (prev_high[valid_idx] + prev_low[valid_idx] + prev_close[valid_idx]) / 3
-    r1[valid_idx] = 2 * pivot_point[valid_idx] - prev_low[valid_idx]
-    s1[valid_idx] = 2 * pivot_point[valid_idx] - prev_high[valid_idx]
+    # Calculate where we have valid data
+    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     
-    # Align pivot levels to 6h timeframe
-    pivot_pp_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
-    pivot_r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    pivot_s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 12h timeframe (already on 12h bars)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
     
-    # Get 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Volume confirmation: volume > 2.0x 20-period average
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (2.0 * vol_ma)
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after warmup
         if position == 0:
-            # LONG: Price crosses above daily PP with volume in uptrend
-            if (pivot_pp_aligned[i] > 0 and not np.isnan(pivot_pp_aligned[i]) and
-                close[i] > pivot_pp_aligned[i] and
-                low[i] <= pivot_pp_aligned[i] and  # crossed from below
-                volume_confirmed[i] and
-                close[i] > ema_50_1d_aligned[i]):
+            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below daily PP with volume in downtrend
-            elif (pivot_pp_aligned[i] > 0 and not np.isnan(pivot_pp_aligned[i]) and
-                  close[i] < pivot_pp_aligned[i] and
-                  high[i] >= pivot_pp_aligned[i] and  # crossed from above
-                  volume_confirmed[i] and
-                  close[i] < ema_50_1d_aligned[i]):
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34)
+            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 or trend weakens
-            if (pivot_s1_aligned[i] > 0 and not np.isnan(pivot_s1_aligned[i]) and
-                low[i] < pivot_s1_aligned[i]) or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: Price crosses back below R1 or trend weakens (price < EMA34)
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 or trend weakens
-            if (pivot_r1_aligned[i] > 0 and not np.isnan(pivot_r1_aligned[i]) and
-                high[i] > pivot_r1_aligned[i]) or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: Price crosses back above S1 or trend weakens (price > EMA34)
+            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+               high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
