@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and choppiness regime filter.
-# Long when price breaks above Camarilla R3 AND 1d volume > 2.0x 20-period average AND 4h choppiness index > 61.8 (range).
-# Short when price breaks below Camarilla S3 AND 1d volume > 2.0x 20-period average AND 4h choppiness index > 61.8 (range).
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and 1w EMA50 trend filter.
+# Long when price breaks above Camarilla R3 AND 1d volume > 2.0x 20-period average AND price > 1w EMA50.
+# Short when price breaks below Camarilla S3 AND 1d volume > 2.0x 20-period average AND price < 1w EMA50.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
-# Camarilla pivots provide precise intraday support/resistance levels that work in ranging markets.
-# Choppiness index > 61.8 ensures we only trade in ranging conditions, avoiding false breakouts in strong trends.
-# Volume spike confirms breakout legitimacy. Target: 80-160 total trades over 4 years (20-40/year) on 4h.
+# Camarilla levels provide precise intraday support/resistance derived from prior day's range.
+# 1d volume spike confirms breakout legitimacy. 1w EMA50 ensures alignment with weekly trend.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
 
-name = "4h_Camarilla_R3S3_Breakout_1dVolume_Chop_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -33,44 +33,33 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels (based on previous day's OHLC)
-    # For 4h timeframe, we use 1d OHLC to calculate Camarilla levels
+    # Get 1d data for Camarilla levels and volume
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Camarilla levels: R3, R2, R1, PP, S1, S2, S3
-    # PP = (high + low + close) / 3
-    # Range = high - low
-    # R3 = PP + Range * 1.1/2
-    # S3 = PP - Range * 1.1/2
-    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate Camarilla levels (R3, S3) from prior 1d bar
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
     rang = high_1d - low_1d
-    r3 = pp + (rang * 1.1 / 2.0)
-    s3 = pp - (rang * 1.1 / 2.0)
+    camarilla_r3 = close_1d + 1.1 * rang / 2
+    camarilla_s3 = close_1d - 1.1 * rang / 2
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate volume confirmation: volume > 2.0x 20-period average (1d)
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = df_1d['volume'].values > (2.0 * vol_ma_20_1d)
-    volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d.astype(float))
+    # Calculate 1d volume confirmation: volume > 2.0x 20-period average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume_1d > (2.0 * vol_ma_20)
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm)
     
-    # Calculate 4h choppiness index (14-period)
-    # CHOP = 100 * log10(sum(ATR1) / (n * log10(highest_high - lowest_low))) / log10(n)
-    # Simplified: CHOP = 100 * log10(sum(TR14) / (14 * log10(HH14 - LL14))) / log10(14)
-    tr_4h = tr  # Already calculated TR for ATR
-    sum_tr_14 = pd.Series(tr_4h).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop_denominator = 14 * np.log10(highest_high_14 - lowest_low_14 + 1e-10)
-    chop_denominator = np.where(chop_denominator <= 0, np.nan, chop_denominator)
-    chop_ratio = sum_tr_14 / chop_denominator
-    chop_ratio = np.where(chop_ratio <= 0, np.nan, chop_ratio)
-    chop = 100 * np.log10(chop_ratio) / np.log10(14)
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,20 +68,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(volume_confirm_1d_aligned[i]) or np.isnan(chop[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(volume_confirm_aligned[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Camarilla R3 AND 1d volume confirmation AND chop > 61.8 (range)
-            if close[i] > r3_aligned[i] and volume_confirm_1d_aligned[i] > 0.5 and chop[i] > 61.8:
+            # LONG: Price > Camarilla R3 AND 1d volume confirmation AND price > 1w EMA50
+            if close[i] > camarilla_r3_aligned[i] and volume_confirm_aligned[i] and close[i] > ema_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Camarilla S3 AND 1d volume confirmation AND chop > 61.8 (range)
-            elif close[i] < s3_aligned[i] and volume_confirm_1d_aligned[i] > 0.5 and chop[i] > 61.8:
+            # SHORT: Price < Camarilla S3 AND 1d volume confirmation AND price < 1w EMA50
+            elif close[i] < camarilla_s3_aligned[i] and volume_confirm_aligned[i] and close[i] < ema_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
