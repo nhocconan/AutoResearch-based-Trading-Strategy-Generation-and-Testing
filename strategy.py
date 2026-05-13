@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot breakouts on 12h with 1d trend filter and volume confirmation provide clean entries with low trade frequency, working in both bull and bear markets by capturing institutional levels with trend alignment.
-Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+Hypothesis: Camarilla pivot R1/S1 breakouts with 12h trend (EMA50) and volume confirmation work in both bull and bear markets.
+Breakout above R1 with uptrend and volume spike = long.
+Breakdown below S1 with downtrend and volume spike = short.
+Exit on opposite S1/R1 touch or trend reversal. Target: 20-50 trades/year per symbol.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,32 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Camarilla pivot levels: R1, S1 from previous day
-    # R1 = Close + 1.1*(High-Low)/12
-    # S1 = Close - 1.1*(High-Low)/12
-    # We use previous day's OHLC (from 1d data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate Camarilla pivot levels from previous day
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous day's OHLC
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # First bar uses current
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # 4h trend: EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_4h = close > ema_50
+    downtrend_4h = close < ema_50
+    
+    # 12h trend filter (HTF) - using EMA50 on 12h closes
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    
-    # Align to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 1d trend filter: EMA50
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_12h = df_12h['close'].values > ema_50_12h
+    downtrend_12h = df_12h['close'].values < ema_50_12h
+    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
+    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
     
     # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
@@ -61,33 +65,35 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Get values
-        r1 = camarilla_r1_aligned[i]
-        s1 = camarilla_s1_aligned[i]
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
+        r1_val = r1[i]
+        s1_val = s1[i]
+        uptrend = uptrend_4h[i]
+        downtrend = downtrend_4h[i]
+        uptrend_htf = uptrend_12h_aligned[i]
+        downtrend_htf = downtrend_12h_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: break above R1 with uptrend and volume confirmation
-            if close[i] > r1 and uptrend and vol_conf:
+            # LONG: break above R1, 4h uptrend, 12h uptrend filter, volume confirmation
+            if close[i] > r1_val and uptrend and uptrend_htf and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1 with downtrend and volume confirmation
-            elif close[i] < s1 and downtrend and vol_conf:
+            # SHORT: break below S1, 4h downtrend, 12h downtrend filter, volume confirmation
+            elif close[i] < s1_val and downtrend and downtrend_htf and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch S1 or trend turns down
-            if close[i] < s1 or not uptrend:
+            # EXIT LONG: touch S1 or 4h trend turns down
+            if close[i] < s1_val or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch R1 or trend turns up
-            if close[i] > r1 or not downtrend:
+            # EXIT SHORT: touch R1 or 4h trend turns up
+            if close[i] > r1_val or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
