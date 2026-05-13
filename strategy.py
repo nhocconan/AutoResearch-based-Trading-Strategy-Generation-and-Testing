@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_1wPivot_1dTrend_VolumeBreakout
-# Hypothesis: Enter long when price breaks above weekly R1 pivot level during 1d uptrend with volume spike, short when breaks below weekly S1 pivot in 1d downtrend with volume spike.
-# Weekly pivots provide institutional support/resistance levels. Trend filter ensures alignment with higher timeframe momentum.
-# Volume surge confirms breakout authenticity. Works in bull (breaks above R1 in uptrend) and bear (breaks below S1 in downtrend).
-# Low frequency due to pivot level requirement and volume confirmation.
+# 1d_Keltner_Channel_Breakout_WeeklyTrend_VolumeFilter
+# Hypothesis: Enter long when price closes above Keltner upper band (EMA20 + 2*ATR) during weekly uptrend with volume confirmation; enter short when price closes below Keltner lower band during weekly downtrend with volume confirmation.
+# Keltner Channels adapt to volatility, reducing false breakouts in low-volatility periods. Weekly trend filter ensures alignment with higher timeframe momentum.
+# Works in bull markets (breakouts above upper band in uptrend) and bear markets (breakdowns below lower band in downtrend).
+# Low-frequency signals due to weekly trend filter and volume confirmation, minimizing fee drag.
 
-name = "6h_1wPivot_1dTrend_VolumeBreakout"
-timeframe = "6h"
+name = "1d_Keltner_Channel_Breakout_WeeklyTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -23,45 +23,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot points
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-
-    # Weekly Pivot Points: (H+L+C)/3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # R1 = 2*P - L, S1 = 2*P - H
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-
-    # Daily trend: EMA50
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-
-    # Align weekly pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-
-    # Align daily EMA50 to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # Volume spike: volume > 2.0 * 4-period average (1 day worth at 6h)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_spike = volume > 2.0 * vol_ma_4
-
+    
+    # ATR for Keltner Channels (using True Range)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])  # First TR is inf to avoid look-ahead
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    
+    # EMA20 for Keltner Channel middle line
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Channels
+    upper = ema20 + 2 * atr
+    lower = ema20 - 2 * atr
+    
+    # Weekly trend: EMA50
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume filter: volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * vol_ma_20
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or 
+            np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,26 +65,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > weekly R1 + daily uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > upper Keltner band + weekly uptrend + volume filter
+            if close[i] > upper[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < weekly S1 + daily downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < lower Keltner band + weekly downtrend + volume filter
+            elif close[i] < lower[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below weekly pivot OR trend reversal
-            if close[i] < pivot_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close below EMA20 (middle line) OR weekly trend reversal
+            if close[i] < ema20[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above weekly pivot OR trend reversal
-            if close[i] > pivot_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close above EMA20 (middle line) OR weekly trend reversal
+            if close[i] > ema20[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
