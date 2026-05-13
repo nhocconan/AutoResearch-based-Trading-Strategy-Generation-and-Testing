@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 1d_RSI_Overbought_Oversold_With_Volume_Confirmation
-# Hypothesis: RSI extremes (below 30 for long, above 70 for short) combined with volume confirmation
-# captures mean reversion in both bull and bear markets. Uses 1w EMA50 as trend filter to avoid
-# trading against the higher timeframe trend. Target: 15-30 trades per year to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filter
+# Hypothesis: Price breaking above/below Camarilla R1/S1 levels with 1d EMA34 trend filter and volume confirmation captures momentum with controlled trade frequency.
+# Works in bull markets via breakouts above R1 and in bear markets via breakdowns below S1.
+# Uses 1d EMA34 to filter trend direction and volume spike for confirmation, reducing false signals.
+# Target: 20-50 trades per year per symbol to minimize fee drag.
 
-name = "1d_RSI_Overbought_Oversold_With_Volume_Confirmation"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,29 +15,46 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # RSI calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # ATR for context (not used in signal)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
 
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla pivot calculation and EMA34 trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate Camarilla pivot levels from previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # where C, H, L are from previous day
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align to 4h timeframe (available after previous day close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
 
-    # Volume filter: >1.5x 20-period average
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Volume filter: >1.8x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
@@ -44,8 +62,8 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,30 +72,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: RSI oversold (<30) + price above 1w EMA50 + volume confirmation
-            if (rsi[i] < 30 and 
-                close[i] > ema50_1w_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Close above R1 + 1d EMA34 uptrend + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.8):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought (>70) + price below 1w EMA50 + volume confirmation
-            elif (rsi[i] > 70 and 
-                  close[i] < ema50_1w_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Close below S1 + 1d EMA34 downtrend + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.8):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought (>70) or trend change
-            if rsi[i] > 70 or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Close below S1 or volatility drop
+            if close[i] < s1_aligned[i] or volume[i] < vol_avg_20[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold (<30) or trend change
-            if rsi[i] < 30 or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Close above R1 or volatility drop
+            if close[i] > r1_aligned[i] or volume[i] < vol_avg_20[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
