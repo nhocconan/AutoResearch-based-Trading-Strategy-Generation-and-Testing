@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_ADX_Trend_Riding
-Hypothesis: ADX > 25 identifies trending markets. Ride trends with +DI/-DI crossovers, using 1d trend filter to avoid counter-trend whipsaws. Exit when trend weakens (ADX < 20) or opposite crossover. Works in both bull and bear by capturing sustained moves.
-Target: 15-30 trades/year per symbol.
+12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels (R3/S3) breakouts on 12h with 1d trend filter and volume confirmation work in both bull and bear markets.
+Breakout above R3 with 1d uptrend and volume spike = long.
+Breakdown below S3 with 1d downtrend and volume spike = short.
+Exit on opposite level touch or trend reversal. Target: 12-37 trades/year per symbol.
 """
 
-name = "6h_ADX_Trend_Riding"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,37 +23,24 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # ADX(14) calculation
-    period = 14
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0.0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Camarilla pivot levels (based on previous day's range)
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
+    # Using 12h high/low/close to calculate levels for next bar
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    range_ = prev_high - prev_low
+    R3 = prev_close + 1.1 * range_ / 2
+    S3 = prev_close - 1.1 * range_ / 2
     
-    # Smoothed values
-    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False).values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).values
-    
-    # 1d trend filter: EMA50
+    # 1d trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -61,37 +50,44 @@ def generate_signals(prices):
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
+    # Volume confirmation: volume > 2.0 * 20-period average
+    vol_ma = np.zeros(n)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_conf = volume > 2.0 * vol_ma
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(period*2, n):
-        adx_val = adx[i]
-        plus_di_val = plus_di[i]
-        minus_di_val = minus_di[i]
-        uptrend_1d_filt = uptrend_1d_aligned[i]
-        downtrend_1d_filt = downtrend_1d_aligned[i]
+    for i in range(20, n):
+        # Get values
+        r3 = R3[i]
+        s3 = S3[i]
+        uptrend_htf = uptrend_1d_aligned[i]
+        downtrend_htf = downtrend_1d_aligned[i]
+        vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: ADX > 25, +DI crosses above -DI, 1d uptrend filter
-            if adx_val > 25 and plus_di_val > minus_di_val and plus_di[i-1] <= minus_di[i-1] and uptrend_1d_filt:
+            # LONG: break above R3, 1d uptrend, volume confirmation
+            if close[i] > r3 and uptrend_htf and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: ADX > 25, -DI crosses above +DI, 1d downtrend filter
-            elif adx_val > 25 and minus_di_val > plus_di_val and minus_di[i-1] <= plus_di[i-1] and downtrend_1d_filt:
+            # SHORT: break below S3, 1d downtrend, volume confirmation
+            elif close[i] < s3 and downtrend_htf and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: ADX < 20 (trend weak) or -DI crosses above +DI
-            if adx_val < 20 or (minus_di_val > plus_di_val and minus_di[i-1] <= plus_di[i-1]):
+            # EXIT LONG: touch S3 or 1d trend turns down
+            if close[i] < s3 or not uptrend_htf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: ADX < 20 (trend weak) or +DI crosses above -DI
-            if adx_val < 20 or (plus_di_val > minus_di_val and plus_di[i-1] <= minus_di[i-1]):
+            # EXIT SHORT: touch R3 or 1d trend turns up
+            if close[i] > r3 or not downtrend_htf:
                 signals[i] = 0.0
                 position = 0
             else:
