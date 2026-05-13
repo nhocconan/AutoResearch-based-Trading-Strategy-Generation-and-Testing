@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
-# Long when price breaks above 20-day high with 1w EMA200 uptrend and volume > 1.5x average.
-# Short when price breaks below 20-day low with 1w EMA200 downtrend and volume > 1.5x average.
-# Uses discrete sizing 0.25. Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
-# Donchian channels provide robust structure that works in both bull and bear markets via breakouts.
-# 1w EMA200 ensures we trade with the long-term trend to avoid counter-trend whipsaws.
-# Volume spike confirms institutional participation. Stoploss via opposite Donchian break.
+# Hypothesis: 6h Williams %R mean reversion with 1d Bollinger Band squeeze filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) + price below lower BB(20,2) + BB width at 20-period low + volume > 1.5x average.
+# Short when Williams %R > -20 (overbought) + price above upper BB(20,2) + BB width at 20-period low + volume > 1.5x average.
+# Uses discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+# Williams %R identifies exhaustion, BB squeeze indicates low volatility primed for expansion, volume confirms participation.
+# Works in bull markets via mean reversion from oversold and in bear markets via mean reversion from overbought.
 
-name = "1d_Donchian20_1wEMA200_VolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_MeanReversion_1dBBSqueeze_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,63 +24,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian(20) channels: 20-day high/low
-    lookback = 20
-    if n < lookback + 1:
+    # Calculate Williams %R (14-period) on 6h data
+    lookback_wr = 14
+    if n < lookback_wr:
         return np.zeros(n)
     
-    # Rolling max/min for previous 20 periods (excluding current bar)
-    high_20 = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    low_20 = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    highest_high = pd.Series(high).rolling(window=lookback_wr, min_periods=lookback_wr).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_wr, min_periods=lookback_wr).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero when highest_high == lowest_low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # Get 1d data for Bollinger Bands
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate Bollinger Bands (20,2) on 1d data
+    bb_period = 20
+    if len(close_1d) < bb_period:
+        return np.zeros(n)
+    
+    ma_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_bb = ma_20 + 2 * std_20
+    lower_bb = ma_20 - 2 * std_20
+    bb_width = upper_bb - lower_bb
+    
+    # Check if BB width is at 20-period low (squeeze condition)
+    bb_width_low = pd.Series(bb_width).rolling(window=bb_period, min_periods=bb_period).min().values
+    bb_squeeze = (bb_width <= bb_width_low * 1.1)  # within 10% of the low
+    
+    # Align 1d indicators to 6h timeframe (wait for 1d bar to close)
+    ma_20_aligned = align_htf_to_ltf(prices, df_1d, ma_20)
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze.astype(float))
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for EMA200 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate EMA200 on 1w data
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # Align 1w EMA200 to 1d timeframe (wait for 1w bar to close)
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback + 20, n):  # Start after sufficient data
+    start_idx = max(lookback_wr + bb_period, 20)  # Ensure sufficient data for all indicators
+    for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_200_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ma_20_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or
+            np.isnan(bb_squeeze_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above 20-day high with 1w EMA200 uptrend and volume spike
-            if (close[i] > high_20[i] and 
-                close[i] > ema_200_1w_aligned[i] and 
+            # LONG: Williams %R oversold + price below lower BB + BB squeeze + volume spike
+            if (williams_r[i] < -80 and 
+                close[i] < lower_bb_aligned[i] and 
+                bb_squeeze_aligned[i] > 0.5 and  # Boolean aligned as 0.0 or 1.0
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 20-day low with 1w EMA200 downtrend and volume spike
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_200_1w_aligned[i] and 
+            # SHORT: Williams %R overbought + price above upper BB + BB squeeze + volume spike
+            elif (williams_r[i] > -20 and 
+                  close[i] > upper_bb_aligned[i] and 
+                  bb_squeeze_aligned[i] > 0.5 and
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 20-day low (reversal signal)
-            if close[i] < low_20[i]:
+            # EXIT LONG: Williams %R returns above -50 (mean reversion complete) or price breaks above upper BB
+            if williams_r[i] > -50 or close[i] > upper_bb_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 20-day high (reversal signal)
-            if close[i] > high_20[i]:
+            # EXIT SHORT: Williams %R returns below -50 (mean reversion complete) or price breaks below lower BB
+            if williams_r[i] < -50 or close[i] < lower_bb_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
