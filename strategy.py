@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band AND close > 12h EMA50 AND volume > 1.8x 20-period average.
-# Short when price breaks below Donchian lower band AND close < 12h EMA50 AND volume > 1.8x 20-period average.
-# Exit on ATR(14) trailing stop (2.5x) or opposite breakout.
-# Uses 4h primary timeframe with 12h trend filter for noise reduction, targeting 75-200 total trades over 4 years.
-# Donchian channels provide clear trend-following structure, 12h EMA50 filters medium-term trend,
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND close > 1w EMA50 AND volume > 2.0x 20-period average.
+# Short when price breaks below Donchian lower band AND close < 1w EMA50 AND volume > 2.0x 20-period average.
+# Exit on ATR(14) trailing stop (2.0x) or opposite breakout.
+# Uses 1d primary timeframe with 1w trend filter for noise reduction, targeting 30-100 total trades over 4 years.
+# Donchian channels provide clear trend-following structure, 1w EMA50 filters long-term trend,
 # volume confirms breakout authenticity. Designed to work in both bull and bear markets via strict entry conditions.
 
-name = "4h_Donchian20_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -45,19 +45,19 @@ def generate_signals(prices):
     upper_band[0] = highest_high[0]
     lower_band[0] = lowest_low[0]
     
-    # Get 12h data for EMA50 trend filter (MTF)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Get 1w data for EMA50 trend filter (MTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA50 on 12h close
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA50 on 1w close
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF arrays to 4h timeframe (wait for completed 12h bar)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align HTF arrays to 1d timeframe (wait for completed 1w bar)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Volume filter: current 4h volume > 1.8x 20-period average (spike confirmation)
-    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma_4h)
+    # Volume filter: current 1d volume > 2.0x 20-period average (spike confirmation)
+    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,19 +66,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_4h[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_1d[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above upper band AND close > 12h EMA50 AND volume spike
-            if close[i] > upper_band[i] and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
+            # LONG: price breaks above upper band AND close > 1w EMA50 AND volume spike
+            if close[i] > upper_band[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price breaks below lower band AND close < 12h EMA50 AND volume spike
-            elif close[i] < lower_band[i] and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
+            # SHORT: price breaks below lower band AND close < 1w EMA50 AND volume spike
+            elif close[i] < lower_band[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -92,7 +92,7 @@ def generate_signals(prices):
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
             # EXIT LONG: trailing stop hit (opposite breakout handled by next bar's entry logic)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -107,7 +107,7 @@ def generate_signals(prices):
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
             # EXIT SHORT: trailing stop hit (opposite breakout handled by next bar's entry logic)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
