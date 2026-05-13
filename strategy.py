@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation.
-# Long when price breaks above 1d Camarilla R3 level AND close > 1w EMA34 AND volume > 1.5x 20-period average.
-# Short when price breaks below 1d Camarilla S3 level AND close < 1w EMA34 AND volume > 1.5x 20-period average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Long when price breaks above Camarilla R3 level AND close > 1d EMA34 AND volume > 2.0x 20-period average.
+# Short when price breaks below Camarilla S3 level AND close < 1d EMA34 AND volume > 2.0x 20-period average.
 # Uses ATR-based trailing stop (2.0x) for risk control.
-# Camarilla levels provide intraday structure, 1w EMA34 filters major trend, volume spike confirms participation.
-# Target: 12-30 trades/year (50-120 total over 4 years) on 12h timeframe.
+# Camarilla levels provide intraday structure, 1d EMA34 filters intermediate trend, volume spike confirms conviction.
+# Target: 20-40 trades/year (80-160 total over 4 years) on 4h timeframe.
 
-name = "12h_Camarilla_R3_S3_Breakout_1wEMA34_Volume_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -32,33 +32,33 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1d data for Camarilla levels
+    # Get 4h data for Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate 4h Camarilla levels (based on previous day's OHLC)
+    # Camarilla R3 = close + 1.1*(high - low)/2
+    # Camarilla S3 = close - 1.1*(high - low)/2
+    camarilla_r3 = close_4h + 1.1 * (high_4h - low_4h) / 2
+    camarilla_s3 = close_4h - 1.1 * (high_4h - low_4h) / 2
+    
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla levels (R3, S3)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    camarilla_r3 = pivot + (range_1d * 1.1 / 4)
-    camarilla_s3 = pivot - (range_1d * 1.1 / 4)
-    
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate EMA34 on 1w close
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA34 on 1d close
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Align HTF indicators to LTF
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate volume confirmation: volume > 1.5x 20-period average
+    # Calculate volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,18 +68,18 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > 1d Camarilla R3 AND close > 1w EMA34 AND volume confirmation
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_1w_aligned[i] and volume_confirm[i]:
+            # LONG: Price > Camarilla R3 AND close > 1d EMA34 AND volume confirmation
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < 1d Camarilla S3 AND close < 1w EMA34 AND volume confirmation
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_1w_aligned[i] and volume_confirm[i]:
+            # SHORT: Price < Camarilla S3 AND close < 1d EMA34 AND volume confirmation
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
