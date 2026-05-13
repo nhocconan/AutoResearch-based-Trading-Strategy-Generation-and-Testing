@@ -1,22 +1,41 @@
 #!/usr/bin/env python3
-"""
-12h_Camarilla_Pivot_R1_S1_1dTrend_VolumeConfirm
-Hypothesis: Camarilla pivot R1/S1 levels on 12h timeframe with daily trend filter and volume confirmation
-capture significant trend moves while avoiding whipsaw. Daily trend ensures alignment with higher-timeframe
-momentum, reducing false signals. Volume confirms breakout strength. Uses 12h timeframe to target 15-30 trades/year.
-"""
 
-name = "12h_Camarilla_Pivot_R1_S1_1dTrend_VolumeConfirm"
-timeframe = "12h"
+# 6h_WilliamsFractal_12hTrend_VolumeFilter
+# Hypothesis: Williams fractal reversals from daily timeframe, filtered by 12h trend and volume, 
+# capture high-probability reversals in both bull and bear markets. Fractals require 
+# two-bar confirmation (no look-ahead), 12h EMA50 filters trend direction, and volume spike 
+# confirms momentum. Target: 60-120 total trades over 4 years (15-30/year) to minimize fee drag.
+
+name = "6h_WilliamsFractal_12hTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_williams_fractals(high, low):
+    """Calculate Williams fractals: bearish (high) and bullish (low)"""
+    n = len(high)
+    bearish = np.full(n, np.nan)
+    bullish = np.full(n, np.nan)
+    
+    for i in range(2, n-2):
+        # Bearish fractal: high[i] is highest of 5 bars (i-2 to i+2)
+        if (high[i] >= high[i-1] and high[i] >= high[i-2] and 
+            high[i] >= high[i+1] and high[i] >= high[i+2]):
+            bearish[i] = high[i]
+        
+        # Bullish fractal: low[i] is lowest of 5 bars (i-2 to i+2)
+        if (low[i] <= low[i-1] and low[i] <= low[i-2] and 
+            low[i] <= low[i+1] and low[i] <= low[i+2]):
+            bullish[i] = low[i]
+    
+    return bearish, bullish
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,41 +43,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
+    # Get daily data for Williams fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 5:
         return np.zeros(n)
 
-    close_1d = df_1d['close'].values
+    # Calculate Williams fractals on daily data
+    bearish_fractal, bullish_fractal = calculate_williams_fractals(
+        df_1d['high'].values, df_1d['low'].values
+    )
+    
+    # Align fractals to 6h timeframe with 2-bar confirmation delay
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
 
-    # Calculate daily EMA20 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
 
-    # Calculate Camarilla pivot levels for 12h timeframe using previous bar's OHLC
-    pivot = (high + low + close) / 3.0
-    r1 = close + (high - low) * 1.1 / 12
-    s1 = close - (high - low) * 1.1 / 12
+    # Calculate 12h EMA50 for trend filter
+    ema_12h = pd.Series(df_12h['close'].values).ewm(
+        span=50, adjust=False, min_periods=50
+    ).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
 
-    # Shift to get previous bar's levels (no look-ahead)
-    r1_prev = np.roll(r1, 1)
-    s1_prev = np.roll(s1, 1)
-    r1_prev[0] = np.nan
-    s1_prev[0] = np.nan
-
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # Volume confirmation: current volume > 1.8 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (1.8 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if data is not ready
-        if (np.isnan(r1_prev[i]) or np.isnan(s1_prev[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,26 +93,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R1 with volume spike and daily uptrend
-            if close[i] > r1_prev[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+            # LONG: Bullish fractal with 12h uptrend and volume spike
+            if (not np.isnan(bullish_fractal_aligned[i]) and 
+                close[i] > bullish_fractal_aligned[i] and
+                close[i] > ema_12h_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with volume spike and daily downtrend
-            elif close[i] < s1_prev[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+            # SHORT: Bearish fractal with 12h downtrend and volume spike
+            elif (not np.isnan(bearish_fractal_aligned[i]) and 
+                  close[i] < bearish_fractal_aligned[i] and
+                  close[i] < ema_12h_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below S1 or daily trend turns down
-            if close[i] < s1_prev[i] or close[i] < ema_1d_aligned[i]:
+            # EXIT LONG: Price breaks below bullish fractal or 12h trend turns down
+            if (not np.isnan(bullish_fractal_aligned[i]) and 
+                close[i] < bullish_fractal_aligned[i]) or close[i] < ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above R1 or daily trend turns up
-            if close[i] > r1_prev[i] or close[i] > ema_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above bearish fractal or 12h trend turns up
+            if (not np.isnan(bearish_fractal_aligned[i]) and 
+                close[i] > bearish_fractal_aligned[i]) or close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
