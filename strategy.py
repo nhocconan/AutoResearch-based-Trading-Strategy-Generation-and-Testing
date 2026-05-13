@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R mean reversion with 1d Bollinger Band squeeze filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) AND price < lower Bollinger Band(20,2) AND volume > 1.5x average.
-# Short when Williams %R > -20 (overbought) AND price > upper Bollinger Band(20,2) AND volume > 1.5x average.
-# Uses Bollinger Band squeeze (bandwidth < 20th percentile) as regime filter to avoid whipsaws in strong trends.
-# Williams %R provides timely mean reversion signals in ranging markets, while Bollinger squeeze identifies low volatility periods conducive to mean reversion.
-# Volume confirmation ensures participation. Discrete sizing 0.25 targets 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
-# Works in bull markets via buying dips and in bear markets via selling rallies within the larger trend.
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above upper Donchian with 1w EMA50 uptrend and volume > 2.0x average.
+# Short when price breaks below lower Donchian with 1w EMA50 downtrend and volume > 2.0x average.
+# Uses discrete sizing 0.25. Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# Donchian channels provide clear breakout levels. 1w EMA50 ensures we trade with the major trend.
+# Volume spike confirms institutional participation. Works in bull markets via upward breaks and in bear markets via downward breaks.
 
-name = "6h_WilliamsR_MeanReversion_1dBBSqueeze_VolumeConfirm_v1"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:  # Need sufficient data for 20-period Donchian and 50-period EMA
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,99 +24,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R(14) on 6h data
-    lookback_wr = 14
-    if n < lookback_wr:
+    # Calculate Donchian channels (20-period)
+    lookback = 20
+    if n < lookback + 1:
         return np.zeros(n)
     
-    highest_high = pd.Series(high).rolling(window=lookback_wr, min_periods=lookback_wr).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_wr, min_periods=lookback_wr).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # Calculate Bollinger Bands(20,2) on 1d data
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    if len(close_1d) < 20:
-        return np.zeros(n)
-    
-    # Basis: 20-period SMA
-    basis = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    # Standard deviation
-    dev = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    # Upper and lower bands
-    upper_bb = basis + 2 * dev
-    lower_bb = basis - 2 * dev
-    # Bollinger Band Width
-    bb_width = (upper_bb - lower_bb) / basis
-    # Handle division by zero
-    bb_width = np.where(basis == 0, 0, bb_width)
-    
-    # Calculate 20th percentile of BB width for squeeze condition (using expanding window to avoid look-ahead)
-    bb_width_percentile = np.full_like(bb_width, np.nan)
-    for i in range(20, len(bb_width)):
-        bb_width_percentile[i] = np.percentile(bb_width[:i+1], 20)
-    
-    # Bollinger Band Squeeze: width < 20th percentile
-    bb_squeeze = bb_width < bb_width_percentile
-    
-    # Align 1d indicators to 6h timeframe (wait for 1d bar to close)
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
-    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze.astype(float))  # bool to float for alignment
+    # Upper and lower Donchian bands
+    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA50 on 1w data
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Align 1w EMA50 to 12h timeframe (wait for 1w bar to close)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after sufficient data for BB
+    for i in range(lookback + 20, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(williams_r_aligned[i]) or np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or np.isnan(bb_squeeze_aligned[i]) or 
-            np.isnan(avg_volume[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Oversold Williams %R AND price below lower BB AND BB squeeze AND volume spike
-            if (williams_r_aligned[i] < -80 and 
-                close[i] < lower_bb_aligned[i] and 
-                bb_squeeze_aligned[i] > 0.5 and  # Convert back to bool (aligned as float)
-                volume[i] > 1.5 * avg_volume[i]):
+            # LONG: Price breaks above upper Donchian with 1w EMA50 uptrend and volume spike
+            if (close[i] > upper[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Overbought Williams %R AND price above upper BB AND BB squeeze AND volume spike
-            elif (williams_r_aligned[i] > -20 and 
-                  close[i] > upper_bb_aligned[i] and 
-                  bb_squeeze_aligned[i] > 0.5 and  # Convert back to bool (aligned as float)
-                  volume[i] > 1.5 * avg_volume[i]):
+            # SHORT: Price breaks below lower Donchian with 1w EMA50 downtrend and volume spike
+            elif (close[i] < lower[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume[i] > 2.0 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R returns above -50 (mean reversion complete) OR price crosses above basis
-            basis_aligned = align_htf_to_ltf(prices, df_1d, basis)
-            if np.isnan(basis_aligned[i]):
-                signals[i] = 0.25
-            elif williams_r_aligned[i] > -50 or close[i] > basis_aligned[i]:
+            # EXIT LONG: Price breaks below lower Donchian (reversal signal)
+            if close[i] < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R returns below -50 (mean reversion complete) OR price crosses below basis
-            basis_aligned = align_htf_to_ltf(prices, df_1d, basis)
-            if np.isnan(basis_aligned[i]):
-                signals[i] = -0.25
-            elif williams_r_aligned[i] < -50 or close[i] < basis_aligned[i]:
+            # EXIT SHORT: Price breaks above upper Donchian (reversal signal)
+            if close[i] > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
