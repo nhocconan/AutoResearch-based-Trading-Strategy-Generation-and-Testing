@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Donchian_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_ADX_Alligator_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,63 +12,60 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Donchian channel (20) on daily close
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(19, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
+    # Williams Alligator components (13,8,5 periods shifted)
+    jaw = pd.Series(high).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(low).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Weekly trend filter: EMA(34) on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # ADX calculation
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / (pd.Series(tr).ewm(alpha=1/14, adjust=False).mean() + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / (pd.Series(tr).ewm(alpha=1/14, adjust=False).mean() + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    adx = np.concatenate([np.full(14, np.nan), adx.values])
+    
+    # Daily trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Volume filter: current volume > 1.5 x 20-day average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    for i in range(20, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+    for i in range(30, n):
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(adx[i]) or np.isnan(ema34_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        vol_condition = volume[i] > 1.5 * vol_ma_20[i]
+        bullish = lips[i] > teeth[i] > jaw[i]
+        bearish = lips[i] < teeth[i] < jaw[i]
+        strong_trend = adx[i] > 25
         
         if position == 0:
-            # LONG: Price breaks above Donchian high with weekly uptrend and volume
-            if close[i] > donchian_high[i] and close[i] > ema34_1w_aligned[i] and vol_condition:
+            if bullish and strong_trend and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low with weekly downtrend and volume
-            elif close[i] < donchian_low[i] and close[i] < ema34_1w_aligned[i] and vol_condition:
+            elif bearish and strong_trend and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low or weekly trend turns bearish
-            if close[i] < donchian_low[i] or close[i] < ema34_1w_aligned[i]:
+            if not (bullish and strong_trend) or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high or weekly trend turns bullish
-            if close[i] > donchian_high[i] or close[i] > ema34_1w_aligned[i]:
+            if not (bearish and strong_trend) or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
