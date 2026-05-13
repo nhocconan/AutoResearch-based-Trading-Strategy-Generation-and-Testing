@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1w trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 AND 1w close > 1w EMA50 AND volume > 1.5x average.
-# Short when price breaks below Camarilla S3 AND 1w close < 1w EMA50 AND volume > 1.5x average.
-# Exit when price returns to Camarilla Pivot point (mean reversion to equilibrium).
-# Uses 12h timeframe for lower frequency, Camarilla levels from 1d for structure, 1w EMA for trend filter.
-# Target: 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, bear via faded rallies to pivot.
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above 20-period high AND close > 1d EMA50 AND volume > 1.5x 20-bar average
+# Short when price breaks below 20-period low AND close < 1d EMA50 AND volume > 1.5x 20-bar average
+# Exit when price crosses the 10-period mid-band OR trend reverses
+# Uses 4h timeframe for optimal trade frequency, Donchian for structure, 1d EMA for trend filter, volume for confirmation.
+# Target: 75-200 total trades over 4 years (19-50/year). Works in bull via breakout continuation, bear via faded rallies.
 
-name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dTrend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,68 +24,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation (yesterday's OHLC)
+    # Calculate Donchian channels on primary timeframe (4h)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    mid_band = (highest_high + lowest_low) / 2.0
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for today (based on yesterday's 1d candle)
-    # Camarilla: R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
-    # We use R3 and S3 for breakout, Pivot (close) for exit
-    diff_1d = high_1d - low_1d
-    camarilla_pivot = close_1d  # Pivot = previous close
-    camarilla_r3 = close_1d + 1.1 * diff_1d
-    camarilla_s3 = close_1d - 1.1 * diff_1d
-    
-    # Align Camarilla levels to 12h timeframe (yesterday's levels available after 1d close)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
-    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume filter: current 12h volume > 1.5x 20-period average
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_12h)
-    
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate EMA(50) on 1w close for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate EMA(50) on 1d close for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
         # Skip if any required data is NaN
-        if (np.isnan(pivot_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_12h[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above R3 AND 1w close > 1w EMA50 AND volume confirmation
-            if close[i] > r3_12h[i] and close_1w[i] > ema50_1w[i] and volume_filter[i]:
+            # LONG: Break above upper band AND price > 1d EMA50 AND volume confirmation
+            if close[i] > highest_high[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S3 AND 1w close < 1w EMA50 AND volume confirmation
-            elif close[i] < s3_12h[i] and close_1w[i] < ema50_1w[i] and volume_filter[i]:
+            # SHORT: Break below lower band AND price < 1d EMA50 AND volume confirmation
+            elif close[i] < lowest_low[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to pivot point (mean reversion)
-            if close[i] <= pivot_12h[i]:
+            # EXIT LONG: Price crosses mid-band OR trend reversal (price < 1d EMA50)
+            if close[i] < mid_band[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to pivot point (mean reversion)
-            if close[i] >= pivot_12h[i]:
+            # EXIT SHORT: Price crosses mid-band OR trend reversal (price > 1d EMA50)
+            if close[i] > mid_band[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
