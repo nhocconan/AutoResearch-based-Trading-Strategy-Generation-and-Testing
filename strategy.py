@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Momentum_With_Volume_Trend_Filter
-Hypothesis: RSI(14) momentum with volume confirmation and 1d trend filter provides robust entries in both bull and bear markets.
-Long when RSI crosses above 50 with rising volume and 1d uptrend; short when RSI crosses below 50 with rising volume and 1d downtrend.
-Exit on opposite RSI cross or trend failure. Uses 4h EMA for trend confirmation.
-Target: 25-35 trades/year per symbol.
+1d_Alligator_ElderRay_Trend_Filter
+Hypothesis: Williams Alligator (13,8,5 SMAs) + Elder Ray (bull/bear power) on 1d with 1w trend filter works in both bull and bear markets. 
+Long when green line > red line (bullish alignment) and bull power > 0 with 1w uptrend. 
+Short when red line > green line (bearish alignment) and bear power < 0 with 1w downtrend.
+Exit on opposite Alligator alignment or trend filter failure. Uses volume confirmation to avoid whipsaws.
+Target: 10-25 trades/year per symbol.
 """
 
-name = "4h_Momentum_With_Volume_Trend_Filter"
-timeframe = "4h"
+name = "1d_Alligator_ElderRay_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,75 +18,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Williams Alligator: SMA(13), SMA(8), SMA(5) on median price
+    median_price = (high + low) / 2
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # Blue line
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # Red line
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values     # Green line
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
+    
+    # Alligator alignment: Green > Red > Blue = bullish, Red > Green > Blue = bearish
+    bullish_align = (lips > teeth) & (teeth > jaw)
+    bearish_align = (teeth > lips) & (lips > jaw)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_conf = volume > 1.5 * vol_ma
     
-    # 4h trend: EMA20
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    uptrend_4h = close > ema_20
-    downtrend_4h = close < ema_20
-    
-    # 1d trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # 1w trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    uptrend_1d = df_1d['close'].values > ema_20_1d
-    downtrend_1d = df_1d['close'].values < ema_20_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    uptrend_1w = df_1w['close'].values > ema_20_1w
+    downtrend_1w = df_1w['close'].values < ema_20_1w
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        rsi_now = rsi[i]
-        rsi_prev = rsi[i-1]
+        # Get values
+        bull_align = bullish_align[i]
+        bear_align = bearish_align[i]
+        bull_pow = bull_power[i]
+        bear_pow = bear_power[i]
         vol_conf = volume_conf[i]
-        uptrend = uptrend_4h[i]
-        downtrend = downtrend_4h[i]
-        uptrend_htf = uptrend_1d_aligned[i]
-        downtrend_htf = downtrend_1d_aligned[i]
+        uptrend_htf = uptrend_1w_aligned[i]
+        downtrend_htf = downtrend_1w_aligned[i]
         
         if position == 0:
-            # LONG: RSI crosses above 50 with volume confirmation and uptrend on both timeframes
-            if rsi_prev <= 50 and rsi_now > 50 and vol_conf and uptrend and uptrend_htf:
+            # LONG: bullish Alligator alignment + bull power > 0 + 1w uptrend + volume confirmation
+            if bull_align and (bull_pow > 0) and uptrend_htf and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI crosses below 50 with volume confirmation and downtrend on both timeframes
-            elif rsi_prev >= 50 and rsi_now < 50 and vol_conf and downtrend and downtrend_htf:
+            # SHORT: bearish Alligator alignment + bear power < 0 + 1w downtrend + volume confirmation
+            elif bear_align and (bear_pow < 0) and downtrend_htf and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI crosses below 50 or 4h trend turns down
-            if rsi_prev >= 50 and rsi_now < 50 or not uptrend:
+            # EXIT LONG: bearish Alligator alignment or bull power <= 0 or 1w trend turns down
+            if bear_align or (bull_pow <= 0) or not uptrend_htf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI crosses above 50 or 4h trend turns up
-            if rsi_prev <= 50 and rsi_now > 50 or not downtrend:
+            # EXIT SHORT: bullish Alligator alignment or bear power >= 0 or 1w trend turns up
+            if bull_align or (bear_pow >= 0) or not downtrend_htf:
                 signals[i] = 0.0
                 position = 0
             else:
