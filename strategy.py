@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R1 and close > 4h EMA34 with volume > 2.0x 20-bar average.
-# Short when price breaks below S1 and close < 4h EMA34 with volume > 2.0x 20-bar average.
-# Uses discrete sizing 0.20 to target 60-150 total trades over 4 years on 1h timeframe.
-# R1/S1 levels act as strong breakout zones; combined with 4h trend filter and volume spike reduces false breakouts.
-# Works in bull markets via breakouts and in bear markets via mean-reversion at extreme levels.
-# Session filter (08-20 UTC) reduces noise trades during low-liquidity periods.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume spike confirmation.
+# Long when price breaks above Donchian upper (20-bar high) and weekly pivot bias is bullish (close > weekly pivot) with volume > 2.0x 20-bar average.
+# Short when price breaks below Donchian lower (20-bar low) and weekly pivot bias is bearish (close < weekly pivot) with volume > 2.0x 20-bar average.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 6h timeframe.
+# Weekly pivot provides higher-timeframe structure to filter breakouts, reducing false signals in choppy markets.
+# Works in bull markets via breakouts with bullish weekly bias and in bear markets via breakdowns with bearish weekly bias.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hEMA34_Trend_VolumeSpike_Session"
-timeframe = "1h"
+name = "6h_Donchian20_WeeklyPivot_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,86 +24,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    lookback = 20  # for volume average
+    lookback = 20  # for Donchian and volume average
     
-    # Calculate Camarilla levels (R1, S1) using previous day's OHLC
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate Donchian channels (20-bar high/low)
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
+    
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla for each 1d bar: based on previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate weekly pivot points (using previous week's OHLC)
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_close = df_1w['close'].shift(1).values
+    prev_week_open = df_1w['open'].shift(1).values
     
-    # Camarilla R1 = close + (high - low) * 1.1 / 12
-    # Camarilla S1 = close - (high - low) * 1.1 / 12
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Weekly pivot = (high + low + close) / 3
+    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
     
-    # Align Camarilla levels to 1h timeframe (wait for 1d bar to close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Get 4h EMA34 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Align weekly pivot to 6h timeframe (wait for weekly bar to close)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_34_4h_aligned[i]) or np.isnan(avg_volume[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Session filter: only trade between 08:00-20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1, close > 4h EMA34, volume spike
-            if (high[i] > R1_aligned[i] and 
-                close[i] > ema_34_4h_aligned[i] and 
+            # LONG: Price breaks above Donchian upper, close > weekly pivot, volume spike
+            if (high[i] > highest_high[i] and 
+                close[i] > weekly_pivot_aligned[i] and 
                 volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1, close < 4h EMA34, volume spike
-            elif (low[i] < S1_aligned[i] and 
-                  close[i] < ema_34_4h_aligned[i] and 
+            # SHORT: Price breaks below Donchian lower, close < weekly pivot, volume spike
+            elif (low[i] < lowest_low[i] and 
+                  close[i] < weekly_pivot_aligned[i] and 
                   volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 OR volume drops below average
-            if (low[i] < S1_aligned[i] or 
+            # EXIT LONG: Price breaks below Donchian lower OR volume drops below average
+            if (low[i] < lowest_low[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 OR volume drops below average
-            if (high[i] > R1_aligned[i] or 
+            # EXIT SHORT: Price breaks above Donchian upper OR volume drops below average
+            if (high[i] > highest_high[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
