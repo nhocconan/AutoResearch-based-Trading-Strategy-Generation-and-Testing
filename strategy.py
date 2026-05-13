@@ -1,28 +1,18 @@
 #!/usr/bin/env python3
 """
-4h_4H_1D_Camarilla_R3_S3_Breakout_With_Volume_Signal
-Hypothesis: Daily Camarilla R3 and S3 levels act as key support/resistance. 
-Breakouts above R3 or below S3 with volume confirmation capture trend moves. 
-Mean reversion occurs when price returns to R3/S3. Designed for 15-25 trades/year 
-to work in both bull and bear markets by combining breakout and mean reversion 
-logic with volume filtering and daily trend filter.
+4h_Keltner_Channel_RSI_Momentum
+Hypothesis: Keltner Channel breakouts with RSI momentum capture trends in both bull and bear markets.
+The middle EMA acts as dynamic support/resistance, while RSI filters momentum strength.
+Designed for low trade frequency (20-40/year) with trend-following logic that adapts to market regimes.
 """
 
-name = "4h_4H_1D_Camarilla_R3_S3_Breakout_With_Volume_Signal"
+name = "4h_Keltner_Channel_RSI_Momentum"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels: R3, R4, S3, S4"""
-    range_ = high - low
-    close_val = close
-    r3 = close_val + (range_ * 1.1 / 4)
-    s3 = close_val - (range_ * 1.1 / 4)
-    return r3, s3
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,52 +24,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend
-    df_daily = get_htf_data(prices, '1d')
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
+    # Calculate Keltner Channel (20, 2.0)
+    ema_middle = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(high - low).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_channel = ema_middle + 2.0 * atr
+    lower_channel = ema_middle - 2.0 * atr
     
-    # Calculate daily Camarilla R3 and S3
-    r3_daily, s3_daily = calculate_camarilla(daily_high, daily_low, daily_close)
+    # Calculate RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = (100 - (100 / (1 + rs))).fillna(50).values
     
-    # Align daily Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_daily, r3_daily)
-    s3_4h = align_htf_to_ltf(prices, df_daily, s3_daily)
+    # Get 1-day trend filter (EMA 50)
+    df_1d = get_htf_data(prices, '1d')
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily trend: EMA34
-    ema34_daily = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h = align_htf_to_ltf(prices, df_daily, ema34_daily)
-    
-    # Volume confirmation: > 1.5x 20-period average
+    # Volume confirmation: > 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirm = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Wait for EMA34 to be valid
+    for i in range(20, n):
         if position == 0:
-            # BREAKOUT LONG: Price breaks above R3 with volume confirmation and uptrend
-            if close[i] > r3_4h[i] and close[i-1] <= r3_4h[i-1] and volume_confirm[i] and close[i] > ema34_4h[i]:
-                signals[i] = 0.25
-                position = 1
-            # BREAKOUT SHORT: Price breaks below S3 with volume confirmation and downtrend
-            elif close[i] < s3_4h[i] and close[i-1] >= s3_4h[i-1] and volume_confirm[i] and close[i] < ema34_4h[i]:
-                signals[i] = -0.25
-                position = -1
+            # LONG: Price breaks above upper channel with RSI > 50 and volume confirmation
+            if close[i] > upper_channel[i] and rsi[i] > 50 and volume_confirm[i]:
+                # Additional filter: only take long if price above 1-day EMA50 (uptrend filter)
+                if close[i] > ema_50_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # SHORT: Price breaks below lower channel with RSI < 50 and volume confirmation
+            elif close[i] < lower_channel[i] and rsi[i] < 50 and volume_confirm[i]:
+                # Additional filter: only take short if price below 1-day EMA50 (downtrend filter)
+                if close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to R3 (mean reversion) or breaks above R3 with weak volume
-            if close[i] <= r3_4h[i]:
+            # EXIT LONG: Price crosses below middle EMA (trend change) or RSI < 40
+            if close[i] < ema_middle[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to S3 (mean reversion) or breaks below S3 with weak volume
-            if close[i] >= s3_4h[i]:
+            # EXIT SHORT: Price crosses above middle EMA (trend change) or RSI > 60
+            if close[i] > ema_middle[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
