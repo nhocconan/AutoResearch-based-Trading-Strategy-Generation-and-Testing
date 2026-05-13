@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_Trend_Volume
-Hypothesis: Donchian Channel (20) breakouts with 1d trend filter and volume confirmation work in both bull and bear markets.
-Breakout above upper band with uptrend and volume spike = long.
-Breakdown below lower band with downtrend and volume spike = short.
-Exit on opposite band touch or trend reversal. Uses 1d trend filter for higher timeframe bias.
-Target: 20-30 trades/year per symbol on 12h timeframe.
+6h_Williams_Alligator_ElderRay
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend direction, while Elder Ray (Bull/Bear Power) confirms momentum strength. 
+Long when price > Teeth, Bull Power > 0, and Bear Power < 0. Short when price < Teeth, Bull Power < 0, and Bear Power > 0.
+Uses 12h trend filter for higher timeframe bias. Works in trending markets (both bull/bear) and avoids chop via Alligator alignment.
+Target: 15-35 trades/year per symbol.
 """
 
-name = "12h_Donchian_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "6h_Williams_Alligator_ElderRay"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,76 +17,70 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian Channel: 20-period high/low
-    high_20 = np.zeros(n)
-    low_20 = np.zeros(n)
-    for i in range(20, n):
-        high_20[i] = np.max(high[i-20:i])
-        low_20[i] = np.min(low[i-20:i])
+    # Williams Alligator: SMAs of median price
+    median_price = (high + low) / 2.0
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # 12h trend: EMA50
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = close > ema_50
-    downtrend_12h = close < ema_50
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # 1d trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 12h trend filter: EMA50
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    
-    # Volume confirmation: volume > 2.0 * 20-period average
-    vol_ma = np.zeros(n)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 2.0 * vol_ma
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_12h = df_12h['close'].values > ema_50_12h
+    downtrend_12h = df_12h['close'].values < ema_50_12h
+    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
+    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Get values
-        upband = high_20[i]
-        lowband = low_20[i]
-        uptrend = uptrend_12h[i]
-        downtrend = downtrend_12h[i]
-        uptrend_htf = uptrend_1d_aligned[i]
-        downtrend_htf = downtrend_1d_aligned[i]
-        vol_conf = volume_conf[i]
+        # Alligator alignment: check if aligned (all in order)
+        lips_val = lips[i]
+        teeth_val = teeth[i]
+        jaw_val = jaw[i]
+        
+        bull = bull_power[i]
+        bear = bear_power[i]
+        
+        uptrend_htf = uptrend_12h_aligned[i]
+        downtrend_htf = downtrend_12h_aligned[i]
         
         if position == 0:
-            # LONG: break above upper band, 12h uptrend, 1d uptrend filter, volume confirmation
-            if close[i] > upband and uptrend and uptrend_htf and vol_conf:
+            # LONG: price > Teeth, Bull Power > 0, Bear Power < 0, 12h uptrend
+            if close[i] > teeth_val and bull > 0 and bear < 0 and uptrend_htf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below lower band, 12h downtrend, 1d downtrend filter, volume confirmation
-            elif close[i] < lowband and downtrend and downtrend_htf and vol_conf:
+            # SHORT: price < Teeth, Bull Power < 0, Bear Power > 0, 12h downtrend
+            elif close[i] < teeth_val and bull < 0 and bear > 0 and downtrend_htf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch lower band or 12h trend turns down
-            if close[i] < lowband or not uptrend:
+            # EXIT LONG: price < Teeth or Bull Power <= 0
+            if close[i] < teeth_val or bull <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch upper band or 12h trend turns up
-            if close[i] > upband or not downtrend:
+            # EXIT SHORT: price > Teeth or Bear Power <= 0
+            if close[i] > teeth_val or bear <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
