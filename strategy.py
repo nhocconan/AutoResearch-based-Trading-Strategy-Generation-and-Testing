@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_TrendShift_Trend"
-timeframe = "6h"
+name = "12h_PivotBreakout_Structure_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1D data ONCE for trend and volatility
+    # Load 1D data ONCE for pivot calculation and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1D EMA200 for long-term trend
-    close_1d = df_1d['close'].values
-    close_1d_s = pd.Series(close_1d)
-    ema200_1d = close_1d_s.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # 1D ATR(14) for volatility
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1)))
-    tr1[0] = high_1d[0] - low_1d[0]
-    atr14_1d = pd.Series(tr1).rolling(window=14, min_periods=14).mean().values
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
     
-    # 6H EMA34 for trend shift
+    # Calculate daily pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    
+    # Align pivot levels to 12H timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 12H EMA20 for trend filter (faster than EMA50)
     close_s = pd.Series(close)
-    ema34_6h = close_s.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema20_12h = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 6H ATR(14) for volatility and momentum
-    tr6h = np.maximum(high - low, np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))
-    tr6h[0] = high[0] - low[0]
-    atr14_6h = pd.Series(tr6h).rolling(window=14, min_periods=14).mean().values
-    
-    # 6H Volume filter
+    # Volume filter: current volume > 15-period average (less frequent triggers)
     volume_s = pd.Series(volume)
-    vol_ma20 = volume_s.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > vol_ma20
+    vol_ma15 = volume_s.rolling(window=15, min_periods=15).mean().values
+    volume_ok = volume > vol_ma15
+    
+    # Add price action filter: require breakout with momentum (close > open)
+    bullish_candle = close > prices['open'].values
+    bearish_candle = close < prices['open'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after sufficient data
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(atr14_1d_aligned[i]) or 
-            np.isnan(ema34_6h[i]) or np.isnan(atr14_6h[i]) or 
-            np.isnan(vol_ma20[i])):
+    for i in range(20, n):  # Start after sufficient data
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema20_12h[i])):
             signals[i] = 0.0
             continue
         
-        # Trend shift: price crossing EMA34 with momentum
-        price_cross_up = close[i] > ema34_6h[i] and close[i-1] <= ema34_6h[i-1]
-        price_cross_down = close[i] < ema34_6h[i] and close[i-1] >= ema34_6h[i-1]
-        
-        # Momentum: price change > 0.5 * ATR
-        price_change = abs(close[i] - close[i-1])
-        momentum_ok = price_change > 0.5 * atr14_6h[i]
-        
-        # Long-term trend filter
-        long_term_up = close[i] > ema200_1d_aligned[i]
-        long_term_down = close[i] < ema200_1d_aligned[i]
+        # Trend filter: price relative to EMA20
+        price_above_ema = close[i] > ema20_12h[i]
+        price_below_ema = close[i] < ema20_12h[i]
         
         if position == 0:
-            # LONG: bullish cross + momentum + uptrend
-            if price_cross_up and momentum_ok and long_term_up and volume_ok[i]:
+            # LONG: Break above R1 with volume, uptrend, and bullish candle
+            if (close[i] > r1_aligned[i]) and price_above_ema and volume_ok[i] and bullish_candle[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: bearish cross + momentum + downtrend
-            elif price_cross_down and momentum_ok and long_term_down and volume_ok[i]:
+            # SHORT: Break below S1 with volume, downtrend, and bearish candle
+            elif (close[i] < s1_aligned[i]) and price_below_ema and volume_ok[i] and bearish_candle[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: bearish cross or trend break
-            if price_cross_down or not long_term_up:
+            # EXIT LONG: Price falls back below S1 (more protective than pivot) or volume drops
+            if (close[i] < s1_aligned[i]) or not volume_ok[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: bullish cross or trend break
-            if price_cross_up or not long_term_down:
+            # EXIT SHORT: Price rises back above R1 or volume drops
+            if (close[i] > r1_aligned[i]) or not volume_ok[i]:
                 signals[i] = 0.0
                 position = 0
             else:
