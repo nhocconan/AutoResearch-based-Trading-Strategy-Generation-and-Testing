@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1d_Weekly_Keltner_Channel_Breakout_Trend_Volume
-# Hypothesis: Breakout above weekly Keltner upper band or below lower band in the direction of daily trend, confirmed by volume spike.
-# Weekly Keltner channels (ATR-based) provide dynamic support/resistance; breakouts indicate momentum with volatility adjustment.
-# Daily trend filter (EMA50) ensures alignment with higher timeframe momentum. Volume spike confirms institutional participation.
-# Works in bull (breakouts above upper band in uptrend) and bear (breakdowns below lower band in downtrend).
-# Low frequency due to weekly volatility-based bands and strict volume confirmation.
+# 12h_Donchian_Breakout_20_1dTrend_Volume
+# Hypothesis: Breakout above/below 20-period Donchian channel on 12h timeframe in the direction of the daily trend, confirmed by volume spike.
+# Donchian channels provide clear breakout levels; daily trend filter ensures alignment with higher timeframe momentum.
+# Volume spike confirms institutional participation. Works in bull (breakouts above upper band in uptrend) and bear (breakdowns below lower band in downtrend).
+# Low frequency due to reliance on Donchian breakouts and strict volume confirmation.
 
-name = "1d_Weekly_Keltner_Channel_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,27 +23,6 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Keltner channel calculation
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly EMA20 and ATR(10)
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr_1w = np.maximum(np.maximum(high_1w[1:] - low_1w[1:], np.abs(high_1w[1:] - close_1w[:-1])), np.abs(low_1w[1:] - close_1w[:-1]))
-    tr_1w = np.concatenate([[np.nan], tr_1w])  # align with original index
-    atr10_1w = pd.Series(tr_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Weekly Keltner channels: EMA20 ± 2 * ATR(10)
-    keltner_upper = ema20_1w + 2 * atr10_1w
-    keltner_lower = ema20_1w - 2 * atr10_1w
-    
-    # Align weekly Keltner channels to daily timeframe
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1w, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1w, keltner_lower)
-    
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
@@ -52,18 +30,22 @@ def generate_signals(prices):
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume spike: volume > 2.0 * 20-period average (approx 20 days)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Volume spike: volume > 2.0 * 24-period average (2 days worth at 12h)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 2.0 * vol_ma_24
+    
+    # Donchian channel (20-period) on 12h timeframe
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(keltner_upper_aligned[i]) or 
-            np.isnan(keltner_lower_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,28 +54,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > weekly Keltner upper + daily uptrend + volume spike
-            if close[i] > keltner_upper_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > upper Donchian + daily uptrend + volume spike
+            if close[i] > donchian_high[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < weekly Keltner lower + daily downtrend + volume spike
-            elif close[i] < keltner_lower_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < lower Donchian + daily downtrend + volume spike
+            elif close[i] < donchian_low[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below weekly EMA20 (middle of Keltner) OR trend reversal
-            keltner_middle_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-            if close[i] < keltner_middle_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close below lower Donchian OR trend reversal
+            if close[i] < donchian_low[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above weekly EMA20 OR trend reversal
-            keltner_middle_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-            if close[i] > keltner_middle_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close above upper Donchian OR trend reversal
+            if close[i] > donchian_high[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
