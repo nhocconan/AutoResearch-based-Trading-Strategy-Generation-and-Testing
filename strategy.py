@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_With_Volume_Spike
-Hypothesis: KAMA adapts to market noise, providing a dynamic trend filter that works in both bull and bear markets.
-Price crossing above/below KAMA with volume confirmation captures trend changes. Uses 1d trend filter for higher timeframe alignment.
-Designed for low-frequency, high-quality setups to minimize fee drag on 12h timeframe.
-Target: 12-37 trades/year (50-150 over 4 years).
+4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
+Hypothesis: Camarilla R1/S1 levels from daily pivot provide high-probability reversal zones.
+Trade in direction of 12h EMA50 trend to align with higher timeframe momentum.
+Volume spike confirms institutional participation.
+Designed for low-frequency, high-quality setups to minimize fee drag.
+Works in both bull and bear markets by following 12h trend direction.
 """
 
-name = "12h_KAMA_Trend_With_Volume_Spike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,32 +26,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Camarilla levels using previous day's OHLC
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    camarilla_r1 = typical_price + (range_1d * 1.1 / 12)
+    camarilla_s1 = typical_price - (range_1d * 1.1 / 12)
 
-    # Calculate KAMA ( Kaufman Adaptive Moving Average )
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    # Handle first 9 values where diff(10) is not available
-    er = np.zeros_like(close)
-    er[9:] = change[9:] / np.maximum(volatility[9:], 1e-10)
-    # Smoothing constants
-    fastest = 2 / (2 + 1)   # for fast EMA (2)
-    slowest = 2 / (30 + 1)  # for slow EMA (30)
-    sc = (er * (fastest - slowest) + slowest) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
 
-    # Volume spike: volume > 2.0 * 20-period average (~10 days at 12h)
+    # 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+
+    # Volume spike: volume > 2.0 * 20-period average (~3.3 days at 4h)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * vol_ma_20
 
@@ -59,7 +58,9 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required value is NaN
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(kama[i]):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,26 +69,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price above KAMA and above 1d EMA50 (uptrend) with volume spike
-            if close[i] > kama[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: Uptrend + price at S1 support + volume spike
+            if close[i] > ema50_12h_aligned[i] and close[i] <= camarilla_s1_aligned[i] * 1.002 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA and below 1d EMA50 (downtrend) with volume spike
-            elif close[i] < kama[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Downtrend + price at R1 resistance + volume spike
+            elif close[i] < ema50_12h_aligned[i] and close[i] >= camarilla_r1_aligned[i] * 0.998 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA or trend turns bearish
-            if close[i] < kama[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price reaches R1 or trend turns bearish
+            if close[i] >= camarilla_r1_aligned[i] * 0.998 or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA or trend turns bullish
-            if close[i] > kama[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price reaches S1 or trend turns bullish
+            if close[i] <= camarilla_s1_aligned[i] * 1.002 or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
