@@ -1,12 +1,13 @@
-#/usr/bin/env python3
-# 4h_EqualHighsLows_RangeBreakout_1dTrend_VolumeFilter
-# Hypothesis: In BTC/ETH, range-bound markets (equally spaced highs/lows) precede breakouts.
-# We detect a 4-bar range (equal highs/lows ±0.15%) and breakout in direction of 1d EMA50 with volume spike.
-# Works in bull/bear: ranges form before major moves in both regimes. Low trade frequency avoids fee drag.
-# Target: 20-30 trades/year (80-120 total over 4 years).
+#!/usr/bin/env python3
+# 1d_Weekly_KAMA_Trend_Filter
+# Hypothesis: KAMA adapts to market efficiency, reducing lag in trends and noise in ranges.
+# Combined with weekly trend filter (price above/below weekly KAMA) and volume confirmation,
+# this strategy captures sustained moves while avoiding whipsaw. Weekly trend ensures alignment
+# with higher-timeframe momentum. Daily KAMA crossovers provide timely entries/exits.
+# Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
 
-name = "4h_EqualHighsLows_RangeBreakout_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "1d_Weekly_KAMA_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,52 +16,52 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
 
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate daily EMA50 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly KAMA for trend filter
+    def calculate_kama(close, length=30, fast=2, slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.abs(np.diff(close)).cumsum()
+        volatility = np.where(volatility == 0, 1, volatility)
+        er = change / volatility
+        er = np.where(np.isnan(er), 0, er)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
 
-    # Detect 4-bar range: equal highs and lows within 0.15%
-    range_high = np.full(n, np.nan)
-    range_low = np.full(n, np.nan)
-    in_range = np.zeros(n, dtype=bool)
+    wkama = calculate_kama(close_1w, length=30, fast=2, slow=30)
+    wkama_aligned = align_htf_to_ltf(prices, df_1w, wkama)
 
-    for i in range(4, n):
-        hh = np.max(high[i-4:i])
-        ll = np.min(low[i-4:i])
-        # Check if highs and lows are roughly equal (within 0.15%)
-        if (hh - np.min(high[i-4:i])) / hh < 0.0015 and (np.max(low[i-4:i]) - ll) / ll < 0.0015:
-            range_high[i] = hh
-            range_low[i] = ll
-            in_range[i] = True
+    # Calculate daily KAMA for entry/exit
+    dkama = calculate_kama(close, length=30, fast=2, slow=30)
 
-    # Volume confirmation: current volume > 2.0 x 20-period average (strict)
+    # Volume confirmation: current volume > 1.5 x 30-day average
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (2.0 * vol_ma)
+    for i in range(30, n):
+        vol_ma[i] = np.mean(volume[i-30:i])
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if data is not ready
-        if (np.isnan(range_high[i]) or np.isnan(range_low[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(dkama[i]) or np.isnan(wkama_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,30 +70,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # Only enter on breakout AFTER a range is identified (lookback 1 bar)
-            if in_range[i-1]:
-                # LONG: Break above range high with volume spike and daily uptrend
-                if close[i] > range_high[i-1] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # SHORT: Break below range low with volume spike and daily downtrend
-                elif close[i] < range_low[i-1] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
+            # LONG: Price crosses above daily KAMA with volume spike and weekly uptrend
+            if close[i] > dkama[i] and close[i-1] <= dkama[i-1] and volume_spike[i] and close[i] > wkama_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Price crosses below daily KAMA with volume spike and weekly downtrend
+            elif close[i] < dkama[i] and close[i-1] >= dkama[i-1] and volume_spike[i] and close[i] < wkama_aligned[i]:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters range or daily trend turns down
-            if close[i] < range_low[i-1] or close[i] < ema_1d_aligned[i]:
+            # EXIT LONG: Price crosses below daily KAMA or weekly trend turns down
+            if close[i] < dkama[i] and close[i-1] >= dkama[i-1] or close[i] < wkama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters range or daily trend turns up
-            if close[i] > range_high[i-1] or close[i] > ema_1d_aligned[i]:
+            # EXIT SHORT: Price crosses above daily KAMA or weekly trend turns up
+            if close[i] > dkama[i] and close[i-1] <= dkama[i-1] or close[i] > wkama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
