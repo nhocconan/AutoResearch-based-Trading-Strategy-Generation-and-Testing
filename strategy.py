@@ -1,16 +1,13 @@
-#!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Price reacts to Camarilla pivot levels (R1/S1) derived from 1d timeframe. 
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Price reacts to Camarilla pivot levels (R1/S1) from 1d timeframe.
 # Go long when price breaks above R1 with 1d uptrend and volume confirmation.
 # Go short when price breaks below S1 with 1d downtrend and volume confirmation.
-# Using 1d pivots captures daily market structure, reducing noise compared to 12h.
-# Trend filter ensures alignment with higher timeframe momentum.
-# Volume spike confirms institutional participation, reducing false breakouts.
+# Uses 12h timeframe to reduce trade frequency and focus on significant moves.
 # Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
-# Target: 20-50 trades/year per symbol to minimize fee drag.
+# Target: 12-37 trades/year per symbol to minimize fee drag.
 
-name = "4h_Pivot_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -31,8 +28,6 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate Camarilla pivot levels (R1, S1) from previous 1d bar
-    # R1 = C + (H-L) * 1.1/12
-    # S1 = C - (H-L) * 1.1/12
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -44,12 +39,12 @@ def generate_signals(prices):
     # 1d trend: EMA34
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d indicators to 4h timeframe
+    # Align 1d indicators to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike: volume > 2.0 * 3-period average (1.5 days worth at 4h)
+    # Volume spike: volume > 2.0 * 3-period average (6 hours worth at 12h)
     vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
     volume_spike = volume > 2.0 * vol_ma_3
     
