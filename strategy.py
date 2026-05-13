@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Direction_RSI_1dTrend_With_Volume
-# Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) for trend direction on 1d, combined with RSI for momentum and volume confirmation. Enter long when KAMA is rising, RSI < 30 (oversold), and volume > 1.5x average. Enter short when KAMA is falling, RSI > 70 (overbought), and volume > 1.5x average. Exit when RSI returns to neutral range (40-60). This strategy aims to catch mean-reversion moves within the dominant trend, reducing false signals in strong trends. Designed for low frequency to minimize fee drag, suitable for 1d timeframe with expected 10-30 trades per year.
+# 6h_Volume_Weighted_RSI_Trend_Follow
+# Hypothesis: Use 6h RSI with volume-weighted smoothing to reduce noise, combined with 1d trend filter.
+# Long when VW-RSI crosses above 50 in 1d uptrend, short when crosses below 50 in 1d downtrend.
+# Volume weighting makes RSI more responsive to institutional flow, reducing false signals in chop.
+# Works in bull (buy strength on volume) and bear (sell weakness on volume).
 
-name = "1d_KAMA_Direction_RSI_1dTrend_With_Volume"
-timeframe = "1d"
+name = "6h_Volume_Weighted_RSI_Trend_Follow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,52 +21,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-
-    # Weekly trend: EMA50
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-
-    # Daily KAMA (10, 2, 30)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Handle first 10 values
-    er = np.full_like(change, np.nan, dtype=np.float64)
-    er[10:] = change[10:] / volatility[10:]
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan, dtype=np.float64)
-    kama[9] = close[9]  # Start at index 9 for 10-period lookback
-    for i in range(10, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-
-    # Daily RSI (14)
-    delta = np.diff(close)
+    # Get daily data for trend
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Daily trend: EMA50
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume-weighted RSI (14 period)
+    # Calculate price changes
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Handle first value
-    rsi = np.insert(rsi, 0, 50.0)
-
-    # Volume average (20-day)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-
+    
+    # Volume-weighted gains and losses
+    vol_gain = gain * volume
+    vol_loss = loss * volume
+    
+    # Smoothed volume-weighted RS
+    avg_vg = pd.Series(vol_gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_vl = pd.Series(vol_loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Avoid division by zero
+    rs = np.where(avg_vl != 0, avg_vg / avg_vl, 0)
+    vw_rsi = 100 - (100 / (1 + rs))
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):  # Start after warmup for indicators
+    for i in range(14, n):
         # Skip if any required value is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if np.isnan(vw_rsi[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,26 +61,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: KAMA rising (today > yesterday), RSI < 30, volume spike, price above weekly EMA50
-            if kama[i] > kama[i-1] and rsi[i] < 30 and volume[i] > 1.5 * vol_ma_20[i] and close[i] > ema50_1w_aligned[i]:
+            # LONG: VW-RSI crosses above 50 + 1d uptrend
+            if vw_rsi[i] > 50 and vw_rsi[i-1] <= 50 and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA falling (today < yesterday), RSI > 70, volume spike, price below weekly EMA50
-            elif kama[i] < kama[i-1] and rsi[i] > 70 and volume[i] > 1.5 * vol_ma_20[i] and close[i] < ema50_1w_aligned[i]:
+            # SHORT: VW-RSI crosses below 50 + 1d downtrend
+            elif vw_rsi[i] < 50 and vw_rsi[i-1] >= 50 and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (40-60) or KAMA turns down
-            if rsi[i] >= 40 and rsi[i] <= 60 or kama[i] < kama[i-1]:
+            # EXIT LONG: VW-RSI crosses below 50 OR trend reversal
+            if vw_rsi[i] < 50 and vw_rsi[i-1] >= 50 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (40-60) or KAMA turns up
-            if rsi[i] >= 40 and rsi[i] <= 60 or kama[i] > kama[i-1]:
+            # EXIT SHORT: VW-RSI crosses above 50 OR trend reversal
+            if vw_rsi[i] > 50 and vw_rsi[i-1] <= 50 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
