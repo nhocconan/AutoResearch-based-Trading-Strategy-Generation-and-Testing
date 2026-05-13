@@ -1,13 +1,14 @@
-# 4h_Keltner_Breakout_Volume_Trend
-# Hypothesis: Use Keltner Channel breakout (20,2.0) with 1d EMA trend filter and volume spike.
-# Enter long when price breaks above upper band with 1d EMA uptrend and volume > 1.5x average.
-# Enter short when price breaks below lower band with 1d EMA downtrend and volume spike.
-# Exit when price closes back inside the Keltner Channel.
-# This combines volatility-based breakout with trend and volume filters to reduce false signals.
-# Target: 20-30 trades/year on 4h to minimize fee drag while capturing strong trends.
+#!/usr/bin/env python3
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Use Camarilla pivot levels (R3/S3) from 1d as breakout levels.
+# Enter long when price breaks above R3 with 1d EMA uptrend and volume spike.
+# Enter short when price breaks below S3 with 1d EMA downtrend and volume spike.
+# Exit when price returns to the 1d close (mean reversion to daily equilibrium).
+# Camarilla levels provide institutional support/resistance; 1d trend filters direction; volume confirms conviction.
+# Target: 15-25 trades/year on 12h to minimize fee drag.
 
-name = "4h_Keltner_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,26 +25,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA trend filter
+    # Get 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate Keltner Channel (20, 2.0) on 4h data
-    # ATR(20)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla pivot levels for 1d
+    # R3 = close + 1.1 * (high - low)
+    # S3 = close - 1.1 * (high - low)
+    range_1d = high_1d - low_1d
+    r3 = close_1d + 1.1 * range_1d
+    s3 = close_1d - 1.1 * range_1d
 
-    # EMA(20) for middle band
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-
-    # Upper and lower bands
-    upper = ema20 + 2.0 * atr
-    lower = ema20 - 2.0 * atr
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
 
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -57,7 +56,7 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,14 +66,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above upper band + price > 1d EMA34 + volume spike
-            if (close[i] > upper[i] and 
+            # LONG: Close breaks above R3 + price > 1d EMA34 + volume spike
+            if (close[i] > r3_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below lower band + price < 1d EMA34 + volume spike
-            elif (close[i] < lower[i] and 
+            # SHORT: Close breaks below S3 + price < 1d EMA34 + volume spike
+            elif (close[i] < s3_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
@@ -82,15 +81,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses back inside Keltner Channel (below upper band)
-            if close[i] < upper[i]:
+            # EXIT LONG: Close returns to 1d close (mean reversion to daily equilibrium)
+            if close[i] < close_1d[-1] if i == 0 else close[i] < close_1d[i // 24]:  # Simplified: use prior day's close
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses back inside Keltner Channel (above lower band)
-            if close[i] > lower[i]:
+            # EXIT SHORT: Close returns to 1d close (mean reversion to daily equilibrium)
+            if close[i] > close_1d[-1] if i == 0 else close[i] > close_1d[i // 24]:  # Simplified: use prior day's close
                 signals[i] = 0.0
                 position = 0
             else:
