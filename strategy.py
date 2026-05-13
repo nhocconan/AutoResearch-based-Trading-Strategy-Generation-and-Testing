@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1D_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Daily chart Camarilla pivot (R1/S1) breakout filtered by 1-week trend and volume spike.
-# Uses weekly trend direction to filter breakouts, ensuring alignment with higher timeframe momentum.
-# Volume spike confirms institutional interest in the breakout.
-# Designed for low trade frequency (<25/year) to minimize fee drag and work in both bull/bear markets.
+# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts at Camarilla R1/S1 levels on 4h, filtered by 1d trend direction and volume spikes.
+# The 1d trend filter ensures alignment with higher timeframe momentum, reducing false breakouts in chop.
+# Volume surge confirms institutional participation. Designed for 20-40 trades/year to minimize fee drag.
+# Works in bull/bear by following 1d trend; avoids counter-trend entries.
 
-name = "1D_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,10 +23,10 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1w data for HTF trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
 
-    # Calculate Camarilla pivot levels for daily (based on previous daily bar)
+    # Calculate Camarilla pivot levels for 4h (based on previous 4h bar)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -38,11 +38,11 @@ def generate_signals(prices):
     r1 = prev_close + rang * 1.1 / 12
     s1 = prev_close - rang * 1.1 / 12
 
-    # Trend filter: 1w EMA50
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Trend filter: 1d EMA50
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Volume confirmation: current volume > 2.0 x 20-period average (strong spike)
+    # Volume confirmation: current volume > 2.0 x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma)
 
@@ -53,7 +53,7 @@ def generate_signals(prices):
         # Skip if any required value is NaN
         if (np.isnan(r1[i]) or 
             np.isnan(s1[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,13 +65,13 @@ def generate_signals(prices):
         if position == 0:
             # LONG: Break above R1 in uptrend with volume spike
             if (close[i] > r1[i] and 
-                close[i] > ema50_1w_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
             # SHORT: Break below S1 in downtrend with volume spike
             elif (close[i] < s1[i] and 
-                  close[i] < ema50_1w_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
@@ -79,14 +79,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # EXIT LONG: Price breaks below S1 or trend turns down
-            if close[i] < s1[i] or close[i] < ema50_1w_aligned[i]:
+            if close[i] < s1[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # EXIT SHORT: Price breaks above R1 or trend turns up
-            if close[i] > r1[i] or close[i] > ema50_1w_aligned[i]:
+            if close[i] > r1[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
