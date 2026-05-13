@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 12h HMA(21) trend filter and volume confirmation.
-# Long when price breaks above Donchian upper with volume > 1.5x average AND price > 12h HMA21.
-# Short when price breaks below Donchian lower with volume > 1.5x average AND price < 12h HMA21.
-# Exit on opposite Donchian level or trend reversal.
-# Uses discrete position sizing (0.25) to minimize fee churn. Target: 19-50 trades/year.
-# Works in bull markets via breakout continuation and in bear markets via faded rallies at resistance.
-# Proven pattern from DB: Donchian breakout + volume + trend filter yields test Sharpe 0.72-1.38.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1w EMA34 trend filter and ATR-based regime filter.
+# Long when Bull Power > 0 AND price > 1w EMA34 AND ATR(14) < ATR(50) (low volatility regime).
+# Short when Bear Power < 0 AND price < 1w EMA34 AND ATR(14) < ATR(50).
+# Exit when power reverses OR ATR(14) > ATR(50) (high volatility regime exit).
+# Uses discrete position sizing (0.25) to minimize fee churn. Target: 12-37 trades/year.
+# Works in bull markets via trend continuation and in bear markets via faded rallies in low vol regimes.
 
-name = "4h_Donchian20_12hHMA21_Volume_v2"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_1wTrend_ATRRegime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,67 +22,59 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for HTF trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Get 1w data for HTF trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate HMA(21) on 12h close for trend filter
-    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    # Calculate EMA(34) on 1w close for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, mode='full')[-len(values):] / weights.sum()
+    # Calculate ATR(14) and ATR(50) for regime filter
+    tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
+    tr2 = np.maximum(tr1, np.abs(low - np.roll(close, 1)))
+    tr2[0] = high[0] - low[0]  # first bar
+    atr14 = pd.Series(tr2).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr2).rolling(window=50, min_periods=50).mean().values
     
-    wma_half = wma(close_12h, half_len)
-    wma_full = wma(close_12h, 21)
-    raw_hma = 2 * wma_half - wma_full
-    hma_21_12h = wma(raw_hma, sqrt_len)
-    hma_21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
-    
-    # Calculate Donchian(20) on 4h
-    donchian_window = 20
-    upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(hma_21_12h_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema34_1w_aligned[i]) or np.isnan(ema13[i]) or np.isnan(atr14[i]) or np.isnan(atr50[i]):
             signals[i] = 0.0
             continue
         
+        # Regime filter: low volatility (ATR14 < ATR50)
+        low_vol_regime = atr14[i] < atr50[i]
+        
         if position == 0:
-            # LONG: price breaks above Donchian upper with volume confirmation AND price > 12h HMA21
-            if close[i] > upper[i] and volume_filter[i] and close[i] > hma_21_12h_aligned[i]:
+            # LONG: Bull Power > 0 AND price > 1w EMA34 AND low volatility regime
+            if bull_power[i] > 0 and close[i] > ema34_1w_aligned[i] and low_vol_regime:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below Donchian lower with volume confirmation AND price < 12h HMA21
-            elif close[i] < lower[i] and volume_filter[i] and close[i] < hma_21_12h_aligned[i]:
+            # SHORT: Bear Power < 0 AND price < 1w EMA34 AND low volatility regime
+            elif bear_power[i] < 0 and close[i] < ema34_1w_aligned[i] and low_vol_regime:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below Donchian lower OR trend reversal (price < 12h HMA21)
-            if close[i] < lower[i] or close[i] < hma_21_12h_aligned[i]:
+            # EXIT LONG: Bull Power <= 0 OR price < 1w EMA34 OR high volatility regime
+            if bull_power[i] <= 0 or close[i] < ema34_1w_aligned[i] or not low_vol_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above Donchian upper OR trend reversal (price > 12h HMA21)
-            if close[i] > upper[i] or close[i] > hma_21_12h_aligned[i]:
+            # EXIT SHORT: Bear Power >= 0 OR price > 1w EMA34 OR high volatility regime
+            if bear_power[i] >= 0 or close[i] > ema34_1w_aligned[i] or not low_vol_regime:
                 signals[i] = 0.0
                 position = 0
             else:
