@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation (>1.5x avg volume). Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.30.
-# Target: 100-180 total trades over 4 years (25-45/year) on 4h timeframe.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation (>1.5x avg volume). Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 # EMA trend filter on 1d ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
 # Camarilla R3/S3 levels provide stronger support/resistance from prior 1h range. Volume confirmation ensures institutional participation.
 # Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
+# Added volume spike filter (>1.5x) to reduce false breakouts and lower trade frequency for better generalization.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeConfirm_ATRStop_v1"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_ATRStop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -77,14 +78,14 @@ def generate_signals(prices):
             if (close[i] > camarilla_upper_aligned[i] and 
                 ema34_1d_aligned[i] > np.roll(ema34_1d_aligned, 1)[i] and  # EMA34 rising
                 volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
             # SHORT: Price breaks below Camarilla S3 AND 1d EMA34 < 0 (falling trend) AND volume > 1.5x average
             elif (close[i] < camarilla_lower_aligned[i] and 
                   ema34_1d_aligned[i] < np.roll(ema34_1d_aligned, 1)[i] and  # EMA34 falling
                   volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
@@ -104,7 +105,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
@@ -119,7 +120,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
