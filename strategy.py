@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above R3 AND 1d EMA50 rising AND volume > 1.8x average.
-# Short when price breaks below S3 AND 1d EMA50 falling AND volume > 1.8x average.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long when price breaks above 20-period high AND 1d EMA50 rising AND volume > 1.8x average.
+# Short when price breaks below 20-period low AND 1d EMA50 falling AND volume > 1.8x average.
 # Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Camarilla levels provide precise support/resistance, 1d EMA50 filters primary trend, volume spike confirms breakout strength.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Donchian channels provide robust structure, 1d EMA50 filters primary trend, volume confirms breakout strength.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA50_VolumeSpike_ATRStop_v2"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dEMA50_Volume_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -35,26 +35,26 @@ def generate_signals(prices):
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Camarilla pivot levels (based on previous day)
+    # Get 1d data for Donchian channel (based on previous day)
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar
-    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + 1.1 * camarilla_range
-    s3 = close_1d - 1.1 * camarilla_range
+    # Calculate Donchian levels for each 1d bar (20-period high/low)
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align 1d Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align 1d Donchian levels to 12h timeframe (wait for 1d bar to close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # Get 1d data for EMA50 trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 4h timeframe (wait for 1d bar to close)
+    # Align 1d EMA50 to 12h timeframe (wait for 1d bar to close)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
@@ -64,22 +64,22 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
             np.isnan(ema_50_1d_aligned[i]) or np.isnan(atr[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND 1d EMA50 rising AND volume > 1.8x average
-            if (close[i] > r3_aligned[i] and 
+            # LONG: Price breaks above Donchian high AND 1d EMA50 rising AND volume > 1.8x average
+            if (close[i] > donchian_high_aligned[i] and 
                 ema_50_1d_aligned[i] > ema_50_1d_aligned[i-1] and 
                 volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below S3 AND 1d EMA50 falling AND volume > 1.8x average
-            elif (close[i] < s3_aligned[i] and 
+            # SHORT: Price breaks below Donchian low AND 1d EMA50 falling AND volume > 1.8x average
+            elif (close[i] < donchian_low_aligned[i] and 
                   ema_50_1d_aligned[i] < ema_50_1d_aligned[i-1] and 
                   volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = -0.25
