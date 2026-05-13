@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above R3 (camarilla level from prior 1d) AND close > 1w EMA50 AND volume > 2.0x 20-period average.
-# Short when price breaks below S3 (camarilla level from prior 1d) AND close < 1w EMA50 AND volume > 2.0x 20-period average.
-# Exit on ATR(14) trailing stop (2.0x). Uses 6h primary timeframe and 1w HTF for trend alignment.
-# Camarilla levels identify intraday support/resistance; 1w EMA50 filters primary trend to avoid counter-trend trades;
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume spike confirmation.
+# Long when price breaks above R3 (camarilla level from prior 1d) AND close > 1d EMA50 AND volume > 2.0x 20-period average.
+# Short when price breaks below S3 (camarilla level from prior 1d) AND close < 1d EMA50 AND volume > 2.0x 20-period average.
+# Exit on ATR(14) trailing stop (2.0x). Uses 12h primary timeframe and 1d HTF for trend alignment.
+# Camarilla levels identify support/resistance; 1d EMA50 filters primary trend to avoid counter-trend trades;
 # volume spike (2.0x) confirms breakout authenticity. Designed for BTC/ETH with strict entry to avoid overtrading (target: 12-30 trades/year).
 
-name = "6h_Camarilla_R3_S3_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA50_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -44,23 +44,19 @@ def generate_signals(prices):
     r3_1d = close_1d + 1.1 * camarilla_range / 2
     s3_1d = close_1d - 1.1 * camarilla_range / 2
     
-    # Align HTF arrays to 6h timeframe (wait for completed 1d bar)
+    # Align HTF arrays to 12h timeframe (wait for completed 1d bar)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Get 1w data for EMA50 trend filter (MTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for EMA50 trend filter (MTF)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate EMA50 on 1w close
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align HTF arrays to 12h timeframe (wait for completed 1d bar)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align HTF arrays to 6h timeframe (wait for completed 1w bar)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Volume filter: current 6h volume > 2.0x 20-period average (spike confirmation)
-    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_6h)
+    # Volume filter: current 12h volume > 2.0x 20-period average (spike confirmation)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,18 +66,18 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
         if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_6h[i])):
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_12h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above R3 AND close > 1w EMA50 AND volume spike
-            if close[i] > r3_1d_aligned[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
+            # LONG: price breaks above R3 AND close > 1d EMA50 AND volume spike
+            if close[i] > r3_1d_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price breaks below S3 AND close < 1w EMA50 AND volume spike
-            elif close[i] < s3_1d_aligned[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
+            # SHORT: price breaks below S3 AND close < 1d EMA50 AND volume spike
+            elif close[i] < s3_1d_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
