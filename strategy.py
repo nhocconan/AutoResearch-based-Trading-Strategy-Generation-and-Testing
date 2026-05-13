@@ -1,21 +1,36 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_Trend_Volume_12h_v2
-# Hypothesis: Daily Camarilla R3/S3 levels act as strong support/resistance on 4h chart.
-# Breakouts above R3 or below S3 with volume confirmation and 12h EMA trend filter capture momentum.
-# Uses 4h for execution and 12h EMA for trend direction. Target ~30-50 trades/year to avoid fee drag.
-# Works in bull (breakouts with trend) and bear (breakdowns against trend filtered by 12h EMA).
+"""
+6h_WMA_Cross_1dATR_Volume_Regime
+Hypothesis: A fast/slow Weighted Moving Average crossover on 6h, filtered by 1d ATR-based volatility regime and volume confirmation, captures momentum in both bull and bear markets.
+- WMA(9) > WMA(21) = bullish momentum, < = bearish
+- 1d ATR ratio (current/20-period avg) > 1.2 = high volatility regime (favor trend following)
+- Volume > 1.5x 20-period average confirms participation
+Target: 20-50 trades/year to minimize fee drag while maintaining edge.
+"""
 
-name = "4h_Camarilla_R3_S3_Breakout_Trend_Volume_12h_v2"
-timeframe = "4h"
+name = "6h_WMA_Cross_1dATR_Volume_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def wma(arr, period):
+    """Weighted Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan, dtype=np.float64)
+    weights = np.arange(1, period + 1, dtype=np.float64)
+    weights_sum = weights.sum()
+    wma_vals = np.full_like(arr, np.nan, dtype=np.float64)
+    for i in range(period - 1, len(arr)):
+        window = arr[i - period + 1:i + 1]
+        wma_vals[i] = np.dot(window, weights) / weights_sum
+    return wma_vals
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,26 +38,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
+    # WMA crossover on 6h
+    wma_fast = wma(close, 9)
+    wma_slow = wma(close, 21)
+    
+    # 1d ATR for volatility regime
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla levels: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    h_1d = df_1d['high'].values
-    l_1d = df_1d['low'].values
-    c_1d = df_1d['close'].values
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index 0
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    camarilla_r3 = c_1d + (h_1d - l_1d) * 1.1 / 2.0
-    camarilla_s3 = c_1d - (h_1d - l_1d) * 1.1 / 2.0
-    
-    # Align daily Camarilla levels to 4h chart (wait for daily close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # ATR ratio: current ATR / 20-period average ATR
+    atr_ma = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / atr_ma
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,28 +68,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
+        if np.isnan(wma_fast[i]) or np.isnan(wma_slow[i]) or np.isnan(atr_ratio_aligned[i]):
+            signals[i] = 0.0
+            continue
+        
+        wma_bullish = wma_fast[i] > wma_slow[i]
+        wma_bearish = wma_fast[i] < wma_slow[i]
+        high_vol_regime = atr_ratio_aligned[i] > 1.2
+        vol_confirm = volume_filter[i]
+        
         if position == 0:
-            # LONG: Breakout above daily R3 with volume confirmation and 12h EMA uptrend
-            if close[i] > camarilla_r3_aligned[i] and volume_filter[i] and close[i] > ema_12h_aligned[i]:
+            # LONG: WMA bullish crossover in high volatility regime with volume
+            if wma_bullish and high_vol_regime and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below daily S3 with volume confirmation and 12h EMA downtrend
-            elif close[i] < camarilla_s3_aligned[i] and volume_filter[i] and close[i] < ema_12h_aligned[i]:
+            # SHORT: WMA bearish crossover in high volatility regime with volume
+            elif wma_bearish and high_vol_regime and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to daily S3 or breaks below 12h EMA
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_12h_aligned[i]:
+            # EXIT LONG: WMA turns bearish OR volatility drops
+            if not wma_bullish or not high_vol_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to daily R3 or breaks above 12h EMA
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_12h_aligned[i]:
+            # EXIT SHORT: WMA turns bullish OR volatility drops
+            if not wma_bearish or not high_vol_regime:
                 signals[i] = 0.0
                 position = 0
             else:
