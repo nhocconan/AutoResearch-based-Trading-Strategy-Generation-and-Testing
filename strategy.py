@@ -1,9 +1,11 @@
-# 4h_Keltner_Channel_Squeeze_Breakout
-# Hypothesis: Keltner Channel squeeze (BBands inside KC) + volume spike triggers breakout in direction of 1d EMA200 trend. Works in bull/bear by following higher timeframe trend.
-# Uses 4h timeframe with 1d trend filter, volatility squeeze, and volume confirmation for clean entries.
+#!/usr/bin/env python3
+"""
+1d_WeeklyPivot_HighLow_Breakout_TrendFilter
+Hypothesis: On daily timeframe, go long when price breaks above weekly pivot high in uptrend (price > weekly EMA20), short when price breaks below weekly pivot low in downtrend (price < weekly EMA20), with volume confirmation (volume > 1.5x 20-day average). Designed for 1d timeframe to capture multi-day trends while minimizing trades and fee drag. Uses weekly pivot points for structure and EMA20 for trend filter.
+"""
 
-name = "4h_Keltner_Channel_Squeeze_Breakout"
-timeframe = "4h"
+name = "1d_WeeklyPivot_HighLow_Breakout_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,77 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d EMA200 for trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate weekly pivot points (based on prior week)
+    prev_weekly_high = df_weekly['high'].shift(1).values
+    prev_weekly_low = df_weekly['low'].shift(1).values
+    prev_weekly_close = df_weekly['close'].shift(1).values
     
-    # === 4h Bollinger Bands (20, 2) ===
-    close_series = pd.Series(close)
-    bb_mid = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
+    valid_idx = ~np.isnan(prev_weekly_high) & ~np.isnan(prev_weekly_low) & ~np.isnan(prev_weekly_close)
+    weekly_pivot_high = np.full_like(prev_weekly_close, np.nan)
+    weekly_pivot_low = np.full_like(prev_weekly_close, np.nan)
     
-    # === 4h Keltner Channel (20, 1.5) ===
-    atr_period = 20
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    kc_mid = bb_mid  # same as EMA/SMA middle
-    kc_upper = kc_mid + 1.5 * atr
-    kc_lower = kc_mid - 1.5 * atr
+    weekly_pivot_high[valid_idx] = prev_weekly_high[valid_idx]
+    weekly_pivot_low[valid_idx] = prev_weekly_low[valid_idx]
     
-    # === Squeeze condition: BB inside KC (low volatility) ===
-    squeeze = (bb_upper <= kc_upper) & (bb_lower >= kc_lower)
+    # Align weekly pivot levels to daily timeframe
+    weekly_pivot_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot_high)
+    weekly_pivot_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot_low)
     
-    # === Volume confirmation: 1.5x 20-period average ===
+    # Get weekly EMA20 for trend filter
+    ema_20_weekly = pd.Series(df_weekly['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
+    
+    # Volume confirmation: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_signal = 0
+    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
-    for i in range(20, n):
-        # Skip if not enough warmup for indicators
-        if np.isnan(ema_200_1d_aligned[i]) or np.isnan(bb_upper[i]) or np.isnan(kc_upper[i]):
-            continue
-            
-        # Check for squeeze breakout
-        if squeeze[i-1]:  # was in squeeze
-            # LONG: break above BB upper with volume, in uptrend
-            if high[i] > bb_upper[i] and volume_spike[i] and close[i] > ema_200_1d_aligned[i]:
+    for i in range(30, n):
+        # Decrease cooldown if active
+        if cooldown > 0:
+            cooldown -= 1
+        
+        if position == 0 and cooldown == 0:
+            # LONG: Price breaks above weekly pivot high with volume confirmation in uptrend
+            if weekly_pivot_high_aligned[i] > 0 and not np.isnan(weekly_pivot_high_aligned[i]) and \
+               high[i] > weekly_pivot_high_aligned[i] and volume_confirmed[i] and \
+               close[i] > ema_20_weekly_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_signal = 0
-            # SHORT: break below BB lower with volume, in downtrend
-            elif low[i] < bb_lower[i] and volume_spike[i] and close[i] < ema_200_1d_aligned[i]:
+            # SHORT: Price breaks below weekly pivot low with volume confirmation in downtrend
+            elif weekly_pivot_low_aligned[i] > 0 and not np.isnan(weekly_pivot_low_aligned[i]) and \
+                 low[i] < weekly_pivot_low_aligned[i] and volume_confirmed[i] and \
+                 close[i] < ema_20_weekly_aligned[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_signal = 0
-        
-        # Exit conditions
-        if position == 1:
-            # Exit: price crosses below BB middle OR ATR-based trailing stop
-            if low[i] < bb_mid[i]:
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # EXIT LONG: Price crosses back below weekly pivot low or trend weakens
+            if weekly_pivot_low_aligned[i] > 0 and not np.isnan(weekly_pivot_low_aligned[i]) and \
+               (low[i] < weekly_pivot_low_aligned[i] or close[i] < ema_20_weekly_aligned[i]):
                 signals[i] = 0.0
                 position = 0
+                cooldown = 5  # 5-day cooldown after exit
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price crosses above BB middle OR ATR-based trailing stop
-            if high[i] > bb_mid[i]:
+            # EXIT SHORT: Price crosses back above weekly pivot high or trend weakens
+            if weekly_pivot_high_aligned[i] > 0 and not np.isnan(weekly_pivot_high_aligned[i]) and \
+               (high[i] > weekly_pivot_high_aligned[i] or close[i] > ema_20_weekly_aligned[i]):
                 signals[i] = 0.0
                 position = 0
+                cooldown = 5  # 5-day cooldown after exit
             else:
                 signals[i] = -0.25
     
