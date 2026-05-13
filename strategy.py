@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """
-4H_Donchian_Breakout_Volume_Trend_v1
-Hypothesis: Use Donchian channel breakouts with volume confirmation and trend filter on 4h timeframe. 
-Long when price breaks above upper Donchian band with volume spike and ADX > 25, 
-short when price breaks below lower Donchian band with volume spike and ADX > 25.
-Designed for 4h timeframe to limit trades and avoid fee drag. Works in both bull and bear markets 
-by using ADX for trend strength and volume for breakout confirmation.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike
+Hypothesis: Use daily Camarilla pivot levels (R1/S1) for breakout entries, filtered by daily trend (close > EMA34) and volume spikes (volume > 2x volume EMA34). Exit on opposite breakout or trend reversal. Camarilla levels provide high-probability support/resistance; volume confirms institutional interest; trend filter ensures alignment with higher timeframe direction. Designed for 4h to balance trade frequency and avoid fee drag, targeting 20-50 trades/year.
 """
 
-name = "4H_Donchian_Breakout_Volume_Trend_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,82 +22,69 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Get daily data for Camarilla pivots, trend filter, and volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Calculate volume moving average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate ADX (14-period) for trend strength
-    # +DM and -DM
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
+    # Calculate Camarilla pivot levels (R1, S1) from previous day's range
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Using previous day's high, low, close to avoid look-ahead
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate volume EMA34 for volume spike filter
+    vol_1d = df_1d['volume'].values
+    vol_ema_34 = pd.Series(vol_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Smooth using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    # Pad arrays to match original length
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
-    tr = np.concatenate([[np.nan], tr])
-    
-    # Smooth
-    atr = wilder_smooth(tr, 14)
-    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
-    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilder_smooth(dx, 14)
-    
-    # Volume spike condition (volume > 1.5x average)
-    volume_spike = volume > (1.5 * vol_ma)
+    # Align all daily indicators to 4h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    vol_ema_34_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(lookback, n):
+    for i in range(200, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(adx[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ema_34_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper Donchian band with volume spike and ADX > 25
-            if close[i] > upper[i] and volume_spike[i] and adx[i] > 25:
+            # LONG: Break above R1 with volume spike and uptrend
+            if (high[i] > r1_aligned[i] and 
+                volume[i] > 2 * vol_ema_34_aligned[i] and 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian band with volume spike and ADX > 25
-            elif close[i] < lower[i] and volume_spike[i] and adx[i] > 25:
+            # SHORT: Break below S1 with volume spike and downtrend
+            elif (low[i] < s1_aligned[i] and 
+                  volume[i] > 2 * vol_ema_34_aligned[i] and 
+                  close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below lower Donchian band or ADX weakens
-            if close[i] < lower[i] or adx[i] < 20:
+            # EXIT LONG: Break below S1 or trend reversal
+            if low[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above upper Donchian band or ADX weakens
-            if close[i] > upper[i] or adx[i] < 20:
+            # EXIT SHORT: Break above R1 or trend reversal
+            if high[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
