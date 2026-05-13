@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_1d_RVI_Divergence_Trend
-Hypothesis: Relative Vigor Index (RVI) divergence with price on 4h, confirmed by 1d trend, provides high-probability reversal signals. RVI measures trend strength; divergence signals weakening momentum before price reverses. Works in both bull and bear markets by following the higher timeframe trend. Target: 20-40 trades/year per symbol.
+4h_1d_SqueezeBreakout
+Hypothesis: Bollinger Band squeeze (low volatility) followed by breakout in direction of 1d KAMA trend.
+Works in both bull and bear markets by trading volatility breakouts aligned with higher timeframe trend.
+Targets 20-40 trades per year per symbol with strict entry conditions to avoid overtrading.
 """
 
-name = "4h_1d_RVI_Divergence_Trend"
+name = "4h_1d_SqueezeBreakout"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,91 +20,81 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    open_price = prices['open'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
-    # Calculate RVI (Relative Vigor Index)
-    numerator = close - open_price
-    denominator = high - low
-    # Avoid division by zero
-    denominator = np.where(denominator == 0, 1e-10, denominator)
-    v = numerator / denominator
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2.0
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + bb_std * bb_std_dev
+    lower = sma - bb_std * bb_std_dev
+    bb_width = (upper - lower) / sma  # Normalized width
     
-    # Smooth v with 4-period SMA for numerator and denominator of RVI
-    v_smooth = np.zeros(n)
-    for i in range(3, n):
-        v_smooth[i] = np.mean(v[i-3:i+1])
+    # Bollinger Band squeeze detection: width < 20th percentile of last 50 periods
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).quantile(0.20).values
+    squeeze = bb_width < bb_width_percentile
     
-    # Calculate RVI using 4-period SMA of v_smooth
-    rvi = np.zeros(n)
-    for i in range(7, n):
-        num = np.sum(v_smooth[i-3:i+1])
-        den = np.sum(np.abs(v_smooth[i-3:i+1]))
-        if den != 0:
-            rvi[i] = num / den
-        else:
-            rvi[i] = 0
+    # Breakout detection: close crosses above upper or below lower band
+    breakout_up = close > upper
+    breakout_down = close < lower
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # 1d trend: 34 EMA (faster for better responsiveness)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = close_1d > ema_34_1d
-    downtrend_1d = close_1d < ema_34_1d
+    # 1d trend: KAMA (adaptive moving average)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, k=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close_1d, k=1)), axis=0) if len(close_1d) > 1 else np.array([0])
+    volatility = pd.Series(volatility).rolling(window=10, min_periods=1).sum().values
+    er = np.where(volatility > 0, change / volatility, 0)
+    
+    # Smoothing constants
+    sc = (er * (2/(2+2) - 2/(30+2)) + 2/(30+2)) ** 2  # Fast=2, Slow=30
+    
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    uptrend_1d = close_1d > kama
+    downtrend_1d = close_1d < kama
     
     # Align 1d trend to 4h
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Calculate RVI slope (4-period) and price slope (4-period)
-    rvi_slope = np.zeros(n)
-    price_slope = np.zeros(n)
-    
-    for i in range(4, n):
-        rvi_slope[i] = rvi[i] - rvi[i-4]
-        price_slope[i] = close[i] - close[i-4]
-    
-    # Detect divergences
-    # Bearish divergence: price makes higher high, RVI makes lower high
-    bearish_divergence = (price_slope > 0) & (rvi_slope < 0)
-    # Bullish divergence: price makes lower low, RVI makes higher low
-    bullish_divergence = (price_slope < 0) & (rvi_slope > 0)
-    
+    # Entry conditions: squeeze breakout in direction of 1d trend
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Get aligned values
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
-        
         if position == 0:
-            # LONG: 1d uptrend + bullish RVI divergence
-            if uptrend and bullish_divergence[i]:
+            # LONG: squeeze breakout up + 1d uptrend
+            if squeeze[i-1] and breakout_up[i] and uptrend_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: 1d downtrend + bearish RVI divergence
-            elif downtrend and bearish_divergence[i]:
+            # SHORT: squeeze breakout down + 1d downtrend
+            elif squeeze[i-1] and breakout_down[i] and downtrend_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: 1d trend turns down or bearish divergence appears
-            if not uptrend or bearish_divergence[i]:
+            # EXIT LONG: close below middle band (SMA) or 1d trend turns down
+            if close[i] < sma[i] or not uptrend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: 1d trend turns up or bullish divergence appears
-            if not downtrend or bullish_divergence[i]:
+            # EXIT SHORT: close above middle band (SMA) or 1d trend turns up
+            if close[i] > sma[i] or not downtrend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
