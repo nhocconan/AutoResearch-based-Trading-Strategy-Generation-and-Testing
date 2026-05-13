@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator (Jaw/Teeth/Lips) crossover with 1d EMA50 trend filter and volume confirmation (>1.3x 20-bar avg volume).
-# Uses Alligator for trend identification and momentum, EMA50 for higher timeframe alignment, volume spike for participation.
-# Designed for BTC/ETH with discrete sizing (0.25) to minimize fee churn while capturing sustained trends.
-# Target: 50-150 total trades over 4 years on 12h timeframe.
+# Hypothesis: 6h Williams %R mean reversion with 1d EMA50 trend filter and volume confirmation (>1.5x 20-bar avg volume). 
+# Williams %R identifies overbought/oversold conditions on 6h timeframe. 
+# Trend filter ensures trades align with higher timeframe direction (1d EMA50) to avoid counter-trend whipsaws.
+# Volume confirmation ensures participation during reversals.
+# Designed for BTC/ETH in both bull and bear markets: mean reversion works in ranging markets, trend filter avoids major losses in strong trends.
+# Target: 12-37 trades/year (50-150 total over 4 years) on 6h timeframe with discrete sizing (0.25) to minimize fee churn.
 
-name = "12h_Williams_Alligator_1dEMA50_Volume_v1"
-timeframe = "12h"
+name = "6h_WilliamsR_MeanReversion_1dEMA50_Volume_Confirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -29,15 +31,11 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Williams Alligator on 12h timeframe (using close prices)
-    jaw_period, jaw_shift = 13, 8   # Blue line
-    teeth_period, teeth_shift = 8, 5  # Red line
-    lips_period, lips_shift = 5, 3    # Green line
-    
-    close_series = pd.Series(close)
-    jaw = close_series.ewm(span=jaw_period, adjust=False).mean().shift(jaw_shift).values
-    teeth = close_series.ewm(span=teeth_period, adjust=False).mean().shift(teeth_shift).values
-    lips = close_series.ewm(span=lips_period, adjust=False).mean().shift(lips_shift).values
+    # Calculate Williams %R on 6h timeframe (14-period)
+    lookback_wr = 14
+    highest_high = pd.Series(high).rolling(window=lookback_wr, min_periods=lookback_wr).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_wr, min_periods=lookback_wr).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # Calculate average volume for confirmation (20-period)
     lookback_vol = 20
@@ -46,46 +44,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(jaw_shift, teeth_shift, lips_shift, lookback_vol), n):
+    for i in range(max(lookback_wr, lookback_vol) + 1, n):  # Start after sufficient data
         # Skip if any required data is NaN
         if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or 
+            np.isnan(williams_r[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Lips > Teeth > Jaw (bullish alignment), close > 1d EMA50, volume spike
-            if (lips[i] > teeth[i] and 
-                teeth[i] > jaw[i] and 
+            # LONG: Williams %R oversold (< -80), price above 1d EMA50, volume spike
+            if (williams_r[i] < -80 and 
                 close[i] > ema_50_1d_aligned[i] and 
-                volume[i] > 1.3 * avg_volume[i]):
-                signals[i] = 0.25  # Enter long
+                volume[i] > 1.5 * avg_volume[i]):
+                signals[i] = 0.25  # Discrete position size
                 position = 1
-            # SHORT: Lips < Teeth < Jaw (bearish alignment), close < 1d EMA50, volume spike
-            elif (lips[i] < teeth[i] and 
-                  teeth[i] < jaw[i] and 
+            # SHORT: Williams %R overbought (> -20), price below 1d EMA50, volume spike
+            elif (williams_r[i] > -20 and 
                   close[i] < ema_50_1d_aligned[i] and 
-                  volume[i] > 1.3 * avg_volume[i]):
-                signals[i] = -0.25  # Enter short
+                  volume[i] > 1.5 * avg_volume[i]):
+                signals[i] = -0.25  # Discrete position size
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Lips cross below Teeth or volume drops
-            if lips[i] < teeth[i] or volume[i] < avg_volume[i]:
-                signals[i] = 0.0  # Exit
+            # EXIT LONG: Williams %R returns to neutral (> -50) or trend breaks
+            if williams_r[i] > -50 or close[i] < ema_50_1d_aligned[i]:
+                signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # Hold long
+                signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # EXIT SHORT: Lips cross above Teeth or volume drops
-            if lips[i] > teeth[i] or volume[i] < avg_volume[i]:
-                signals[i] = 0.0  # Exit
+            # EXIT SHORT: Williams %R returns to neutral (< -50) or trend breaks
+            if williams_r[i] < -50 or close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # Hold short
+                signals[i] = -0.25  # Maintain position
     
     return signals
