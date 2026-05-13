@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_With_Market_Regime
-Hypothesis: Elder Ray Index (Bull Power/Bear Power) identifies bullish/bearish momentum.
-Combine with market regime (ADX for trend strength, Bollinger Bands width for volatility).
-In strong trends (ADX>25), trade Elder Ray direction. In range (ADX<20), fade extremes.
-Designed for low trade frequency (<30/year) to avoid fee drag. Works in bull/bear via regime filter.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+Hypothesis: Camarilla pivot levels from 1-day chart provide strong support/resistance.
+Breakout above R1 with 1-day EMA34 uptrend and volume spike indicates bullish momentum.
+Breakdown below S1 with 1-day EMA34 downtrend and volume spike indicates bearish momentum.
+Designed for low trade frequency (~20-30/year) on 12h timeframe to avoid fee drag.
 """
 
-name = "6h_ElderRay_With_Market_Regime"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,95 +25,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA for Elder Ray (13-period)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Get 1-day data once before loop (HTF)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Bull Power and Bear Power
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate Camarilla levels from previous day's range
+    # R1 = C + (H-L) * 1.1/12
+    # S1 = C - (H-L) * 1.1/12
+    # Where C, H, L are from previous day
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
     
-    # ADX for trend strength (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
+    # Calculate Camarilla levels for each 1-day bar
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Align Camarilla levels to 12h timeframe (wait for 1-day close)
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
     
-    def wilders_smoothing(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) < period:
-            return result
-        result[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Trend filter: EMA34 on 1-day close
+    ema_34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    uptrend_1d = close > ema_34_12h
+    downtrend_1d = close < ema_34_12h
     
-    period = 14
-    plus_dm_smooth = wilders_smoothing(plus_dm, period)
-    minus_dm_smooth = wilders_smoothing(minus_dm, period)
-    tr_smooth = wilders_smoothing(tr, period)
-    
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, period)
-    
-    # Bollinger Bands width for volatility regime (20-period)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
-    bb_width = (bb_upper - bb_lower) / sma_20
+    # Volume confirmation: > 1.5x 20-period average on 12h
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Regime classification
-        trending = adx[i] > 25
-        ranging = adx[i] < 20
-        
         if position == 0:
-            # LONG conditions
-            if trending and bull_power[i] > 0 and bull_power[i] > bull_power[i-1]:
+            # LONG: Close breaks above R1, 1-day uptrend, volume confirmation
+            if close[i] > r1_12h[i] and uptrend_1d[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            elif ranging and bear_power[i] < 0 and low[i] < bb_lower[i]:
-                # Fade bear power exhaustion in range
-                signals[i] = 0.25
-                position = 1
-            # SHORT conditions
-            elif trending and bear_power[i] < 0 and bear_power[i] < bear_power[i-1]:
-                signals[i] = -0.25
-                position = -1
-            elif ranging and bull_power[i] > 0 and high[i] > bb_upper[i]:
-                # Fade bull power exhaustion in range
+            # SHORT: Close breaks below S1, 1-day downtrend, volume confirmation
+            elif close[i] < s1_12h[i] and downtrend_1d[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG
-            if trending and bull_power[i] <= 0:
-                signals[i] = 0.0
-                position = 0
-            elif ranging and high[i] >= bb_upper[i]:
+            # EXIT LONG: Close crosses below S1 or trend fails
+            if close[i] < s1_12h[i] or not uptrend_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT
-            if trending and bear_power[i] >= 0:
-                signals[i] = 0.0
-                position = 0
-            elif ranging and low[i] <= bb_lower[i]:
+            # EXIT SHORT: Close crosses above R1 or trend fails
+            if close[i] > r1_12h[i] or not downtrend_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
