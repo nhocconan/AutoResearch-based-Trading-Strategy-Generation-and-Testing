@@ -1,22 +1,39 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R + 1d ADX trend filter + volume spike confirmation.
-# Long when Williams %R crosses above -80 (oversold bounce) AND 1d ADX > 25 (trending) AND volume > 1.8x average
-# Short when Williams %R crosses below -20 (overbought rejection) AND 1d ADX > 25 AND volume > 1.8x average
-# Exit when Williams %R returns to -50 (mean reversion) OR ADX < 20 (trend weakening)
-# Uses 6h timeframe (target: 50-150 total trades over 4 years = 12-37/year) with daily trend filter for BTC/ETH resilience.
-# Williams %R captures mean reversion extremes; ADX filters for trending markets; volume spike confirms momentum.
+# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volume spike confirmation.
+# Long when Alligator jaws (13-period SMMA) < teeth (8-period SMMA) < lips (5-period SMMA) AND close > 1d EMA34 AND volume > 2.0x average
+# Short when Alligator jaws > teeth > lips AND close < 1d EMA34 AND volume > 2.0x average
+# Exit when Alligator lines cross (jaws-teeth or teeth-lips) OR trend reversal (price crosses 1d EMA34)
+# Uses 12h timeframe (target: 50-150 total trades over 4 years = 12-37/year) with daily trend filter for BTC/ETH resilience.
+# Williams Alligator identifies trending markets via SMMA alignment; EMA34 filters higher-timeframe trend; volume spike confirms breakout authenticity.
 
-name = "6h_WilliamsR_ADX_Trend_Volume_v3"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(source, length):
+    """Smoothed Moving Average (SMMA) as used in Williams Alligator"""
+    if length < 1:
+        return np.full_like(source, np.nan)
+    result = np.full_like(source, np.nan)
+    if len(source) < length:
+        return result
+    # First value is simple SMA
+    result[length-1] = np.nansum(source[:length]) / length
+    # Subsequent values: SMMA = (PREV_SMMA * (LENGTH-1) + CLOSE) / LENGTH
+    for i in range(length, len(source)):
+        if np.isnan(result[i-1]):
+            result[i] = np.nansum(source[i-length+1:i+1]) / length
+        else:
+            result[i] = (result[i-1] * (length-1) + source[i]) / length
+    return result
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,88 +41,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Williams %R on 6h data (primary timeframe)
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Get 12h data for Williams Alligator calculation (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Get 1d data for ADX trend filter
+    # Calculate Williams Alligator on 12h close: jaws (13), teeth (8), lips (5) SMMA
+    lips = smma(close_12h, 5)
+    teeth = smma(close_12h, 8)
+    jaws = smma(close_12h, 13)
+    
+    # Align Alligator lines to 12h timeframe (already aligned since calculated on 12h)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    jaws_aligned = align_htf_to_ltf(prices, df_12h, jaws)
+    
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX(14) on 1d data
-    adx_period = 14
-    # True Range
-    tr1 = pd.Series(high_1d).diff().abs()
-    tr2 = (pd.Series(high_1d) - pd.Series(close_1d).shift()).abs()
-    tr3 = (pd.Series(low_1d) - pd.Series(close_1d).shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values
+    # Calculate EMA(34) on 1d close for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Directional Movement
-    up_move = pd.Series(high_1d).diff()
-    down_move = -pd.Series(low_1d).diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / atr
-    minus_di = 100 * minus_dm_smooth / atr
-    # Handle division by zero
-    plus_di = np.where(atr == 0, 0, plus_di)
-    minus_di = np.where(atr == 0, 0, minus_di)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(span=adx_period, adjust=False, min_periods=adx_period).mean().values
-    
-    # Align 1d ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume filter: current 6h volume > 1.8x 20-period average (spike confirmation)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
+    # Volume filter: current 12h volume > 2.0x 20-period average (spike confirmation)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after sufficient data for indicators
+    for i in range(50, n):  # Start after sufficient data for EMA and Alligator
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_12h[i])):
             signals[i] = 0.0
             continue
         
+        # Alligator conditions: jaws < teeth < lips (bullish alignment) OR jaws > teeth > lips (bearish alignment)
+        bullish_alignment = jaws_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < lips_aligned[i]
+        bearish_alignment = jaws_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
+        
         if position == 0:
-            # LONG: Williams %R crosses above -80 AND ADX > 25 AND volume spike
-            if williams_r[i] > -80 and williams_r[i-1] <= -80 and adx_aligned[i] > 25 and volume_filter[i]:
+            # LONG: bullish Alligator alignment AND close > 1d EMA34 AND volume spike
+            if bullish_alignment and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R crosses below -20 AND ADX > 25 AND volume spike
-            elif williams_r[i] < -20 and williams_r[i-1] >= -20 and adx_aligned[i] > 25 and volume_filter[i]:
+            # SHORT: bearish Alligator alignment AND close < 1d EMA34 AND volume spike
+            elif bearish_alignment and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R returns to -50 (mean reversion) OR ADX < 20 (trend weakening)
-            if williams_r[i] > -50 or adx_aligned[i] < 20:
+            # EXIT LONG: Alligator lines cross (jaws-teeth or teeth-lips) OR trend reversal (close < 1d EMA34)
+            if (jaws_aligned[i] >= teeth_aligned[i] or teeth_aligned[i] >= lips_aligned[i]) or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R returns to -50 (mean reversion) OR ADX < 20 (trend weakening)
-            if williams_r[i] < -50 or adx_aligned[i] < 20:
+            # EXIT SHORT: Alligator lines cross (jaws-teeth or teeth-lips) OR trend reversal (close > 1d EMA34)
+            if (jaws_aligned[i] <= teeth_aligned[i] or teeth_aligned[i] <= lips_aligned[i]) or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
