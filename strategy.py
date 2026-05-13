@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla pivot levels from daily data provide robust support/resistance.
-Breakouts above R3 or below S3 with volume confirmation and aligned daily trend
-capture institutional moves while minimizing false breakouts. Designed for low
-trade frequency (target: 12-37 trades/year) to minimize fee drift. Works in both
-bull and bear regimes by following the daily trend direction only.
+4h_SuperTrend_Retest_Entry
+Hypothesis: SuperTrend (ATR=10, mult=3) defines the trend, and retests of the SuperTrend line during pullbacks provide high-probability entries in the direction of the trend. Volume confirmation filters out weak moves. Works in both bull and bear markets by following the trend direction. Target: 20-40 trades/year to minimize fee drag.
 """
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_SuperTrend_Retest_Entry"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,59 +22,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate ATR(10)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate Camarilla levels for each day
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    hl_range = df_1d['high'] - df_1d['low']
-    r3 = df_1d['close'] + hl_range * 1.1 / 4
-    s3 = df_1d['close'] - hl_range * 1.1 / 4
+    # SuperTrend calculation
+    upper = (high + low) / 2 + 3 * atr
+    lower = (high + low) / 2 - 3 * atr
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
+    supertrend = np.zeros_like(close)
+    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
     
-    # Calculate 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    supertrend[0] = upper[0]
+    direction[0] = 1
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    for i in range(1, n):
+        if close[i] > supertrend[i-1]:
+            direction[i] = 1
+        elif close[i] < supertrend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = max(lower[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper[i], supertrend[i-1])
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         if position == 0:
-            # LONG: break above R3 with volume spike and above daily EMA34 (uptrend)
-            if (close[i] > r3_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > trend_1d_aligned[i]):
+            # LONG: retest of SuperTrend support in uptrend with volume confirmation
+            if direction[i] == 1 and close[i] > supertrend[i] and close[i] <= supertrend[i] + 0.5 * atr[i] and volume_confirmed[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S3 with volume spike and below daily EMA34 (downtrend)
-            elif (close[i] < s3_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < trend_1d_aligned[i]):
+            # SHORT: retest of SuperTrend resistance in downtrend with volume confirmation
+            elif direction[i] == -1 and close[i] < supertrend[i] and close[i] >= supertrend[i] - 0.5 * atr[i] and volume_confirmed[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price drops below S3 or trend turns down
-            if (close[i] < s3_aligned[i] or 
-                close[i] < trend_1d_aligned[i]):
+            # EXIT LONG: close below SuperTrend
+            if close[i] < supertrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price rises above R3 or trend turns up
-            if (close[i] > r3_aligned[i] or 
-                close[i] > trend_1d_aligned[i]):
+            # EXIT SHORT: close above SuperTrend
+            if close[i] > supertrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
