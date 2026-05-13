@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Trix_Signal_1dTrend_Volume
-# Hypothesis: Use TRIX (15) crossing zero for momentum signals with 1d EMA50 trend filter and volume confirmation.
-# Long when TRIX crosses above zero in uptrend with volume spike, short when TRIX crosses below zero in downtrend with volume spike.
-# Exit when TRIX reverses or trend changes.
-# TRIX is a momentum oscillator that filters out minor cycles, effective in both trending and ranging markets.
-# Designed for low trade frequency (20-50 total trades over 4 years) with clear entry/exit rules to avoid overtrading.
+# 4h_12h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Use 12h Camarilla pivot points (R1/S1) for breakout entries with 12h EMA50 trend filter and volume confirmation.
+# Long when price breaks above 12h R1 in uptrend (price > 12h EMA50) with volume spike, short when price breaks below 12h S1 in downtrend (price < 12h EMA50) with volume spike.
+# Exit when price returns to 12h pivot point (PP) or trend changes.
+# 12h pivots provide stronger support/resistance than daily, reducing false breakouts in volatile markets.
+# Designed for 4h timeframe with HTF 12h to avoid overtrading and capture multi-day trends.
 
-name = "12h_Trix_Signal_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,40 +24,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for TRIX calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate TRIX (15): Triple EMA of ROC
-    # ROC = (close / close.shift(1) - 1) * 100
-    roc = np.diff(np.log(close_pd)) * 100 if len(close_pd := pd.Series(df_1d['close'])) > 1 else np.array([])
-    if len(roc) < 1:
-        ema1 = ema2 = ema3 = np.array([])
-    else:
-        ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
-        ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-        ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # Pad to match df_1d length
-    trix_raw = np.full_like(df_1d['close'], np.nan, dtype=float)
-    if len(ema3) > 0:
-        trix_raw[14:] = ema3  # TRIX starts at index 14 due to 3x EMA(15)
+    # Calculate 12h Camarilla pivot points: PP, R1, S1
+    # Camarilla formulas:
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pp_12h = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
+    r1_12h = df_12h['close'] + (df_12h['high'] - df_12h['low']) * 1.1 / 12
+    s1_12h = df_12h['close'] - (df_12h['high'] - df_12h['low']) * 1.1 / 12
     
-    # Align TRIX to 12h timeframe
-    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix_raw)
+    # Align 12h Camarilla levels to 4h timeframe
+    pp_12h_aligned = align_htf_to_ltf(prices, df_12h, pp_12h.values)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h.values)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h.values)
 
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Get 12h data for EMA trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
 
-    # Volume filter: >1.5x 20-period average
+    # Volume filter: >1.5x 20-period average on 4h
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    prev_trix = np.nan
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(trix_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or 
+            np.isnan(pp_12h_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,35 +64,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX crosses above zero + price above 1d EMA50 (uptrend) + volume spike
-            if (prev_trix <= 0 and trix_1d_aligned[i] > 0 and 
-                close[i] > ema_50_1d_aligned[i] and
+            # LONG: Price breaks above R1 + price above 12h EMA50 (uptrend) + volume spike
+            if (close[i] > r1_12h_aligned[i] and 
+                close[i] > ema_50_12h_aligned[i] and
                 volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero + price below 1d EMA50 (downtrend) + volume spike
-            elif (prev_trix >= 0 and trix_1d_aligned[i] < 0 and 
-                  close[i] < ema_50_1d_aligned[i] and
+            # SHORT: Price breaks below S1 + price below 12h EMA50 (downtrend) + volume spike
+            elif (close[i] < s1_12h_aligned[i] and 
+                  close[i] < ema_50_12h_aligned[i] and
                   volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero or trend changes (price below EMA50)
-            if (trix_1d_aligned[i] < 0 or close[i] < ema_50_1d_aligned[i]):
+            # EXIT LONG: Price returns to pivot point (PP) or trend changes (price below EMA50)
+            if (close[i] <= pp_12h_aligned[i] or close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero or trend changes (price above EMA50)
-            if (trix_1d_aligned[i] > 0 or close[i] > ema_50_1d_aligned[i]):
+            # EXIT SHORT: Price returns to pivot point (PP) or trend changes (price above EMA50)
+            if (close[i] >= pp_12h_aligned[i] or close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
-
-        prev_trix = trix_1d_aligned[i]
 
     return signals
