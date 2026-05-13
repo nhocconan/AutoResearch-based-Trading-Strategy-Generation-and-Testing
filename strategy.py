@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 12h trend filter (EMA34) and volume confirmation (1.5x MA20).
-# Enters long when price breaks above R3 level with 12h bullish trend (close > EMA34) and volume > 1.5x MA20.
-# Enters short when price breaks below S3 level with 12h bearish trend (close < EMA34) and volume > 1.5x MA20.
-# Exits when price crosses the 6h EMA20 (mean reversion).
-# Uses discrete position sizing (0.25) to balance profit potential and drawdown control.
-# Designed for low trade frequency (~12-37/year) by requiring confluence of breakout, trend, and volume.
-# Works in both bull and bear markets: 12h trend filter ensures alignment with higher timeframe direction,
-# while Camarilla R3/S3 levels provide significant breakout points with volume confirmation reducing false signals.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike (1.5x MA20).
+# Enters long when price breaks above upper Donchian channel with 1d bullish trend (close > EMA34) and volume > 1.5x MA20.
+# Enters short when price breaks below lower Donchian channel with 1d bearish trend (close < EMA34) and volume > 1.5x MA20.
+# Exits when price crosses the 4h EMA20 (mean reversion).
+# Uses discrete position sizing (0.25) to balance return and risk.
+# Designed for low trade frequency (~20-50/year) by requiring confluence of breakout, trend, and volume.
+# Works in both bull and bear markets: 1d trend filter ensures alignment with higher timeframe direction,
+# while Donchian breakouts capture momentum with volume confirmation reducing false signals.
 
-name = "6h_Camarilla_R3S3_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,64 +26,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Camarilla pivot levels (based on previous 6h bar)
-    df_6h = get_htf_data(prices, '6h')
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Get 1d data for trend filter (EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Camarilla levels: R3, S3 (based on previous 6h bar)
-    # R3 = close + 1.1*(high - low)/6
-    # S3 = close - 1.1*(high - low)/6
-    camarilla_r3 = close_6h + 1.1 * (high_6h - low_6h) / 6
-    camarilla_s3 = close_6h - 1.1 * (high_6h - low_6h) / 6
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_6h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_6h, camarilla_s3)
-    
-    # Get 12h data for trend filter (EMA34)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Calculate Donchian channels (20-period) on 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
     vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma20 * 1.5)
     
-    # 6h EMA20 for exit condition
-    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 4h EMA20 for exit condition
+    ema20_4h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or \
-           np.isnan(ema34_12h_aligned[i]) or np.isnan(vol_ma20[i]) or np.isnan(ema20_6h[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]) or np.isnan(ema20_4h[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 with 12h bullish trend and volume spike
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_12h_aligned[i] and volume_spike[i]:
+            # LONG: Price breaks above upper Donchian with 1d bullish trend and volume spike
+            if close[i] > donchian_high[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with 12h bearish trend and volume spike
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_12h_aligned[i] and volume_spike[i]:
+            # SHORT: Price breaks below lower Donchian with 1d bearish trend and volume spike
+            elif close[i] < donchian_low[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below 6h EMA20 (mean reversion)
-            if close[i] < ema20_6h[i]:
+            # EXIT LONG: Price crosses below 4h EMA20 (mean reversion)
+            if close[i] < ema20_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above 6h EMA20 (mean reversion)
-            if close[i] > ema20_6h[i]:
+            # EXIT SHORT: Price crosses above 4h EMA20 (mean reversion)
+            if close[i] > ema20_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
