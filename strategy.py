@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_Reversal_With_Volume_Spike_v2
-Hypothesis: Reversal at daily pivot points (PP) with volume spike and rejection of R1/S1 levels.
-In ranging markets, price tends to revert to the pivot after testing R1/S1. In trending markets,
-breakouts beyond R1/S1 with volume continuation are filtered out by requiring price to stay
-within the pivot-R1/S1 band. Uses 6h timeframe to reduce noise and overtrading.
-Target: 20-50 trades/year, size 0.25.
+4h_RSI45_Trend_Volume_Spike
+Hypothesis: RSI around 45 (neutral) indicates momentum exhaustion and potential continuation of the prevailing trend. Combined with trend filter (4h EMA50) and volume spike (2x 24-bar average), this captures high-probability continuation moves in both bull and bear markets. Designed for low trade frequency (~20-40/year) to minimize fee drag.
 """
 
-name = "6h_Pivot_Reversal_With_Volume_Spike_v2"
-timeframe = "6h"
+name = "4h_RSI45_Trend_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,56 +22,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for pivot calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4h data for EMA50 trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
     
-    # Daily pivot points: PP = (H + L + C)/3, R1 = 2*PP - L, S1 = 2*PP - H
-    pp = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    r1 = 2 * pp - df_1d['low']
-    s1 = 2 * pp - df_1d['high']
+    # 4h EMA(50) for trend filter
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Align to 6h - use previous day's levels (available at 6h open)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    # RSI(14) on 4h close
+    delta = np.diff(df_4h['close'], prepend=df_4h['close'][0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
     
-    # Volume confirmation: current volume > 1.5x 24-period average (4 days)
+    # Volume confirmation: current volume > 2.0x 24-period average (4 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
+    for i in range(50, n):
         if position == 0:
-            # LONG: Price rejects S1 (bounces off support) with volume spike, below pivot
-            if (low[i] <= s1_aligned[i] and  # tested S1
-                close[i] > s1_aligned[i] and  # closed above S1 (rejection)
-                close[i] < pp_aligned[i] and  # still below pivot (range-bound)
-                volume_spike[i]):
+            # LONG: RSI near 45 (40-50), above EMA50 (uptrend), volume spike
+            if (40 <= rsi_aligned[i] <= 50 and 
+                close[i] > ema50_4h_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price rejects R1 (fails at resistance) with volume spike, above pivot
-            elif (high[i] >= r1_aligned[i] and  # tested R1
-                  close[i] < r1_aligned[i] and  # closed below R1 (rejection)
-                  close[i] > pp_aligned[i] and  # still above pivot (range-bound)
-                  volume_spike[i]):
+            # SHORT: RSI near 45 (40-50), below EMA50 (downtrend), volume spike
+            elif (40 <= rsi_aligned[i] <= 50 and 
+                  close[i] < ema50_4h_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches pivot (mean reversion target) OR stops rejecting S1
-            if (close[i] >= pp_aligned[i] or  # reached pivot target
-                low[i] > s1_aligned[i]):      # no longer testing S1
+            # EXIT LONG: RSI moves above 50 (overbought) or below EMA50 (trend change)
+            if (rsi_aligned[i] > 50 or 
+                close[i] < ema50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches pivot (mean reversion target) OR stops rejecting R1
-            if (close[i] <= pp_aligned[i] or  # reached pivot target
-                high[i] < r1_aligned[i]):     # no longer testing R1
+            # EXIT SHORT: RSI moves below 40 (oversold) or above EMA50 (trend change)
+            if (rsi_aligned[i] < 40 or 
+                close[i] > ema50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
