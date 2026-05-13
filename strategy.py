@@ -1,13 +1,11 @@
-#2025-01-11
 #!/usr/bin/env python3
-
 """
-12H_CAMARILLA_R1_S1_BREAKOUT_1D_TREND_VOLUME
-Hypothesis: Breakouts above daily Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34), with volume confirmation (volume > 2.0x 30-period average). Designed for 12h timeframe to reduce trade frequency and work in both bull and bear markets by requiring trend alignment and avoiding whipsaw through volume confirmation. Focus on BTC/ETH with robust risk controls.
+4H_Camarilla_R1_S1_Breakout_1D_Trend_Force_v2
+Hypothesis: Breakouts above daily Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34) with volume confirmation (volume > 2.0x 20-period average). Uses force index (price change * volume) to filter weak breakouts and reduce false signals. Designed for fewer trades (<150/year) and robust performance in both bull and bear markets by requiring trend alignment and volume/force confirmation.
 """
 
-name = "12H_CAMARILLA_R1_S1_BREAKOUT_1D_TREND_VOLUME"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_1D_Trend_Force_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -41,7 +39,7 @@ def generate_signals(prices):
     camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -49,9 +47,16 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation: volume > 2.0x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: volume > 2.0x 20-period average (balanced threshold)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (2.0 * vol_ma)
+    
+    # Force index: (close - prior close) * volume - filters weak moves
+    price_change = close - np.roll(close, 1)
+    price_change[0] = 0  # first bar has no prior
+    force_index = price_change * volume
+    force_ma = pd.Series(np.abs(force_index)).rolling(window=20, min_periods=20).mean().values
+    force_confirmed = np.abs(force_index) > (1.5 * force_ma)  # require strong force
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,31 +68,33 @@ def generate_signals(prices):
             cooldown -= 1
         
         if position == 0 and cooldown == 0:
-            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > EMA34)
+            # LONG: Price breaks above R1 with volume and force confirmation in uptrend
             if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and close[i] > ema_34_1d_aligned[i]:
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and force_confirmed[i] and \
+               close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < EMA34)
+            # SHORT: Price breaks below S1 with volume and force confirmation in downtrend
             elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and close[i] < ema_34_1d_aligned[i]:
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and force_confirmed[i] and \
+                 close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back below R1 or trend weakens (price < EMA34)
+            # EXIT LONG: Price crosses back below R1 or trend weakens
             if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
-               low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+               (low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 cooldown = 3  # 3-bar cooldown after exit
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back above S1 or trend weakens (price > EMA34)
+            # EXIT SHORT: Price crosses back above S1 or trend weakens
             if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
-               high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+               (high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
                 cooldown = 3  # 3-bar cooldown after exit
