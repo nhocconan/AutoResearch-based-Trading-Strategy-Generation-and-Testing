@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above R3 AND 1d EMA34 rising AND volume > 1.5x MA20 volume.
-# Short when price breaks below S3 AND 1d EMA34 falling AND volume > 1.5x MA20 volume.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high AND 1d EMA34 rising AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian(20) low AND 1d EMA34 falling AND volume > 1.5x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Volume_ATRStop_v1"
-timeframe = "4h"
+name = "12h_Donchian20_1dEMA34_Volume_ATRStop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,19 +23,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels for 4h
-    # Using previous bar's high, low, close for today's levels
-    phigh = np.roll(high, 1)
-    plow = np.roll(low, 1)
-    pclose = np.roll(close, 1)
-    phigh[0] = high[0]
-    plow[0] = low[0]
-    pclose[0] = close[0]
-    
-    pivot = (phigh + plow + pclose) / 3
-    range_ = phigh - plow
-    r3 = pivot + (range_ * 1.1 / 4)
-    s3 = pivot - (range_ * 1.1 / 4)
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -44,12 +34,8 @@ def generate_signals(prices):
     # Calculate EMA(34) on 1d data
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
+    # Align 1d EMA34 to 12h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: volume > 1.5x 20-period MA
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
     
     # ATR(14) for trailing stop
     tr1 = high - low
@@ -59,6 +45,10 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
@@ -66,20 +56,20 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_ok[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(volume_filter[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND 1d EMA34 rising AND volume confirmation
-            if close[i] > r3[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_ok[i]:
+            # LONG: Price breaks above Donchian high AND 1d EMA34 rising AND volume filter
+            if close[i] > highest_high[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below S3 AND 1d EMA34 falling AND volume confirmation
-            elif close[i] < s3[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_ok[i]:
+            # SHORT: Price breaks below Donchian low AND 1d EMA34 falling AND volume filter
+            elif close[i] < lowest_low[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
