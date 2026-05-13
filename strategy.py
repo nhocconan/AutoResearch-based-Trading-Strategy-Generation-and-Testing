@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend_1wEMA
-Hypothesis: Breakout of 4-hour Donchian channel (20-period) with volume confirmation (>2x 20-bar average volume) and aligned 1-week trend (close > weekly EMA50) captures strong momentum moves. Uses 25% position size to limit drawdown and maintain low trade frequency (~25-40/year) for robustness in bull and bear markets.
+12h_WilliamsAlligator_Trend_With_Volume
+Hypothesis: Williams Alligator (13,8,5 SMAs with 8,5,3 offsets) identifies trends.
+In strong trends (JAW > TEETH > LIPS for long, JAW < TEETH < LIPS for short),
+enter with volume confirmation (volume > 1.5x 20-period average).
+Exit when Alligator lines re-interlace (trend weakness) or volume drops.
+Designed for low trade frequency (~15-25/year) on 12h to minimize fee drag.
 """
 
-name = "4h_Donchian_Breakout_Volume_Trend_1wEMA"
-timeframe = "4h"
+name = "12h_WilliamsAlligator_Trend_With_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,55 +26,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Williams Alligator (calculated on 1d close)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian channels (20-period) on 4h data
-    # Upper band = rolling max of high
-    # Lower band = rolling min of low
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Williams Alligator: three SMAs with different periods and offsets
+    # Jaw: 13-period SMMA, offset 8 bars
+    # Teeth: 8-period SMMA, offset 5 bars  
+    # Lips: 5-period SMMA, offset 3 bars
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    # Smoothed Moving Average (SMMA) - same as RMA/Wilder's smoothing
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: (prev*(period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # 1-week trend filter: EMA(50) on close
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    jaw = smma(close_1d, 13)
+    teeth = smma(close_1d, 8)
+    lips = smma(close_1d, 5)
+    
+    # Apply offsets: shift values to the right (past values)
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    
+    # Set NaN for rolled values
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
+    
+    # Align to 12t - use previous day's values (available at 12h open)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
+        # Skip if any Alligator value is NaN (not enough data)
+        if np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]):
+            signals[i] = 0.0
+            continue
+            
         if position == 0:
-            # LONG: Price breaks above Donchian high, volume confirmation, price above weekly EMA50 (uptrend)
-            if (close[i] > donchian_high[i] and 
-                volume_filter[i] and 
-                close[i] > ema50_1w_aligned[i]):
+            # LONG: JAW > TEETH > LIPS (bullish alignment) + volume confirmation
+            if (jaw_aligned[i] > teeth_aligned[i] and 
+                teeth_aligned[i] > lips_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low, volume confirmation, price below weekly EMA50 (downtrend)
-            elif (close[i] < donchian_low[i] and 
-                  volume_filter[i] and 
-                  close[i] < ema50_1w_aligned[i]):
+            # SHORT: JAW < TEETH < LIPS (bearish alignment) + volume confirmation
+            elif (jaw_aligned[i] < teeth_aligned[i] and 
+                  teeth_aligned[i] < lips_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below Donchian low (reversal signal)
-            if close[i] < donchian_low[i]:
+            # EXIT LONG: Alligator lines re-interlace (trend weakness) OR volume drops
+            if not (jaw_aligned[i] > teeth_aligned[i] and 
+                    teeth_aligned[i] > lips_aligned[i]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above Donchian high (reversal signal)
-            if close[i] > donchian_high[i]:
+            # EXIT SHORT: Alligator lines re-interlace OR volume drops
+            if not (jaw_aligned[i] < teeth_aligned[i] and 
+                    teeth_aligned[i] < lips_aligned[i]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
