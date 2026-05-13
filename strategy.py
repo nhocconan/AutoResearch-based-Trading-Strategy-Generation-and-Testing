@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
-# Hypothesis: Breakout of Camarilla R1/S1 levels on 4h timeframe with 1d trend filter and volume spike confirmation.
-# Uses 1h timeframe for entry timing, 4h for Camarilla levels and trend direction, 1d for volume confirmation.
-# Designed to capture breakouts from key intraday resistance/support levels with higher timeframe alignment.
-# Target: 15-37 trades/year per symbol (60-150 total over 4 years) to minimize fee drag while maintaining edge.
+# 6h_TRIX_ZeroLag_VolumeSpike_Direction
+# Hypothesis: TRIX (triple exponential average) zero-lag version on 6h with volume spike and direction filter.
+# Zero-lag TRIX reduces lag by adding momentum component. Trades only when TRIX crosses zero with volume confirmation.
+# Direction filter: 1w EMA200 to ensure alignment with long-term trend.
+# Volume spike: current volume > 1.5x 50-period average to filter low-quality breakouts.
+# Designed to capture momentum shifts in both bull and bear markets with trend alignment.
+# Target: 12-37 trades/year per symbol to minimize fee drag while maintaining edge.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_TRIX_ZeroLag_VolumeSpike_Direction"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,41 +25,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for Camarilla levels and trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
 
-    # Calculate Camarilla levels for 4h using previous 4h bar's OHLC
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # where C = previous 4h close, H = previous 4h high, L = previous 4h low
-    prev_close = df_4h['close'].shift(1).values
-    prev_high = df_4h['high'].shift(1).values
-    prev_low = df_4h['low'].shift(1).values
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Calculate zero-lag TRIX on 6h
+    # EMA1 = EMA(close, 12)
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA2 = EMA(EMA1, 12)
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # EMA3 = EMA(EMA2, 12)
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # TRIX = (EMA3 - prev_EMA3) / prev_EMA3 * 100
+    trix = np.zeros_like(close)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    # Zero-lag TRIX = 2*TRIX - lagged TRIX (1 period)
+    trix_lag = np.roll(trix, 1)
+    trix_lag[0] = 0
+    trix_zero_lag = 2 * trix - trix_lag
 
-    # Align Camarilla levels to 1h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
+    # Trend filter: 1w EMA200
+    ema200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
 
-    # Trend filter: 4h EMA50
-    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
-
-    # Volume confirmation: 1d volume > 2.0 x 20-period average
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    volume_spike = vol_1d > (2.0 * vol_ma_1d_aligned)
+    # Volume confirmation: current volume > 1.5 x 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(50, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or 
+        if (np.isnan(trix_zero_lag[i]) or 
+            np.isnan(ema200_1w_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -67,33 +67,33 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above Camarilla R1 in uptrend with volume spike
-            if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema50_4h_aligned[i] and 
+            # LONG: Zero-lag TRIX crosses above zero with volume spike and above weekly EMA200
+            if (trix_zero_lag[i] > 0 and trix_zero_lag[i-1] <= 0 and 
+                close[i] > ema200_1w_aligned[i] and 
                 volume_spike[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Camarilla S1 in downtrend with volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema50_4h_aligned[i] and 
+            # SHORT: Zero-lag TRIX crosses below zero with volume spike and below weekly EMA200
+            elif (trix_zero_lag[i] < 0 and trix_zero_lag[i-1] >= 0 and 
+                  close[i] < ema200_1w_aligned[i] and 
                   volume_spike[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S1 or trend turns down
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema50_4h_aligned[i]:
+            # EXIT LONG: Zero-lag TRIX crosses below zero
+            if trix_zero_lag[i] < 0 and trix_zero_lag[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R1 or trend turns up
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema50_4h_aligned[i]:
+            # EXIT SHORT: Zero-lag TRIX crosses above zero
+            if trix_zero_lag[i] > 0 and trix_zero_lag[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
