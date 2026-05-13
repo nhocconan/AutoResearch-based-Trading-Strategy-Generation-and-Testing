@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d KAMA trend + RSI mean reversion + volume spike + chop regime filter
-# Long when KAMA rising (bullish trend), RSI < 30 (oversold), volume > 2.0x 20-day average, and choppy market (CHOP > 61.8)
-# Short when KAMA falling (bearish trend), RSI > 70 (overbought), volume > 2.0x 20-day average, and choppy market (CHOP > 61.8)
-# Uses 1d primary timeframe and 1w HTF for regime alignment (choppiness index on 1w)
-# Designed for BTC/ETH to work in both bull and bear markets by combining trend-following entry with mean reversion in choppy conditions
-# Volume spike confirms authenticity of reversion signal
-# Discrete position sizing (0.25) to minimize fee churn
-# ATR-based trailing stop (2.5x) for risk management
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
+# Long when price breaks above Donchian upper (20) AND 1d ADX > 25 AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower (20) AND 1d ADX > 25 AND volume > 1.5x 20-period average.
+# Exit on ATR(14) trailing stop (2.5x). Uses 4h primary timeframe and 1d HTF for trend strength.
+# Designed for BTC/ETH with strict entry to avoid overtrading (target: 20-50 trades/year).
+# Donchian channels provide objective structure, ADX filters for trending markets only, volume confirms breakout validity.
 
-name = "1d_KAMA_RSI_Volume_Chop_Regime_v1"
-timeframe = "1d"
+name = "4h_Donchian20_ADX25_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,69 +32,53 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # Sum of |close[t] - close[t-1]| over 10 periods
-    # Pad arrays to match length
-    change = np.concatenate([np.full(9, np.nan), change])
-    volatility = np.concatenate([np.full(9, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # Start after first ER calculation
-    for i in range(10, n):
-        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    delta = np.concatenate([np.array([np.nan]), delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Get 1d data for ADX trend filter (MTF)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate volume MA(20) for spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
-    
-    # Get 1w data for Choppiness Index (regime filter)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate Choppiness Index(14) on 1w data
+    # Calculate ADX(14) on 1d data
     # True Range
-    tr1_w = high_1w - low_1w
-    tr2_w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3_w = np.abs(low_1w - np.roll(close_1w, 1))
-    tr_w = np.maximum(tr1_w, np.maximum(tr2_w, tr3_w))
-    tr_w[0] = tr1_w[0]  # First bar
-    atr_w = pd.Series(tr_w).rolling(window=14, min_periods=14).sum().values  # Sum of TR over 14 periods
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d[0] = tr1_1d[0]
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Highest high and lowest low over 14 periods
-    hh_w = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-    ll_w = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Chop = 100 * log10(atr_w / (hh_w - ll_w)) / log10(14)
-    # Avoid division by zero
-    range_w = hh_w - ll_w
-    chop_w = np.where(range_w > 0, 100 * np.log10(atr_w / range_w) / np.log10(14), 50)
-    chop_w = np.where(np.isnan(chop_w), 50, chop_w)  # Default to 50 if undefined
+    # Smoothed DM and TR
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    atr_smooth = pd.Series(atr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align HTF arrays to 1d timeframe (wait for completed 1w bar)
-    chop_w_aligned = align_htf_to_ltf(prices, df_1w, chop_w)
-    chop_filter = chop_w_aligned > 61.8  # Choppy market regime
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / atr_smooth
+    di_minus = 100 * dm_minus_smooth / atr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Align HTF arrays to 4h timeframe (wait for completed 1d bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume filter: current 4h volume > 1.5x 20-period average (spike confirmation)
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -105,19 +87,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(chop_w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: KAMA rising (bullish trend), RSI < 30 (oversold), volume spike, choppy market
-            if kama[i] > kama[i-1] and rsi[i] < 30 and volume_filter[i] and chop_filter[i]:
+            # LONG: price > Donchian upper AND ADX > 25 AND volume spike
+            if close[i] > donchian_high[i] and adx_aligned[i] > 25 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: KAMA falling (bearish trend), RSI > 70 (overbought), volume spike, choppy market
-            elif kama[i] < kama[i-1] and rsi[i] > 70 and volume_filter[i] and chop_filter[i]:
+            # SHORT: price < Donchian lower AND ADX > 25 AND volume spike
+            elif close[i] < donchian_low[i] and adx_aligned[i] > 25 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
