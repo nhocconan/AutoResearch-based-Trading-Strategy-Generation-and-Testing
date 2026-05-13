@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation. 
-# Long when price breaks above R3 with volume > 1.5x MA20 and close > 1d EMA50.
-# Short when price breaks below S3 with volume > 1.5x MA20 and close < 1d EMA50.
-# Uses discrete position sizing (0.25) to limit trades to target range (12-37/year) and minimize fee drag.
-# Designed to work in bull markets via breakout continuation and in bear markets via breakdown continuation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high AND price > 1d EMA34 AND volume > 1.5x volume MA(20).
+# Short when price breaks below Donchian(20) low AND price < 1d EMA34 AND volume > 1.5x volume MA(20).
+# Uses ATR(14) for volatility-adjusted position sizing: 0.30 in high volatility (ATR14 > ATR50), 0.15 in low volatility.
+# Discrete position sizes to minimize fee churn. Designed for 19-50 trades/year by requiring confluence of trend, breakout, and volume.
+# Works in bull markets via breakout strength and in bear markets via short-side breakouts with trend filter.
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dTrend_Volume_VolRegime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,64 +28,63 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d close for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate EMA(34) on 1d close for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Camarilla pivot levels from previous 12h bar
-    # R3 = close + 1.1*(high - low)
-    # S3 = close - 1.1*(high - low)
-    # We use the previous completed 12h bar to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
+    # Volume confirmation: volume > 1.5x volume MA(20)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * volume_ma)
     
-    # Volume confirmation: volume > 1.5x 20-period MA
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma20)
+    # ATR(14) and ATR(50) for volatility regime
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]  # first bar
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
-    # Discrete position size
-    position_size = 0.25
+    # Volatility regime: ATR14 > ATR50 (high volatility) -> full size, else half size
+    vol_regime = atr14 > atr50
+    position_size = np.where(vol_regime, 0.30, 0.15)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or \
-           np.isnan(vol_ma20[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
+           np.isnan(volume_ma[i]) or np.isnan(atr14[i]) or np.isnan(atr50[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 with volume confirmation and price > 1d EMA50
-            if close[i] > camarilla_r3[i] and volume_confirm[i] and close[i] > ema50_1d_aligned[i]:
-                signals[i] = position_size
+            # LONG: Price breaks above Donchian high AND price > 1d EMA34 AND volume confirmation
+            if close[i] > highest_high[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
+                signals[i] = position_size[i]
                 position = 1
-            # SHORT: Price breaks below S3 with volume confirmation and price < 1d EMA50
-            elif close[i] < camarilla_s3[i] and volume_confirm[i] and close[i] < ema50_1d_aligned[i]:
-                signals[i] = -position_size
+            # SHORT: Price breaks below Donchian low AND price < 1d EMA34 AND volume confirmation
+            elif close[i] < lowest_low[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
+                signals[i] = -position_size[i]
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 (reverse breakdown) OR close < 1d EMA50 (trend break)
-            if close[i] < camarilla_s3[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price breaks below Donchian low OR price < 1d EMA34 (trend break)
+            if close[i] < lowest_low[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = position_size
+                signals[i] = position_size[i]
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 (reverse breakout) OR close > 1d EMA50 (trend break)
-            if close[i] > camarilla_r3[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above Donchian high OR price > 1d EMA34 (trend break)
+            if close[i] > highest_high[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -position_size
+                signals[i] = -position_size[i]
     
     return signals
