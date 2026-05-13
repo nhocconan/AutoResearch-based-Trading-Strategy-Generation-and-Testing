@@ -1,18 +1,39 @@
 #!/usr/bin/env python3
-# 4h_TRIX_VolumeSpike_1dTrend
-# Hypothesis: TRIX (15-period) crosses zero with volume spike and 1d EMA50 trend confirmation. 
-# In uptrend (price > 1d EMA50), long on TRIX crossing above zero with volume > 1.5x 20-period average. 
-# In downtrend (price < 1d EMA50), short on TRIX crossing below zero with volume spike. 
-# Exits on TRIX crossing back through zero or trend reversal. 
-# Designed to capture momentum in both bull and bear markets with low trade frequency.
+# 12h_Williams_Alligator_ElderRay_1wTrend
+# Hypothesis: Combines Williams Alligator (trend identification) with Elder Ray (bull/bear power) on 12h timeframe, filtered by 1w trend direction. 
+# Alligator identifies trend via SMAs (Jaw/Teeth/Lips), Elder Ray measures bull/bear power via EMA13, and 1w EMA8 filters for long-term trend.
+# Designed to work in both bull and bear markets by only taking trades in direction of higher timeframe trend, reducing whipsaws.
 
-name = "4h_TRIX_VolumeSpike_1dTrend"
-timeframe = "4h"
+name = "12h_Williams_Alligator_ElderRay_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def ema(series, period):
+    """Calculate Exponential Moving Average."""
+    return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def sma(series, period):
+    """Calculate Simple Moving Average."""
+    return pd.Series(series).rolling(window=period, min_periods=period).mean().values
+
+def williams_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5):
+    """Calculate Williams Alligator (Jaw, Teeth, Lips)."""
+    median_price = (high + low) / 2
+    jaw = sma(median_price, jaw_period)
+    teeth = sma(median_price, teeth_period)
+    lips = sma(median_price, lips_period)
+    return jaw, teeth, lips
+
+def elder_ray(high, low, close, ema_period=13):
+    """Calculate Elder Ray (Bull Power, Bear Power)."""
+    ema_val = ema(close, ema_period)
+    bull_power = high - ema_val
+    bear_power = low - ema_val
+    return bull_power, bear_power
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,29 +45,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w EMA8 for trend filter
+    ema_8_1w = ema(df_1w['close'], 8)
+    ema_8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_8_1w)
 
-    # Calculate TRIX(15): EMA of EMA of EMA of price
-    ema1 = pd.Series(close).ewm(span=15, adjust=False).mean()
-    ema2 = ema1.ewm(span=15, adjust=False).mean()
-    ema3 = ema2.ewm(span=15, adjust=False).mean()
-    trix = 100 * (ema3.pct_change())
-    trix_values = trix.fillna(0).values
-
-    # Volume filter: >1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Williams Alligator on 12h
+    jaw, teeth, lips = williams_alligator(high, low, close, 13, 8, 5)
+    
+    # Calculate Elder Ray on 12h
+    bull_power, bear_power = elder_ray(high, low, close, 13)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(trix_values[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema_8_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,31 +72,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
+        alligator_long = lips[i] > teeth[i] > jaw[i]
+        alligator_short = lips[i] < teeth[i] < jaw[i]
+        
+        # Elder Ray: Bull Power > 0 and rising, Bear Power < 0 and falling
+        bull_strong = bull_power[i] > 0 and (i == 0 or bull_power[i] > bull_power[i-1])
+        bear_strong = bear_power[i] < 0 and (i == 0 or bear_power[i] < bear_power[i-1])
+
         if position == 0:
-            # LONG: TRIX crosses above zero (bullish momentum) + price above 1d EMA50 (uptrend) + volume spike
-            if (trix_values[i] > 0 and trix_values[i-1] <= 0 and 
-                close[i] > ema_50_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Alligator uptrend + Bull Power positive/rising + 1w uptrend
+            if (alligator_long and bull_strong and close[i] > ema_8_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero (bearish momentum) + price below 1d EMA50 (downtrend) + volume spike
-            elif (trix_values[i] < 0 and trix_values[i-1] >= 0 and 
-                  close[i] < ema_50_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Alligator downtrend + Bear Power negative/falling + 1w downtrend
+            elif (alligator_short and bear_strong and close[i] < ema_8_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero (loss of momentum) or price below 1d EMA50 (trend change)
-            if (trix_values[i] < 0 and trix_values[i-1] >= 0) or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: Alligator trend weakness or Bear Power becomes strong
+            if not alligator_long or bear_strong:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero (loss of momentum) or price above 1d EMA50 (trend change)
-            if (trix_values[i] > 0 and trix_values[i-1] <= 0) or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: Alligator trend weakness or Bull Power becomes strong
+            if not alligator_short or bull_strong:
                 signals[i] = 0.0
                 position = 0
             else:
