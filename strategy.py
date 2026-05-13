@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation (>1.5x avg volume).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>1.5x avg volume).
 # Uses ATR(20) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
-# EMA50 trend filter ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Donchian breakouts capture strong momentum moves, effective in both bull and bear markets via long/short symmetry.
-# Volume spike confirmation ensures breakouts have conviction, reducing false signals.
+# Target: 50-150 total trades over 4 years (12-37/year) on 4h timeframe.
+# EMA trend filter ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
+# Donchian breakouts provide clear structure with proven edge in BTC/ETH.
+# Volume confirmation ensures breakouts have participation.
+# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
 
-name = "1d_Donchian20_1wEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "1d"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,35 +36,33 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Donchian channel calculation
+    # Get 1d data for Donchian channel calculation and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian(20) channels from previous 20 days
-    donchian_high = np.full(len(close_1d), np.nan)
-    donchian_low = np.full(len(close_1d), np.nan)
+    # Calculate Donchian channel (20) from previous day
+    # Upper = max(high_1d[-20:])
+    # Lower = min(low_1d[-20:])
+    donchian_upper = np.full(len(close_1d), np.nan)
+    donchian_lower = np.full(len(close_1d), np.nan)
     
     for i in range(20, len(close_1d)):
-        # Use previous 20 days' data to calculate today's channels
-        donchian_high[i] = np.max(high_1d[i-20:i])
-        donchian_low[i] = np.min(low_1d[i-20:i])
+        # Use previous 20 days' data to calculate today's levels
+        donchian_upper[i] = np.max(high_1d[i-20:i])
+        donchian_lower[i] = np.min(low_1d[i-20:i])
     
-    # Align Donchian levels to 1d timeframe (already aligned, but keep for consistency)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align Donchian levels to 4h timeframe (wait for daily bar to close)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align 1w EMA50 to 1d timeframe (wait for weekly bar to close)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align 1d EMA to 4h timeframe (wait for daily bar to close)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,22 +71,22 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian HIGH AND 1w EMA50 > close AND volume > 1.5x average
-            if (close[i] > donchian_high_aligned[i] and 
-                ema50_1w_aligned[i] > close[i] and 
+            # LONG: Price breaks above Donchian Upper AND 1d EMA50 > close AND volume > 1.5x average
+            if (close[i] > donchian_upper_aligned[i] and 
+                ema50_1d_aligned[i] > close_1d[-1] if len(close_1d) > 0 else False and  # Simplified trend check
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian LOW AND 1w EMA50 < close AND volume > 1.5x average
-            elif (close[i] < donchian_low_aligned[i] and 
-                  ema50_1w_aligned[i] < close[i] and 
+            # SHORT: Price breaks below Donchian Lower AND 1d EMA50 < close AND volume > 1.5x average
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  ema50_1d_aligned[i] < close_1d[-1] if len(close_1d) > 0 else False and  # Simplified trend check
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
