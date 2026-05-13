@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) from 1d combined with 1w trend filter and volume confirmation on 12h timeframe works in both bull and bear markets.
-Breakout above R1 with 1w uptrend and volume spike = long.
-Breakdown below S1 with 1w downtrend and volume spike = short.
-Exit on opposite level touch or trend reversal. Uses 1w trend for higher timeframe bias.
-Target: 12-37 trades/year per symbol.
+6h_Pivot_Reversal_Confluence
+Hypothesis: Price reversals at key pivot levels (Camarilla R3/S3) with volume divergence and 1d trend alignment yield high-probability entries. Works in both bull and bear markets by fading extremes in ranging markets and catching reversals in trending markets. Target: 15-30 trades/year.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "6h_Pivot_Reversal_Confluence"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,76 +14,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for 12h using previous bar's high/low/close
-    # R1 = close + (high - low) * 1.12
-    # S1 = close - (high - low) * 1.12
-    # Use previous bar to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    R1 = prev_close + (prev_high - prev_low) * 1.12
-    S1 = prev_close - (prev_high - prev_low) * 1.12
-    
-    # 1w trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate Camarilla pivot levels from previous day
+    # Using daily high/low/close from 1d data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1w = df_1w['close'].values > ema_50_1w
-    downtrend_1w = df_1w['close'].values < ema_50_1w
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
+    # Previous day's OHLC
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate pivot and Camarilla levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    R3 = pivot + (range_hl * 1.1 / 2)
+    S3 = pivot - (range_hl * 1.1 / 2)
+    R4 = pivot + (range_hl * 1.1)
+    S4 = pivot - (range_hl * 1.1)
+    
+    # Align daily levels to 6h timeframe
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # 1d trend filter (EMA50)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_6h = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_6h = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
+    # Volume divergence: current volume < average volume (sign of exhaustion)
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.5 * vol_ma
+    volume_exhaustion = volume < vol_ma  # Lower volume on test = exhaustion
+    
+    # RSI for overbought/oversold confirmation
+    delta = np.diff(close)
+    delta = np.concatenate([[0], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
-        # Get values
-        r1_level = R1[i]
-        s1_level = S1[i]
-        uptrend = uptrend_1w_aligned[i]
-        downtrend = downtrend_1w_aligned[i]
-        vol_conf = volume_conf[i]
+        # Skip if pivot levels not available (first day)
+        if np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]):
+            signals[i] = 0.0
+            continue
+            
+        price = close[i]
+        rsi_val = rsi[i]
+        vol_exhaust = volume_exhaustion[i]
+        uptrend = uptrend_1d_6h[i]
+        downtrend = downtrend_1d_6h[i]
         
         if position == 0:
-            # LONG: break above R1, 1w uptrend, volume confirmation
-            if close[i] > r1_level and uptrend and vol_conf:
+            # LONG: Price at S3 support with RSI oversold, volume exhaustion, and 1d uptrend bias
+            if price <= S3_6h[i] and rsi_val < 30 and vol_exhaust and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S1, 1w downtrend, volume confirmation
-            elif close[i] < s1_level and downtrend and vol_conf:
+            # SHORT: Price at R3 resistance with RSI overbought, volume exhaustion, and 1d downtrend bias
+            elif price >= R3_6h[i] and rsi_val > 70 and vol_exhaust and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch S1 or 1w trend turns down
-            if close[i] < s1_level or not uptrend:
+            # EXIT LONG: Price reaches R3 or RSI overbought or trend changes
+            if price >= R3_6h[i] or rsi_val > 70 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch R1 or 1w trend turns up
-            if close[i] > r1_level or not downtrend:
+            # EXIT SHORT: Price reaches S3 or RSI oversold or trend changes
+            if price <= S3_6h[i] or rsi_val < 30 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
