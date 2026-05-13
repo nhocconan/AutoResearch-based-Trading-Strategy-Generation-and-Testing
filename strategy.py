@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Camarilla_R3_S3_Breakout_1dTrend_Force_v5"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,41 +17,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h period Camarilla levels (using previous 12h bar)
-    R3 = np.zeros(n)
-    S3 = np.zeros(n)
+    # Calculate Camarilla R1 and S1 levels from previous 4h bar
+    R1 = np.zeros(n)
+    S1 = np.zeros(n)
     for i in range(1, n):
         prev_high = high[i-1]
         prev_low = low[i-1]
         prev_close = close[i-1]
         range_val = prev_high - prev_low
         if range_val > 0:
-            R3[i] = prev_close + range_val * 1.1 / 2
-            S3[i] = prev_close - range_val * 1.1 / 2
+            R1[i] = prev_close + range_val * 1.1 / 4
+            S1[i] = prev_close - range_val * 1.1 / 4
         else:
-            R3[i] = prev_close
-            S3[i] = prev_close
+            R1[i] = prev_close
+            S1[i] = prev_close
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Calculate EMA34 on daily close
-    ema_34 = np.zeros_like(close_1d)
-    ema_34[:] = np.nan
-    alpha = 2 / (34 + 1)
-    for i in range(len(close_1d)):
+    close_12h = df_12h['close'].values
+    # Calculate EMA50 on 12h close
+    ema_50 = np.zeros_like(close_12h)
+    ema_50[:] = np.nan
+    alpha = 2 / (50 + 1)
+    for i in range(len(close_12h)):
         if i == 0:
-            ema_34[i] = close_1d[i]
-        elif np.isnan(ema_34[i-1]):
-            ema_34[i] = close_1d[i]
+            ema_50[i] = close_12h[i]
+        elif np.isnan(ema_50[i-1]):
+            ema_50[i] = close_12h[i]
         else:
-            ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
+            ema_50[i] = alpha * close_12h[i] + (1 - alpha) * ema_50[i-1]
     
-    # Align 1d EMA34 to 12h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align 12h EMA50 to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
     # Calculate volume average (20-period) for volume spike filter
     vol_ma_20 = np.zeros_like(volume)
@@ -62,9 +62,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(60, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -73,26 +73,26 @@ def generate_signals(prices):
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Close > R3 + volume spike + 1d uptrend (close > EMA34)
-            if (close[i] > R3[i] and vol_spike and close[i] > ema_34_aligned[i]):
+            # LONG: Close > R1 + volume spike + 12h uptrend (close > EMA50)
+            if (close[i] > R1[i] and vol_spike and close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S3 + volume spike + 1d downtrend (close < EMA34)
-            elif (close[i] < S3[i] and vol_spike and close[i] < ema_34_aligned[i]):
+            # SHORT: Close < S1 + volume spike + 12h downtrend (close < EMA50)
+            elif (close[i] < S1[i] and vol_spike and close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close < S3 (reversal to opposite level)
-            if close[i] < S3[i]:
+            # EXIT LONG: Close < S1 (reversal to opposite level)
+            if close[i] < S1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close > R3 (reversal to opposite level)
-            if close[i] > R3[i]:
+            # EXIT SHORT: Close > R1 (reversal to opposite level)
+            if close[i] > R1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
