@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 4h_TRIX_ZeroCross_12hTrend_Volume
-# Hypothesis: TRIX (triple smoothed EMA) zero crossovers combined with 12h trend filter and volume spikes provide reliable momentum signals.
-# TRIX filters out market noise and identifies trend changes with less lag than MACD.
-# Long when TRIX crosses above zero with 12h uptrend and volume confirmation.
-# Short when TRIX crosses below zero with 12h downtrend and volume confirmation.
-# Volume spike confirms institutional participation, reducing false signals.
-# Works in bull markets (TRIX > 0 in uptrend) and bear markets (TRIX < 0 in downtrend).
-# Target: 25-50 trades/year per symbol to minimize fee drag.
+# 6h_WeeklyPivot_Breakout_1dTrend_Volume
+# Hypothesis: Price reacts to weekly pivot levels (R1/S1) derived from weekly timeframe.
+# Go long when price breaks above weekly R1 with daily uptrend and volume confirmation.
+# Go short when price breaks below weekly S1 with daily downtrend and volume confirmation.
+# Weekly pivots provide strong support/resistance in ranging markets, while daily trend filter ensures alignment with higher timeframe momentum.
+# Volume spike confirms institutional participation, reducing false breakouts.
+# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
+# Target: 12-37 trades/year per symbol to minimize fee drag on 6h timeframe.
 
-name = "4h_TRIX_ZeroCross_12hTrend_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,41 +21,49 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
 
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for TRIX calculation and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-
-    # Calculate TRIX on 12h close: triple EMA of ROC
-    # TRIX = EMA(EMA(EMA(ROC, 12), 12), 12) where ROC = (close/tmp - 1) * 100
-    # Using period 12 as standard
-    close_series = pd.Series(close_12h)
-    roc = close_series.pct_change(periods=12) * 100
-    ema1 = roc.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = ema3.values
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
     
-    # 12h trend: EMA34
-    ema34_12h = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly pivot levels (R1, S1) from previous weekly bar
+    # R1 = C + (H-L) * 1.1/12
+    # S1 = C - (H-L) * 1.1/12
+    close_weekly = df_weekly['close'].values
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
     
-    # Align 12h indicators to 4h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    weekly_range = high_weekly - low_weekly
+    camarilla_width = weekly_range * 1.1 / 12
+    r1 = close_weekly + camarilla_width
+    s1 = close_weekly - camarilla_width
     
-    # Volume spike: volume > 2.0 * 4-period average (2 days worth at 4h)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_spike = volume > 2.0 * vol_ma_4
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    
+    # Daily trend: EMA34
+    ema34_daily = pd.Series(close_daily).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align weekly and daily indicators to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    ema34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema34_daily)
+    
+    # Volume spike: volume > 2.0 * 3-period average (3 periods at 6h = 18h)
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    volume_spike = volume > 2.0 * vol_ma_3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(trix_aligned[i]) or 
-            np.isnan(ema34_12h_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_daily_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,26 +72,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX crosses above zero + 12h uptrend + volume spike
-            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and close[i] > ema34_12h_aligned[i] and volume_spike[i]:
+            # LONG: Close > weekly R1 + daily uptrend + volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema34_daily_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero + 12h downtrend + volume spike
-            elif trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and close[i] < ema34_12h_aligned[i] and volume_spike[i]:
+            # SHORT: Close < weekly S1 + daily downtrend + volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema34_daily_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero or trend reversal
-            if trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 or close[i] < ema34_12h_aligned[i]:
+            # EXIT LONG: Close below weekly S1 or daily trend reversal
+            if close[i] < s1_aligned[i] or close[i] < ema34_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero or trend reversal
-            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 or close[i] > ema34_12h_aligned[i]:
+            # EXIT SHORT: Close above weekly R1 or daily trend reversal
+            if close[i] > r1_aligned[i] or close[i] > ema34_daily_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
