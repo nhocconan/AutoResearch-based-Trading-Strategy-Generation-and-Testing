@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
-# Elder Ray measures bull/bear power relative to EMA13. In bull markets, buy when bull power > 0 and rising; in bear markets, sell when bear power < 0 and falling.
-# Combined with 1d EMA50 trend filter to avoid counter-trend trades and volume confirmation for breakout strength.
-# Designed for low trade frequency (~15-25/year) to minimize fee drift, works in both bull and bear via trend alignment.
+# Hypothesis: 12h volume-weighted average price (VWAP) deviation with 1d trend filter and volume confirmation.
+# Uses deviation from 12h VWAP to identify mean-reversion opportunities in ranging markets,
+# filtered by 1d EMA trend direction to avoid counter-trend trades. Volume ensures participation.
+# Designed for low trade frequency (~15-25/year) to minimize fee drag on 12h timeframe.
 
-name = "6h_ElderRay_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_VWAP_Deviation_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,19 +22,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d EMA50 for trend filter
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate EMA13 for Elder Ray (using close prices)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 12-period VWAP for current timeframe
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = typical_price * volume
+    vwap_denominator = volume
     
-    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Cumulative sums for VWAP calculation
+    cum_vwap_num = np.nancumsum(vwap_numerator)
+    cum_vwap_den = np.nancumsum(vwap_denominator)
+    vwap = np.where(cum_vwap_den != 0, cum_vwap_num / cum_vwap_den, np.nan)
+    
+    # Calculate deviation from VWAP as percentage
+    vwap_deviation = (close - vwap) / vwap * 100.0
     
     # Volume filter: current volume > 20-period average
     volume_series = pd.Series(volume)
@@ -45,21 +51,19 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):  # Start after sufficient data
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20[i]) or np.isnan(ema13[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vwap[i]) or np.isnan(vwap_deviation[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Bull power positive and rising, uptrend, volume confirmation
-            if (bull_power[i] > 0 and 
-                i > 50 and bull_power[i] > bull_power[i-1] and  # rising bull power
+            # LONG: Price deviates below VWAP (oversold) with uptrend and volume
+            if (vwap_deviation[i] < -1.5 and  # 1.5% below VWAP
                 close[i] > ema50_1d_aligned[i] and 
                 volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear power negative and falling, downtrend, volume confirmation
-            elif (bear_power[i] < 0 and 
-                  i > 50 and bear_power[i] < bear_power[i-1] and  # falling bear power (more negative)
+            # SHORT: Price deviates above VWAP (overbought) with downtrend and volume
+            elif (vwap_deviation[i] > 1.5 and  # 1.5% above VWAP
                   close[i] < ema50_1d_aligned[i] and 
                   volume_ok[i]):
                 signals[i] = -0.25
@@ -67,15 +71,17 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull power turns negative (momentum loss) or trend breaks
-            if bull_power[i] <= 0 or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price returns to VWAP or trend changes
+            if (vwap_deviation[i] > -0.5 or  # Back within 0.5% of VWAP
+                close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear power turns positive (momentum loss) or trend breaks
-            if bear_power[i] >= 0 or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price returns to VWAP or trend changes
+            if (vwap_deviation[i] < 0.5 or   # Back within 0.5% of VWAP
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
