@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h EMA(21) pullback strategy with 4h Supertrend(10,3) filter and session (08-20 UTC) for entry timing.
-# Long when: price > 4h Supertrend (uptrend), price pulls back to touch 1h EMA21 from above, and session filter active.
-# Short when: price < 4h Supertrend (downtrend), price pulls back to touch 1h EMA21 from below, and session filter active.
-# Uses 4h for trend direction, 1h for precise entry timing, session filter to reduce noise.
-# Target: 60-150 trades over 4 years (15-37/year) by requiring confluence of trend, pullback, and session.
+# Hypothesis: 6h Donchian(20) breakout with 1w EMA50 trend filter and volume spike.
+# Long when price breaks above upper Donchian(20) AND close > 1w EMA50 AND volume > 2.0x 20-period average.
+# Short when price breaks below lower Donchian(20) AND close < 1w EMA50 AND volume > 2.0x 20-period average.
+# Exit on opposite breakout (price < lower Donchian for longs, price > upper Donchian for shorts) or ATR trailing stop (2.5x).
+# Uses 6h timeframe with 1w trend filter for noise reduction, targeting 50-150 trades over 4 years.
+# Donchian channels provide robust trend-following structure, 1w EMA50 filters intermediate trend, volume confirms breakout authenticity.
 
-name = "1h_EMA21_Pullback_4hSupertrend_Session_v1"
-timeframe = "1h"
+name = "6h_Donchian20_1wEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,103 +24,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(10) for Supertrend
+    # Calculate ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
+    tr[0] = tr1[0]  # First bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Supertrend on 4h timeframe
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate Donchian(20) channels: based on previous 20 bars' high/low
+    # Upper = max(high[-20:]), Lower = min(low[-20:])
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # ATR for Supertrend calculation (using 4h data)
-    tr1_4h = high_4h - low_4h
-    tr2_4h = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3_4h = np.abs(low_4h - np.roll(close_4h, 1))
-    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
-    tr_4h[0] = tr1_4h[0]
-    atr_4h = pd.Series(tr_4h).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
+    # Get 1w data for EMA50 trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Supertrend basic upper and lower bands
-    hl2_4h = (high_4h + low_4h) / 2
-    upper_band_4h = hl2_4h + (3.0 * atr_4h)
-    lower_band_4h = hl2_4h - (3.0 * atr_4h)
+    # Calculate EMA50 on 1w close
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Initialize Supertrend arrays
-    supertrend_4h = np.full_like(close_4h, np.nan)
-    direction_4h = np.full_like(close_4h, np.nan)  # 1 for uptrend, -1 for downtrend
+    # Align HTF arrays to 6h timeframe (wait for completed 1w bar)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Supertrend
-    for i in range(len(close_4h)):
-        if i == 0:
-            supertrend_4h[i] = hl2_4h[i]
-            direction_4h[i] = 1
-        else:
-            if close_4h[i-1] > supertrend_4h[i-1]:
-                # Previous close was above previous Supertrend
-                supertrend_4h[i] = max(lower_band_4h[i], supertrend_4h[i-1])
-                direction_4h[i] = 1
-            else:
-                # Previous close was below previous Supertrend
-                supertrend_4h[i] = min(upper_band_4h[i], supertrend_4h[i-1])
-                direction_4h[i] = -1
-    
-    # Align Supertrend and direction to 1h timeframe (wait for completed 4h bar)
-    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h)
-    direction_4h_aligned = align_htf_to_ltf(prices, df_4h, direction_4h)
-    
-    # Calculate EMA21 on 1h close
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # Session filter: 08-20 UTC (pre-compute hours from index)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume filter: current 6h volume > 2.0x 20-period average (spike confirmation)
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
+    lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(21, n):  # Start after EMA21 warmup
+    for i in range(50, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_4h_aligned[i]) or np.isnan(direction_4h_aligned[i]) or 
-            np.isnan(ema21[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: 4h uptrend, price touches EMA21 from above, in session
-            if (direction_4h_aligned[i] == 1 and 
-                low[i] <= ema21[i] <= high[i] and 
-                close[i] > ema21[i] and  # Confirmed bounce from EMA21
-                in_session[i]):
-                signals[i] = 0.20
+            # LONG: price breaks above upper Donchian AND close > 1w EMA50 AND volume spike
+            if close[i] > upper[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: 4h downtrend, price touches EMA21 from below, in session
-            elif (direction_4h_aligned[i] == -1 and 
-                  low[i] <= ema21[i] <= high[i] and 
-                  close[i] < ema21[i] and  # Confirmed rejection from EMA21
-                  in_session[i]):
-                signals[i] = -0.20
+                highest_since_entry[i] = high[i]  # Initialize tracking
+            # SHORT: price breaks below lower Donchian AND close < 1w EMA50 AND volume spike
+            elif close[i] < lower[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
+                lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
                 signals[i] = 0.0
+                # Carry forward tracking values when flat
+                if i > 0:
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:
-            # EXIT LONG: price closes below EMA21 or 4h trend turns down
-            if close[i] < ema21[i] or direction_4h_aligned[i] == -1:
+            # Update highest high since entry
+            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
+            # EXIT LONG: price breaks below lower Donchian (opposite breakout) OR trailing stop hit
+            breakout_exit = close[i] < lower[i]
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            if breakout_exit or trailing_stop:
                 signals[i] = 0.0
                 position = 0
+                # Reset tracking when flat
+                highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
+                # Carry forward tracking
+                if i > 0:
+                    highest_since_entry[i] = highest_since_entry[i-1]
         elif position == -1:
-            # EXIT SHORT: price closes above EMA21 or 4h trend turns up
-            if close[i] > ema21[i] or direction_4h_aligned[i] == 1:
+            # Update lowest low since entry
+            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
+            # EXIT SHORT: price breaks above upper Donchian (opposite breakout) OR trailing stop hit
+            breakout_exit = close[i] > upper[i]
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            if breakout_exit or trailing_stop:
                 signals[i] = 0.0
                 position = 0
+                # Reset tracking when flat
+                lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
+                # Carry forward tracking
+                if i > 0:
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
     
     return signals
