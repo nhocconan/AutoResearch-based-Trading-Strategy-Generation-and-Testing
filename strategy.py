@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: On 12h timeframe, breakout beyond Camarilla R1/S1 levels (daily support/resistance) 
-# with alignment to daily trend (price vs EMA34) and volume confirmation captures strong momentum moves.
-# R1/S1 represent solid levels that balance reliability and sensitivity.
-# Works in both bull and bear markets by following daily trend direction.
-# Targets low-frequency, high-quality setups to minimize fee drag on 12h chart.
-# Expected trades: 15-30 per year per symbol.
+# 12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike
+# Hypothesis: On 12h timeframe, breakout beyond weekly Camarilla R1/S1 levels with alignment to weekly trend 
+# (price vs weekly EMA34) and volume confirmation captures strong momentum moves. 
+# R1/S1 levels act as dynamic support/resistance, and weekly trend filter ensures trades align with 
+# higher timeframe momentum. Works in both bull and bear markets by following weekly trend direction.
+# Targets low-frequency, high-quality setups (12-37 trades/year) to minimize fee drag.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,27 +24,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get weekly data for Camarilla pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate Camarilla pivot levels for each day
+    # Calculate weekly Camarilla pivot levels
     # Pivot = (H + L + C) / 3
     # R1 = C + (H - L) * 1.1 / 12
     # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = close_1w + (high_1w - low_1w) * 1.1 / 12.0
+    s1_1w = close_1w - (high_1w - low_1w) * 1.1 / 12.0
 
     # Align to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
 
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
 
     # Volume spike: volume > 2.0 * 10-period average (~5 days at 12h)
     vol_ma_10 = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
