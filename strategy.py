@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_TripleBarrier_Breakout_12hTrend_VolumeConfirmation
-# Hypothesis: Combine Donchian breakout with Bollinger squeeze release and 12h trend filter.
-# This creates high-conviction entries during volatility expansion in trending markets,
-# reducing false breakouts. Volatility contraction (squeeze) followed by expansion
-# captures meaningful moves while avoiding chop. Works in bull/bear by following 12h trend.
-# Target: 20-30 trades/year (80-120 total) to minimize fee drag.
+# 1d_Weekly_Keltner_Channel_Breakout_Trend_Filter
+# Hypothesis: Use weekly Keltner Channel breakout with daily trend filter to capture strong trends in BTC/ETH.
+# Combines volatility-based breakout (Keltner) with weekly trend alignment to avoid false signals.
+# Works in both bull and bear markets by following the weekly trend direction.
+# Target: 15-25 trades/year (60-100 total) to minimize fee drag while maintaining edge.
 
-name = "4h_TripleBarrier_Breakout_12hTrend_VolumeConfirmation"
-timeframe = "4h"
+name = "1d_Weekly_Keltner_Channel_Breakout_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,52 +23,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get weekly data for trend and Keltner calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
 
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    weekly_close = df_weekly['close'].values
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
 
-    # Calculate 12h EMA30 for trend filter
-    ema_12h = pd.Series(close_12h).ewm(span=30, adjust=False, min_periods=30).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate weekly ATR(10) for Keltner Channel
+    tr1 = weekly_high[1:] - weekly_low[1:]
+    tr2 = np.abs(weekly_high[1:] - weekly_close[:-1])
+    tr3 = np.abs(weekly_low[1:] - weekly_close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
 
-    # Calculate Donchian channels (20-period) on 4h
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
+    # Weekly EMA(20) for trend filter and Keltner center
+    ema_20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
 
-    # Bollinger Bands (20,2) for squeeze detection
-    ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = ma + 2 * std
-    lower_bb = ma - 2 * std
-    bb_width = (upper_bb - lower_bb) / ma  # normalized width
+    # Keltner Channel: EMA(20) ± 2 * ATR(10)
+    keltner_upper = ema_20 + 2 * atr_10
+    keltner_lower = ema_20 - 2 * atr_10
 
-    # Bollinger squeeze: width below 20-period 10th percentile
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).quantile(0.1).values
-    squeeze = bb_width < bb_width_percentile
+    # Align weekly indicators to daily timeframe
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_weekly, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_weekly, keltner_lower)
+    ema_20_aligned = align_htf_to_ltf(prices, df_weekly, ema_20)
 
-    # Volume confirmation: current volume > 1.8 x 20-period average
+    # Daily volume confirmation: volume > 1.5 * 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.8 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if data is not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(squeeze[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,34 +72,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above upper Donchian + BB squeeze release + 12h uptrend + volume spike
-            if (close[i] > highest_high[i] and 
-                not squeeze[i] and  # squeeze released (volatility expanding)
-                close[i] > ema_12h_aligned[i] and 
+            # LONG: Price breaks above weekly Keltner upper + weekly uptrend + volume spike
+            if (close[i] > keltner_upper_aligned[i] and 
+                close[i] > ema_20_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian + BB squeeze release + 12h downtrend + volume spike
-            elif (close[i] < lowest_low[i] and 
-                  not squeeze[i] and 
-                  close[i] < ema_12h_aligned[i] and 
+            # SHORT: Price breaks below weekly Keltner lower + weekly downtrend + volume spike
+            elif (close[i] < keltner_lower_aligned[i] and 
+                  close[i] < ema_20_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters Donchian channel or 12h trend turns down
-            midpoint = (highest_high[i] + lowest_low[i]) / 2.0
-            if close[i] < midpoint or close[i] < ema_12h_aligned[i]:
+            # EXIT LONG: Price crosses below weekly EMA(20) or re-enters Keltner Channel
+            if close[i] < ema_20_aligned[i] or close[i] < keltner_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters Donchian channel or 12h trend turns up
-            midpoint = (highest_high[i] + lowest_low[i]) / 2.0
-            if close[i] > midpoint or close[i] > ema_12h_aligned[i]:
+            # EXIT SHORT: Price crosses above weekly EMA(20) or re-enters Keltner Channel
+            if close[i] > ema_20_aligned[i] or close[i] > keltner_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
