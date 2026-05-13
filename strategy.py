@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_1d_ADX_Regime_Trend
-Hypothesis: On 6h timeframe, ADX-based trend regime filtering (ADX>25 = trend, ADX<20 = range) 
-combined with EMA crossovers provides robust signals in both bull and bear markets.
-ADX regime filter prevents whipsaws in sideways markets while capturing trends.
-Target: 15-30 trades/year per symbol.
+1d_1w_KAMA_Trend_With_Weekly_Adx
+Hypothesis: On daily timeframe, Kaufman Adaptive Moving Average (KAMA) captures trend direction,
+while weekly ADX acts as a regime filter to avoid whipsaws in low-trend environments.
+Works in both bull and bear markets by only taking trades when weekly trend is strong (ADX > 25).
+Target: 15-25 trades/year per symbol.
 """
 
-name = "6h_1d_ADX_Regime_Trend"
-timeframe = "6h"
+name = "1d_1w_KAMA_Trend_With_Weekly_Adx"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,108 +20,101 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate ADX (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First value
-        
-        # Directional Movement
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-        def WilderSmooth(data, period):
-            result = np.zeros_like(data)
-            alpha = 1.0 / period
-            result[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-            return result
-        
-        tr_smooth = WilderSmooth(tr, period)
-        plus_dm_smooth = WilderSmooth(plus_dm, period)
-        minus_dm_smooth = WilderSmooth(minus_dm, period)
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_smooth / tr_smooth
-        minus_di = 100 * minus_dm_smooth / tr_smooth
-        
-        # DX and ADX
-        dx = np.zeros_like(close)
-        dx_mask = (plus_di + minus_di) > 0
-        dx[dx_mask] = 100 * np.abs(plus_di[dx_mask] - minus_di[dx_mask]) / (plus_di[dx_mask] + minus_di[dx_mask])
-        
-        adx = WilderSmooth(dx, period)
-        return adx
+    # Calculate KAMA on daily close
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum |close[i] - close[i-1]| over 10
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    adx = calculate_adx(high, low, close, 14)
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for ADX filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1d trend: 34 EMA
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = close_1d > ema_34_1d
-    downtrend_1d = close_1d < ema_34_1d
+    # Calculate ADX (14-period) on weekly
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[0], tr])  # align length
     
-    # Align 1d trend to 6h
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Calculate 6m EMA crossovers (8 and 21)
-    ema_8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Smoothed values
+    def wilders_smoothing(x, period):
+        result = np.zeros_like(x)
+        result[period-1] = np.nansum(x[:period])  # seed with sum
+        for i in range(period, len(x)):
+            result[i] = result[i-1] - (result[i-1] / period) + x[i]
+        return result
     
-    # Golden cross (bullish) and death cross (bearish)
-    golden_cross = ema_8 > ema_21
-    death_cross = ema_8 < ema_21
+    atr = wilders_smoothing(tr, 14)
+    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
+    
+    # DI+ and DI-
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smoothing(dx, 14)
+    
+    # Weekly trend strong: ADX > 25
+    strong_trend = adx > 25
+    
+    # Align weekly ADX to daily
+    strong_trend_aligned = align_htf_to_ltf(prices, df_1w, strong_trend)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Get aligned values
-        adx_val = adx[i]
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
-        gc = golden_cross[i]
-        dc = death_cross[i]
+    for i in range(50, n):  # warmup for KAMA and indicators
+        # Get aligned weekly trend strength
+        strong = strong_trend_aligned[i]
         
         if position == 0:
-            # LONG: ADX>25 (trending) + 1d uptrend + golden cross
-            if adx_val > 25 and uptrend and gc:
+            # LONG: price above KAMA + strong weekly trend
+            if close[i] > kama[i] and strong:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: ADX>25 (trending) + 1d downtrend + death cross
-            elif adx_val > 25 and downtrend and dc:
+            # SHORT: price below KAMA + strong weekly trend
+            elif close[i] < kama[i] and strong:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: ADX<20 (ranging) or death cross
-            if adx_val < 20 or dc:
+            # EXIT LONG: price crosses below KAMA or trend weakens
+            if close[i] < kama[i] or not strong:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: ADX<20 (ranging) or golden cross
-            if adx_val < 20 or gc:
+            # EXIT SHORT: price crosses above KAMA or trend weakens
+            if close[i] > kama[i] or not strong:
                 signals[i] = 0.0
                 position = 0
             else:
