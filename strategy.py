@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn
-Hypothesis: Use daily Camarilla pivot levels (R3/S3) as strong support/resistance. 
-Breakout above R3 with 1d EMA34 uptrend and volume confirmation signals long. 
-Breakdown below S3 with 1d EMA34 downtrend and volume confirmation signals short. 
-Camarilla levels from higher timeframe provide robust S/R that works in both bull/bear markets, 
-while volume confirmation filters false breakouts. Target: 20-50 trades/year per symbol.
+4h_Keltner_Channel_Breakout_Trend_Volume
+Hypothesis: Keltner Channel (ATR-based) breakouts capture momentum in both bull and bear markets.
+Breakout above upper band with EMA trend and volume confirmation signals long.
+Breakdown below lower band with EMA trend and volume confirmation signals short.
+Uses 4h EMA20 trend filter and volume > 1.5x average to reduce false signals.
+Target: 20-40 trades/year per symbol to avoid fee drag.
 """
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn"
+name = "4h_Keltner_Channel_Breakout_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,63 +26,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivot levels (R3/S3)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Keltner Channel: EMA20 center, ATR(10) bands
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    kc_upper = ema_20 + (2.0 * atr_10)
+    kc_lower = ema_20 - (2.0 * atr_10)
     
-    # Calculate daily Camarilla pivot points
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Trend filter: 4h EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend = close > ema_50
+    downtrend = close < ema_50
     
-    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
-    daily_range = daily_high - daily_low
-    r3 = daily_pivot + (daily_range * 1.1 / 2)  # R3 = P + 1.1*(H-L)/2
-    s3 = daily_pivot - (daily_range * 1.1 / 2)  # S3 = P - 1.1*(H-L)/2
-    
-    # Align daily R3/S3 to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # 1d EMA34 trend filter
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = daily_close > ema_34_1d
-    downtrend_1d = daily_close < ema_34_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average (stricter to reduce trades)
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (2.0 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         if position == 0:
-            # LONG: break above R3, 1d uptrend, volume confirmation
-            if close[i] > r3_aligned[i] and uptrend_1d_aligned[i] and volume_confirm[i]:
+            # LONG: break above upper Keltner band, uptrend, volume confirmation
+            if close[i] > kc_upper[i] and uptrend[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below S3, 1d downtrend, volume confirmation
-            elif close[i] < s3_aligned[i] and downtrend_1d_aligned[i] and volume_confirm[i]:
+            # SHORT: break below lower Keltner band, downtrend, volume confirmation
+            elif close[i] < kc_lower[i] and downtrend[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price falls back below daily pivot or trend reverses
-            pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
-            if close[i] < pivot_aligned[i] or not uptrend_1d_aligned[i]:
+            # EXIT LONG: price falls back below EMA20 or trend reverses
+            if close[i] < ema_20[i] or not uptrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price rises back above daily pivot or trend reverses
-            pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
-            if close[i] > pivot_aligned[i] or not downtrend_1d_aligned[i]:
+            # EXIT SHORT: price rises back above EMA20 or trend reverses
+            if close[i] > ema_20[i] or not downtrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
