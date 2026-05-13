@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_1dTrend_Volume_Confirmation
-Hypothesis: Weekly pivot levels provide institutional support/resistance. 
-Breakouts above weekly R1/S1 with daily trend and volume confirmation capture 
-multi-day momentum while avoiding false signals. Works in bull/bear markets 
-by trading breakouts in direction of higher timeframe trend.
-Target: 20-35 trades/year per symbol to avoid fee drag.
+4h_Vortex_Trend_Filter_Volume
+Hypothesis: Vortex Indicator (VI) captures trend direction while filtering noise. 
+Long when VI+ > VI- and VI+ rising, short when VI- > VI+ and VI- rising, 
+with volume confirmation and EMA50 trend filter. 
+Designed for low trade frequency (<30/year) to avoid fee drag in choppy markets.
 """
 
-name = "6h_Weekly_Pivot_1dTrend_Volume_Confirmation"
-timeframe = "6h"
+name = "4h_Vortex_Trend_Filter_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,73 +17,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly pivot points (R1, S1, R2, S2) - calculated from prior week
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
-        return np.zeros(n)
+    # Vortex Indicator: VM+ and VM-
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus[0] = 0.0
+    vm_minus[0] = 0.0
     
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Pivot point calculation
-    pivot = (weekly_high + weekly_low + weekly_close) / 3
-    r1 = (2 * pivot) - weekly_low
-    s1 = (2 * pivot) - weekly_high
-    r2 = pivot + (weekly_high - weekly_low)
-    s2 = pivot - (weekly_high - weekly_low)
+    # Smooth with Wilder's smoothing (EMA-like)
+    def wilders_smoothing(arr, period):
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        result[period-1] = np.nansum(arr[:period])
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
     
-    # Align weekly pivots to 6h timeframe (only use after weekly bar closes)
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot.values)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    period = 14
+    vm_plus_sum = wilders_smoothing(vm_plus, period)
+    vm_minus_sum = wilders_smoothing(vm_minus, period)
+    tr_sum = wilders_smoothing(tr, period)
     
-    # Daily trend filter - 1d EMA50
-    df_daily = get_htf_data(prices, '1d')
-    ema_50_daily = pd.Series(df_daily['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_daily, ema_50_daily)
-    daily_uptrend = close > ema_50_aligned
-    daily_downtrend = close < ema_50_aligned
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
     
-    # Volume confirmation: > 1.3x 50-period average
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Trend filter: EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend = close > ema_50
+    downtrend = close < ema_50
+    
+    # Volume confirmation: > 1.3x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.3 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
+    for i in range(50, n):
         if position == 0:
-            # LONG: break above weekly R1 with daily uptrend and volume confirmation
-            if close[i] > r1_aligned[i] and daily_uptrend[i] and volume_confirm[i]:
+            # LONG: VI+ > VI- and VI+ rising, uptrend, volume confirmation
+            if vi_plus[i] > vi_minus[i] and vi_plus[i] > vi_plus[i-1] and uptrend[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below weekly S1 with daily downtrend and volume confirmation
-            elif close[i] < s1_aligned[i] and daily_downtrend[i] and volume_confirm[i]:
+            # SHORT: VI- > VI+ and VI- rising, downtrend, volume confirmation
+            elif vi_minus[i] > vi_plus[i] and vi_minus[i] > vi_minus[i-1] and downtrend[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price falls back to weekly pivot or trend reverses
-            if close[i] < pivot_aligned[i] or not daily_uptrend[i]:
+            # EXIT LONG: VI- crosses above VI+ or trend fails
+            if vi_minus[i] > vi_plus[i] or not uptrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price rises back to weekly pivot or trend reverses
-            if close[i] > pivot_aligned[i] or not daily_downtrend[i]:
+            # EXIT SHORT: VI+ crosses above VI- or trend fails
+            if vi_plus[i] > vi_minus[i] or not downtrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
