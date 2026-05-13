@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 1d_Donchian_Breakout_WeeklyTrend_Volume
-# Hypothesis: Enter long when price breaks above weekly Donchian high (20-week high) on daily close,
-# with weekly trend aligned (price above weekly EMA40) and volume confirmation.
-# Enter short when price breaks below weekly Donchian low (20-week low) with weekly downtrend
-# and volume confirmation. Uses weekly timeframe for trend and structure, daily for execution.
-# Trend filter reduces false breakouts in choppy markets. Volume surge confirms institutional
-# participation. Designed to work in both bull (breakouts in uptrend) and bear (breakdowns in downtrend).
-# Low frequency due to weekly Donchian breakout requirement and strict volume confirmation.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend
+# Hypothesis: Enter long when price breaks above Camarilla R3 level with 1d uptrend and volume confirmation; short when breaks below S3 with 1d downtrend and volume confirmation.
+# Exit when price crosses back through the prior day's close (Camarilla base level).
+# Camarilla levels act as intraday support/resistance; breaks indicate institutional flow.
+# Trend filter ensures alignment with higher timeframe momentum, reducing false breakouts.
+# Works in bull (breaks above R3 in uptrend) and bear (breaks below S3 in downtrend).
+# Low frequency due to strict level breaks and volume confirmation.
 
-name = "1d_Donchian_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -26,36 +25,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for Donchian channels and trend
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly Donchian Channel (20-period)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Previous day's OHLC (needed for Camarilla)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Weekly trend: EMA40
-    close_1w = df_1w['close'].values
-    ema40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
+    # Camarilla levels: H-L = range
+    rng = prev_high - prev_low
     
-    # Align weekly indicators to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
+    # Resistance levels
+    r3 = prev_close + rng * 1.1 / 2
+    r4 = prev_close + rng * 1.1
     
-    # Volume spike: volume > 2.0 * 20-day average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * vol_ma_20
+    # Support levels
+    s3 = prev_close - rng * 1.1 / 2
+    s4 = prev_close - rng * 1.1
+    
+    # Pivot point (close of previous day)
+    pivot = prev_close
+    
+    # Daily trend: EMA50
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align daily indicators to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume spike: volume > 2.0 * 2-period average (1 day worth at 12h)
+    vol_ma_2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    volume_spike = volume > 2.0 * vol_ma_2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(ema40_1w_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,26 +77,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > weekly Donchian high + weekly uptrend + volume spike
-            if close[i] > donchian_high_aligned[i] and close[i] > ema40_1w_aligned[i] and volume_spike[i]:
+            # LONG: Close > R3 + daily uptrend + volume spike
+            if close[i] > r3_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < weekly Donchian low + weekly downtrend + volume spike
-            elif close[i] < donchian_low_aligned[i] and close[i] < ema40_1w_aligned[i] and volume_spike[i]:
+            # SHORT: Close < S3 + daily downtrend + volume spike
+            elif close[i] < s3_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below weekly EMA40 (trend reversal)
-            if close[i] < ema40_1w_aligned[i]:
+            # EXIT LONG: Close below pivot (previous day's close)
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above weekly EMA40 (trend reversal)
-            if close[i] > ema40_1w_aligned[i]:
+            # EXIT SHORT: Close above pivot (previous day's close)
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
