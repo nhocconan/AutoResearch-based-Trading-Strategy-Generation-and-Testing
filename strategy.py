@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Trix_Trend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_1dTrend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,74 +9,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # TRIX: triple EMA of percentage change
-    roc = np.diff(np.log(close), prepend=np.log(close[0]))
-    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = ema3 * 100  # scale for readability
-    
-    # TRIX signal line (EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=8, adjust=False, min_periods=8).mean().values
-    
-    # 12h trend filter: EMA(50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1d trend filter: EMA(34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current volume > 1.5 x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_mask = (hours >= 8) & (hours <= 20)
+    
+    # Calculate previous day's Camarilla levels (R1, S1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + 0.2917 * camarilla_range
+    s1 = prev_close - 0.2917 * camarilla_range
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma_20[i])):
+    for i in range(1, n):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r1[i]) or 
+            np.isnan(s1[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
-        vol_filter = volume[i] > 1.5 * vol_ma_20[i]
-        trix_bullish = trix[i] > trix_signal[i]
-        trix_bearish = trix[i] < trix_signal[i]
+        # Only trade during active session
+        if not session_mask[i]:
+            signals[i] = 0.0
+            continue
         
         if position == 0:
-            # LONG: TRIX bullish crossover + 12h uptrend + volume confirmation
-            if trix_bullish and close[i] > ema50_12h_aligned[i] and vol_filter:
-                signals[i] = 0.25
+            # LONG: price breaks above R1 + 1d uptrend
+            if close[i] > r1[i] and close[i] > ema34_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: TRIX bearish crossover + 12h downtrend + volume confirmation
-            elif trix_bearish and close[i] < ema50_12h_aligned[i] and vol_filter:
-                signals[i] = -0.25
+            # SHORT: price breaks below S1 + 1d downtrend
+            elif close[i] < s1[i] and close[i] < ema34_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX bearish crossover or trend breaks
-            if trix_bearish or close[i] < ema50_12h_aligned[i]:
+            # EXIT LONG: price breaks below S1 or trend reverses
+            if close[i] < s1[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: TRIX bullish crossover or trend breaks
-            if trix_bullish or close[i] > ema50_12h_aligned[i]:
+            # EXIT SHORT: price breaks above R1 or trend reverses
+            if close[i] > r1[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
