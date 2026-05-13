@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA34 trend filter and volume confirmation.
-# Long when price breaks above Camarilla R3 level and close > 1w EMA34 with volume > 1.8x 20-bar average.
-# Short when price breaks below Camarilla S3 level and close < 1w EMA34 with volume > 1.8x 20-bar average.
-# Uses discrete sizing 0.25 to target 30-100 total trades over 4 years on 1d timeframe.
-# Camarilla levels provide tighter structure than Donchian for mean reversion in ranging markets,
-# while EMA34 filter ensures we only trade with the weekly trend. Volume spike confirms conviction.
-# Designed to work in both bull (trend continuation) and bear (mean reversion off weekly trend) markets.
+# Hypothesis: 6h Williams %R with 12h EMA20 trend filter and volume confirmation.
+# Long when Williams %R crosses above -80 from oversold, price > 12h EMA20, and volume > 1.3x 20-bar average.
+# Short when Williams %R crosses below -20 from overbought, price < 12h EMA20, and volume > 1.3x 20-bar average.
+# Exit when Williams %R returns to neutral zone (-50) or volume drops below 0.7x average.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 6h timeframe.
+# Designed to capture mean reversion moves within the trend, filtering weak signals via volume and trend alignment.
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA34_Trend_VolumeConfirm"
-timeframe = "1d"
+name = "6h_WilliamsR_12hEMA20_Trend_VolumeConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,74 +24,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    lookback = 20  # for Camarilla calculation and volume average
+    lookback = 14  # for Williams %R
+    vol_lookback = 20  # for volume average
     
-    # Calculate Camarilla levels (based on previous day's range)
-    # Camarilla R3 = close_prev + 1.1 * (high_prev - low_prev) / 2
-    # Camarilla S3 = close_prev - 1.1 * (high_prev - low_prev) / 2
-    close_prev = pd.Series(close).shift(1).values
-    high_prev = pd.Series(high).shift(1).values
-    low_prev = pd.Series(low).shift(1).values
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    camarilla_r3 = close_prev + 1.1 * (high_prev - low_prev) / 2
-    camarilla_s3 = close_prev - 1.1 * (high_prev - low_prev) / 2
-    
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA(34) on 1w close
-    if len(close_1w) < 34:
-        ema_34_1w = np.full(len(close_1w), np.nan)
+    # Calculate EMA(20) on 12h close
+    if len(close_12h) < 20:
+        ema_20_12h = np.full(len(close_12h), np.nan)
     else:
-        ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+        ema_20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align 1w EMA to 1d timeframe (wait for 1w bar to close)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Align 12h EMA to 6h timeframe (wait for 12h bar to close)
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
     # Calculate average volume for confirmation (20-period)
-    avg_volume = pd.Series(volume).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
+    avg_volume = pd.Series(volume).rolling(window=vol_lookback, min_periods=vol_lookback).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(lookback, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_20_12h_aligned[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R3, close > 1w EMA34, volume spike
-            if (high[i] > camarilla_r3[i] and 
-                close[i] > ema_34_1w_aligned[i] and 
-                volume[i] > 1.8 * avg_volume[i]):
+            # LONG: Williams %R crosses above -80 (from below), price > 12h EMA20, volume spike
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+                close[i] > ema_20_12h_aligned[i] and 
+                volume[i] > 1.3 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S3, close < 1w EMA34, volume spike
-            elif (low[i] < camarilla_s3[i] and 
-                  close[i] < ema_34_1w_aligned[i] and 
-                  volume[i] > 1.8 * avg_volume[i]):
+            # SHORT: Williams %R crosses below -20 (from above), price < 12h EMA20, volume spike
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+                  close[i] < ema_20_12h_aligned[i] and 
+                  volume[i] > 1.3 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S3 OR volume dries up (< 0.8x average)
-            if (low[i] < camarilla_s3[i] or 
-                volume[i] < 0.8 * avg_volume[i]):
+            # EXIT LONG: Williams %R returns to -50 or volume drops significantly
+            if (williams_r[i] >= -50 or 
+                volume[i] < 0.7 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R3 OR volume dries up (< 0.8x average)
-            if (high[i] > camarilla_r3[i] or 
-                volume[i] < 0.8 * avg_volume[i]):
+            # EXIT SHORT: Williams %R returns to -50 or volume drops significantly
+            if (williams_r[i] <= -50 or 
+                volume[i] < 0.7 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
