@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1D_RSI_Backtest
-Strategy: Use 4h timeframe with 1D RSI filter and volume confirmation.
-Enters long when price is above 4h EMA50, 1D RSI < 30 (oversold), and volume spike.
-Enters short when price is below 4h EMA50, 1D RSI > 70 (overbought), and volume spike.
-Exits when RSI returns to neutral (40-60) or trend reversal.
-Position size 0.25 to limit risk and trade frequency.
-Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
+4h_RSI_Divergence_With_Volume_Filter
+Hypothesis: RSI divergences signal exhaustion in momentum. Combined with volume exhaustion
+and 4h trend filter, this captures reversals in both bull and bear markets. 
+RSI bearish divergence: price makes higher high, RSI makes lower high → short signal.
+RSI bullish divergence: price makes lower low, RSI makes higher low → long signal.
+Volume filter ensures momentum is weakening. Position size 0.25 targets ~20-30 trades/year.
 """
 
-name = "4h_1D_RSI_Backtest"
+name = "4h_RSI_Divergence_With_Volume_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,58 +26,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1D data for RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1D RSI(14)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    
-    # Align 1D RSI to 4h chart (wait for daily close)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # 4h EMA50 for trend filter
+    # 4h trend filter: EMA50
     ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # RSI(14) calculation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Volume exhaustion: current volume < 0.7x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_exhaustion = volume < (0.7 * vol_ma)
+    
+    # Find swing points for divergence detection
+    def find_swing_points(arr, window=3):
+        """Find swing highs and lows"""
+        highs = np.zeros_like(arr, dtype=bool)
+        lows = np.zeros_like(arr, dtype=bool)
+        
+        for i in range(window, len(arr) - window):
+            # Swing high: higher than window bars on both sides
+            if arr[i] == np.max(arr[i-window:i+window+1]):
+                highs[i] = True
+            # Swing low: lower than window bars on both sides
+            if arr[i] == np.min(arr[i-window:i+window+1]):
+                lows[i] = True
+        return highs, lows
+    
+    # Find swing points in price and RSI
+    price_highs, price_lows = find_swing_points(close, window=3)
+    rsi_highs, rsi_lows = find_swing_points(rsi_values, window=3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         if position == 0:
-            # LONG: Price above EMA50, 1D RSI oversold (<30), volume spike
-            if (close[i] > ema50[i] and 
-                rsi_1d_aligned[i] < 30 and 
-                volume_spike[i]):
+            # Check for bullish divergence: price lower low, RSI higher low
+            bullish_div = False
+            if price_lows[i] and rsi_lows[i]:
+                # Look back for previous swing low
+                for j in range(i-20, i):
+                    if price_lows[j] and rsi_lows[j]:
+                        if close[i] < close[j] and rsi_values[i] > rsi_values[j]:
+                            bullish_div = True
+                        break
+            
+            # Check for bearish divergence: price higher high, RSI lower high
+            bearish_div = False
+            if price_highs[i] and rsi_highs[i]:
+                # Look back for previous swing high
+                for j in range(i-20, i):
+                    if price_highs[j] and rsi_highs[j]:
+                        if close[i] > close[j] and rsi_values[i] < rsi_values[j]:
+                            bearish_div = True
+                        break
+            
+            # LONG: bullish divergence + volume exhaustion + above EMA50
+            if bullish_div and volume_exhaustion[i] and close[i] > ema50[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below EMA50, 1D RSI overbought (>70), volume spike
-            elif (close[i] < ema50[i] and 
-                  rsi_1d_aligned[i] > 70 and 
-                  volume_spike[i]):
+            # SHORT: bearish divergence + volume exhaustion + below EMA50
+            elif bearish_div and volume_exhaustion[i] and close[i] < ema50[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
+                
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (>=40) or trend reversal
-            if (rsi_1d_aligned[i] >= 40) or (close[i] < ema50[i]):
+            # EXIT LONG: RSI overbought or trend reversal
+            if rsi_values[i] > 70 or close[i] < ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (<=60) or trend reversal
-            if (rsi_1d_aligned[i] <= 60) or (close[i] > ema50[i]):
+            # EXIT SHORT: RSI oversold or trend reversal
+            if rsi_values[i] < 30 or close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
