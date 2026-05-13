@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Chaikin_Oscillator_ZeroCross_Trend_Filter
-# Hypothesis: Chaikin Oscillator (3,10) zero-cross signals combined with 1d trend filter (EMA34) capture momentum shifts with institutional confirmation.
-# Long when Chaikin Osc crosses above zero and price > 1d EMA34 (uptrend).
-# Short when Chaikin Osc crosses below zero and price < 1d EMA34 (downtrend).
-# Works in bull markets (captures early momentum) and bear markets (identifies distribution/accumulation phases).
-# Uses volume-weighted accumulation/distribution to filter noise. Target: 15-30 trades/year per symbol.
+# 4h_Donchian20_Breakout_12hTrend_Volume
+# Hypothesis: Price breaking Donchian(20) high/low on 4h with 12h EMA50 trend alignment and volume confirmation.
+# Long when price breaks above Donchian high with 12h uptrend and volume spike.
+# Short when price breaks below Donchian low with 12h downtrend and volume spike.
+# Exit when price reverts to Donchian midpoint or trend reverses.
+# Designed for 20-50 trades/year to minimize fee drag. Works in both bull and bear markets via trend filter.
 
-name = "6h_Chaikin_Oscillator_ZeroCross_Trend_Filter"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,36 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Chaikin Oscillator: (3-period EMA of ADL) - (10-period EMA of ADL)
-    # ADL = ((Close - Low) - (High - Close)) / (High - Low) * Volume
-    # Handle division by zero when high == low
-    hl_range = high - low
-    hl_range = np.where(hl_range == 0, 1, hl_range)  # avoid div by zero
-    adl = ((close - low) - (high - close)) / hl_range * volume
-    adl = np.cumsum(adl)  # cumulative ADL
-    
-    # Calculate 3-period and 10-period EMA of ADL
-    ema3_adl = pd.Series(adl).ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10_adl = pd.Series(adl).ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin_osc = ema3_adl - ema10_adl
-    
-    # 1d trend: EMA34
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Align Chaikin Oscillator to 6h timeframe
-    chaikin_osc_aligned = align_htf_to_ltf(prices, df_1d, chaikin_osc)
-    
+    # Donchian(20) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2
+
+    # Get 12h data
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+
+    # 12h trend: EMA50
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+
+    # Volume spike: volume > 2.0 * 3-period average
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    volume_spike = volume > 2.0 * vol_ma_3
+
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(chaikin_osc_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema50_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,26 +58,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Chaikin Osc crosses above zero + 1d uptrend
-            if chaikin_osc_aligned[i] > 0 and chaikin_osc_aligned[i-1] <= 0 and close[i] > ema34_1d_aligned[i]:
+            # LONG: Break above Donchian high + 12h uptrend + volume spike
+            if close[i] > high_20[i] and close[i] > ema50_12h_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Chaikin Osc crosses below zero + 1d downtrend
-            elif chaikin_osc_aligned[i] < 0 and chaikin_osc_aligned[i-1] >= 0 and close[i] < ema34_1d_aligned[i]:
+            # SHORT: Break below Donchian low + 12h downtrend + volume spike
+            elif close[i] < low_20[i] and close[i] < ema50_12h_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Chaikin Osc crosses below zero or trend reversal
-            if chaikin_osc_aligned[i] < 0 or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price reverts to midpoint or trend reversal
+            if close[i] < donchian_mid[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Chaikin Osc crosses above zero or trend reversal
-            if chaikin_osc_aligned[i] > 0 or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price reverts to midpoint or trend reversal
+            if close[i] > donchian_mid[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
