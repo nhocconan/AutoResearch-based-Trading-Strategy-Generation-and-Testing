@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Use 12h Camarilla pivot levels (R3/S3) for breakout entries with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3 in uptrend with volume spike, short when price breaks below S3 in downtrend with volume spike.
-# Exit when price returns to the 12h pivot level (PP) or trend changes.
-# Designed for 12h timeframe to achieve 50-150 total trades over 4 years with low frequency and high win rate.
+# 1d_KAMA_Trend_RSI_1dTrend
+# Hypothesis: Use 1d KAMA for trend direction, RSI for momentum confirmation, and price action for entry.
+# Long when price crosses above KAMA in uptrend with RSI > 50, short when price crosses below KAMA in downtrend with RSI < 50.
+# Exit when price crosses back below/above KAMA.
+# Designed for low trade frequency (<100 total trades over 4 years) with clear trend-following logic.
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_KAMA_Trend_RSI_1dTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,48 +18,43 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 12h data for Camarilla pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    
-    # Calculate 12h Camarilla pivot levels: R3, S3, and PP (pivot point)
-    # Camarilla formulas:
-    # PP = (H + L + C) / 3
-    # R3 = C + (H - L) * 1.1 / 2
-    # S3 = C - (H - L) * 1.1 / 2
-    typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3
-    pp_12h = typical_price.values
-    hl_range = df_12h['high'] - df_12h['low']
-    r3_12h = df_12h['close'].values + hl_range.values * 1.1 / 2
-    s3_12h = df_12h['close'].values - hl_range.values * 1.1 / 2
-    
-    # Align 12h Camarilla levels to 12h timeframe (no alignment needed, but using helper for consistency)
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    pp_12h_aligned = align_htf_to_ltf(prices, df_12h, pp_12h)
-
-    # Get 1d data for EMA trend filter
+    # Get 1d data (same as primary timeframe) for KAMA calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    # Efficiency Ratio (ER) = |change| / volatility
+    change = np.abs(np.diff(df_1d['close'], prepend=df_1d['close'][0]))
+    volatility = np.abs(np.diff(df_1d['close'])).rolling(window=10, min_periods=10).sum()
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(df_1d['close'])
+    kama[0] = df_1d['close'].iloc[0]
+    for i in range(1, len(df_1d)):
+        kama[i] = kama[i-1] + sc[i] * (df_1d['close'].iloc[i] - kama[i-1])
+    
+    # Align KAMA to 1d timeframe (no alignment needed as it's same timeframe)
+    kama_aligned = kama
 
-    # Volume filter: >1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if any required value is NaN
-        if (np.isnan(r3_12h_aligned[i]) or np.isnan(s3_12h_aligned[i]) or 
-            np.isnan(pp_12h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_avg_20[i])):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,30 +63,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above R3 + price above 1d EMA50 (uptrend) + volume spike
-            if (close[i] > r3_12h_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Price crosses above KAMA + RSI > 50 (bullish momentum)
+            if close[i] > kama_aligned[i] and close[i-1] <= kama_aligned[i-1] and rsi[i] > 50:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + price below 1d EMA50 (downtrend) + volume spike
-            elif (close[i] < s3_12h_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Price crosses below KAMA + RSI < 50 (bearish momentum)
+            elif close[i] < kama_aligned[i] and close[i-1] >= kama_aligned[i-1] and rsi[i] < 50:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to pivot point (PP) or trend changes (price below EMA50)
-            if (close[i] <= pp_12h_aligned[i] or close[i] < ema_50_1d_aligned[i]):
+            # EXIT LONG: Price crosses below KAMA
+            if close[i] < kama_aligned[i] and close[i-1] >= kama_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot point (PP) or trend changes (price above EMA50)
-            if (close[i] >= pp_12h_aligned[i] or close[i] > ema_50_1d_aligned[i]):
+            # EXIT SHORT: Price crosses above KAMA
+            if close[i] > kama_aligned[i] and close[i-1] <= kama_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
