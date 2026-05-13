@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>2.0x avg volume).
-# Uses ATR(20) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>1.6x avg volume).
+# Uses ATR(20) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 # EMA trend filter ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Donchian breakouts provide clear structure with proven edge in crypto markets.
-# Volume spike confirmation (>2.0x) ensures breakouts have strong participation.
+# Donchian(20) breakouts provide clear structure with proven edge in BTC/ETH.
+# Volume spike confirmation (>1.6x) ensures breakouts have institutional participation.
 # Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
 
-name = "12h_Donchian20_1dEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_ATRStop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -36,7 +36,7 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Donchian channels (20-period) on primary timeframe
+    # Calculate Donchian channels (20-period) for breakout signals
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -48,7 +48,7 @@ def generate_signals(prices):
     close_1d_series = pd.Series(close_1d)
     ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA to 12h timeframe (wait for daily bar to close)
+    # Align 1d EMA to 4h timeframe (wait for daily bar to close)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
@@ -64,17 +64,17 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper band AND 1d EMA50 > price AND volume > 2.0x average
+            # LONG: Price breaks above Donchian upper band AND 1d EMA50 > close AND volume > 1.6x average
             if (close[i] > highest_high[i] and 
-                ema50_1d_aligned[i] > close[i] and 
-                volume[i] > 2.0 * avg_volume[i]):
+                ema50_1d_aligned[i] > close_1d[-1] if i == len(close) else ema50_1d_aligned[i] > close_1d[min(i//6, len(close_1d)-1)] and 
+                volume[i] > 1.6 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian lower band AND 1d EMA50 < price AND volume > 2.0x average
+            # SHORT: Price breaks below Donchian lower band AND 1d EMA50 < close AND volume > 1.6x average
             elif (close[i] < lowest_low[i] and 
-                  ema50_1d_aligned[i] < close[i] and 
-                  volume[i] > 2.0 * avg_volume[i]):
+                  ema50_1d_aligned[i] < close_1d[-1] if i == len(close) else ema50_1d_aligned[i] < close_1d[min(i//6, len(close_1d)-1)] and 
+                  volume[i] > 1.6 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -87,8 +87,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -102,8 +102,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
