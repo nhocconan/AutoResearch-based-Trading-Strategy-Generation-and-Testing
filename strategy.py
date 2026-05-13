@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Squeeze_Breakout
-Hypothesis: Breakouts from weekly pivot range (S3 to R3) with Bollinger Band squeeze and volume confirmation. Uses weekly pivot levels as structural support/resistance and Bollinger Band width to identify low-volatility compression before breakouts. Designed for 6h timeframe to capture multi-day moves with fewer trades, working in both bull and bear markets by requiring volatility contraction before directional moves.
+12h_Camarilla_R1_S1_Breakout_1D_Trend_v1
+Hypothesis: Breakouts above daily Camarilla R1 in uptrend (price > EMA34) and breakdowns below S1 in downtrend (price < EMA34) with volume confirmation (volume > 2.0x 20-period average). Designed for 12h timeframe to reduce trade frequency and improve generalization in both bull and bear markets.
 """
 
-name = "6h_Weekly_Pivot_Squeeze_Breakout"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1D_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,88 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get 1d data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot points and S3/R3 levels
-    prev_weekly_high = df_weekly['high'].shift(1).values
-    prev_weekly_low = df_weekly['low'].shift(1).values
-    prev_weekly_close = df_weekly['close'].shift(1).values
+    # Calculate Camarilla levels for each 1d bar (based on previous day's range)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    valid_idx = ~np.isnan(prev_weekly_high) & ~np.isnan(prev_weekly_low) & ~np.isnan(prev_weekly_close)
-    pivot_point = np.full_like(prev_weekly_close, np.nan)
-    weekly_r3 = np.full_like(prev_weekly_close, np.nan)
-    weekly_s3 = np.full_like(prev_weekly_close, np.nan)
+    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
+    camarilla_r1 = np.full_like(prev_close, np.nan)
+    camarilla_s1 = np.full_like(prev_close, np.nan)
     
-    # Standard pivot point calculation
-    pivot_point[valid_idx] = (prev_weekly_high[valid_idx] + prev_weekly_low[valid_idx] + prev_weekly_close[valid_idx]) / 3.0
-    weekly_range = prev_weekly_high[valid_idx] - prev_weekly_low[valid_idx]
+    camarilla_r1[valid_idx] = prev_close[valid_idx] + 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
+    camarilla_s1[valid_idx] = prev_close[valid_idx] - 1.1 * (prev_high[valid_idx] - prev_low[valid_idx]) / 12
     
-    # S3 and R3 levels (more extreme levels)
-    weekly_r3[valid_idx] = pivot_point[valid_idx] + weekly_range[valid_idx] * 1.1
-    weekly_s3[valid_idx] = pivot_point[valid_idx] - weekly_range[valid_idx] * 1.1
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_point)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s3)
+    # Get 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Bollinger Band squeeze detection (20-period, 2 std dev)
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle  # Normalized width
-    
-    # Squeeze condition: BB width below 20-period mean (low volatility)
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze_condition = bb_width < bb_width_ma
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma)
+    volume_confirmed = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
-    for i in range(100, n):
-        # Skip if weekly levels not available
-        if np.isnan(weekly_r3_aligned[i]) or np.isnan(weekly_s3_aligned[i]):
-            signals[i] = 0.0
-            continue
+    for i in range(50, n):
+        # Decrease cooldown if active
+        if cooldown > 0:
+            cooldown -= 1
         
-        if position == 0:
-            # LONG: Break above R3 with squeeze and volume confirmation
-            if (high[i] > weekly_r3_aligned[i] and 
-                squeeze_condition[i] and 
-                volume_confirmed[i]):
+        if position == 0 and cooldown == 0:
+            # LONG: Price breaks above R1 with volume confirmation in uptrend
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               high[i] > camarilla_r1_aligned[i] and volume_confirmed[i] and \
+               close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S3 with squeeze and volume confirmation
-            elif (low[i] < weekly_s3_aligned[i] and 
-                  squeeze_condition[i] and 
-                  volume_confirmed[i]):
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend
+            elif camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+                 low[i] < camarilla_s1_aligned[i] and volume_confirmed[i] and \
+                 close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to pivot point or squeeze breaks down
-            if (low[i] <= pivot_aligned[i] or 
-                not squeeze_condition[i]):
+            # EXIT LONG: Price crosses back below R1 or trend weakens
+            if camarilla_r1_aligned[i] > 0 and not np.isnan(camarilla_r1_aligned[i]) and \
+               (low[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
+                cooldown = 3  # 3-bar cooldown after exit
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot point or squeeze breaks down
-            if (high[i] >= pivot_aligned[i] or 
-                not squeeze_condition[i]):
+            # EXIT SHORT: Price crosses back above S1 or trend weakens
+            if camarilla_s1_aligned[i] > 0 and not np.isnan(camarilla_s1_aligned[i]) and \
+               (high[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
+                cooldown = 3  # 3-bar cooldown after exit
             else:
                 signals[i] = -0.25
     
