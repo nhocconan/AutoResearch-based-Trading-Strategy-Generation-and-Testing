@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# 4h_TRIX_ZeroLag_VolumeSpike_TrendFilter
-# Hypothesis: TRIX zero-lag (Ehlers) identifies momentum shifts early, combined with volume spike and 1-day EMA trend filter for confirmation.
-# Works in bull/bear: long when Trix crosses above signal line with volume and above daily EMA; short when crosses below with volume and below daily EMA.
-# Designed for 20-40 trades/year to minimize fee drag.
+# 1d_KeltnerChannel_Breakout_VolumeSpike_1wTrend
+# Hypothesis: Breakouts from 1D Keltner Channel (EMA20 +/- 2*ATR10) confirmed by volume spike and 1W EMA50 trend.
+# Keltner channels adapt to volatility, capturing breakouts in both trending and ranging markets.
+# Volume surge confirms institutional participation; weekly trend filter avoids counter-trend trades.
+# Designed for 15-25 trades/year on 1D timeframe to minimize fee drag.
+# Works in bull/bear: long when price breaks above upper KC with volume and above weekly EMA;
+# short when breaks below lower KC with volume and below weekly EMA.
 
-name = "4h_TRIX_ZeroLag_VolumeSpike_TrendFilter"
-timeframe = "4h"
+name = "1d_KeltnerChannel_Breakout_VolumeSpike_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,37 +25,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
 
-    # 1-day EMA34 trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate EMA20 and ATR10 for Keltner Channel (daily)
+    close_s = pd.Series(close)
+    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # True Range and ATR
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Keltner Channel bands
+    upper_kc = ema20 + 2 * atr10
+    lower_kc = ema20 - 2 * atr10
 
-    # TRIX zero-lag (Ehlers) on close
-    # EMA1
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    # EMA2
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    # EMA3
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    # TRIX = 100 * (EMA3 - EMA3_prev) / EMA3_prev
-    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    trix = trix.fillna(0).values
-    # Signal line: EMA of TRIX
-    signal_line = pd.Series(trix).ewm(span=8, adjust=False, min_periods=8).mean().values
+    # Weekly EMA50 trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
 
-    # Volume confirmation: current volume > 2.0 x 20-period average
+    # Volume confirmation: current volume > 2.5 x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (2.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(12, n):  # Start after sufficient warmup
+    for i in range(50, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(signal_line[i]) or 
+        if (np.isnan(upper_kc[i]) or 
+            np.isnan(lower_kc[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,30 +71,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: TRIX crosses above signal line with volume spike and above daily EMA34
-            if (trix[i] > signal_line[i] and trix[i-1] <= signal_line[i-1] and 
+            # LONG: Price breaks above upper KC with volume spike and above weekly EMA50
+            if (close[i] > upper_kc[i] and 
                 volume_spike[i] and 
-                close[i] > ema34_1d_aligned[i]):
+                close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below signal line with volume spike and below daily EMA34
-            elif (trix[i] < signal_line[i] and trix[i-1] >= signal_line[i-1] and 
+            # SHORT: Price breaks below lower KC with volume spike and below weekly EMA50
+            elif (close[i] < lower_kc[i] and 
                   volume_spike[i] and 
-                  close[i] < ema34_1d_aligned[i]):
+                  close[i] < ema50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below signal line or closes below daily EMA34
-            if (trix[i] < signal_line[i] and trix[i-1] >= signal_line[i-1]) or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price closes below EMA20 or weekly EMA50 turns down
+            if close[i] < ema20[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above signal line or closes above daily EMA34
-            if (trix[i] > signal_line[i] and trix[i-1] <= signal_line[i-1]) or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price closes above EMA20 or weekly EMA50 turns up
+            if close[i] > ema20[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
