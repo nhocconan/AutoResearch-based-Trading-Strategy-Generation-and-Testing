@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# 1h_4h_Donchian_Breakout_1dTrend_VolumeSpike
-# Hypothesis: On 1h timeframe, breakout beyond 4h Donchian channels (20-period) with alignment to daily trend (price vs EMA50) and volume confirmation captures momentum moves while minimizing false signals.
-# Uses 4h for trend/structure and 1d for higher timeframe trend filter. Volume spike filters for conviction.
-# Designed for low-frequency, high-quality setups to avoid fee drag on 1h chart.
+# 6h_WeeklyPivot_BullBearPower_Momentum
+# Hypothesis: Combines weekly pivot points (from 1w timeframe) with Elder Ray's Bull/Bear Power 
+# and momentum filter to capture directional moves. Uses weekly pivot for structure, 
+# Bull/Bear Power from daily data for conviction, and 6h ROC for momentum timing. 
+# Works in bull markets by buying above weekly pivot with bullish power, 
+# and in bear markets by selling below weekly pivot with bearish power. 
+# Designed for low trade frequency (target: 50-150/4 years) to minimize fee drag on 6h.
 
-name = "1h_4h_Donchian_Breakout_1dTrend_VolumeSpike"
-timeframe = "1h"
+name = "6h_WeeklyPivot_BullBearPower_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -22,39 +25,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
 
-    # Calculate 4h Donchian channels (20-period)
-    donchian_high_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Weekly pivot points: P = (H+L+C)/3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
 
-    # Align Donchian channels to 1h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high_4h)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low_4h)
-
-    # Get 1d data for trend filter
+    # Get daily data for Bull/Bear Power (Elder Ray)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # EMA13 for Bull/Bear Power calculation
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
 
-    # Volume spike: volume > 2.0 * 24-period average (~1 day at 1h)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > 2.0 * vol_ma_24
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = ema13_1d - low_1d
+
+    # Align weekly pivot to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+
+    # Align daily Bull/Bear Power to 6h
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+
+    # Momentum filter: 6-period ROC > 0 for long, < 0 for short
+    roc_ema = pd.Series(close).ewm(span=6, adjust=False, min_periods=6).mean()
+    roc = (roc_ema / roc_ema.shift(6) - 1) * 100
+    roc_values = roc.values
+    roc_values[:6] = np.nan  # First 6 values invalid
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(60, n):
         # Skip if any required value is NaN
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema50_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i]) or
+            np.isnan(roc_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,29 +77,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Uptrend + breakout above 4h Donchian high + volume spike
-            if close[i] > ema50_aligned[i] and close[i] > donchian_high_aligned[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # LONG: Above weekly pivot + bullish power + positive momentum
+            if close[i] > pivot_aligned[i] and bull_power_aligned[i] > 0 and roc_values[i] > 0:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend + breakdown below 4h Donchian low + volume spike
-            elif close[i] < ema50_aligned[i] and close[i] < donchian_low_aligned[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # SHORT: Below weekly pivot + bearish power + negative momentum
+            elif close[i] < pivot_aligned[i] and bear_power_aligned[i] > 0 and roc_values[i] < 0:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 4h Donchian low or trend turns bearish
-            if close[i] < donchian_low_aligned[i] or close[i] < ema50_aligned[i]:
+            # EXIT LONG: Price crosses below weekly pivot OR bearish power dominates
+            if close[i] < pivot_aligned[i] or bear_power_aligned[i] > bull_power_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 4h Donchian high or trend turns bullish
-            if close[i] > donchian_high_aligned[i] or close[i] > ema50_aligned[i]:
+            # EXIT SHORT: Price crosses above weekly pivot OR bullish power dominates
+            if close[i] > pivot_aligned[i] or bull_power_aligned[i] > bear_power_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
