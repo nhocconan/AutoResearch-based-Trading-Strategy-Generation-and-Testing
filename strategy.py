@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_RSI_Reversal_With_Weekly_Trend_Filter
-Hypothesis: RSI mean-reversion (RSI<30 for long, RSI>70 for short) combined with weekly trend filter (price above/below weekly EMA50) works in both bull and bear markets. Uses 25% position size to limit risk and target ~15-25 trades/year on daily timeframe to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels from 1-day timeframe identify strong support/resistance. A breakout above R1 (bullish) or below S1 (bearish) with volume confirmation and aligned daily trend (close > EMA34) signals continuation. Uses 12h timeframe for lower trade frequency (target 15-30/year) and 30% position size to balance risk/return while minimizing fee drag.
 """
 
-name = "1d_RSI_Reversal_With_Weekly_Trend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,60 +14,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla pivots and trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate RSI(14) on close
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(50).values  # fill neutral before warmup
+    # Calculate Camarilla levels from previous day's OHLC
+    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
+    # where C = (H+L+C)/3 (typical price), but for pivot we use previous day's close as base
+    # Standard Camarilla uses: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We'll use previous day's high, low, close to calculate today's levels
+    prev_high = df_1d['high'].shift(1).values  # Previous day's high
+    prev_low = df_1d['low'].shift(1).values    # Previous day's low
+    prev_close = df_1d['close'].shift(1).values # Previous day's close
     
-    # Weekly trend filter: EMA(50) on close
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # 1d trend filter: EMA(34) on close
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average (to reduce frequency)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after RSI warmup
+    for i in range(35, n):  # Start after EMA warmup
         if position == 0:
-            # LONG: RSI crosses above 30 from below, price above weekly EMA50 (uptrend filter)
-            if (rsi_values[i] > 30 and rsi_values[i-1] <= 30 and 
-                close[i] > ema50_1w_aligned[i]):
-                signals[i] = 0.25
+            # LONG: Close breaks above R1, volume confirmation, price above 1d EMA34 (uptrend)
+            if (close[i] > camarilla_r1_aligned[i] and 
+                volume_filter[i] and 
+                close[i] > ema34_1d_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # SHORT: RSI crosses below 70 from above, price below weekly EMA50 (downtrend filter)
-            elif (rsi_values[i] < 70 and rsi_values[i-1] >= 70 and 
-                  close[i] < ema50_1w_aligned[i]):
-                signals[i] = -0.25
+            # SHORT: Close breaks below S1, volume confirmation, price below 1d EMA34 (downtrend)
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  volume_filter[i] and 
+                  close[i] < ema34_1d_aligned[i]):
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI crosses above 70 (overbought) or price crosses below weekly EMA50
-            if (rsi_values[i] >= 70 and rsi_values[i-1] < 70) or \
-               (close[i] < ema50_1w_aligned[i]):
+            # EXIT LONG: Close breaks below S1 (reversal) OR volume drops significantly
+            if (close[i] < camarilla_s1_aligned[i]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: RSI crosses below 30 (oversold) or price crosses above weekly EMA50
-            if (rsi_values[i] <= 30 and rsi_values[i-1] > 30) or \
-               (close[i] > ema50_1w_aligned[i]):
+            # EXIT SHORT: Close breaks above R1 (reversal) OR volume drops significantly
+            if (close[i] > camarilla_r1_aligned[i]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
