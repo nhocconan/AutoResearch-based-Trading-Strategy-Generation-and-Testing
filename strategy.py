@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Phase_Accumulation_Distribution_1dTrend_Volume
-Hypothesis: Accumulation/distribution phases identified by price closing in upper/lower third of daily range combined with volume surge. In uptrend (price > 1d EMA50), go long on accumulation; in downtrend (price < 1d EMA50), go short on distribution. Volume confirmation filters low-quality signals. Designed for 4h timeframe to capture institutional accumulation/distribution phases in both bull and bear markets with low trade frequency.
+1d_WeeklyPivot_HighLow_Breakout_TrendFilter
+Hypothesis: Breakouts above weekly pivot resistance (R1) in uptrend (price > weekly EMA20) and breakdowns below weekly pivot support (S1) in downtrend (price < weekly EMA20) with volume confirmation (volume > 1.5x 20-day average). Designed for 1d timeframe to capture multi-day trends in both bull and bear markets with low trade frequency.
 """
 
-name = "4h_Phase_Accumulation_Distribution_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_HighLow_Breakout_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,65 +22,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for accumulation/distribution phases
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot levels and trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 2:
         return np.zeros(n)
     
-    # Calculate daily range and close position
-    daily_range = df_1d['high'] - df_1d['low']
-    close_position = (df_1d['close'] - df_1d['low']) / daily_range  # 0=low, 0.5=middle, 1=high
+    # Calculate weekly pivot points (based on previous week's OHLC)
+    prev_high = df_weekly['high'].shift(1).values
+    prev_low = df_weekly['low'].shift(1).values
+    prev_close = df_weekly['close'].shift(1).values
     
-    # Accumulation: close in upper third (>0.67), Distribution: close in lower third (<0.33)
-    accumulation = close_position > 0.67
-    distribution = close_position < 0.33
+    valid_idx = ~np.isnan(prev_high) & ~np.isnan(prev_low) & ~np.isnan(prev_close)
+    pivot_point = np.full_like(prev_close, np.nan)
+    resistance_r1 = np.full_like(prev_close, np.nan)
+    support_s1 = np.full_like(prev_close, np.nan)
     
-    # Align accumulation/distribution signals to 4h timeframe
-    accumulation_aligned = align_htf_to_ltf(prices, df_1d, accumulation.values.astype(float))
-    distribution_aligned = align_htf_to_ltf(prices, df_1d, distribution.values.astype(float))
+    pivot_point[valid_idx] = (prev_high[valid_idx] + prev_low[valid_idx] + prev_close[valid_idx]) / 3.0
+    resistance_r1[valid_idx] = 2.0 * pivot_point[valid_idx] - prev_low[valid_idx]
+    support_s1[valid_idx] = 2.0 * pivot_point[valid_idx] - prev_high[valid_idx]
     
-    # Get 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align weekly pivot levels to daily timeframe
+    resistance_r1_aligned = align_htf_to_ltf(prices, df_weekly, resistance_r1)
+    support_s1_aligned = align_htf_to_ltf(prices, df_weekly, support_s1)
+    pivot_point_aligned = align_htf_to_ltf(prices, df_weekly, pivot_point)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Weekly EMA20 for trend filter
+    ema_20_weekly = pd.Series(df_weekly['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_20_weekly)
+    
+    # Volume confirmation: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirmed = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    cooldown = 0  # cooldown counter to prevent immediate re-entry
     
     for i in range(50, n):
-        # Decrease cooldown if active
-        if cooldown > 0:
-            cooldown -= 1
-        
-        if position == 0 and cooldown == 0:
-            # LONG: Accumulation phase with volume confirmation in uptrend
-            if accumulation_aligned[i] > 0.5 and volume_confirmed[i] and close[i] > ema_50_1d_aligned[i]:
+        if position == 0:
+            # LONG: Price breaks above R1 with volume confirmation in uptrend (price > weekly EMA20)
+            if (not np.isnan(resistance_r1_aligned[i]) and 
+                high[i] > resistance_r1_aligned[i] and 
+                volume_confirmed[i] and 
+                close[i] > ema_20_weekly_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Distribution phase with volume confirmation in downtrend
-            elif distribution_aligned[i] > 0.5 and volume_confirmed[i] and close[i] < ema_50_1d_aligned[i]:
+            # SHORT: Price breaks below S1 with volume confirmation in downtrend (price < weekly EMA20)
+            elif (not np.isnan(support_s1_aligned[i]) and 
+                  low[i] < support_s1_aligned[i] and 
+                  volume_confirmed[i] and 
+                  close[i] < ema_20_weekly_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Distribution phase appears or trend weakens
-            if distribution_aligned[i] > 0.5 or close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: Price falls back below pivot point or trend weakens
+            if (not np.isnan(pivot_point_aligned[i]) and 
+                low[i] < pivot_point_aligned[i]) or \
+               (not np.isnan(ema_20_weekly_aligned[i]) and 
+                close[i] < ema_20_weekly_aligned[i]):
                 signals[i] = 0.0
                 position = 0
-                cooldown = 2  # 2-bar cooldown after exit
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Accumulation phase appears or trend weakens
-            if accumulation_aligned[i] > 0.5 or close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: Price rises back above pivot point or trend weakens
+            if (not np.isnan(pivot_point_aligned[i]) and 
+                high[i] > pivot_point_aligned[i]) or \
+               (not np.isnan(ema_20_weekly_aligned[i]) and 
+                close[i] > ema_20_weekly_aligned[i]):
                 signals[i] = 0.0
                 position = 0
-                cooldown = 2  # 2-bar cooldown after exit
             else:
                 signals[i] = -0.25
     
