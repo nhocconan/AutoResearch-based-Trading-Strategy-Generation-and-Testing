@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA20 trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel AND price > 1w EMA20 AND volume > 1.5x 20-period average.
-# Short when price breaks below lower Donchian channel AND price < 1w EMA20 AND volume > 1.5x 20-period average.
-# Exit on ATR(14) trailing stop (2.0x). Uses 1d primary timeframe and 1w HTF for trend alignment.
-# Donchian channels provide robust price structure, EMA20 filters weekly trend, volume spike confirms breakout authenticity.
-# Designed for BTC/ETH with strict entry to avoid overtrading (target: 15-30 trades/year).
+# Hypothesis: 6h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band AND price > 12h EMA50 AND volume > 1.5x 20-period average.
+# Short when price breaks below Donchian lower band AND price < 12h EMA50 AND volume > 1.5x 20-period average.
+# Exit on ATR(14) trailing stop (2.0x). Designed for BTC/ETH with strict entry to avoid overtrading.
+# Uses 6h primary timeframe and 12h HTF for trend alignment. Donchian provides clear structure,
+# EMA50 filters intermediate trend, volume spike confirms breakout authenticity.
 
-name = "1d_Donchian20_1wEMA20_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_Donchian20_12hEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -32,23 +32,23 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1w data for EMA20 trend filter (MTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Calculate Donchian channels (20-period) on 6h data
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate EMA20 on 1w close
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Get 12h data for EMA50 trend filter (MTF)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Align HTF arrays to 1d timeframe (wait for completed 1w bar)
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate EMA50 on 12h close
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Donchian(20) channels from 20-period high/low
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align HTF arrays to 6h timeframe (wait for completed 12h bar)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Volume filter: current 1d volume > 1.5x 20-period average (spike confirmation)
-    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_1d)
+    # Volume filter: current 6h volume > 1.5x 20-period average (spike confirmation)
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,19 +57,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(highest_20[i]) or 
-            np.isnan(lowest_20[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_1d[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price > upper Donchian AND price > 1w EMA20 AND volume spike
-            if close[i] > highest_20[i] and close[i] > ema20_1w_aligned[i] and volume_filter[i]:
+            # LONG: price > Donchian upper band AND price > 12h EMA50 AND volume spike
+            if close[i] > highest_high[i] and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price < lower Donchian AND price < 1w EMA20 AND volume spike
-            elif close[i] < lowest_20[i] and close[i] < ema20_1w_aligned[i] and volume_filter[i]:
+            # SHORT: price < Donchian lower band AND price < 12h EMA50 AND volume spike
+            elif close[i] < lowest_low[i] and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
