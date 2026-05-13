@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike
-Hypothesis: Use daily Camarilla pivot levels (R1/S1) for breakout entries, filtered by daily trend (close > EMA34) and volume spikes (volume > 2x volume EMA34). Exit on opposite breakout or trend reversal. Camarilla levels provide high-probability support/resistance; volume confirms institutional interest; trend filter ensures alignment with higher timeframe direction. Designed for 4h to balance trade frequency and avoid fee drag, targeting 20-50 trades/year.
+12h_TRIX_Volume_Spike_1dTrend_Filter_v1
+Hypothesis: Use TRIX (15-period) on 12h timeframe for momentum with 1d trend filter (close > 50 EMA) and volume spike (>1.5x 20-period average) to confirm. TRIX captures momentum changes while volume spike ensures institutional participation. Works in bull (momentum continuation) and bear (momentum reversal) markets by going long when TRIX turns up with volume, short when TRIX turns down with volume. Designed for 12h to limit trades (~20-50/year) and avoid fee drag.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
-timeframe = "4h"
+name = "12h_TRIX_Volume_Spike_1dTrend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,77 +14,64 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots, trend filter, and volume filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 50 EMA for 1d trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day's range
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Using previous day's high, low, close to avoid look-ahead
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Calculate TRIX on 12h price
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1 period rate of change
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = ema3.pct_change() * 100  # percentage change
     
-    # Calculate volume EMA34 for volume spike filter
-    vol_1d = df_1d['volume'].values
-    vol_ema_34 = pd.Series(vol_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align all daily indicators to 4h timeframe
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    vol_ema_34_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_34)
+    # Volume spike: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_spike = volume > (vol_ma_20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_ema_34_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(trix.iloc[i]) or 
+            np.isnan(volume_spike.iloc[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Break above R1 with volume spike and uptrend
-            if (high[i] > r1_aligned[i] and 
-                volume[i] > 2 * vol_ema_34_aligned[i] and 
-                close[i] > ema_34_aligned[i]):
+            # LONG: TRIX turning up (positive and rising) with volume spike and above 1d EMA50
+            if trix.iloc[i] > 0 and trix.iloc[i] > trix.iloc[i-1] and volume_spike.iloc[i] and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 with volume spike and downtrend
-            elif (low[i] < s1_aligned[i] and 
-                  volume[i] > 2 * vol_ema_34_aligned[i] and 
-                  close[i] < ema_34_aligned[i]):
+            # SHORT: TRIX turning down (negative and falling) with volume spike and below 1d EMA50
+            elif trix.iloc[i] < 0 and trix.iloc[i] < trix.iloc[i-1] and volume_spike.iloc[i] and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Break below S1 or trend reversal
-            if low[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
+            # EXIT LONG: TRIX turns down or breaks below 1d EMA50
+            if trix.iloc[i] < 0 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Break above R1 or trend reversal
-            if high[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
+            # EXIT SHORT: TRIX turns up or breaks above 1d EMA50
+            if trix.iloc[i] > 0 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
