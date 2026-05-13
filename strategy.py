@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation (>1.5x avg volume).
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and volume confirmation (>1.5x avg volume).
+# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Long when Bull Power > 0 AND Bear Power rising (less negative) AND 1d EMA34 > EMA89 AND volume > 1.5x avg.
+# Short when Bear Power < 0 AND Bull Power falling (less positive) AND 1d EMA34 < EMA89 AND volume > 1.5x avg.
 # Uses ATR(20) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Target: 50-150 total trades over 4 years (12-37/year) on 4h timeframe.
-# EMA trend filter ensures we only trade with the higher timeframe trend, reducing counter-trend whipsaw.
-# Donchian breakouts provide clear structure with proven edge in BTC/ETH.
-# Volume confirmation ensures breakouts have participation.
-# Works in bull markets via trend-following breakouts and in bear markets via shorting breakdowns with trend filter.
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+# Works in bull markets via trend-following longs and in bear markets via trend-following shorts.
+# Elder Ray provides early momentum signals while 1d EMA filter ensures higher timeframe alignment.
 
-name = "4h_Donchian20_1dEMA50_Trend_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_1dEMATrend_VolumeSpike_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -36,33 +37,32 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1d data for Donchian channel calculation and EMA trend filter
+    # Calculate EMA13 for Elder Ray (on close)
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
+    
+    # Calculate smoothed Elder Ray for momentum (3-period EMA of raw values)
+    bull_power_s = pd.Series(bull_power)
+    bear_power_s = pd.Series(bear_power)
+    bull_power_smooth = bull_power_s.ewm(span=3, adjust=False, min_periods=3).mean().values
+    bear_power_smooth = bear_power_s.ewm(span=3, adjust=False, min_periods=3).mean().values
+    
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Donchian channel (20) from previous day
-    # Upper = max(high_1d[-20:])
-    # Lower = min(low_1d[-20:])
-    donchian_upper = np.full(len(close_1d), np.nan)
-    donchian_lower = np.full(len(close_1d), np.nan)
-    
-    for i in range(20, len(close_1d)):
-        # Use previous 20 days' data to calculate today's levels
-        donchian_upper[i] = np.max(high_1d[i-20:i])
-        donchian_lower[i] = np.min(low_1d[i-20:i])
-    
-    # Align Donchian levels to 4h timeframe (wait for daily bar to close)
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 and EMA89 for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89_1d = close_1d_series.ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Align 1d EMA to 4h timeframe (wait for daily bar to close)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 1d EMAs to 6h timeframe (wait for daily bar to close)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,22 +71,25 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(ema89_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(avg_volume[i]) or
+            np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian Upper AND 1d EMA50 > close AND volume > 1.5x average
-            if (close[i] > donchian_upper_aligned[i] and 
-                ema50_1d_aligned[i] > close_1d[-1] if len(close_1d) > 0 else False and  # Simplified trend check
+            # LONG: Bull Power > 0 AND Bear Power rising (less negative) AND 1d EMA34 > EMA89 AND volume > 1.5x average
+            if (bull_power_smooth[i] > 0 and 
+                bear_power_smooth[i] > bear_power_smooth[i-1] and  # Bear Power rising
+                ema34_1d_aligned[i] > ema89_1d_aligned[i] and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian Lower AND 1d EMA50 < close AND volume > 1.5x average
-            elif (close[i] < donchian_lower_aligned[i] and 
-                  ema50_1d_aligned[i] < close_1d[-1] if len(close_1d) > 0 else False and  # Simplified trend check
+            # SHORT: Bear Power < 0 AND Bull Power falling (less positive) AND 1d EMA34 < EMA89 AND volume > 1.5x average
+            elif (bear_power_smooth[i] < 0 and 
+                  bull_power_smooth[i] < bull_power_smooth[i-1] and  # Bull Power falling
+                  ema34_1d_aligned[i] < ema89_1d_aligned[i] and 
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
