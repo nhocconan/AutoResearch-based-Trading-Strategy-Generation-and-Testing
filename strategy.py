@@ -1,20 +1,26 @@
-#1: Hypothesis
-# Weekly pivot levels from 1w (major weekly support/resistance) act as strong institutional levels.
-# On 1d timeframe: long when price breaks above weekly R3 with volume confirmation and price > weekly EMA20 (uptrend filter);
-# short when price breaks below weekly S3 with volume confirmation and price < weekly EMA20 (downtrend filter).
-# Exit when price returns to weekly pivot (PP) level or opposite extreme (S1/R1) is touched.
-# Weekly levels reduce noise; daily breakouts capture momentum; volume confirms institutional interest.
-# Designed for low trade frequency (<25/year) to avoid fee drag in ranging/bear markets (2025+ test).
+# This strategy is designed for 4h timeframe with a focus on the Stochastic RSI indicator combined with price action and volume confirmation.
+# The hypothesis is that Stochastic RSI can identify overbought/oversold conditions with sensitivity to recent price action,
+# while volume confirmation and price action filters help avoid false signals in choppy markets.
+# The strategy aims for low trade frequency to minimize fee drag, targeting 20-50 trades per year.
+# It uses a 14-period RSI, then applies Stochastic to the RSI values over 14 periods, with smoothing of 3.
+# Long entries occur when Stochastic RSI crosses above 20 from below, with price above EMA20 and volume above average.
+# Short entries occur when Stochastic RSI crosses below 80 from above, with price below EMA20 and volume above average.
+# Exits are triggered when Stochastic RSI crosses the opposite level (80 for long, 20 for short) or when price crosses EMA20 in the opposite direction.
 
-#2: Implementation
 #!/usr/bin/env python3
+"""
+4h_Stochastic_RSI_Volume_Filter
+Hypothesis: Stochastic RSI identifies momentum extremes while volume and EMA filters improve signal quality.
+Designed for low trade frequency (<25/year) to avoid fee drag in choppy markets.
+"""
+
+name = "4h_Stochastic_RSI_Volume_Filter"
+timeframe = "4h"
+leverage = 1.0
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "1d_Weekly_Pivot_R3_S3_Breakout_Trend_Volume"
-timeframe = "1d"
-leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,68 +32,112 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data (OHLC) once before loop
-    df_1w = get_htf_data(prices, '1w')
+    # RSI calculation
+    def rsi(close_prices, period=14):
+        delta = np.diff(close_prices)
+        up = np.where(delta > 0, delta, 0)
+        down = np.where(delta < 0, -delta, 0)
+        
+        # Wilder's smoothing
+        roll_up = np.zeros_like(close_prices)
+        roll_down = np.zeros_like(close_prices)
+        
+        roll_up[period] = np.nansum(up[:period])
+        roll_down[period] = np.nansum(down[:period])
+        
+        for i in range(period+1, len(close_prices)):
+            roll_up[i] = roll_up[i-1] - (roll_up[i-1] / period) + up[i-1]
+            roll_down[i] = roll_down[i-1] - (roll_down[i-1] / period) + down[i-1]
+        
+        rs = np.where(roll_down != 0, roll_up / roll_down, 0)
+        rsi_vals = 100 - (100 / (1 + rs))
+        # Set first period values to NaN
+        rsi_vals[:period] = np.nan
+        return rsi_vals
     
-    # Calculate weekly pivot points (standard formula)
-    # PP = (H + L + C) / 3
-    # R1 = 2*PP - L, S1 = 2*PP - H
-    # R2 = PP + (H - L), S2 = PP - (H - L)
-    # R3 = H + 2*(PP - L), S3 = L - 2*(H - PP)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    rsi_vals = rsi(close, 14)
     
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pp - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pp)
+    # Stochastic RSI
+    def stoch_rsi(rsi_series, stoch_period=14, k_period=3, d_period=3):
+        # Calculate Stochastic of RSI
+        rsi_min = np.full_like(rsi_series, np.nan)
+        rsi_max = np.full_like(rsi_series, np.nan)
+        
+        for i in range(stoch_period-1, len(rsi_series)):
+            start_idx = i - stoch_period + 1
+            rsi_slice = rsi_series[start_idx:i+1]
+            if np.all(np.isnan(rsi_slice)):
+                rsi_min[i] = np.nan
+                rsi_max[i] = np.nan
+            else:
+                rsi_min[i] = np.nanmin(rsi_slice)
+                rsi_max[i] = np.nanmax(rsi_slice)
+        
+        # Avoid division by zero
+        denominator = rsi_max - rsi_min
+        stoch_rsi_raw = np.where(denominator != 0, (rsi_series - rsi_min) / denominator * 100, 0)
+        
+        # Smooth with SMA for %K
+        k = np.full_like(stoch_rsi_raw, np.nan)
+        for i in range(k_period-1, len(stoch_rsi_raw)):
+            start_idx = i - k_period + 1
+            k_slice = stoch_rsi_raw[start_idx:i+1]
+            if np.all(np.isnan(k_slice)):
+                k[i] = np.nan
+            else:
+                k[i] = np.nanmean(k_slice)
+        
+        # Smooth %K for %D
+        d = np.full_like(k, np.nan)
+        for i in range(d_period-1, len(k)):
+            start_idx = i - d_period + 1
+            k_slice = k[start_idx:i+1]
+            if np.all(np.isnan(k_slice)):
+                d[i] = np.nan
+            else:
+                d[i] = np.nanmean(k_slice)
+                
+        return k, d
     
-    # Align weekly levels to daily timeframe (wait for weekly bar to close)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    stoch_k, stoch_d = stoch_rsi(rsi_vals, 14, 3, 3)
     
-    # Trend filter: weekly EMA20 (aligned to daily)
-    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema20)
-    uptrend = close > ema20_aligned
-    downtrend = close < ema20_aligned
+    # EMA20 for trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume confirmation: > 1.5x 20-day average
+    # Volume confirmation: > 1.2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma)
+    volume_confirm = volume > (1.2 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(35, n):  # Start after enough data for indicators
+        # Skip if any required value is NaN
+        if np.isnan(stoch_k[i]) or np.isnan(ema_20[i]) or np.isnan(vol_ma[i]):
+            signals[i] = 0.0
+            continue
+            
         if position == 0:
-            # LONG: break above weekly R3 with volume and uptrend
-            if close[i] > r3_aligned[i] and volume_confirm[i] and uptrend[i]:
+            # LONG: StochK crosses above 20, price above EMA20, volume confirmation
+            if stoch_k[i] > 20 and stoch_k[i-1] <= 20 and close[i] > ema_20[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below weekly S3 with volume and downtrend
-            elif close[i] < s3_aligned[i] and volume_confirm[i] and downtrend[i]:
+            # SHORT: StochK crosses below 80, price below EMA20, volume confirmation
+            elif stoch_k[i] < 80 and stoch_k[i-1] >= 80 and close[i] < ema_20[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: return to weekly pivot or touch S1 (mean reversion)
-            if close[i] <= pp_aligned[i] or close[i] <= s1_aligned[i]:
+            # EXIT LONG: StochK crosses above 80 or price crosses below EMA20
+            if stoch_k[i] >= 80 or close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: return to weekly pivot or touch R1 (mean reversion)
-            if close[i] >= pp_aligned[i] or close[i] >= r1_aligned[i]:
+            # EXIT SHORT: StochK crosses below 20 or price crosses above EMA20
+            if stoch_k[i] <= 20 or close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
