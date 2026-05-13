@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_TRIX_VolumeSpike_Regime
-Hypothesis: TRIX (12-period) combined with volume spikes and chop regime filtering works in both bull and bear markets.
-Long: TRIX crosses above zero, volume spike, chop regime < 61.8 (trending)
-Short: TRIX crosses below zero, volume spike, chop regime < 61.8 (trending)
-Exit on opposite TRIX cross or chop regime > 61.8 (range). Uses 12h trend filter for higher timeframe bias.
-Target: 12-37 trades/year per symbol.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot breakouts with 1d trend filter and volume confirmation work in both bull and bear markets.
+Breakout above R1 with uptrend and volume spike = long.
+Breakdown below S1 with downtrend and volume spike = short.
+Exit on opposite Camarilla level touch or trend reversal. Uses 1d trend filter for higher timeframe bias.
+Target: 20-50 trades/year per symbol.
 """
 
-name = "6h_TRIX_VolumeSpike_Regime"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,85 +26,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # TRIX: 12-period EMA of EMA of EMA of close, then 1-period percent change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = ema3.pct_change() * 100
-    trix_values = trix.fillna(0).values
+    # Calculate 1d Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Chop regime: using ATR(14) and highest high/lowest low over 14 periods
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0.0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Previous day's high, low, close
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # Highest high and lowest low over 14 periods
-    highest_high = np.zeros(n)
-    lowest_low = np.zeros(n)
-    for i in range(14, n):
-        highest_high[i] = np.max(high[i-14:i])
-        lowest_low[i] = np.min(low[i-14:i])
+    # Camarilla pivot calculations
+    range_ = prev_high - prev_low
+    r1 = prev_close + range_ * 1.1 / 12
+    s1 = prev_close - range_ * 1.1 / 12
     
-    # Chop calculation: 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
-    chop = np.full(n, 50.0)  # default neutral
-    for i in range(14, n):
-        if highest_high[i] > lowest_low[i]:
-            sum_atr = np.sum(tr[i-14:i])
-            chop[i] = 100 * np.log10(sum_atr) / np.log10(14) / np.log10((highest_high[i] - lowest_low[i]) + 1e-10)
-        else:
-            chop[i] = 50.0
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # 1d trend filter: EMA50
+    ema_50_1d = pd.Series(prev_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = prev_close > ema_50_1d
+    downtrend_1d = prev_close < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
+    # 4h trend: EMA50
+    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_4h = close > ema_50_4h
+    downtrend_4h = close < ema_50_4h
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 2.0 * vol_ma
-    
-    # 12h trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    ema_30_12h = pd.Series(df_12h['close']).ewm(span=30, adjust=False, min_periods=30).mean().values
-    uptrend_12h = df_12h['close'].values > ema_30_12h
-    downtrend_12h = df_12h['close'].values < ema_30_12h
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h)
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h)
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Get values
-        trix_now = trix_values[i]
-        trix_prev = trix_values[i-1]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        uptrend = uptrend_4h[i]
+        downtrend = downtrend_4h[i]
+        uptrend_htf = uptrend_1d_aligned[i]
+        downtrend_htf = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
-        chop_now = chop[i]
-        uptrend_htf = uptrend_12h_aligned[i]
-        downtrend_htf = downtrend_12h_aligned[i]
         
         if position == 0:
-            # LONG: TRIX crosses above zero, volume chop < 61.8 (trending), volume confirmation
-            if trix_prev <= 0 and trix_now > 0 and chop_now < 61.8 and vol_conf:
+            # LONG: break above R1, 4h uptrend, 1d uptrend filter, volume confirmation
+            if close[i] > r1_val and uptrend and uptrend_htf and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: TRIX crosses below zero, volume chop < 61.8 (trending), volume confirmation
-            elif trix_prev >= 0 and trix_now < 0 and chop_now < 61.8 and vol_conf:
+            # SHORT: break below S1, 4h downtrend, 1d downtrend filter, volume confirmation
+            elif close[i] < s1_val and downtrend and downtrend_htf and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: TRIX crosses below zero OR chop > 61.8 (range)
-            if trix_prev >= 0 and trix_now < 0 or chop_now > 61.8:
+            # EXIT LONG: touch S1 or 4h trend turns down
+            if close[i] < s1_val or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: TRIX crosses above zero OR chop > 61.8 (range)
-            if trix_prev <= 0 and trix_now > 0 or chop_now > 61.8:
+            # EXIT SHORT: touch R1 or 4h trend turns up
+            if close[i] > r1_val or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
