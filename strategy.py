@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band AND close > 1w EMA50 AND volume > 2.0x 20-period average.
-# Short when price breaks below Donchian lower band AND close < 1w EMA50 AND volume > 2.0x 20-period average.
-# Exit on ATR(14) trailing stop (2.0x) or opposite breakout.
-# Uses 1d primary timeframe with 1w trend filter for noise reduction, targeting 30-100 total trades over 4 years.
-# Donchian channels provide clear trend-following structure, 1w EMA50 filters long-term trend,
-# volume confirms breakout authenticity. Designed to work in both bull and bear markets via strict entry conditions.
+# Hypothesis: 6h Williams Alligator + Elder Ray combination with 1d trend filter.
+# Long when: Green candle, Jaw < Teeth < Lips (Alligator aligned up), Bull Power > 0 (Elder Ray), and close > 1d EMA50.
+# Short when: Red candle, Jaw > Teeth > Lips (Alligator aligned down), Bear Power < 0 (Elder Ray), and close < 1d EMA50.
+# Exit on opposing signal. Uses 6h primary timeframe with 1d trend filter to avoid counter-trend trades.
+# Williams Alligator identifies trend alignment, Elder Ray measures bull/bear power behind moves.
+# Designed for low frequency (12-35 trades/year) to minimize fee drag while capturing sustained moves.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_WilliamsAlligator_ElderRay_1dEMA50_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,100 +22,76 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Calculate ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Williams Alligator (6h): Jaw=13, Teeth=8, Lips=5 SMAs shifted
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
+    # Shift to avoid look-ahead (Alligator uses future data if not shifted)
+    jaw = np.roll(jaw, 5)
+    teeth = np.roll(teeth, 3)
+    lips = np.roll(lips, 2)
+    # Fill NaN from roll
+    jaw[:5] = jaw[5] if not np.isnan(jaw[5]) else close[5] if len(close) > 5 else close[0]
+    teeth[:3] = teeth[3] if not np.isnan(teeth[3]) else close[3] if len(close) > 3 else close[0]
+    lips[:2] = lips[2] if not np.isnan(lips[2]) else close[2] if len(close) > 2 else close[0]
     
-    # Calculate Donchian channels (20-period) using previous period's data to avoid look-ahead
-    # Upper band = highest high of previous 20 periods
-    # Lower band = lowest low of previous 20 periods
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # Shift by 1 to use only completed periods (avoid look-ahead)
-    upper_band = np.roll(highest_high, 1)
-    lower_band = np.roll(lowest_low, 1)
-    # First bar uses current values (no previous data)
-    upper_band[0] = highest_high[0]
-    lower_band[0] = lowest_low[0]
+    # Elder Ray (6h): Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Get 1w data for EMA50 trend filter (MTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for EMA50 trend filter (MTF)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1w close
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA50 on 1d close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF arrays to 1d timeframe (wait for completed 1w bar)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Volume filter: current 1d volume > 2.0x 20-period average (spike confirmation)
-    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_1d)
+    # Align HTF arrays to 6h timeframe (wait for completed 1d bar)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
-    lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(100, n):  # Start after sufficient data for indicators
+    for i in range(50, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_1d[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # Determine candle color
+        is_green = close[i] > open_price[i]
+        is_red = close[i] < open_price[i]
+        
         if position == 0:
-            # LONG: price breaks above upper band AND close > 1w EMA50 AND volume spike
-            if close[i] > upper_band[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
+            # LONG: Green candle + Alligator aligned up (Jaw < Teeth < Lips) + Bull Power > 0 + close > 1d EMA50
+            if (is_green and jaw[i] < teeth[i] and teeth[i] < lips[i] and 
+                bull_power[i] > 0 and close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-                highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price breaks below lower band AND close < 1w EMA50 AND volume spike
-            elif close[i] < lower_band[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
+            # SHORT: Red candle + Alligator aligned down (Jaw > Teeth > Lips) + Bear Power < 0 + close < 1d EMA50
+            elif (is_red and jaw[i] > teeth[i] and teeth[i] > lips[i] and 
+                  bear_power[i] < 0 and close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
-                lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
                 signals[i] = 0.0
-                # Carry forward tracking values when flat
-                if i > 0:
-                    highest_since_entry[i] = highest_since_entry[i-1]
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
         elif position == 1:
-            # Update highest high since entry
-            highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (opposite breakout handled by next bar's entry logic)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
-            if trailing_stop:
+            # EXIT LONG: Any opposing condition (red candle or Alligator alignment down or Bear Power >= 0)
+            if (is_red or jaw[i] >= teeth[i] or teeth[i] >= lips[i] or bear_power[i] >= 0):
                 signals[i] = 0.0
                 position = 0
-                # Reset tracking when flat
-                highest_since_entry[i] = np.nan
             else:
                 signals[i] = 0.25
-                # Carry forward tracking
-                if i > 0:
-                    highest_since_entry[i] = highest_since_entry[i-1]
         elif position == -1:
-            # Update lowest low since entry
-            lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (opposite breakout handled by next bar's entry logic)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
-            if trailing_stop:
+            # EXIT SHORT: Any opposing condition (green candle or Alligator alignment up or Bull Power <= 0)
+            if (is_green or jaw[i] <= teeth[i] or teeth[i] <= lips[i] or bull_power[i] <= 0):
                 signals[i] = 0.0
                 position = 0
-                # Reset tracking when flat
-                lowest_since_entry[i] = np.nan
             else:
                 signals[i] = -0.25
-                # Carry forward tracking
-                if i > 0:
-                    lowest_since_entry[i] = lowest_since_entry[i-1]
     
     return signals
