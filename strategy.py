@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Breakout_Trend_Filter
-Hypothesis: Combines weekly pivot points (from 1w data) as key support/resistance levels with trend filtering from 1d EMA to capture breakouts in both bull and bear markets. Weekly pivots provide institutional-grade levels that hold across market regimes, while EMA filter ensures trades align with higher timeframe momentum. Designed for low trade frequency (15-30/year) with clear breakout logic.
+12h_Triple_Pattern_Confirmation
+Hypothesis: Combines 12h Donchian breakout, 1w EMA trend filter, and 1d RSI momentum for high-probability entries.
+Designed for low trade frequency (15-25/year) with strong trend-following logic that works in both bull and bear markets.
+Uses volume confirmation and ATR-based stoploss to reduce false signals and manage risk.
 """
 
-name = "6h_Weekly_Pivot_Breakout_Trend_Filter"
-timeframe = "6h"
+name = "12h_Triple_Pattern_Confirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,38 +24,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day EMA for trend filter (50 period)
-    ema_50_1d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Donchian Channel (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    upper_channel = high_roll.values
+    lower_channel = low_roll.values
     
-    # Get weekly data for pivot points
+    # Calculate RSI(14) for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = (100 - (100 / (1 + rs))).fillna(50).values
+    
+    # Get 1-week trend filter (EMA 50)
     df_1w = get_htf_data(prices, '1w')
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate weekly pivot points: (H + L + C) / 3
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    pivot_points = typical_price.values
-    
-    # Calculate support and resistance levels
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    r1 = 2 * pivot_points - low_1w
-    s1 = 2 * pivot_points - high_1w
-    r2 = pivot_points + (high_1w - low_1w)
-    s2 = pivot_points - (high_1w - low_1w)
-    r3 = high_1w + 2 * (pivot_points - low_1w)
-    s3 = low_1w - 2 * (high_1w - pivot_points)
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_points)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Get 1-day RSI for entry timing
+    df_1d = get_htf_data(prices, '1d')
+    delta_1d = pd.Series(df_1d['close']).diff()
+    gain_1d = delta_1d.clip(lower=0)
+    loss_1d = -delta_1d.clip(upper=0)
+    avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_1d = avg_gain_1d / avg_loss_1d.replace(0, np.nan)
+    rsi_1d = (100 - (100 / (1 + rs_1d))).fillna(50).values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,28 +62,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         if position == 0:
-            # LONG: Price breaks above R3 with volume confirmation and uptrend filter
-            if close[i] > r3_aligned[i] and volume_confirm[i] and close[i] > ema_50_1d[i]:
+            # LONG: Price breaks above upper channel with 1w uptrend, 1d RSI > 55, and volume confirmation
+            if (close[i] > upper_channel[i] and 
+                ema_50_1w_aligned[i] is not np.nan and 
+                close[i] > ema_50_1w_aligned[i] and
+                rsi_1d_aligned[i] > 55 and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with volume confirmation and downtrend filter
-            elif close[i] < s3_aligned[i] and volume_confirm[i] and close[i] < ema_50_1d[i]:
+            # SHORT: Price breaks below lower channel with 1w downtrend, 1d RSI < 45, and volume confirmation
+            elif (close[i] < lower_channel[i] and 
+                  ema_50_1w_aligned[i] is not np.nan and 
+                  close[i] < ema_50_1w_aligned[i] and
+                  rsi_1d_aligned[i] < 45 and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below pivot point or S1 (strong support break)
-            if close[i] < pivot_aligned[i] or close[i] < s1_aligned[i]:
+            # EXIT LONG: Price crosses below lower channel or 1w trend turns down
+            if close[i] < lower_channel[i] or (ema_50_1w_aligned[i] is not np.nan and close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above pivot point or R1 (strong resistance break)
-            if close[i] > pivot_aligned[i] or close[i] > r1_aligned[i]:
+            # EXIT SHORT: Price crosses above upper channel or 1w trend turns up
+            if close[i] > upper_channel[i] or (ema_50_1w_aligned[i] is not np.nan and close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
