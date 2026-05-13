@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyDonchian_Breakout_Trend_Volume
-Hypothesis: Weekly Donchian breakout with daily trend and volume confirmation works in both bull and bear markets.
-Breakout above 4-week high with daily uptrend and volume spike = long.
-Breakdown below 4-week low with daily downtrend and volume spike = short.
-Exit on opposite band touch or trend reversal. Uses weekly trend filter for higher timeframe bias.
-Target: 10-25 trades/year per symbol.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla R1/S1 breakouts with 1d trend filter and volume confirmation on 12h timeframe work in both bull and bear markets.
+Breakout above R1 with 1d uptrend and volume spike = long.
+Breakdown below S1 with 1d downtrend and volume spike = short.
+Exit on opposite Camarilla level touch or trend reversal. Uses 12h timeframe to reduce trade frequency and avoid fee drag.
+Target: 12-37 trades/year per symbol.
 """
 
-name = "1d_WeeklyDonchian_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,37 +26,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend: EMA50
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_daily = close > ema_50
-    downtrend_daily = close < ema_50
+    # Calculate Camarilla levels using previous day's range
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous day's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    # Set first value to avoid NaN
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Weekly Donchian (20 periods = ~4 weeks)
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    range_prev = prev_high - prev_low
+    R1 = prev_close + range_prev * 1.1 / 12
+    S1 = prev_close - range_prev * 1.1 / 12
+    
+    # 1d trend filter: EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Calculate weekly Donchian channels (20-period high/low)
-    donchian_high = np.zeros(len(high_weekly))
-    donchian_low = np.zeros(len(low_weekly))
-    for i in range(20, len(high_weekly)):
-        donchian_high[i] = np.max(high_weekly[i-20:i])
-        donchian_low[i] = np.min(low_weekly[i-20:i])
-    
-    # Align to daily timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
-    
-    # Weekly trend: EMA50 on weekly
-    ema_50_weekly = pd.Series(df_weekly['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_weekly = df_weekly['close'].values > ema_50_weekly
-    downtrend_weekly = df_weekly['close'].values < ema_50_weekly
-    uptrend_weekly_aligned = align_htf_to_ltf(prices, df_weekly, uptrend_weekly)
-    downtrend_weekly_aligned = align_htf_to_ltf(prices, df_weekly, downtrend_weekly)
-    
-    # Volume confirmation: volume > 2.0 * 20-day average
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -65,37 +60,35 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Get values
-        upper_band = donchian_high_aligned[i]
-        lower_band = donchian_low_aligned[i]
-        daily_uptrend = uptrend_daily[i]
-        daily_downtrend = downtrend_daily[i]
-        weekly_uptrend = uptrend_weekly_aligned[i]
-        weekly_downtrend = downtrend_weekly_aligned[i]
+        r1 = R1[i]
+        s1 = S1[i]
+        uptrend = uptrend_1d_aligned[i]
+        downtrend = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: break above weekly Donchian high, daily uptrend, weekly uptrend, volume confirmation
-            if close[i] > upper_band and daily_uptrend and weekly_uptrend and vol_conf:
+            # LONG: break above R1, 1d uptrend, volume confirmation
+            if close[i] > r1 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: break below weekly Donchian low, daily downtrend, weekly downtrend, volume confirmation
-            elif close[i] < lower_band and daily_downtrend and weekly_downtrend and vol_conf:
+            # SHORT: break below S1, 1d downtrend, volume confirmation
+            elif close[i] < s1 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch weekly Donchian low or daily trend turns down
-            if close[i] < lower_band or not daily_uptrend:
+            # EXIT LONG: touch S1 or 1d trend turns down
+            if close[i] < s1 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch weekly Donchian high or daily trend turns up
-            if close[i] > upper_band or not daily_downtrend:
+            # EXIT SHORT: touch R1 or 1d trend turns up
+            if close[i] > r1 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
