@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_WilliamsAlligator_ElderRay_Trend_Volume
-# Hypothesis: Williams Alligator (13/8/5 SMAs) defines trend direction, Elder Ray (bull/bear power) confirms momentum strength, and volume spike filters weak moves. Works in bull/bear by using 1w trend filter and requiring volume confirmation. Targets 12-37 trades/year on 12h timeframe.
+# 4h_RSI_MeanReversion_VolumeSpike_Filter
+# Hypothesis: Mean reversion at extreme RSI levels with volume spike and price above/below 200 SMA captures reversals in both bull and bear markets. Works by fading extremes when momentum exhausts.
 
-name = "12h_WilliamsAlligator_ElderRay_Trend_Volume"
-timeframe = "12h"
+name = "4h_RSI_MeanReversion_VolumeSpike_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,41 +20,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate ATR for volatility normalization (used in Elder Ray)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # RSI(14) for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
 
-    # 1w EMA34 for trend filter (load once, align)
-    df_1w = get_htf_data(prices, '1w')
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 200 SMA for trend filter (avoid counter-trend trades)
+    sma200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
 
-    # Williams Alligator: Jaw(13), Teeth(8), Lips(5) SMAs
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = ema13 - low
-
-    # Volume confirmation: volume > 1.8x 30-period average
-    vol_avg_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation: volume > 1.8x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):
+    for i in range(200, n):
         # Skip if any required value is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_avg_30[i])):
+        if (np.isnan(rsi[i]) or np.isnan(sma200[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,37 +48,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Williams Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        alligator_long = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        alligator_short = lips[i] < teeth[i] and teeth[i] < jaw[i]
-
         if position == 0:
-            # LONG: Alligator uptrend + Bull Power > 0 + volume spike + 1w uptrend
-            if (alligator_long and 
-                bull_power[i] > 0 and
-                volume[i] > vol_avg_30[i] * 1.8 and
-                close[i] > ema34_1w_aligned[i]):
+            # LONG: RSI < 20 (oversold) + price above SMA200 + volume spike
+            if (rsi[i] < 20 and 
+                close[i] > sma200[i] and
+                volume[i] > vol_avg_20[i] * 1.8):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Alligator downtrend + Bear Power > 0 + volume spike + 1w downtrend
-            elif (alligator_short and 
-                  bear_power[i] > 0 and
-                  volume[i] > vol_avg_30[i] * 1.8 and
-                  close[i] < ema34_1w_aligned[i]):
+            # SHORT: RSI > 80 (overbought) + price below SMA200 + volume spike
+            elif (rsi[i] > 80 and 
+                  close[i] < sma200[i] and
+                  volume[i] > vol_avg_20[i] * 1.8):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alligator turns down OR Elder Ray weakens
-            if not alligator_long or bull_power[i] <= 0:
+            # EXIT LONG: RSI > 60 (overbought threshold) or volume drops
+            if rsi[i] > 60 or volume[i] < vol_avg_20[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator turns up OR Elder Ray weakens
-            if not alligator_short or bear_power[i] <= 0:
+            # EXIT SHORT: RSI < 40 (oversold threshold) or volume drops
+            if rsi[i] < 40 or volume[i] < vol_avg_20[i] * 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
