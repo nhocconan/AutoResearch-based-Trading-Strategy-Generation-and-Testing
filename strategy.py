@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Momentum_Confluence_Strategy
-Hypothesis: Combining momentum (MACD), trend (ADX), and volume confirmation on 4H timeframe
-creates robust entries in both bull and bear markets. Uses ETH/BTC-proven indicators with
-strict entry conditions to limit trades (~20-35/year) and avoid fee drag. Exits on momentum
-reversal or trend exhaustion. Position size 0.25 balances risk and return.
+12h_Pivot_Breakout_1dTrend_Volume
+Hypothesis: 12h breakouts of 1-day high/low with 1d trend alignment and volume confirmation
+capture momentum moves while avoiding false breakouts. Uses 1d high/low as support/resistance.
+Exit on return to 1d close or trend reversal. Position size 0.25 targets ~20-30 trades/year.
 """
 
-name = "4h_Momentum_Confluence_Strategy"
-timeframe = "4h"
+name = "12h_Pivot_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,77 +24,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # MACD calculation (12,26,9)
-    close_s = pd.Series(close)
-    ema12 = close_s.ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = close_s.ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
+    # Get 1d data for pivot levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # ADX calculation (14-period)
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Pivot levels: 1d high and low as support/resistance
+    pivot_high = high_1d
+    pivot_low = low_1d
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Trend filter: 20-period EMA on 1d close
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / (pd.Series(atr).rolling(window=14, min_periods=14).sum().values + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / (pd.Series(atr).rolling(window=14, min_periods=14).sum().values + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    # Align to 12h timeframe
+    pivot_high_aligned = align_htf_to_ltf(prices, df_1d, pivot_high)
+    pivot_low_aligned = align_htf_to_ltf(prices, df_1d, pivot_low)
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: current volume > 1.5x 12-period average (6 days on 12h)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     volume_filter = volume > (1.5 * vol_ma)
-    
-    # Trend filter: EMA50 on 4H
-    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after warmup
         if position == 0:
-            # LONG: MACD bullish crossover + ADX > 20 (trending) + above EMA50 + volume
-            if (macd_line[i] > signal_line[i] and 
-                macd_line[i-1] <= signal_line[i-1] and
-                adx[i] > 20 and 
-                close[i] > ema50[i] and 
-                volume_filter[i]):
+            # LONG: Break above 1d high with volume and uptrend
+            if (close[i] > pivot_high_aligned[i] and 
+                volume_filter[i] and 
+                close[i] > ema20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: MACD bearish crossover + ADX > 20 + below EMA50 + volume
-            elif (macd_line[i] < signal_line[i] and 
-                  macd_line[i-1] >= signal_line[i-1] and
-                  adx[i] > 20 and 
-                  close[i] < ema50[i] and 
-                  volume_filter[i]):
+            # SHORT: Break below 1d low with volume and downtrend
+            elif (close[i] < pivot_low_aligned[i] and 
+                  volume_filter[i] and 
+                  close[i] < ema20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
+            else:
+                signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: MACD bearish crossover or ADX weakens (<20) or price below EMA50
-            if (macd_line[i] < signal_line[i] and 
-                macd_line[i-1] >= signal_line[i-1]) or \
-               adx[i] < 20 or \
-               close[i] < ema50[i]:
+            # EXIT LONG: Return to 1d close or trend reversal
+            if (close[i] < close_1d[i//2] if i//2 < len(close_1d) else close_1d[-1]) or \
+               (close[i] < ema20_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: MACD bullish crossover or ADX weakens or price above EMA50
-            if (macd_line[i] > signal_line[i] and 
-                macd_line[i-1] <= signal_line[i-1]) or \
-               adx[i] < 20 or \
-               close[i] > ema50[i]:
+            # EXIT SHORT: Return to 1d close or trend reversal
+            if (close[i] > close_1d[i//2] if i//2 < len(close_1d) else close_1d[-1]) or \
+               (close[i] > ema20_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
