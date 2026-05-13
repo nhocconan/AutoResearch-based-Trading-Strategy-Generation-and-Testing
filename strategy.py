@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_Pivot_Signal_WeeklyTrend_Volume
-# Hypothesis: Use Camarilla pivot levels from daily data for entry signals in the direction of weekly trend, confirmed by volume spikes.
-# Camarilla levels (R1,R2,R3,S1,S2,S3) act as intraday support/resistance with high probability of reversal/continuation.
-# Weekly trend filter ensures alignment with higher timeframe momentum, reducing false signals.
-# Volume spike confirms institutional participation. Works in bull/bear as it captures mean reversion at key levels.
-# Low frequency due to requirement of weekly trend alignment and volume confirmation.
+# 1h_Combined_Trend_Momentum_Strategy
+# Hypothesis: Combine 4h trend direction with 1h momentum and volume confirmation to capture medium-term moves while avoiding whipsaws.
+# Long when: 4h EMA21 > EMA50 (uptrend), 1h RSI > 55 (momentum), and volume > 1.5x 20-period average (confirmation).
+# Short when: 4h EMA21 < EMA50 (downtrend), 1h RSI < 45 (momentum), and volume > 1.5x 20-period average.
+# Uses 4h for trend direction (reducing false signals) and 1h for entry timing.
+# Includes session filter (08-20 UTC) to avoid low-volume Asian session noise.
+# Position size fixed at 0.20 to manage risk and reduce churn.
+# Designed to work in both bull (trend following) and bear (mean reversion within trend) markets.
 
-name = "12h_Camarilla_Pivot_Signal_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "1h_Combined_Trend_Momentum_Strategy"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,64 +18,60 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
 
-    # Get daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-
-    # Calculate Camarilla levels from previous day's OHLC
-    # Formula: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), R2 = C + ((H-L) * 1.1/6), R1 = C + ((H-L) * 1.1/12)
-    #        S1 = C - ((H-L) * 1.1/12), S2 = C - ((H-L) * 1.1/6), S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
-    # Where C = (H+L+C)/3 (typical price), but we use close of previous day for pivot
-    # Actually standard Camarilla uses (H+L+C)/3 as pivot, but we'll use typical price
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    high_val = df_1d['high'].values
-    low_val = df_1d['low'].values
-    close_val = df_1d['close'].values
-
-    pivot = typical_price.values
-    range_hl = high_val - low_val
-
-    R1 = pivot + (range_hl * 1.1 / 12)
-    R2 = pivot + (range_hl * 1.1 / 6)
-    R3 = pivot + (range_hl * 1.1 / 4)
-    S1 = pivot - (range_hl * 1.1 / 12)
-    S2 = pivot - (range_hl * 1.1 / 6)
-    S3 = pivot - (range_hl * 1.1 / 4)
-
-    # Align Camarilla levels to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-
-    # Weekly trend: EMA50 on weekly close
-    weekly_close = df_1w['close'].values
-    ema50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-
-    # Volume spike: volume > 2.0 * 4-period average (2 days worth at 12h)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_spike = volume > 2.0 * vol_ma_4
-
+    # Get 4h data for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    
+    # 4h EMAs for trend: EMA21 > EMA50 = uptrend, EMA21 < EMA50 = downtrend
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 4h EMAs to 1h timeframe
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # 1h RSI for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1h volume confirmation: volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > 1.5 * vol_ma_20
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(20, n):  # Start after RSI warmup
         # Skip if any required value is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(R2_aligned[i]) or np.isnan(R3_aligned[i]) or
-            np.isnan(S1_aligned[i]) or np.isnan(S2_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(ema21_4h_aligned[i]) or 
+            np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(rsi[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+
+        # Apply session filter: only trade during 08-20 UTC
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,29 +80,35 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price crosses above S1 with weekly uptrend and volume spike
-            if close[i] > S1_aligned[i] and close[i-1] <= S1_aligned[i-1] and ema50_1w_aligned[i] > ema50_1w_aligned[i-1] and volume_spike[i]:
-                signals[i] = 0.25
+            # LONG: 4h uptrend + 1h bullish momentum + volume confirmation
+            if (ema21_4h_aligned[i] > ema50_4h_aligned[i] and 
+                rsi[i] > 55 and 
+                volume_confirmed[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price crosses below R1 with weekly downtrend and volume spike
-            elif close[i] < R1_aligned[i] and close[i-1] >= R1_aligned[i-1] and ema50_1w_aligned[i] < ema50_1w_aligned[i-1] and volume_spike[i]:
-                signals[i] = -0.25
+            # SHORT: 4h downtrend + 1h bearish momentum + volume confirmation
+            elif (ema21_4h_aligned[i] < ema50_4h_aligned[i] and 
+                  rsi[i] < 45 and 
+                  volume_confirmed[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S2 or weekly trend turns down
-            if close[i] < S2_aligned[i] and close[i-1] >= S2_aligned[i-1] or ema50_1w_aligned[i] < ema50_1w_aligned[i-1]:
+            # EXIT LONG: 4h trend turns down OR momentum fades
+            if (ema21_4h_aligned[i] < ema50_4h_aligned[i] or 
+                rsi[i] < 50):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price crosses above R2 or weekly trend turns up
-            if close[i] > R2_aligned[i] and close[i-1] <= R2_aligned[i-1] or ema50_1w_aligned[i] > ema50_1w_aligned[i-1]:
+            # EXIT SHORT: 4h trend turns up OR momentum fades
+            if (ema21_4h_aligned[i] > ema50_4h_aligned[i] or 
+                rsi[i] > 50):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
 
     return signals
