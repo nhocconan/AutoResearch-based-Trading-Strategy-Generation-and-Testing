@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above 4h Donchian upper band AND close > 1d EMA34 AND volume > 1.5x 20-period average.
-# Short when price breaks below 4h Donchian lower band AND close < 1d EMA34 AND volume > 1.5x 20-period average.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above 1d Donchian upper band AND close > 1w EMA50 AND volume > 1.5x 20-period average.
+# Short when price breaks below 1d Donchian lower band AND close < 1w EMA50 AND volume > 1.5x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
-# Uses 1d HTF for stronger trend filter to avoid whipsaws in bear markets, focusing on major trend continuation.
+# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+# Uses 1w HTF for stronger trend filter to avoid whipsaws in bear markets, focusing on major trend continuation.
 # Volume confirmation reduces false breakouts. Discrete position sizing (0.25) minimizes fee churn.
 
-name = "4h_Donchian20_1dEMA34_Volume_v1"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA50_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -33,21 +33,19 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_roll
-    donchian_lower = low_roll
+    # Calculate 1d Donchian(20) bands
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA34 on 1d close
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate EMA50 on 1w close
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF indicators to LTF (4h)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align HTF indicators to LTF (1d)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,19 +58,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Donchian upper AND close > EMA34 AND volume confirmation
-            if close[i] > donchian_upper[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
+            # LONG: Price > Donchian upper band AND close > EMA50 AND volume confirmation
+            if close[i] > highest_high[i] and close[i] > ema50_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Donchian lower AND close < EMA34 AND volume confirmation
-            elif close[i] < donchian_lower[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
+            # SHORT: Price < Donchian lower band AND close < EMA50 AND volume confirmation
+            elif close[i] < lowest_low[i] and close[i] < ema50_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
