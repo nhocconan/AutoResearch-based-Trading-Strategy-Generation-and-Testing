@@ -1,15 +1,13 @@
-#3911786415010975712
 #!/usr/bin/env python3
 """
-6h_Adaptive_Trend_Momentum
-Hypothesis: Combines adaptive trend detection (ADX) with momentum confirmation (RSI) and volume filters.
-Uses 1-day timeframe for trend context and 6h for entry timing. Designed to work in both bull and bear
-markets by filtering trades with strong trend strength (ADX > 25) and avoiding choppy markets.
-Target: 20-50 trades/year per symbol with disciplined risk control via trend-based exits.
+4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+Hypothesis: Camarilla pivot levels (R1/S1) from daily chart combined with 12h trend filter and volume confirmation.
+Provides institutional-grade support/resistance levels with trend alignment and volume validation.
+Designed for low trade frequency (20-40/year) with clear entry/exit rules that work in both bull and bear markets.
 """
 
-name = "6h_Adaptive_Trend_Momentum"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,39 +24,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ADX(14) for trend strength
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]  # First TR is just high-low
-    
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Calculate RSI(14) for momentum
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = (100 - (100 / (1 + rs))).fillna(50).values
-    
-    # Get 1-day trend filter (EMA 50)
+    # Calculate Camarilla pivot levels from daily timeframe
     df_1d = get_htf_data(prices, '1d')
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Ensure we have enough data for daily calculation
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate pivot points for each day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla formula: 
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align to 4h timeframe (these levels are valid until next day's pivot)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # 12h trend filter (EMA 50)
+    df_12h = get_htf_data(prices, '12h')
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -67,36 +60,28 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Warmup for ADX/RSI
+    for i in range(50, n):  # Start after warmup period
         if position == 0:
-            # LONG: Strong uptrend (ADX > 25, +DI > -DI) + RSI momentum (> 50) + volume
-            if (adx[i] > 25 and plus_di[i] > minus_di[i] and 
-                rsi[i] > 50 and volume_confirm[i]):
-                # Additional filter: price above 1-day EMA50 (uptrend confirmation)
-                if close[i] > ema_50_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # SHORT: Strong downtrend (ADX > 25, -DI > +DI) + RSI weakness (< 50) + volume
-            elif (adx[i] > 25 and minus_di[i] > plus_di[i] and 
-                  rsi[i] < 50 and volume_confirm[i]):
-                # Additional filter: price below 1-day EMA50 (downtrend confirmation)
-                if close[i] < ema_50_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # LONG: Price breaks above R1 with uptrend and volume confirmation
+            if close[i] > r1_1d_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume_confirm[i]:
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Price breaks below S1 with downtrend and volume confirmation
+            elif close[i] < s1_1d_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume_confirm[i]:
+                signals[i] = -0.25
+                position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Trend weakening (ADX < 20) or RSI overextended (< 30) or trend reversal
-            if (adx[i] < 20 or rsi[i] < 30 or 
-                minus_di[i] > plus_di[i]):
+            # EXIT LONG: Price breaks below S1 or trend turns down
+            if close[i] < s1_1d_aligned[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Trend weakening (ADX < 20) or RSI overextended (> 70) or trend reversal
-            if (adx[i] < 20 or rsi[i] > 70 or 
-                plus_di[i] > minus_di[i]):
+            # EXIT SHORT: Price breaks above R1 or trend turns up
+            if close[i] > r1_1d_aligned[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
