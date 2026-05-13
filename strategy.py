@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 12h_Keltner_Breakout_1dTrend_Volume
-# Hypothesis: Keltner Channel breakouts capture trend moves with fewer whipsaws than Bollinger Bands.
-# Enter long when price breaks above upper Keltner band with volume spike and 1d EMA uptrend.
-# Enter short when price breaks below lower Keltner band with volume spike and 1d EMA downtrend.
-# Exit when price crosses back to EMA(20) to avoid missed reversals.
-# Designed for 12h timeframe with 1d trend filter to reduce trade frequency and improve win rate.
-# Target: 15-25 trades/year per symbol.
+# 4h_Chaikin_Momentum_1dTrend_VolumeSurge
+# Hypothesis: Chaikin Oscillator (3,10) crossing zero identifies momentum shifts with less whipsaw.
+# Enter long when Chaikin crosses above zero with volume surge and 1d EMA50 uptrend.
+# Enter short when Chaikin crosses below zero with volume surge and 1d EMA50 downtrend.
+# Exit when Chaikin crosses back through zero.
+# Uses 4h timeframe with 1d trend filter to balance trade frequency and win rate.
+# Designed to work in both bull (buy in uptrend) and bear (sell in downtrend).
+# Target: 25-45 trades/year per symbol.
 
-name = "12h_Keltner_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Chaikin_Momentum_1dTrend_VolumeSurge"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,25 +35,40 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate EMA(20) and ATR(10) for Keltner Channel
-    close_s = pd.Series(close)
-    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Chaikin Oscillator (3,10) on 4h data
+    # Money Flow Multiplier
+    mfm = np.zeros(n)
+    for i in range(n):
+        if high[i] == low[i]:
+            mfm[i] = 0.0
+        else:
+            mfm[i] = ((close[i] - low[i]) - (high[i] - close[i])) / (high[i] - low[i])
 
-    tr0 = np.abs(high - low)
-    tr1 = np.abs(high - np.roll(close, 1))
-    tr2 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr0, np.maximum(tr1, tr2))
-    tr[0] = tr0[0]
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Money Flow Volume
+    mfv = mfm * volume
 
-    upper_keltner = ema_20 + (2.0 * atr_10)
-    lower_keltner = ema_20 - (2.0 * atr_10)
+    # Accumulation/Distribution Line
+    adl = np.cumsum(mfv)
 
-    # Volume confirmation: current volume > 1.5 x 20-period average
+    # EMA of ADL (3 and 10)
+    ema3 = pd.Series(adl).ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10 = pd.Series(adl).ewm(span=10, adjust=False, min_periods=10).mean().values
+
+    # Chaikin Oscillator
+    chaikin = ema3 - ema10
+
+    # Chaikin zero cross signals
+    chaikin_cross_above = np.zeros(n, dtype=bool)
+    chaikin_cross_below = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        chaikin_cross_above[i] = (chaikin[i-1] <= 0) and (chaikin[i] > 0)
+        chaikin_cross_below[i] = (chaikin[i-1] >= 0) and (chaikin[i] < 0)
+
+    # Volume surge: current volume > 2.0 x 30-period average
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_spike = volume > (1.5 * vol_ma)
+    for i in range(30, n):
+        vol_ma[i] = np.mean(volume[i-30:i])
+    volume_surge = volume > (2.0 * vol_ma)
 
     # Get 1d EMA50 for trend filter
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -61,10 +77,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if data is not ready
-        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
-            np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(chaikin[i]) or np.isnan(volume_surge[i]) or np.isnan(ema_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,26 +88,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above upper Keltner with volume spike and 1d EMA uptrend
-            if close[i] > upper_keltner[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+            # LONG: Chaikin crosses above zero with volume surge and 1d EMA uptrend
+            if chaikin_cross_above[i] and volume_surge[i] and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Keltner with volume spike and 1d EMA downtrend
-            elif close[i] < lower_keltner[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+            # SHORT: Chaikin crosses below zero with volume surge and 1d EMA downtrend
+            elif chaikin_cross_below[i] and volume_surge[i] and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below EMA(20) (mean reversion signal)
-            if close[i] < ema_20[i]:
+            # EXIT LONG: Chaikin crosses below zero (momentum loss)
+            if chaikin_cross_below[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above EMA(20) (mean reversion signal)
-            if close[i] > ema_20[i]:
+            # EXIT SHORT: Chaikin crosses above zero (momentum loss)
+            if chaikin_cross_above[i]:
                 signals[i] = 0.0
                 position = 0
             else:
