@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 6h_RangeReversal_Bollinger_RSI
-# Hypothesis: In ranging markets (BTC/ETH 2025), price reverses at Bollinger Bands ±2σ with RSI extremes.
-# Long when price touches lower BB, RSI<30, and volume spikes; short at upper BB, RSI>70, volume spike.
-# Exit when price returns to middle BB (20 SMA). Uses 1d trend filter to avoid counter-trend trades.
-# Designed for low turnover in ranging markets, works in both bull (buy dips) and bear (sell rallies).
+# 12h_WeeklyPivot_Breakout_1dTrend
+# Hypothesis: Use weekly pivot points from Monday's session to identify key support/resistance.
+# Long when price breaks above weekly R1 with volume spike and 1d EMA50 uptrend.
+# Short when price breaks below weekly S1 with volume spike and 1d EMA50 downtrend.
+# Exit on mean reversion to weekly pivot (PP). Weekly pivots reset every Monday, providing
+# fresh levels that adapt to market regime. Designed for low turnover (~15-25/year) to avoid fee drag.
+# For 12h timeframe, we capture longer-term weekly structure with fewer trades.
 
-name = "6h_RangeReversal_Bollinger_RSI"
-timeframe = "6h"
+name = "12h_WeeklyPivot_Breakout_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,32 +25,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
 
-    # Bollinger Bands (20, 2)
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean()
-    dev = close_s.rolling(window=20, min_periods=20).std()
-    upper = basis + 2 * dev
-    lower = basis - 2 * dev
+    # Calculate weekly pivot points using Monday's OHLC
+    # We'll compute weekly high/low/close from Friday's close to next Friday's close
+    # But simpler: use 5-day (1 week) rolling window ending on Friday
+    # Since we don't have day-of-week easily, approximate with 5-period (1 week) rolling on daily data
+    # Instead: calculate pivots from prior week's daily OHLC
+    # Get 1d data first
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
+    
+    # Calculate weekly high, low, close from prior 5 trading days (approx 1 week)
+    # Use rolling window of 5 on daily data
+    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
+    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
+    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
+    
+    # Weekly pivot points
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    
+    # Align weekly pivots to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
 
-    # RSI(14)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-
-    # Volume spike: current > 1.5x 20-period average
+    # Volume confirmation: current volume > 1.5 x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (1.5 * vol_ma)
 
-    # 1d trend filter: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
-        return np.zeros(n)
+    # Get 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
@@ -57,9 +70,9 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
-        # Skip if data not ready
-        if (np.isnan(basis.iloc[i]) or np.isnan(upper.iloc[i]) or np.isnan(lower.iloc[i]) or
-            np.isnan(rsi.iloc[i]) or np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
+        # Skip if data is not ready
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(volume_spike[i]) or np.isnan(ema_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,26 +81,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: price at lower BB, RSI oversold, volume spike, and 1d uptrend
-            if close[i] <= lower.iloc[i] and rsi.iloc[i] < 30 and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+            # LONG: break above weekly R1 with volume spike and 1d EMA50 uptrend
+            if close[i] > r1_aligned[i] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price at upper BB, RSI overbought, volume spike, and 1d downtrend
-            elif close[i] >= upper.iloc[i] and rsi.iloc[i] > 70 and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+            # SHORT: break below weekly S1 with volume spike and 1d EMA50 downtrend
+            elif close[i] < s1_aligned[i] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to middle BB
-            if close[i] >= basis.iloc[i]:
+            # EXIT LONG: price crosses below weekly pivot (mean reversion to center)
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to middle BB
-            if close[i] <= basis.iloc[i]:
+            # EXIT SHORT: price crosses above weekly pivot
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
