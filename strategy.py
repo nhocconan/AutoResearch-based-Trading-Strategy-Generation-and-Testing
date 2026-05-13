@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Acceleration_Bounce
-Hypothesis: In volatile crypto markets, sharp momentum reversals after extreme moves often precede mean-reverting bounces. 
-This strategy identifies overextended moves using 4-hour RSI divergence from price extremes, confirmed by volume spikes 
-and aligned with the 1-day trend (price > EMA50 for longs, < EMA50 for shorts). 
-Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets by combining 
-contrarian entry with trend filter to avoid counter-trend traps. 
-Low frequency (~20-40 trades/year) minimizes fee drag.
+6h_KAMA_Trend_Filter
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market volatility, providing a dynamic trend filter. 
+In low volatility (range markets), KAMA stays close to price, reducing false signals. In high volatility (trends), 
+KAMA follows with less lag. We go long when price crosses above KAMA with volume confirmation, short when price 
+crosses below KAMA with volume confirmation. Uses 6h timeframe with 1d trend filter (price > 1d EMA50 for longs, 
+price < 1d EMA50 for shorts). Designed to work in both bull and bear markets by adapting to volatility regimes.
 """
 
-name = "4h_Acceleration_Bounce"
-timeframe = "4h"
+name = "6h_KAMA_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,64 +22,71 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) - momentum oscillator
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.fillna(50).values  # neutral fill for warmup
+    # Calculate KAMA (30, 2, 30) - ER period 10, fast EMA 2, slow EMA 30
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
     
-    # 1-day trend filter: EMA(50) on close
+    # Proper ER calculation: change over 10 periods / sum of absolute changes over 10 periods
+    change_10 = np.abs(np.diff(close, n=10, prepend=close[:10]))
+    abs_change_sum_10 = np.sum(np.abs(np.diff(close, n=1, prepend=close[0]))[:, None] * np.ones(10), axis=1) if False else None
+    
+    # Simplified: use pandas for ER calculation
+    close_series = pd.Series(close)
+    change = close_series.diff().abs()
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    direction = (close_series - close_series.shift(10)).abs()
+    er = direction / volatility
+    er = er.fillna(0)
+    
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Get 1d data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (avoid noise)
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # Price extremes: recent 10-bar high/low for overextension check
-    highest_10 = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    lowest_10 = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(30, n):  # Start after warmup
         if position == 0:
-            # LONG: RSI oversold (<30) + price near recent low + volume spike + uptrend (price > EMA50)
-            if (rsi_values[i] < 30 and 
-                close[i] <= lowest_10[i] * 1.005 and  # within 0.5% of recent low
-                volume_spike[i] and 
+            # LONG: price crosses above KAMA, volume confirmation, price above 1d EMA50 (uptrend)
+            if (close[i] > kama[i] and close[i-1] <= kama[i-1] and 
+                volume_filter[i] and 
                 close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI overbought (>70) + price near recent high + volume spike + downtrend (price < EMA50)
-            elif (rsi_values[i] > 70 and 
-                  close[i] >= highest_10[i] * 0.995 and  # within 0.5% of recent high
-                  volume_spike[i] and 
+            # SHORT: price crosses below KAMA, volume confirmation, price below 1d EMA50 (downtrend)
+            elif (close[i] < kama[i] and close[i-1] >= kama[i-1] and 
+                  volume_filter[i] and 
                   close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI overbought (>70) OR trend breaks (price < EMA50)
-            if rsi_values[i] > 70 or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: price crosses below KAMA OR volume drops
+            if (close[i] < kama[i] and close[i-1] >= kama[i-1]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI oversold (<30) OR trend breaks (price > EMA50)
-            if rsi_values[i] < 30 or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: price crosses above KAMA OR volume drops
+            if (close[i] > kama[i] and close[i-1] <= kama[i-1]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
