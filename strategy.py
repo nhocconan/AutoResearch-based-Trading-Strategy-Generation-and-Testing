@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_1w_PriceAction_Strategy
-Hypothesis: On daily timeframe, price rejection at weekly key levels (support/resistance) with volume confirmation and ADX trend filter provides high-probability reversal signals in both bull and bear markets. Uses weekly pivot points calculated from prior week's OHLC. Weekly context ensures alignment with major market structure, reducing false signals. Target: 15-25 trades/year per symbol.
+12h_1d_Camarilla_R1_S1_Breakout_Trend_Volume
+Hypothesis: On 12h timeframe, price breaking above/below Camarilla R1/S1 levels from prior 1d,
+confirmed by 1d trend and volume spike, provides high-probability trend-following entries.
+Works in both bull (breakouts above R1 in uptrend) and bear (breakdowns below S1 in downtrend).
+Target: 15-25 trades/year per symbol.
 """
 
-name = "1d_1w_PriceAction_Strategy"
-timeframe = "1d"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,103 +20,69 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # Calculate volume spike: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(prices['volume']).rolling(window=20, min_periods=20).mean().values
+    volume_spike = prices['volume'].values > (vol_ma * 1.5)
     
-    # Calculate daily ATR(14) for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Get weekly data for pivot points and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get 1d data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly OHLC arrays
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_open = df_1w['open'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
+    # Calculate Camarilla levels from prior 1d
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    rang = high_1d - low_1d
+    camarilla_r1 = close_1d + (1.1 * rang / 12)
+    camarilla_s1 = close_1d - (1.1 * rang / 12)
     
-    # Align weekly levels to daily
-    weekly_pivot_d = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_d = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_d = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    # 1d trend: 34 EMA
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
     
-    # Weekly trend: 5-period EMA of weekly close
-    weekly_ema5 = pd.Series(weekly_close).ewm(span=5, adjust=False, min_periods=5).mean().values
-    weekly_uptrend = weekly_close > weekly_ema5
-    weekly_downtrend = weekly_close < weekly_ema5
-    
-    # Align weekly trend to daily
-    weekly_uptrend_d = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
-    weekly_downtrend_d = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
-    
-    # Volume spike detection: current volume > 1.5 * 20-day average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
-    
-    # ADX(14) for trend strength - use only when ADX < 25 (ranging market) for mean reversion
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
-    
-    tr_abs = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))
-    atr_14 = pd.Series(tr_abs).rolling(window=14, min_periods=14).mean().values
-    
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Ranging market filter: ADX < 25
-    ranging_market = adx < 25
+    # Align 1d data to 12h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):  # Start after warmup
+    for i in range(20, n):
         # Get aligned values
-        pivot = weekly_pivot_d[i]
-        r1 = weekly_r1_d[i]
-        s1 = weekly_s1_d[i]
-        uptrend = weekly_uptrend_d[i]
-        downtrend = weekly_downtrend_d[i]
-        ranging = ranging_market[i]
+        r1 = camarilla_r1_aligned[i]
+        s1 = camarilla_s1_aligned[i]
+        uptrend = uptrend_1d_aligned[i]
+        downtrend = downtrend_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # LONG: Price at or below S1 in ranging market with volume spike
-            if ranging and vol_spike and close[i] <= s1 * 1.005 and low[i] <= s1:
+            # LONG: price breaks above R1 + 1d uptrend + volume spike
+            if prices['close'].iloc[i] > r1 and uptrend and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at or above R1 in ranging market with volume spike
-            elif ranging and vol_spike and close[i] >= r1 * 0.995 and high[i] >= r1:
+            # SHORT: price breaks below S1 + 1d downtrend + volume spike
+            elif prices['close'].iloc[i] < s1 and downtrend and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches pivot or weekly trend turns down
-            if close[i] >= pivot * 0.995 or not uptrend:
+            # EXIT LONG: price closes below R1 or trend breaks
+            if prices['close'].iloc[i] < r1 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches pivot or weekly trend turns up
-            if close[i] <= pivot * 1.005 or not downtrend:
+            # EXIT SHORT: price closes above S1 or trend breaks
+            if prices['close'].iloc[i] > s1 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
