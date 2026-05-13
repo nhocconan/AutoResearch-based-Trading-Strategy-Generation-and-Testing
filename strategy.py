@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_1d_Ichimoku_Cloud_Breakout_Trend_Filter
-Hypothesis: Ichimoku cloud on daily chart acts as major support/resistance. 
-Price breaking above/below cloud with TK cross on 6h and volume confirmation captures trends in both bull and bear markets.
-Cloud provides dynamic S/R, TK cross gives entry timing, trend filter avoids whipsaws.
-Target: 12-37 trades/year per sensor.
+12h_1d_ChaikinOscillator_Trend_Momentum
+Hypothesis: Chaikin Oscillator (3,10) on 1d chart measures accumulation/distribution momentum.
+When Chaikin Oscillator crosses above zero with 1d uptrend and volume confirmation,
+it signals bullish momentum for long entries. When it crosses below zero with 1d downtrend,
+it signals bearish momentum for short entries. Uses 12h timeframe for execution.
+Works in both bull and bear markets by following 1d momentum and trend.
+Target: 12-37 trades/year per symbol.
 """
 
-name = "6h_1d_Ichimoku_Cloud_Breakout_Trend_Filter"
-timeframe = "6h"
+name = "12h_1d_ChaikinOscillator_Trend_Momentum"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,103 +27,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku calculation
+    # Get 1d data for Chaikin Oscillator calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Ichimoku components on daily
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Calculate Money Flow Multiplier and Money Flow Volume
+    mfm = ((close_1d - low_1d) - (high_1d - close_1d)) / (high_1d - low_1d)
+    mfm = np.where((high_1d - low_1d) == 0, 0, mfm)  # avoid division by zero
+    mfv = mfm * volume_1d
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # Calculate Accumulation/Diffusion Line (ADL)
+    adl = np.cumsum(mfv)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
+    # Chaikin Oscillator = EMA(3, ADL) - EMA(10, ADL)
+    adl_series = pd.Series(adl)
+    ema3 = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10 = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    chaikin_osc = ema3 - ema10
     
-    # Chikou Span (Lagging Span): close shifted 26 periods back
-    chikou = np.roll(close_1d, 26)
-    chikou[:26] = np.nan
+    # Align Chaikin Oscillator to 12h timeframe (wait for 1d bar to close)
+    chaikin_osc_aligned = align_htf_to_ltf(prices, df_1d, chaikin_osc)
     
-    # Align Ichimoku components to 6h (wait for daily close)
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    chikou_6h = align_htf_to_ltf(prices, df_1d, chikou)
+    # 1d trend: 34 EMA
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    uptrend_1d = close_1d > ema_34_1d
+    downtrend_1d = close_1d < ema_34_1d
     
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_6h, senkou_b_6h)
-    cloud_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
+    # Align 1d trend to 12h
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # TK Cross on 6h (using same Ichimoku but on 6h data for entry timing)
-    # Calculate Ichimoku on 6h for TK cross only
-    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan_6h_local = (period9_high_6h + period9_low_6h) / 2
-    
-    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun_6h_local = (period26_high_6h + period26_low_6h) / 2
-    
-    tk_cross_above = (tenkan_6h_local > kijun_6h_local) & (np.roll(tenkan_6h_local, 1) <= np.roll(kijun_6h_local, 1))
-    tk_cross_below = (tenkan_6h_local < kijun_6h_local) & (np.roll(tenkan_6h_local, 1) >= np.roll(kijun_6h_local, 1))
-    
-    # Volume confirmation: volume > 1.3 * 20-period average
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.3 * vol_ma
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # start after Ichimoku warmup
+    for i in range(100, n):
         # Get aligned values for current bar
-        price = close[i]
-        tk_above = tk_cross_above[i]
-        tk_below = tk_cross_below[i]
+        chaikin = chaikin_osc_aligned[i]
+        uptrend = uptrend_1d_aligned[i]
+        downtrend = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
         
-        # Handle NaN values in cloud
-        if np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]):
-            signals[i] = 0.0
-            continue
-            
         if position == 0:
-            # LONG: price above cloud, TK cross bullish, volume confirmation
-            if price > cloud_top[i] and tk_above and vol_conf:
+            # LONG: Chaikin Oscillator crosses above zero, 1d uptrend, volume confirmation
+            if chaikin > 0 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price below cloud, TK cross bearish, volume confirmation
-            elif price < cloud_bottom[i] and tk_below and vol_conf:
+            # SHORT: Chaikin Oscillator crosses below zero, 1d downtrend, volume confirmation
+            elif chaikin < 0 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price crosses below cloud bottom or TK cross bearish
-            if price < cloud_bottom[i] or tk_below:
+            # EXIT LONG: Chaikin Oscillator crosses below zero or 1d trend turns down
+            if chaikin < 0 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price crosses above cloud top or TK cross bullish
-            if price > cloud_top[i] or tk_above:
+            # EXIT SHORT: Chaikin Oscillator crosses above zero or 1d trend turns up
+            if chaikin > 0 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
