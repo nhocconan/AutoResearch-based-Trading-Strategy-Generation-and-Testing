@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_Altman_Zscore_Reversal_1dTrend_Filter
-# Hypothesis: In 6h timeframe, extreme deviations from the 1-day VWAP (Z-score > 2.0 or < -2.0)
-# signal mean-reversion opportunities, but only when aligned with the 1-day trend (price vs EMA50).
-# This captures reversals in overextended moves while avoiding counter-trend trades in strong trends.
-# Designed for low-frequency, high-probability setups in both bull and bear markets.
+# 4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeS
+# Hypothesis: Use Camarilla R3/S3 levels from daily pivot for breakout entries, confirmed by 12h EMA50 trend and volume spikes.
+# This combines price channel breakout with trend alignment and volume confirmation for high-probability setups.
+# Designed to work in both bull and bear markets by filtering counter-trend trades and avoiding overtrading.
 
-name = "6h_Altman_Zscore_Reversal_1dTrend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -23,32 +22,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Calculate VWAP for each 6h bar
-    typical_price = (high + low + close) / 3.0
-    vwap_num = (typical_price * volume).cumsum()
-    vwap_den = volume.cumsum()
-    vwap = vwap_num / vwap_den
-
-    # Calculate rolling standard deviation of price-VWAP deviation
-    deviation = typical_price - vwap
-    vol = pd.Series(deviation).rolling(window=24, min_periods=24).std().values  # 24*6h = 6 days
-    zscore = deviation / vol
-
-    # Get 1-day data for trend filter
+    # Calculate Camarilla levels from previous day's range
+    # Use daily data to get prior day's high, low, close
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Shift to use previous day's data (avoid look-ahead)
+    phigh = np.roll(df_1d['high'].values, 1)
+    plow = np.roll(df_1d['low'].values, 1)
+    pclose = np.roll(df_1d['close'].values, 1)
+    # First value will be invalid due to roll, but we'll handle via min_periods later
 
-    # Calculate 1-day EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Camarilla calculations
+    range_val = phigh - plow
+    R3 = pclose + (range_val * 1.1 / 4)
+    S3 = pclose - (range_val * 1.1 / 4)
+
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+
+    # Get 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+
+    # Volume spike detection: current volume > 2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):
+    for i in range(50, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(zscore[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,26 +66,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Extreme negative deviation (oversold) + uptrend bias
-            if zscore[i] < -2.0 and close[i] > ema50_1d_aligned[i]:
+            # LONG: Break above R3 with volume spike and uptrend
+            if close[i] > R3_aligned[i] and volume_spike[i] and close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Extreme positive deviation (overbought) + downtrend bias
-            elif zscore[i] > 2.0 and close[i] < ema50_1d_aligned[i]:
+            # SHORT: Break below S3 with volume spike and downtrend
+            elif close[i] < S3_aligned[i] and volume_spike[i] and close[i] < ema50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Deviation normalizes or trend turns bearish
-            if zscore[i] > -0.5 or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price breaks below S3 or trend turns down
+            if close[i] < S3_aligned[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Deviation normalizes or trend turns bullish
-            if zscore[i] < 0.5 or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above R3 or trend turns up
+            if close[i] > R3_aligned[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
