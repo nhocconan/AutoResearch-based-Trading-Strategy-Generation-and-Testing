@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_Pivot_Breakout_Trend_Filter
-Hypothesis: Camarilla pivot breakouts on daily timeframe with weekly trend filter and volume confirmation.
-In bull markets, buy breaks above R3/R4; in bear markets, sell breaks below S3/S4.
-Weekly trend filter ensures we only trade with the higher timeframe direction.
-Volume confirmation reduces false breakouts.
-Target: 15-25 trades/year per symbol.
+4h_ParabolicSAR_Breakout_TopBottom
+Hypothesis: Parabolic SAR acts as dynamic support/resistance. Price breaking above/below SAR with trend alignment and volume confirmation captures trend reversals and continuations. Works in both bull and bear markets by using SAR as trailing stop and entry trigger. Target: 20-50 trades/year per symbol.
 """
 
-name = "1d_1w_Camarilla_Pivot_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "4h_ParabolicSAR_Breakout_TopBottom"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,52 +22,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily typical price for pivot calculation
-    typical_price = (high + low + close) / 3.0
+    # Parabolic SAR calculation
+    def calculate_sar(high, low, start=0.02, increment=0.02, maximum=0.2):
+        n = len(high)
+        sar = np.zeros(n)
+        trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
+        af = np.zeros(n)     # acceleration factor
+        ep = np.zeros(n)     # extreme point
+        
+        # Initialize
+        sar[0] = low[0]
+        trend[0] = 1
+        af[0] = start
+        ep[0] = high[0]
+        
+        for i in range(1, n):
+            if trend[i-1] == 1:  # uptrend
+                sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+                # SAR cannot exceed the lowest low of the past two periods
+                sar[i] = min(sar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
+                
+                if high[i] > ep[i-1]:
+                    ep[i] = high[i]
+                    af[i] = min(af[i-1] + increment, maximum)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+                
+                # Trend reversal
+                if low[i] < sar[i]:
+                    trend[i] = -1
+                    sar[i] = ep[i-1]  # SAR becomes prior EP
+                    ep[i] = low[i]
+                    af[i] = start
+                else:
+                    trend[i] = 1
+            else:  # downtrend
+                sar[i] = sar[i-1] + af[i-1] * (sar[i-1] - ep[i-1])
+                # SAR cannot be lower than the highest high of the past two periods
+                sar[i] = max(sar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
+                
+                if low[i] < ep[i-1]:
+                    ep[i] = low[i]
+                    af[i] = min(af[i-1] + increment, maximum)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+                
+                # Trend reversal
+                if high[i] > sar[i]:
+                    trend[i] = 1
+                    sar[i] = ep[i-1]  # SAR becomes prior EP
+                    ep[i] = high[i]
+                    af[i] = start
+                else:
+                    trend[i] = -1
+        
+        return sar, trend
     
-    # Calculate Camarilla levels using previous day's data
-    # We need to shift by 1 to avoid look-ahead
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
+    sar, psar_trend = calculate_sar(high, low)
     
-    # Set first day's values to avoid NaN
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # 4h trend: EMA50 (additional confirmation)
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_4h = close > ema_50
+    downtrend_4h = close < ema_50
     
-    # Pivot point = (H + L + C) / 3
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    
-    # Range = H - L
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels
-    R4 = close + (range_val * 1.5000)  # Using current close as base
-    R3 = close + (range_val * 1.2500)
-    R2 = close + (range_val * 1.1666)
-    R1 = close + (range_val * 1.0833)
-    S1 = close - (range_val * 1.0833)
-    S2 = close - (range_val * 1.1666)
-    S3 = close - (range_val * 1.2500)
-    S4 = close - (range_val * 1.5000)
-    
-    # Weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Weekly EMA20 for trend
-    weekly_close = df_1w['close'].values
-    ema_20_weekly = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    uptrend_1w = weekly_close > ema_20_weekly
-    downtrend_1w = weekly_close < ema_20_weekly
-    
-    # Align weekly trend to daily
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
-    
-    # Volume confirmation: volume > 1.5 * 20-day average
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -80,32 +106,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip first day due to roll
-        if i == 0:
-            continue
-            
+    for i in range(50, n):
+        # Get values
+        psar = sar[i]
+        psar_trend_val = psar_trend[i]
+        uptrend = uptrend_4h[i]
+        downtrend = downtrend_4h[i]
+        uptrend_htf = uptrend_1d_aligned[i]
+        downtrend_htf = downtrend_1d_aligned[i]
+        vol_conf = volume_conf[i]
+        
         if position == 0:
-            # LONG: price breaks above R3 with weekly uptrend and volume
-            if close[i] > R3[i] and uptrend_1w_aligned[i] and volume_conf[i]:
+            # LONG: price above SAR, SAR in uptrend, 4h uptrend, 1d uptrend filter, volume confirmation
+            if close[i] > psar and psar_trend_val == 1 and uptrend and uptrend_htf and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S3 with weekly downtrend and volume
-            elif close[i] < S3[i] and downtrend_1w_aligned[i] and volume_conf[i]:
+            # SHORT: price below SAR, SAR in downtrend, 4h downtrend, 1d downtrend filter, volume confirmation
+            elif close[i] < psar and psar_trend_val == -1 and downtrend and downtrend_htf and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price touches S1 or weekly trend turns down
-            if close[i] < S1[i] or not uptrend_1w_aligned[i]:
+            # EXIT LONG: price below SAR or SAR flips to downtrend
+            if close[i] < psar or psar_trend_val == -1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price touches R1 or weekly trend turns up
-            if close[i] > R1[i] or not downtrend_1w_aligned[i]:
+            # EXIT SHORT: price above SAR or SAR flips to uptrend
+            if close[i] > psar or psar_trend_val == 1:
                 signals[i] = 0.0
                 position = 0
             else:
