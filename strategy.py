@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_PriceAction
-Hypothesis: Weekly pivot levels act as strong support/resistance on 6h charts.
-Breakouts above weekly R1 or below S1 with price action confirmation (engulfing candle)
-and volume spike capture institutional moves. The weekly timeframe provides structural
-levels that work in both bull and bear markets by adapting to the dominant trend.
-Target: 15-25 trades/year to minimize fee drag.
+1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter
+Hypothesis: On daily timeframe, Camarilla pivot levels (R1/S1) act as significant support/resistance.
+Breakouts above R1 or below S1 with volume confirmation and weekly trend alignment capture
+major momentum moves while avoiding false breakouts. Targets 30-100 trades over 4 years to
+minimize fee drag. Works in both bull and bear markets by following the weekly trend.
 """
 
-name = "6h_Weekly_Pivot_PriceAction"
-timeframe = "6h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,80 +25,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
+    # Get weekly data for trend filter and Camarilla calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot points (standard formula)
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    # Resistance 1 (R1) = (2 * PP) - Low
-    # Support 1 (S1) = (2 * PP) - High
-    # Resistance 2 (R2) = PP + (High - Low)
-    # Support 2 (S2) = PP - (High - Low)
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate Camarilla levels for each weekly bar
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12, PP = (H+L+C)/3
+    h_1w = df_1w['high'].values
+    l_1w = df_1w['low'].values
+    c_1w = df_1w['close'].values
     
-    weekly_pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = (2 * weekly_pp) - weekly_low
-    weekly_s1 = (2 * weekly_pp) - weekly_high
-    weekly_r2 = weekly_pp + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pp - (weekly_high - weekly_low)
+    camarilla_pp = (h_1w + l_1w + c_1w) / 3.0
+    camarilla_r1 = c_1w + (h_1w - l_1w) * 1.1 / 12.0
+    camarilla_s1 = c_1w - (h_1w - l_1w) * 1.1 / 12.0
     
-    # Align weekly levels to 6h timeframe
-    weekly_pp_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pp)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
+    # Align Camarilla levels to daily chart (no additional delay needed)
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pp)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Weekly trend filter: EMA50 on weekly close
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average (approx 1 month)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
-    
-    # Price action: bullish engulfing pattern
-    # Current candle engulfs previous candle's body
-    bullish_engulfing = (close > open_prices) & (open_prices < close_prev) & (close > close_prev)
-    bearish_engulfing = (close < open_prices) & (open_prices > close_prev) & (close < close_prev)
-    
-    # Need open and previous close
-    open_prices = prices['open'].values
-    close_prev = np.roll(close, 1)
-    close_prev[0] = close[0]  # first bar
-    
-    bullish_engulfing = (close > open_prices) & (open_prices < close_prev) & (close > close_prev)
-    bearish_engulfing = (close < open_prices) & (open_prices > close_prev) & (close < close_prev)
+    volume_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):  # Start after warmup
         if position == 0:
-            # LONG: Price breaks above weekly R1 with bullish engulfing and volume
-            if (close[i] > weekly_r1_aligned[i] and 
-                bullish_engulfing[i] and 
-                volume_filter[i]):
+            # LONG: Breakout above R1 with volume confirmation and weekly uptrend
+            if (close[i] > camarilla_r1_aligned[i] and 
+                volume_filter[i] and 
+                close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly S1 with bearish engulfing and volume
-            elif (close[i] < weekly_s1_aligned[i] and 
-                  bearish_engulfing[i] and 
-                  volume_filter[i]):
+            # SHORT: Breakdown below S1 with volume confirmation and weekly downtrend
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  volume_filter[i] and 
+                  close[i] < ema50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to weekly PP or shows weakness
-            if (close[i] < weekly_pp_aligned[i]) or \
-               (close[i] < weekly_s1_aligned[i]):
+            # EXIT LONG: Price returns to pivot point or trend reverses
+            if (close[i] < camarilla_pp_aligned[i]) or \
+               (close[i] < ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to weekly PP or shows strength
-            if (close[i] > weekly_pp_aligned[i]) or \
-               (close[i] > weekly_r1_aligned[i]):
+            # EXIT SHORT: Price returns to pivot point or trend reverses
+            if (close[i] > camarilla_pp_aligned[i]) or \
+               (close[i] > ema50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
