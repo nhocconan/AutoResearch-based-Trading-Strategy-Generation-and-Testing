@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_DonchianBreakout_VolumeTrend"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,76 +9,91 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    # Calculate 1-hour Camarilla levels
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1D data ONCE for trend filter
+    # Use previous hour's range for Camarilla calculation
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    # Calculate Camarilla levels
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    
+    # Load 4H data for trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    
+    # Load 1D data for volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
-    # 1D EMA20 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    
-    # 12h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # 12h volume filter
-    volume_series = pd.Series(volume)
-    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma20[i]) or np.isnan(ema20_1d_aligned[i])):
+    for i in range(34, n):
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or 
+            np.isnan(ema34_4h_aligned[i]) or 
+            np.isnan(vol_ma20_1d_aligned[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 1D EMA20
-        price_above_ema = close[i] > ema20_1d_aligned[i]
-        price_below_ema = close[i] < ema20_1d_aligned[i]
+        # Trend filter: price above/below 34 EMA on 4H
+        uptrend_4h = close[i] > ema34_4h_aligned[i]
+        downtrend_4h = close[i] < ema34_4h_aligned[i]
         
-        # Volume filter: volume above average
-        volume_ok = volume[i] > vol_ma20[i]
+        # Volume filter: current volume > 20-day average on 1D
+        volume_filter = volume[i] > vol_ma20_1d_aligned[i]
         
         if position == 0:
-            # LONG: Donchian breakout above + uptrend + volume
-            if close[i] > donchian_high[i] and price_above_ema and volume_ok:
-                signals[i] = 0.25
+            # LONG: Break above R1 + uptrend on 4H + volume confirmation
+            if close[i] > R1[i] and uptrend_4h and volume_filter:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Donchian breakout below + downtrend + volume
-            elif close[i] < donchian_low[i] and price_below_ema and volume_ok:
-                signals[i] = -0.25
+            # SHORT: Break below S1 + downtrend on 4H + volume confirmation
+            elif close[i] < S1[i] and downtrend_4h and volume_filter:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Donchian breakdown below or trend reversal
-            if close[i] < donchian_low[i] or not price_above_ema:
+            # EXIT LONG: Break below S1 or trend reversal
+            if close[i] < S1[i] or not uptrend_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Donchian breakout above or trend reversal
-            if close[i] > donchian_high[i] or not price_below_ema:
+            # EXIT SHORT: Break above R1 or trend reversal
+            if close[i] > R1[i] or not downtrend_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
