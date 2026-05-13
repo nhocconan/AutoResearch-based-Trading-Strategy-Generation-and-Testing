@@ -1,40 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_HMA_Crossover_1DTrend_Volume
-Hypothesis: Hull Moving Average crossover (16/32) with 1d trend filter and volume confirmation works in both bull and bear markets.
-Long: HMA(16) crosses above HMA(32) with 1d uptrend and volume spike.
-Short: HMA(16) crosses below HMA(32) with 1d downtrend and volume spike.
-Exit on opposite crossover. Uses volume > 2x 20-period average for confirmation.
-Target: 15-30 trades/year per symbol to minimize fee drag.
+6h_WeeklyPivot_Breakout_Trend_Filter
+Hypothesis: Weekly pivot levels act as strong support/resistance. Breakout above weekly R3 or below S3 with
+daily trend alignment and volume confirmation captures institutional flow. Works in bull/bear by using
+trend filters to avoid false breakouts in ranging markets. Target: 15-35 trades/year.
 """
 
-name = "12h_HMA_Crossover_1DTrend_Volume"
-timeframe = "12h"
+name = "6h_WeeklyPivot_Breakout_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def weighted_moving_average(array, window):
-    """Calculate weighted moving average with weights 1,2,3,...,window"""
-    weights = np.arange(1, window + 1)
-    return np.convolve(array, weights, 'full')[:len(array)] / weights.sum()
-
-def hull_moving_average(array, period):
-    """Calculate Hull Moving Average: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)"""
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    wma_half = weighted_moving_average(array, half_period)
-    wma_full = weighted_moving_average(array, period)
-    
-    raw_hma = 2 * wma_half - wma_full
-    hma = weighted_moving_average(raw_hma, sqrt_period)
-    
-    # Handle NaN values from convolution
-    hma = np.where(np.isnan(hma), 0, hma)
-    return hma
 
 def generate_signals(prices):
     n = len(prices)
@@ -42,62 +20,72 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # HMA indicators
-    hma_fast = hull_moving_average(close, 16)
-    hma_slow = hull_moving_average(close, 32)
+    # Daily trend filter: EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_daily = close > ema_50
+    downtrend_daily = close < ema_50
     
-    # 1d trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1d = df_1d['close'].values > ema_50_1d
-    downtrend_1d = df_1d['close'].values < ema_50_1d
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    # R3 = H + 2*(P-L), S3 = L - 2*(H-P)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    
+    # Align weekly levels to 6h timeframe (wait for weekly close)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
+    
+    # Volume confirmation: volume > 1.5 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 2.0 * vol_ma
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after HMA warmup
-        # Get values
-        hma_f = hma_fast[i]
-        hma_s = hma_slow[i]
-        hma_f_prev = hma_fast[i-1]
-        hma_s_prev = hma_slow[i-1]
-        uptrend_htf = uptrend_1d_aligned[i]
-        downtrend_htf = downtrend_1d_aligned[i]
+    for i in range(50, n):
+        r3 = weekly_r3_aligned[i]
+        s3 = weekly_s3_aligned[i]
+        uptrend = uptrend_daily[i]
+        downtrend = downtrend_daily[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: HMA(16) crosses above HMA(32), 1d uptrend, volume confirmation
-            if hma_f > hma_s and hma_f_prev <= hma_s_prev and uptrend_htf and vol_conf:
+            # LONG: break above weekly R3, daily uptrend, volume confirmation
+            if close[i] > r3 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: HMA(16) crosses below HMA(32), 1d downtrend, volume confirmation
-            elif hma_f < hma_s and hma_f_prev >= hma_s_prev and downtrend_htf and vol_conf:
+            # SHORT: break below weekly S3, daily downtrend, volume confirmation
+            elif close[i] < s3 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: HMA(16) crosses below HMA(32)
-            if hma_f < hma_s and hma_f_prev >= hma_s_prev:
+            # EXIT LONG: price returns to weekly pivot or daily trend turns down
+            if close[i] < weekly_pivot_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: HMA(16) crosses above HMA(32)
-            if hma_f > hma_s and hma_f_prev <= hma_s_prev:
+            # EXIT SHORT: price returns to weekly pivot or daily trend turns up
+            if close[i] > weekly_pivot_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
