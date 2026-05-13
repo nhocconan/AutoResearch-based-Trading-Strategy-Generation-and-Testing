@@ -1,12 +1,15 @@
-# 4h_SupportResistance_Fibonacci_Extension
-# Hypothesis: Use 1D swing high/low to calculate Fibonacci extension levels (127.2%, 161.8%, 261.8%) as dynamic support/resistance.
-# Enter long when price breaks above 127.2% extension of prior swing low with bullish 1D trend and volume spike.
-# Enter short when price breaks below 61.8% retracement of prior swing high with bearish 1D trend and volume spike.
-# Exit when price crosses back below/above the swing point level.
-# This captures momentum after pullbacks in trending markets while avoiding false breakouts.
+#!/usr/bin/env python3
+# 6h_ADX_Stochastic_Reversal_1dTrend_Volume
+# Hypothesis: Mean-reversion pullbacks in strong trends using ADX (trend strength) + Stochastic (overbought/oversold).
+# Enter long when ADX > 25 (strong trend) and %K crosses above 20 from below (oversold bounce).
+# Enter short when ADX > 25 and %K crosses below 80 from above (overbought rejection).
+# Exit when Stochastic returns to neutral range (40-60) or ADX weakens (<20).
+# Trend filter from 1d EMA50 ensures alignment with higher timeframe momentum.
+# Works in bull/bear by fading overextensions within the dominant trend.
+# Target: 20-35 trades/year to minimize fee drag.
 
-name = "4h_SupportResistance_Fibonacci_Extension"
-timeframe = "4h"
+name = "6h_ADX_Stochastic_Reversal_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,61 +26,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for swing points and trend
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
 
-    # Calculate swing high/low on 1D (pivot points)
-    swing_high = np.full_like(high_1d, np.nan)
-    swing_low = np.full_like(low_1d, np.nan)
-    
-    for i in range(2, len(high_1d)-2):
-        # Swing high: higher than 2 bars on each side
-        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and 
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            swing_high[i] = high_1d[i]
-        # Swing low: lower than 2 bars on each side
-        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and 
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            swing_low[i] = low_1d[i]
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # Forward fill swing points to use most recent
-    for i in range(1, len(swing_high)):
-        if np.isnan(swing_high[i]):
-            swing_high[i] = swing_high[i-1]
-        if np.isnan(swing_low[i]):
-            swing_low[i] = swing_low[i-1]
+    # ADX calculation (14-period)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
 
-    # Calculate Fibonacci levels
-    range_1d = swing_high - swing_low
-    fib_ext_127 = swing_low + range_1d * 1.272  # 127.2% extension
-    fib_ret_618 = swing_high - range_1d * 0.618  # 61.8% retracement
+    # Directional Movement
+    up_move = high - np.concatenate([[high[0]], high[:-1]])
+    down_move = np.concatenate([[low[0]], low[:-1]]) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
 
-    # Align Fibonacci levels to 4h timeframe
-    fib_ext_127_aligned = align_htf_to_ltf(prices, df_1d, fib_ext_127)
-    fib_ret_618_aligned = align_htf_to_ltf(prices, df_1d, fib_ret_618)
-    swing_high_aligned = align_htf_to_ltf(prices, df_1d, swing_high)
-    swing_low_aligned = align_htf_to_ltf(prices, df_1d, swing_low)
+    # Smoothed DM
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
 
-    # 1D EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
 
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Stochastic Oscillator (14,3,3)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low)
+    # Avoid division by zero
+    k_percent = np.where((highest_high - lowest_low) == 0, 50, k_percent)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+
+    # Volume confirmation: volume > 1.3x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(14, n):
         # Skip if any required value is NaN
-        if (np.isnan(fib_ext_127_aligned[i]) or np.isnan(fib_ret_618_aligned[i]) or 
-            np.isnan(swing_high_aligned[i]) or np.isnan(swing_low_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(adx[i]) or np.isnan(k_percent[i]) or np.isnan(d_percent[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,30 +84,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close breaks above 127.2% extension + price > 1D EMA34 + volume spike
-            if (close[i] > fib_ext_127_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Strong trend (ADX>25) + Stochastic crosses above 20 from below + price > 1d EMA50 + volume
+            if (adx[i] > 25 and 
+                k_percent[i] > 20 and d_percent[i-1] <= 20 and  # cross above 20
+                close[i] > ema50_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.3):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below 61.8% retracement + price < 1D EMA34 + volume spike
-            elif (close[i] < fib_ret_618_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Strong trend (ADX>25) + Stochastic crosses below 80 from above + price < 1d EMA50 + volume
+            elif (adx[i] > 25 and 
+                  k_percent[i] < 80 and d_percent[i-1] >= 80 and  # cross below 80
+                  close[i] < ema50_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.3):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses back below swing low (invalidates uptrend)
-            if close[i] < swing_low_aligned[i]:
+            # EXIT LONG: Stochastic returns to neutral (>40) or trend weakens (ADX<20)
+            if k_percent[i] > 40 or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses back above swing high (invalidates downtrend)
-            if close[i] > swing_high_aligned[i]:
+            # EXIT SHORT: Stochastic returns to neutral (<60) or trend weakens (ADX<20)
+            if k_percent[i] < 60 or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
