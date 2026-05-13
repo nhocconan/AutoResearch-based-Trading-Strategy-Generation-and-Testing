@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_RSI_Momentum
-Hypothesis: KAMA direction + RSI momentum + volume confirmation works in both bull and bear markets.
-KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends.
-RSI confirms momentum strength, volume validates breakout strength.
-Target: 10-25 trades/year per symbol.
+12h_Donchian_Breakout_Trend_Volume
+Hypothesis: Donchian channel (20) breakouts with 1d trend (EMA50) and volume confirmation work in both bull and bear markets.
+Breakout above upper channel with uptrend and volume spike = long.
+Breakdown below lower channel with downtrend and volume spike = short.
+Exit on opposite channel touch or trend reversal. Uses 1w trend filter for higher timeframe bias.
+Target: 12-37 trades/year per station.
 """
 
-name = "1d_KAMA_Trend_With_RSI_Momentum"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,74 +26,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA: Adaptive Moving Average
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = np.power(er * (2/2 - 2/30) + 2/30, 2)  # fast=2, slow=30
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Donchian Channel: 20-period high/low
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    kama_dir = kama > np.roll(kama, 1)  # upward slope
+    # 12h trend: EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_12h = close > ema_50
+    downtrend_12h = close < ema_50
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation: volume > 1.5 * 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_conf = volume > 1.5 * vol_ma
-    
-    # Weekly trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    uptrend_1w = df_1w['close'].values > ema_20_1w
-    downtrend_1w = df_1w['close'].values < ema_20_1w
-    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
+    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
+    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    
+    # Volume confirmation: volume > 2.0 * 20-period average
+    vol_ma = np.zeros(n)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_conf = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Get values
-        kama_up = kama_dir[i]
-        rsi_val = rsi[i]
+        upper = high_20[i]
+        lower = low_20[i]
+        uptrend = uptrend_12h[i]
+        downtrend = downtrend_12h[i]
+        uptrend_htf = uptrend_1d_aligned[i]
+        downtrend_htf = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
-        uptrend_weekly = uptrend_1w_aligned[i]
-        downtrend_weekly = downtrend_1w_aligned[i]
         
         if position == 0:
-            # LONG: KAMA up, RSI > 50, volume confirmation, weekly uptrend
-            if kama_up and rsi_val > 50 and vol_conf and uptrend_weekly:
+            # LONG: break above upper channel, 12h uptrend, 1d uptrend filter, volume confirmation
+            if close[i] > upper and uptrend and uptrend_htf and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: KAMA down, RSI < 50, volume confirmation, weekly downtrend
-            elif not kama_up and rsi_val < 50 and vol_conf and downtrend_weekly:
+            # SHORT: break below lower channel, 12h downtrend, 1d downtrend filter, volume confirmation
+            elif close[i] < lower and downtrend and downtrend_htf and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: KAMA down or RSI < 40
-            if not kama_up or rsi_val < 40:
+            # EXIT LONG: touch lower channel or 12h trend turns down
+            if close[i] < lower or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: KAMA up or RSI > 60
-            if kama_up or rsi_val > 60:
+            # EXIT SHORT: touch upper channel or 12h trend turns up
+            if close[i] > upper or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
