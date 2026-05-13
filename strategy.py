@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 12h_Camarilla_R3_S3_Breakout_1dTrend
-Hypothesis: Camarilla pivot levels (R3/S3) on the 1-day timeframe act as key support/resistance.
-Breakouts above R3 or below S3 with volume confirmation and aligned 1-day trend (close > EMA34) 
+Hypothesis: Camarilla pivot levels (R3/S3) on 1d timeframe act as strong support/resistance. 
+Breakouts above R3 or below S3 with volume confirmation and aligned 1d trend (close > EMA34) 
 signal strong momentum continuation. Uses 0.25 position size to balance risk/return and 
 limit trade frequency (~12-30/year) to minimize fee drag in 12-hour bars.
 Works in bull markets via breakout continuation and in bear markets via breakdown continuation.
@@ -29,9 +29,10 @@ def generate_signals(prices):
     # Get 1d data for Camarilla pivots and trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels for 1d (using previous day's OHLC)
-    # R3 = C + (H-L) * 1.1/4
-    # S3 = C - (H-L) * 1.1/4
+    # Calculate Camarilla pivot levels for 1d (R3, S3)
+    # R3 = C + ((H-L) * 1.1/4)
+    # S3 = C - ((H-L) * 1.1/4)
+    # Where C, H, L are from previous day
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -48,7 +49,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: current volume > 2.0x 24-period average (12 days on 12h)
+    # Volume confirmation: current volume > 2.0x 24-period average (2 days on 12h)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_filter = volume > (2.0 * vol_ma)
     
