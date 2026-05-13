@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume
-Hypothesis: Camarilla pivot levels (R1/S1) from daily chart act as key support/resistance. 
-Buy when price breaks above R1 with volume confirmation and weekly uptrend; 
-Sell when price breaks below S1 with volume confirmation and weekly downtrend.
-Weekly trend filter reduces whipsaws in sideways markets. Works in both bull and bear regimes by following higher timeframe direction.
-Target: 12-37 trades/year per symbol.
+1d_TRIX_VolumeSpike_Regime
+Hypothesis: TRIX (15-period) captures momentum turning points; volume spike confirms strength; 
+Choppiness Index regime filter (CHOP > 61.8 for range, < 38.2 for trend) selects appropriate strategy.
+In ranging markets (CHOP > 61.8), fade TRIX extremes; in trending markets (CHOP < 38.2), follow TRIX crosses.
+Uses weekly trend filter (price > weekly EMA40) for bias. Designed for low trade frequency (~10-25/year).
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "1d_TRIX_VolumeSpike_Regime"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,66 +25,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla pivot levels (using previous day's OHLC)
-    # Since we don't have direct access to previous day, we'll use rolling window
-    # This approximates the previous day's levels for intraday calculation
-    lookback = 24  # 24 * 12h = 12 days worth of data to approximate daily
-    if n < lookback:
-        return np.zeros(n)
+    # TRIX: triple-smoothed EMA of ROC
+    # TRIX = EMA(EMA(EMA(ROC, 15), 15), 15) * 100
+    roc = np.diff(np.log(close), prepend=np.log(close[0])) * 100
+    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = ema3 * 100
     
-    # Rolling max/min/close for previous day approximation
-    # We use shift(1) to avoid look-ahead: use data from previous bar only
-    prev_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-    prev_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
-    prev_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).mean().shift(1).values
+    # Volume spike: volume > 2.0 * 20-day average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
-    # Calculate pivot and Camarilla levels
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR,14) / (max(high,14)-min(low,14))) / log10(14)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr * 14 / (highest_high - lowest_low + 1e-10)) / np.log10(14)
+    chop[0:13] = np.nan
+    chop_range = chop > 61.8  # ranging market
+    chop_trend = chop < 38.2  # trending market
     
-    # Camarilla levels: R1 = close + (range * 1.1/12), S1 = close - (range * 1.1/12)
-    r1 = prev_close + (range_val * 1.1 / 12)
-    s1 = prev_close - (range_val * 1.1 / 12)
-    
-    # Volume confirmation: current volume > 1.5 * average volume
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 24 * 12h = 12 days
-    volume_ok = volume > (vol_ma * 1.5)
-    
-    # Weekly trend filter: EMA50 on weekly data
+    # Weekly trend filter: price > weekly EMA40 for bullish bias
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 40:
         return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_1w = df_1w['close'].values > ema_50_1w
-    downtrend_1w = df_1w['close'].values < ema_50_1w
+    ema_40_1w = pd.Series(df_1w['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
+    uptrend_1w = df_1w['close'].values > ema_40_1w
     uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
-    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
+        # Skip if any key value is NaN
+        if np.isnan(trix[i]) or np.isnan(chop[i]) or np.isnan(vol_ma[i]):
+            signals[i] = 0.0
+            continue
+            
+        trix_val = trix[i]
+        vol_spike_now = vol_spike[i]
+        in_range = chop_range[i]
+        in_trend = chop_trend[i]
+        weekly_up = uptrend_1w_aligned[i]
+        
         if position == 0:
-            # LONG: price breaks above R1, volume confirmation, weekly uptrend
-            if close[i] > r1[i] and volume_ok[i] and uptrend_1w_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # SHORT: price breaks below S1, volume confirmation, weekly downtrend
-            elif close[i] < s1[i] and volume_ok[i] and downtrend_1w_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+            # LONG conditions
+            if in_range:
+                # In range: fade TRIX extremes (oversold bounce)
+                if trix_val < -0.15 and vol_spike_now and weekly_up:
+                    signals[i] = 0.25
+                    position = 1
             else:
-                signals[i] = 0.0
+                # In trend: follow TRIX crosses (bullish momentum)
+                if trix_val > 0.05 and vol_spike_now and weekly_up:
+                    signals[i] = 0.25
+                    position = 1
+            # SHORT conditions
+            if in_range:
+                # In range: fade TRIX extremes (overbought pullback)
+                if trix_val > 0.15 and vol_spike_now and not weekly_up:
+                    signals[i] = -0.25
+                    position = -1
+            else:
+                # In trend: follow TRIX crosses (bearish momentum)
+                if trix_val < -0.05 and vol_spike_now and not weekly_up:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # EXIT LONG: price breaks below S1 (reversal) or volume drops
-            if close[i] < s1[i] or not volume_ok[i]:
+            # EXIT LONG: TRIX crosses below zero or volatility dies
+            if trix_val < -0.05 or not vol_spike_now:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above R1 (reversal) or volume drops
-            if close[i] > r1[i] or not volume_ok[i]:
+            # EXIT SHORT: TRIX crosses above zero or volatility dies
+            if trix_val > 0.05 or not vol_spike_now:
                 signals[i] = 0.0
                 position = 0
             else:
