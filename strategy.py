@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike confirmation.
-# Long when price breaks above R3 with volume > 1.5x average and close > 12h EMA50.
-# Short when price breaks below S3 with volume > 1.5x average and close < 12h EMA50.
-# Uses ATR-based trailing stop (2.5x) for risk control. Designed to capture strong trending moves
-# with confluence of price action, volume, and trend filters to avoid false breakouts.
-# Target: 25-40 trades/year (100-160 total over 4 years).
+# Hypothesis: 1d Williams %R mean reversion with 1w trend filter and volume confirmation.
+# Long when Williams %R < -80 (oversold) and price > 1w EMA34 (uptrend) and volume > 1.3x average.
+# Short when Williams %R > -20 (overbought) and price < 1w EMA34 (downtrend) and volume > 1.3x average.
+# Uses ATR-based trailing stop (2.0x) for risk control.
+# Designed to capture mean reversion in ranging markets while respecting the weekly trend.
+# Target: 15-25 trades/year (60-100 total over 4 years).
 
-name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_VolumeSpike_v1"
-timeframe = "4h"
+name = "1d_WilliamsR_MeanReversion_1wEMA34_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -32,37 +32,24 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Calculate Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Calculate EMA50 on 12h close
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for Camarilla pivot levels (R3, S3)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate EMA34 on 1w close
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot = (High + Low + Close) / 3
-    # Range = High - Low
-    # R3 = Close + (Range * 1.1 / 4)
-    # S3 = Close - (Range * 1.1 / 4)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + (range_1d * 1.1 / 4.0)
-    s3_1d = close_1d - (range_1d * 1.1 / 4.0)
-    
-    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Calculate volume spike: volume > 1.5x 20-period average
+    # Calculate volume spike: volume > 1.3x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    volume_spike = volume > (1.3 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,19 +58,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND volume spike AND close > 12h EMA50
-            if high[i] > r3_1d_aligned[i] and volume_spike[i] and close[i] > ema50_12h_aligned[i]:
+            # LONG: Williams %R < -80 (oversold) AND price > 1w EMA34 AND volume spike
+            if williams_r[i] < -80 and close[i] > ema34_1w_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below S3 AND volume spike AND close < 12h EMA50
-            elif low[i] < s3_1d_aligned[i] and volume_spike[i] and close[i] < ema50_12h_aligned[i]:
+            # SHORT: Williams %R > -20 (overbought) AND price < 1w EMA34 AND volume spike
+            elif williams_r[i] > -20 and close[i] < ema34_1w_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -96,8 +83,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -111,8 +98,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
