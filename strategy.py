@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_MACD_EMA_Trend_Follower
-# Hypothesis: Follow medium-term trend using 6h MACD histogram and EMA200 filter.
-# Long when MACD histogram turns positive AND price above EMA200 (6h).
-# Short when MACD histogram turns negative AND price below EMA200 (6h).
-# Uses weekly trend filter to avoid counter-trend trades in strong trends.
-# Designed to capture trends while minimizing whipsaws in both bull and bear markets.
+# 12h_Donchian_Breakout_Volume_Trend
+# Hypothesis: Breakout of 20-period Donchian channel with volume confirmation and 1d trend filter.
+# Works in bull markets by capturing breakouts, in bear markets by avoiding false breakouts via trend filter.
+# Volume confirmation reduces false signals. Trend filter ensures alignment with higher timeframe momentum.
+# Designed for low trade frequency (<30/year) to minimize fee drag on 12h timeframe.
 
-name = "6h_MACD_EMA_Trend_Follower"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,36 +23,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 6h data for MACD and EMA200
-    df_6h = get_htf_data(prices, '6h')
+    # Get 12h data for Donchian channels
+    df_12h = get_htf_data(prices, '12h')
     
-    # MACD (12,26,9) on 6h close
-    close_6h = df_6h['close'].values
-    ema12 = pd.Series(close_6h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema26 = pd.Series(close_6h).ewm(span=26, adjust=False, min_periods=26).mean().values
-    macd_line = ema12 - ema26
-    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
-    macd_hist = macd_line - signal_line
+    # Donchian channels (20-period) on 12h high/low
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # EMA200 on 6h close
-    ema200_6h = pd.Series(close_6h).ewm(span=200, adjust=False, min_periods=200).mean().values
+    # Upper band: 20-period rolling max of high
+    upperband = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Lower band: 20-period rolling min of low
+    lowerband = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Weekly trend filter: price above/below weekly EMA50
-    df_1w = get_htf_data(prices, '1w')
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Get 1d data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume average (20-period) for confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
-    # Align 6h indicators to lower timeframe (15m equivalent for 6h)
-    macd_hist_aligned = align_htf_to_ltf(prices, df_6h, macd_hist)
-    ema200_6h_aligned = align_htf_to_ltf(prices, df_6h, ema200_6h)
+    # Align indicators to 12h timeframe
+    upperband_aligned = align_htf_to_ltf(prices, df_12h, upperband)
+    lowerband_aligned = align_htf_to_ltf(prices, df_12h, lowerband)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(100, n):  # Start after warmup period
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required value is NaN
-        if (np.isnan(macd_hist_aligned[i]) or np.isnan(ema200_6h_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(upperband_aligned[i]) or np.isnan(lowerband_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,44 +63,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # MACD histogram crossover signals
-        macd_hist_prev = macd_hist_aligned[i-1] if i > 0 else 0
-        macd_hist_curr = macd_hist_aligned[i]
+        # Breakout conditions
+        bullish_breakout = high[i] > upperband_aligned[i]
+        bearish_breakout = low[i] < lowerband_aligned[i]
         
-        # Bullish crossover: MACD hist crosses above zero
-        bullish_cross = macd_hist_prev <= 0 and macd_hist_curr > 0
-        # Bearish crossover: MACD hist crosses below zero
-        bearish_cross = macd_hist_prev >= 0 and macd_hist_curr < 0
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirm = volume[i] > 1.5 * vol_ma_aligned[i]
         
-        # Price relative to EMA200
-        price_above_ema200 = close[i] > ema200_6h_aligned[i]
-        price_below_ema200 = close[i] < ema200_6h_aligned[i]
-        
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
 
         if position == 0:
-            # LONG: MACD bullish crossover + price above EMA200 + weekly uptrend
-            if bullish_cross and price_above_ema200 and weekly_uptrend:
+            # LONG: Bullish breakout + volume confirmation + uptrend
+            if bullish_breakout and volume_confirm and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: MACD bearish crossover + price below EMA200 + weekly downtrend
-            elif bearish_cross and price_below_ema200 and weekly_downtrend:
+            # SHORT: Bearish breakout + volume confirmation + downtrend
+            elif bearish_breakout and volume_confirm and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: MACD bearish crossover OR price below EMA200 OR weekly downtrend
-            if bearish_cross or not price_above_ema200 or not weekly_uptrend:
+            # EXIT LONG: Price re-enters Donchian channel (below upper band) OR trend reversal
+            if close[i] < upperband_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: MACD bullish crossover OR price above EMA200 OR weekly uptrend
-            if bullish_cross or not price_below_ema200 or not weekly_downtrend:
+            # EXIT SHORT: Price re-enters Donchian channel (above lower band) OR trend reversal
+            if close[i] > lowerband_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
