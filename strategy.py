@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_1dTrend_Filter
-# Hypothesis: Elder Ray (Bull/Bear Power) combined with 1d trend filter to capture institutional
-# buying/selling pressure. Goes long when Bear Power shows weakening bears + 1d uptrend,
-# short when Bull Power shows weakening bulls + 1d downtrend. Volume spike confirms.
-# Works in bull (buy weakening bear pressure) and bear (sell weakening bull pressure) markets.
-# Low frequency due to Elder Ray smoothing and volume confirmation requirement.
+# 4h_Pivot_Reversal_Scalp
+# Hypothesis: At 4h timeframe, price often reverses at daily pivot points (S1/S2/R1/R2) with volume confirmation.
+# Works in both bull and bear markets as reversals occur at key levels regardless of trend.
+# Uses 1d Camarilla pivots + volume spike + tight stop via reversal signal.
+# Low frequency due to requiring exact pivot proximity and volume confirmation.
 
-name = "6h_ElderRay_1dTrend_Filter"
-timeframe = "6h"
+name = "4h_Pivot_Reversal_Scalp"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,30 +23,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter and EMA13 for Elder Ray
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA13 for Elder Ray calculation
-    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla pivot levels from previous day
+    # PP = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1/12
+    # S1 = C - (H - L) * 1.1/12
+    # R2 = C + (H - L) * 1.1/6
+    # S2 = C - (H - L) * 1.1/6
+    # Using previous day's values to avoid look-ahead
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1d trend filter: EMA50
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Shift by 1 to use previous day's data
+    pp = (np.roll(high_1d, 1) + np.roll(low_1d, 1) + np.roll(close_1d, 1)) / 3
+    range_1d = np.roll(high_1d, 1) - np.roll(low_1d, 1)
+    r1 = np.roll(close_1d, 1) + range_1d * 1.1 / 12
+    s1 = np.roll(close_1d, 1) - range_1d * 1.1 / 12
+    r2 = np.roll(close_1d, 1) + range_1d * 1.1 / 6
+    s2 = np.roll(close_1d, 1) - range_1d * 1.1 / 6
     
-    # Align 1d indicators to 6h timeframe
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align pivot levels to 4h timeframe (will use previous day's pivots)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Calculate Elder Ray components on 1d
-    # Bull Power = High - EMA13
-    bull_power = df_1d['high'].values - ema13_1d
-    # Bear Power = Low - EMA13
-    bear_power = df_1d['low'].values - ema13_1d
-    
-    # Align Elder Ray to 6h
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Volume spike: volume > 1.8 * 20-period average (moderate threshold)
+    # Volume spike: volume > 1.8 * 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 1.8 * vol_ma_20
     
@@ -56,10 +61,9 @@ def generate_signals(prices):
 
     for i in range(50, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema13_1d_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,40 +71,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Trend conditions
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
-        
-        # Elder Ray conditions
-        # Bull Power declining but still positive = weakening bulls
-        bull_power_declining = (i >= 1 and bull_power_aligned[i] < bull_power_aligned[i-1] and bull_power_aligned[i] > 0)
-        # Bear Power rising but still negative = weakening bears  
-        bear_power_rising = (i >= 1 and bear_power_aligned[i] > bear_power_aligned[i-1] and bear_power_aligned[i] < 0)
+        # Proximity to pivot levels (within 0.15% of price)
+        price = close[i]
+        near_s1 = abs(price - s1_aligned[i]) / price < 0.0015
+        near_s2 = abs(price - s2_aligned[i]) / price < 0.0015
+        near_r1 = abs(price - r1_aligned[i]) / price < 0.0015
+        near_r2 = abs(price - r2_aligned[i]) / price < 0.0015
         
         # Volume confirmation
         vol_spike = volume_spike[i]
 
         if position == 0:
-            # LONG: Bears weakening (Bear Power rising but negative) + uptrend + volume spike
-            if bear_power_rising and uptrend and vol_spike:
+            # LONG: Price near S1 or S2 with volume spike (bounce off support)
+            if (near_s1 or near_s2) and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bulls weakening (Bull Power declining but positive) + downtrend + volume spike
-            elif bull_power_declining and downtrend and vol_spike:
+            # SHORT: Price near R1 or R2 with volume spike (rejection at resistance)
+            elif (near_r1 or near_r2) and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bulls strengthening OR trend reversal
-            if bull_power_declining or not uptrend:
+            # EXIT LONG: Price reaches pivot point or shows rejection
+            if price >= pp_aligned[i] or near_r1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bears strengthening OR trend reversal
-            if bear_power_rising or not downtrend:
+            # EXIT SHORT: Price reaches pivot point or shows bounce
+            if price <= pp_aligned[i] or near_s1:
                 signals[i] = 0.0
                 position = 0
             else:
