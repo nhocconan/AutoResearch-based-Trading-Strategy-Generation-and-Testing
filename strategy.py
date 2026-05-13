@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts at Camarilla R1/S1 levels on 4h, filtered by 1d trend direction and volume spikes.
-# The 1d trend filter ensures alignment with higher timeframe momentum, reducing false breakouts in chop.
-# Volume surge confirms institutional participation. Designed for 20-40 trades/year to minimize fee drag.
-# Works in bull/bear by following 1d trend; avoids counter-trend entries.
+# 1D_Donchian20_Trend_1w_Signal
+# Hypothesis: Daily Donchian(20) breakout filtered by 1-week trend direction.
+# Long when price breaks above 20-day high and 1-week close > 1-week open (bullish week).
+# Short when price breaks below 20-day low and 1-week close < 1-week open (bearish week).
+# Uses weekly trend to avoid counter-trend trades, reducing false signals in ranging markets.
+# Target: 15-25 trades/year per symbol to minimize fee drag and improve generalization.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1D_Donchian20_Trend_1w_Signal"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,46 +16,36 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
 
-    # Calculate Camarilla pivot levels for 4h (based on previous 4h bar)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Calculate Donchian channels (20-period) on daily data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
 
-    rang = prev_high - prev_low
-    r1 = prev_close + rang * 1.1 / 12
-    s1 = prev_close - rang * 1.1 / 12
+    # Weekly trend: bullish if weekly close > weekly open, bearish if close < open
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open
+    weekly_bearish = weekly_close < weekly_open
 
-    # Trend filter: 1d EMA50
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
-    # Volume confirmation: current volume > 2.0 x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    # Align weekly trend to daily timeframe (only use completed weekly bars)
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
-        # Skip if any required value is NaN
-        if (np.isnan(r1[i]) or 
-            np.isnan(s1[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        # Skip if Donchian values are not ready
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,30 +54,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above R1 in uptrend with volume spike
-            if (close[i] > r1[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume_spike[i]):
+            # LONG: Break above 20-day high in bullish weekly trend
+            if close[i] > high_20[i] and weekly_bullish_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1 in downtrend with volume spike
-            elif (close[i] < s1[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: Break below 20-day low in bearish weekly trend
+            elif close[i] < low_20[i] and weekly_bearish_aligned[i] > 0.5:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or trend turns down
-            if close[i] < s1[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price breaks below 20-day low
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or trend turns up
-            if close[i] > r1[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price breaks above 20-day high
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
