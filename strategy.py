@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
-# Bull Power = High - EMA13(close); Bear Power = Low - EMA13(close)
-# Long when Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND price > 1d EMA34 AND volume > 1.5x average
-# Short when Bear Power < 0 AND Bull Power < 0 (bearish momentum) AND price < 1d EMA34 AND volume > 1.5x average
-# Exit when momentum diverges (Bull Power <= 0 for long, Bear Power >= 0 for short) OR trend reversal
-# Uses 6h timeframe for lower frequency, Elder Ray for momentum strength, 1d EMA for trend filter, volume for confirmation.
-# Target: 50-150 total trades over 4 years (12-37/year). Works in bull via momentum continuation, bear via faded rallies.
+# Hypothesis: 12h Williams %R with 1w trend filter and volume confirmation.
+# Williams %R measures overbought/oversold levels: Long when %R < -80 (oversold) AND price > 1w EMA50 (uptrend) AND volume > 1.3x average
+# Short when %R > -20 (overbought) AND price < 1w EMA50 (downtrend) AND volume > 1.3x average
+# Exit when %R reverses to midpoint (-50) OR trend fails
+# Uses 12h timeframe for lower frequency, Williams %R for mean reversion in extremes, 1w EMA for trend filter, volume for confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year). Works in bull via buying dips in uptrend, bear via selling rallies in downtrend.
 
-name = "6h_ElderRay_1dTrend_Volume_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_1wTrend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,63 +24,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 6h data for Elder Ray calculation
-    df_6h = get_htf_data(prices, '6h')
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    volume_6h = df_6h['volume'].values
+    # Get 12h data for Williams %R calculation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Calculate EMA(13) on 6h close for Elder Ray
-    ema13_6h = pd.Series(close_6h).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Williams %R(14) on 12h: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close_12h) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # Bull Power = High - EMA13; Bear Power = Low - EMA13
-    bull_power = high_6h - ema13_6h
-    bear_power = low_6h - ema13_6h
+    # Volume filter: current 12h volume > 1.3x 20-period average
+    vol_ma_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_filter_12h = volume_12h > (1.3 * vol_ma_12h)
     
-    # Volume filter: current 6h volume > 1.5x 20-period average
-    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
-    volume_filter_6h = volume_6h > (1.5 * vol_ma_6h)
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate EMA(34) on 1d close for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate EMA(50) on 1w close for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
         # Skip if any required data is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_6h[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1w_aligned[i]) or
+            np.isnan(vol_ma_12h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Bull Power > 0 AND Bear Power < 0 (bullish momentum) AND price > 1d EMA34 AND volume confirmation
-            if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema34_1d_aligned[i] and volume_filter_6h[i]:
+            # LONG: Williams %R < -80 (oversold) AND price > 1w EMA50 (uptrend) AND volume confirmation
+            if williams_r[i] < -80 and close[i] > ema50_1w_aligned[i] and volume_filter_12h[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power < 0 AND Bull Power < 0 (bearish momentum) AND price < 1d EMA34 AND volume confirmation
-            elif bear_power[i] < 0 and bull_power[i] < 0 and close[i] < ema34_1d_aligned[i] and volume_filter_6h[i]:
+            # SHORT: Williams %R > -20 (overbought) AND price < 1w EMA50 (downtrend) AND volume confirmation
+            elif williams_r[i] > -20 and close[i] < ema50_1w_aligned[i] and volume_filter_12h[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power <= 0 (momentum fading) OR trend reversal (price < 1d EMA34)
-            if bull_power[i] <= 0 or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Williams %R > -50 (reverting from oversold) OR trend fails (price < 1w EMA50)
+            if williams_r[i] > -50 or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power >= 0 (momentum fading) OR trend reversal (price > 1d EMA34)
-            if bear_power[i] >= 0 or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Williams %R < -50 (reverting from overbought) OR trend fails (price > 1w EMA50)
+            if williams_r[i] < -50 or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
