@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above Camarilla R3 AND price > 1d EMA34 AND volume > 1.5x 20-period average.
 # Short when price breaks below Camarilla S3 AND price < 1d EMA34 AND volume > 1.5x 20-period average.
-# Exit on ATR(14) trailing stop (2.0x). Uses 12h primary timeframe and 1d HTF for trend alignment.
+# Exit on ATR(14) trailing stop (2.0x). Uses 4h primary timeframe and 1d HTF for trend alignment.
 # Camarilla levels provide precise intraday support/resistance, EMA34 filters intermediate trend,
 # volume spike confirms breakout authenticity. Designed for BTC/ETH with strict entry to avoid overtrading.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     # Calculate EMA34 on 1d close
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF arrays to 12h timeframe (wait for completed 1d bar)
+    # Align HTF arrays to 4h timeframe (wait for completed 1d bar)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
@@ -52,13 +52,13 @@ def generate_signals(prices):
     camarilla_r3_1d = close_1d_vals + 1.1 * (high_1d - low_1d)
     camarilla_s3_1d = close_1d_vals - 1.1 * (high_1d - low_1d)
     
-    # Align HTF arrays to 12h timeframe (wait for completed 1d bar)
+    # Align HTF arrays to 4h timeframe (wait for completed 1d bar)
     camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
     camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
-    # Volume filter: current 12h volume > 1.5x 20-period average (spike confirmation)
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma_12h)
+    # Volume filter: current 4h volume > 1.5x 20-period average (spike confirmation)
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,7 +68,7 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
         if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_1d_aligned[i]) or 
-            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_12h[i])):
+            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
