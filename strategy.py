@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
-# 6h_Camarilla_R3S3_Breakout_1wTrend_Volume
-# Hypothesis: Camarilla R3/S3 breakouts with weekly trend filter and volume confirmation work across market regimes.
-# Weekly trend (1w EMA13) filters direction: only long when above EMA13, short when below.
-# Breakout logic: long when close > R3, short when close < S3. Exit on opposite touch (S3 for longs, R3 for shorts).
-# Volume confirmation requires >1.5x 20-period average to avoid false breakouts.
-# Target: 15-25 trades/year per symbol.
+#/usr/bin/env python3
+# 4h_Keltner_RSI_MeanReversion_Trend
+# Hypothesis: Keltner Channel combined with RSI mean reversion and 1d EMA trend filter works in both bull and bear.
+# In bull: buy pullbacks to lower Keltner band when RSI < 40 and price > 1d EMA200.
+# In bear: sell rallies to upper Keltner band when RSI > 60 and price < 1d EMA200.
+# Uses 20-period ATR(1.5) for Keltner width. Target: 20-40 trades/year.
 
-name = "6h_Camarilla_R3S3_Breakout_1wTrend_Volume"
-timeframe = "6h"
+name = "4h_Keltner_RSI_MeanReversion_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,50 +23,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Camarilla levels from previous day (using daily OHLC)
-    # Typical price = (high + low + close) / 3
-    typical_price = (high + low + close) / 3.0
-    # Calculate daily values for typical price, then get Camarilla levels
-    # We'll use rolling window of 24 (for 6h data, 24 periods = 4 days) but need daily OHLC
-    # Instead, resample conceptually: we need previous day's high, low, close
-    # Since we can't resample, we'll approximate using rolling window of 4 (previous 4*6h = 1 day)
-    # But better: use actual daily data via get_htf_data for '1d'
+    # Keltner Channel: EMA(20) ± ATR(20) * 1.5
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(high - low).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema20 + atr * 1.5
+    lower_keltner = ema20 - atr * 1.5
+
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+
+    # Get 1d data for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels for each day: based on previous day's OHLC
-    # R3 = close + 1.1*(high - low)
-    # S3 = close - 1.1*(high - low)
-    # We'll shift by 1 to use previous day's values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
-    
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-
-    # Weekly trend filter: 1w EMA13
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        ema13_1w = np.full_like(close, np.nan)
-    else:
-        ema13_1w = pd.Series(df_1w['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
-
-    # Volume filter: >1.5x 20-period average
-    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):  # Warmup period
+    for i in range(200, n):
         # Skip if any required value is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema13_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
+        if (np.isnan(ema20[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(rsi[i]) or np.isnan(ema200_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,30 +58,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: close > R3, above weekly EMA13, volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema13_1w_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: price < lower Keltner + RSI < 40 (oversold) + price > 1d EMA200 (uptrend filter)
+            if (close[i] < lower_keltner[i] and 
+                rsi[i] < 40 and 
+                close[i] > ema200_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: close < S3, below weekly EMA13, volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema13_1w_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: price > upper Keltner + RSI > 60 (overbought) + price < 1d EMA200 (downtrend filter)
+            elif (close[i] > upper_keltner[i] and 
+                  rsi[i] > 60 and 
+                  close[i] < ema200_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: close < S3 (opposite touch) or weekly trend turns bearish
-            if (close[i] < s3_aligned[i] or close[i] < ema13_1w_aligned[i]):
+            # EXIT LONG: price > EMA20 (mean reversion) or RSI > 50
+            if (close[i] > ema20[i] or rsi[i] > 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: close > R3 (opposite touch) or weekly trend turns bullish
-            if (close[i] > r3_aligned[i] or close[i] > ema13_1w_aligned[i]):
+            # EXIT SHORT: price < EMA20 (mean reversion) or RSI < 50
+            if (close[i] < ema20[i] or rsi[i] < 50):
                 signals[i] = 0.0
                 position = 0
             else:
