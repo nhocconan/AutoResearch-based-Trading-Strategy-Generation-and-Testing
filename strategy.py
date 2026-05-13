@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_Keltner_Channel_Pullback
-Hypothesis: In trending markets, price pulls back to the 20-period EMA (middle of Keltner Channel) before continuing. The upper/lower bands (EMA ± 2*ATR) act as dynamic support/resistance. We enter long when price touches the lower band during an uptrend (EMA20 rising) and short when price touches the upper band during a downtrend (EMA20 falling). Weekly trend filter ensures we only trade with the higher timeframe trend, reducing false signals in ranging markets. Works in bull markets by catching pullbacks in uptrends and in bear markets by catching pullbacks in downtrends.
+1D_Donchian_Breakout_With_Volume_Filter
+Hypothesis: Daily Donchian channel breakouts capture major trend moves, while volume confirmation filters false breakouts. Works in bull markets by catching sustained uptrends and in bear markets by capturing sharp reversals with volume spikes. Uses weekly trend filter to avoid counter-trend trades.
 """
 
-name = "6h_Keltner_Channel_Pullback"
-timeframe = "6h"
+name = "1D_Donchian_Breakout_With_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtr_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,94 +22,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate EMA(20) - middle of Keltner Channel
-    ema_period = 20
-    ema = np.zeros_like(close)
-    ema[:] = np.nan
-    if len(close) >= ema_period:
-        ema[ema_period-1] = np.mean(close[:ema_period])
-        for i in range(ema_period, len(close)):
-            ema[i] = (close[i] * 2 + ema[i-1] * (ema_period - 1)) / (ema_period + 1)
+    # Calculate Donchian channels (20-day)
+    donchian_period = 20
+    upper_channel = np.full_like(high, np.nan)
+    lower_channel = np.full_like(low, np.nan)
     
-    # Calculate ATR(10) for Keltner Channel width
-    atr_period = 10
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    for i in range(donchian_period - 1, n):
+        upper_channel[i] = np.max(high[i-donchian_period+1:i+1])
+        lower_channel[i] = np.min(low[i-donchian_period+1:i+1])
     
-    atr = np.zeros_like(close)
-    atr[:] = np.nan
-    if len(tr) >= atr_period:
-        atr[atr_period-1] = np.mean(tr[:atr_period])
-        for i in range(atr_period, len(tr)):
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-    
-    # Keltner Channel bands: EMA ± 2*ATR
-    kc_upper = ema + (2 * atr)
-    kc_lower = ema - (2 * atr)
-    
-    # Get weekly data for trend filter
+    # Get weekly trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
+    # Weekly 50-period EMA for trend filter
+    ema_period = 50
+    ema_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= ema_period:
+        multiplier = 2 / (ema_period + 1)
+        ema_1w[ema_period-1] = np.mean(close_1w[:ema_period])
+        for i in range(ema_period, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
     
-    # Weekly EMA(20) for trend filter
-    ema_20_1w = np.zeros_like(close_1w)
-    ema_20_1w[:] = np.nan
-    if len(close_1w) >= 20:
-        ema_20_1w[19] = np.mean(close_1w[:20])
-        for i in range(20, len(close_1w)):
-            ema_20_1w[i] = (close_1w[i] * 2 + ema_20_1w[i-1] * 19) / 21
+    # Align weekly EMA to daily
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Weekly trend: 1 = uptrend (price above EMA20), -1 = downtrend (price below EMA20)
-    weekly_trend = np.zeros_like(close_1w)
-    weekly_trend[:] = np.nan
-    for i in range(len(close_1w)):
-        if not np.isnan(ema_20_1w[i]):
-            weekly_trend[i] = 1 if close_1w[i] > ema_20_1w[i] else -1
-    
-    # Align weekly trend to 6h timeframe
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    # Volume average (20-day) for volume confirmation
+    vol_ma_20 = np.full_like(volume, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup period
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
-            np.isnan(weekly_trend_aligned[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
+        # Volume spike condition: current volume > 1.5x 20-day average
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        
         if position == 0:
-            # LONG: Price touches or crosses below lower KC band during weekly uptrend
-            if (weekly_trend_aligned[i] == 1 and 
-                low[i] <= kc_lower[i] and 
-                close[i] > kc_lower[i]):  # Confirm with close above band
+            # LONG: Price breaks above upper Donchian + volume spike + weekly uptrend
+            if (close[i] > upper_channel[i] and vol_spike and 
+                close[i] > ema_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price touches or crosses above upper KC band during weekly downtrend
-            elif (weekly_trend_aligned[i] == -1 and 
-                  high[i] >= kc_upper[i] and 
-                  close[i] < kc_upper[i]):  # Confirm with close below band
+            # SHORT: Price breaks below lower Donchian + volume spike + weekly downtrend
+            elif (close[i] < lower_channel[i] and vol_spike and 
+                  close[i] < ema_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back above EMA(20) or weekly trend turns down
-            if (close[i] >= ema[i] or weekly_trend_aligned[i] == -1):
+            # EXIT LONG: Price breaks below lower Donchian or weekly trend turns down
+            if (close[i] < lower_channel[i] or close[i] < ema_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back below EMA(20) or weekly trend turns up
-            if (close[i] <= ema[i] or weekly_trend_aligned[i] == 1):
+            # EXIT SHORT: Price breaks above upper Donchian or weekly trend turns up
+            if (close[i] > upper_channel[i] or close[i] > ema_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
