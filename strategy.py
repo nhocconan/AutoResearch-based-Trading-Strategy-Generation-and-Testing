@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# 4H_ADX_Trend_Channel_Breakout_1DTrend
-# Hypothesis: Enter long when price breaks above Donchian(20) upper band with ADX>25 (trending) and price above 1d EMA50 (uptrend).
-# Enter short when price breaks below Donchian(20) lower band with ADX>25 and price below 1d EMA50 (downtrend).
-# Exit when price reverses back into the Donchian channel or trend weakens (ADX<20).
-# Trend filter (ADX) ensures trades only in strong trends, reducing whipsaws in ranging markets.
-# Works in bull (breakouts in uptrend) and bear (breakdowns in downtrend).
-# Low frequency due to ADX trend filter and breakout requirement.
+# 12h_KAMA_Trend_Filter_Volume_Squeeze
+# Hypothesis: Use KAMA direction as a noise-resistant trend filter on daily timeframe. Enter long/short when price breaks Bollinger Bands during low volatility (squeeze) in the direction of daily KAMA trend, confirmed by volume spike. Exit on Bollinger mean reversion or trend change. Designed to work in both bull and bear by capturing volatility breakouts in trending markets while avoiding whipsaws in chop.
 
-name = "4H_ADX_Trend_Channel_Breakout_1DTrend"
-timeframe = "4h"
+name = "12h_KAMA_Trend_Filter_Volume_Squeeze"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,49 +20,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend filter
+    # Get daily data
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily trend: EMA50
+    # KAMA parameters
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
+    
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(df_1d['close'], prepend=df_1d['close'][0]))
+    volatility = np.abs(np.diff(df_1d['close'], prepend=df_1d['close'][0]))
+    for i in range(1, len(volatility)):
+        volatility[i] = volatility[i-1] + np.abs(df_1d['close'][i] - df_1d['close'][i-1])
+    
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(df_1d['close'], np.nan, dtype=float)
+    kama[0] = df_1d['close'][0]
+    for i in range(1, len(kama)):
+        kama[i] = kama[i-1] + sc[i] * (df_1d['close'][i] - kama[i-1])
+    
+    # Bollinger Bands (20, 2)
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    sma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper = sma20 + 2 * std20
+    lower = sma20 - 2 * std20
     
-    # ADX calculation (14-period) on 4h data
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[0], plus_dm])
-    minus_dm = np.concatenate([[0], minus_dm])
+    # Bollinger Band Width for squeeze detection
+    bb_width = (upper - lower) / sma20
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
     
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR is just high-low
+    # Align daily indicators to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Donchian channel (20-period) on 4h data
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Align daily EMA50 to 4h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Volume spike: volume > 2.0 * 4-period average (1 day worth at 12h)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_spike = volume > 2.0 * vol_ma_4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(donch_high[i]) or 
-            np.isnan(donch_low[i]) or 
-            np.isnan(adx[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or 
+            np.isnan(squeeze_aligned[i]) or 
+            np.isnan(kama_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,26 +84,28 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above Donchian high + ADX>25 (trending) + price above 1d EMA50
-            if close[i] > donch_high[i] and adx[i] > 25 and close[i] > ema50_1d_aligned[i]:
+            # LONG: Close > upper band + squeeze + daily KAMA uptrend + volume spike
+            if close[i] > upper_aligned[i] and squeeze_aligned[i] and close[i] > kama_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Donchian low + ADX>25 (trending) + price below 1d EMA50
-            elif close[i] < donch_low[i] and adx[i] > 25 and close[i] < ema50_1d_aligned[i]:
+            # SHORT: Close < lower band + squeeze + daily KAMA downtrend + volume spike
+            elif close[i] < lower_aligned[i] and squeeze_aligned[i] and close[i] < kama_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price back below Donchian low OR ADX<20 (trend weakening)
-            if close[i] < donch_low[i] or adx[i] < 20:
+            # EXIT LONG: Close below middle band (SMA20) OR price below KAMA
+            sma20_aligned = align_htf_to_ltf(prices, df_1d, sma20)
+            if close[i] < sma20_aligned[i] or close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price back above Donchian high OR ADX<20 (trend weakening)
-            if close[i] > donch_high[i] or adx[i] < 20:
+            # EXIT SHORT: Close above middle band (SMA20) OR price above KAMA
+            sma20_aligned = align_htf_to_ltf(prices, df_1d, sma20)
+            if close[i] > sma20_aligned[i] or close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
