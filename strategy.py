@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume spike (>2.0x 20-bar avg), and choppiness regime filter (CHOP > 61.8 = range -> mean reversion, CHOP < 38.2 = trend -> follow breakout). This strategy targets 12h timeframe to reduce trade frequency (target: 50-150 total trades over 4 years) and uses regime filter to avoid false breakouts in choppy markets, improving edge in both bull and bear markets. BTC and ETH are primary targets.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (>2.0x 20-bar avg volume), and choppiness regime filter (CHOP > 61.8 = range -> avoid entries, CHOP < 38.2 = trend -> allow breakout entries). Uses 4h timeframe to target 75-200 total trades over 4 years. Volume spike and regime filter reduce false breakouts. Discrete position sizing (0.25) minimizes fee churn. Works in both bull (follows trend) and bear (avoids range whipsaws via chop filter).
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeChopRegime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
