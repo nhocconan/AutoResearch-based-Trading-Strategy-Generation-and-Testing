@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator + Elder Ray combination with 1d volume spike filter.
-# Long when Alligator is bullish (jaw < teeth < lips) AND Bull Power > 0 AND volume > 2.0x 20-period average.
-# Short when Alligator is bearish (jaw > teeth > lips) AND Bear Power < 0 AND volume > 2.0x 20-period average.
-# Exit on ATR(21) trailing stop (2.5x). Uses 12h primary timeframe and 1d HTF for trend/power alignment.
-# Williams Alligator identifies trend structure via smoothed medians, Elder Ray measures bull/bear power via EMA13.
-# Volume spike confirms breakout authenticity. Designed for BTC/ETH with strict entry to avoid overtrading (target: 12-37 trades/year).
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 AND price > 12h EMA50 AND volume > 1.6x 20-period average.
+# Short when price breaks below Camarilla S3 AND price < 12h EMA50 AND volume > 1.6x 20-period average.
+# Exit on ATR(14) trailing stop (2.0x). Uses 4h primary timeframe and 12h HTF for trend alignment.
+# Designed for BTC/ETH with strict entry to avoid overtrading (target: 20-50 trades/year).
+# Camarilla R3/S3 levels provide strong intraday support/resistance with lower false breakout rate than R4/S4.
+# EMA50 on 12h filters intermediate trend, volume spike confirms breakout authenticity.
 
-name = "12h_WilliamsAlligator_ElderRay_1dVolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,67 +25,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(21) for stoploss
+    # Calculate ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).rolling(window=21, min_periods=21).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1d data for EMA13 (Elder Ray) and volume (MTF)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for EMA50 trend filter (MTF)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA13 on 1d close for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate EMA50 on 12h close
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Bull Power and Bear Power on 1d
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # Align HTF arrays to 4h timeframe (wait for completed 12h bar)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate Williams Alligator on 1d (smoothed medians)
-    # Jaw: 13-period SMMA shifted 8 bars
-    # Teeth: 8-period SMMA shifted 5 bars
-    # Lips: 5-period SMMA shifted 3 bars
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) >= period:
-            # First value is simple SMA
-            result[period-1] = np.mean(arr[:period])
-            # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
-            for i in range(period, len(arr)):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate Camarilla levels from previous 12h bar (using 12h data for pivot calculation)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h_vals = df_12h['close'].values
     
-    jaw_1d = smma(close_1d, 13)
-    teeth_1d = smma(close_1d, 8)
-    lips_1d = smma(close_1d, 5)
+    camarilla_r3_12h = close_12h_vals + (1.1 * (high_12h - low_12h) / 2)  # R3 = C + 1.1*(H-L)/2
+    camarilla_s3_12h = close_12h_vals - (1.1 * (high_12h - low_12h) / 2)  # S3 = C - 1.1*(H-L)/2
     
-    # Shift the lines as per Alligator definition
-    jaw_1d = np.roll(jaw_1d, 8)
-    teeth_1d = np.roll(teeth_1d, 5)
-    lips_1d = np.roll(lips_1d, 3)
-    # Set NaN for rolled values
-    jaw_1d[:8] = np.nan
-    teeth_1d[:5] = np.nan
-    lips_1d[:3] = np.nan
+    # Align HTF arrays to 4h timeframe (wait for completed 12h bar)
+    camarilla_r3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3_12h)
+    camarilla_s3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3_12h)
     
-    # Align HTF arrays to 12h timeframe (wait for completed 1d bar)
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
-    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
-    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
-    
-    # Volume filter: current 12h volume > 2.0x 20-period average (spike confirmation)
-    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_12h)
+    # Volume filter: current 4h volume > 1.6x 20-period average (spike confirmation)
+    vol_ma_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.6 * vol_ma_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -93,22 +66,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or np.isnan(lips_1d_aligned[i]) or
-            np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(vol_ma_12h[i]) or np.isnan(volume_1d_aligned[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(camarilla_r3_12h_aligned[i]) or 
+            np.isnan(camarilla_s3_12h_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_4h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Alligator bullish (jaw < teeth < lips) AND Bull Power > 0 AND volume spike
-            if (jaw_1d_aligned[i] < teeth_1d_aligned[i] < lips_1d_aligned[i] and 
-                bull_power_1d_aligned[i] > 0 and volume_filter[i]):
+            # LONG: price > Camarilla R3 AND price > 12h EMA50 AND volume spike
+            if close[i] > camarilla_r3_12h_aligned[i] and close[i] > ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Alligator bearish (jaw > teeth > lips) AND Bear Power < 0 AND volume spike
-            elif (jaw_1d_aligned[i] > teeth_1d_aligned[i] > lips_1d_aligned[i] and 
-                  bear_power_1d_aligned[i] < 0 and volume_filter[i]):
+            # SHORT: price < Camarilla S3 AND price < 12h EMA50 AND volume spike
+            elif close[i] < camarilla_s3_12h_aligned[i] and close[i] < ema50_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -121,8 +91,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
+            # EXIT LONG: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -136,8 +106,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.5x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
