@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above R3 with close > EMA50 (bullish trend) and volume > 1.5x average.
-# Short when price breaks below S3 with close < EMA50 (bearish trend) and volume > 1.5x average.
-# Uses discrete sizing 0.25. Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
-# Camarilla levels from prior day provide institutional support/resistance. EMA50 filter ensures trend alignment.
-# Volume spike confirms institutional participation. Works in bull markets via upward breaks and bear markets via downward breaks.
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volatility filter and volume confirmation.
+# Long when price breaks above Donchian upper band with ATR(30)/ATR(7) < 0.8 (low volatility regime) and volume > 1.5x average.
+# Short when price breaks below Donchian lower band with ATR(30)/ATR(7) < 0.8 and volume > 1.5x average.
+# Uses discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+# Donchian channels provide clear breakout levels. ATR filter ensures we trade in low volatility regimes before expansion.
+# Volume spike confirms participation. Works in trending markets via breakouts and avoids choppy conditions.
 
-name = "1d_Camarilla_R3_S3_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "4h_Donchian20_1dATRRegime_VolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,73 +24,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Need at least 2 days: 1 for previous, 1 for current
-    if n < 2:
+    # Calculate Donchian channels (20-period)
+    lookback = 20
+    if n < lookback + 1:
         return np.zeros(n)
     
-    # Previous day's OHLC (shifted by 1)
-    high_prev = np.roll(high, 1)
-    low_prev = np.roll(low, 1)
-    close_prev = np.roll(close, 1)
-    # Set first value to NaN as there is no previous day
-    high_prev[0] = np.nan
-    low_prev[0] = np.nan
-    close_prev[0] = np.nan
-    
-    # Camarilla R3 and S3 levels
-    camarilla_range = high_prev - low_prev
-    r3 = close_prev + 1.1 * camarilla_range / 2
-    s3 = close_prev - 1.1 * camarilla_range / 2
+    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().shift(1).values
+    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().shift(1).values
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for ATR-based volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1w data
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ATR (14-period) on 1d data
+    def calculate_atr(high, low, close, period=14):
+        tr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            tr[i] = max(high[i] - low[i], 
+                       abs(high[i] - close[i-1]), 
+                       abs(low[i] - close[i-1]))
+        
+        atr = np.zeros_like(high)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        return atr
     
-    # Align 1w EMA50 to 1d timeframe (wait for 1w bar to close)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    atr_7_1d = calculate_atr(high_1d, low_1d, close_1d, 7)
+    atr_30_1d = calculate_atr(high_1d, low_1d, close_1d, 30)
+    
+    # Avoid division by zero
+    atr_ratio = np.where(atr_7_1d > 0, atr_30_1d / atr_7_1d, 1.0)
+    
+    # Align 1d ATR ratio to 4h timeframe (wait for 1d bar to close)
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 since we use previous day's data
+    for i in range(lookback + 20, n):  # Start after sufficient data
         # Skip if any required data is NaN
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 with close > EMA50 (bullish trend) and volume spike
-            if (close[i] > r3[i] and 
-                close[i] > ema_50_aligned[i] and 
+            # LONG: Price breaks above upper band with low volatility regime (ATR30/ATR7 < 0.8) and volume spike
+            if (close[i] > upper[i] and 
+                atr_ratio_aligned[i] < 0.8 and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 with close < EMA50 (bearish trend) and volume spike
-            elif (close[i] < s3[i] and 
-                  close[i] < ema_50_aligned[i] and 
+            # SHORT: Price breaks below lower band with low volatility regime and volume spike
+            elif (close[i] < lower[i] and 
+                  atr_ratio_aligned[i] < 0.8 and 
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3 (reversal signal)
-            if close[i] < s3[i]:
+            # EXIT LONG: Price breaks below lower band (reversal signal) OR volatility expands (ATR ratio > 1.2)
+            if (close[i] < lower[i]) or (atr_ratio_aligned[i] > 1.2):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3 (reversal signal)
-            if close[i] > r3[i]:
+            # EXIT SHORT: Price breaks above upper band (reversal signal) OR volatility expands (ATR ratio > 1.2)
+            if (close[i] > upper[i]) or (atr_ratio_aligned[i] > 1.2):
                 signals[i] = 0.0
                 position = 0
             else:
