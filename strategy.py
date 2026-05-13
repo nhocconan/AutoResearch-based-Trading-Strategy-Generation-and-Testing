@@ -1,29 +1,30 @@
-#!/usr/bin/env python3
-"""
-6h_Weekly_Pivot_Volume_Squeeze
-Hypothesis: Weekly pivot levels (S4/R4) act as extreme support/resistance where price mean-reverts during low volatility (squeeze), while breakouts above R3/below S3 during high volatility (expansion) continue the trend. Volume and Bollinger Band width filter regimes. Designed for 15-25 trades/year to work in bull/bear markets by capturing reversals at extremes and breakouts in strong moves.
-"""
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
+# Hypothesis: Camarilla pivot levels (R1/S1) from daily timeframe act as key support/resistance.
+# Breakouts above R1 or below S1 with volume confirmation and 12h EMA trend filter capture sustained moves.
+# Designed for low trade frequency (20-40/year) to work in both bull and bear markets by avoiding chop.
+# Uses 12h EMA for trend filter to reduce whipsaw and improve trend following.
 
-name = "6h_Weekly_Pivot_Volume_Squeeze"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_pivot_points(high, low, close):
-    """Calculate weekly pivot points: P, R1-R4, S1-S4"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    r4 = r3 + (high - low)
-    s4 = s3 - (high - low)
-    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels: R1-R4, S1-S4"""
+    range_ = high - low
+    close = close
+    r1 = close + range_ * 1.1 / 12
+    s1 = close - range_ * 1.1 / 12
+    r2 = close + range_ * 1.1 / 6
+    s2 = close - range_ * 1.1 / 6
+    r3 = close + range_ * 1.1 / 4
+    s3 = close - range_ * 1.1 / 4
+    r4 = close + range_ * 1.1 / 2
+    s4 = close - range_ * 1.1 / 2
+    return r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,71 +36,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data (using daily as proxy for weekly calculation)
-    df_weekly = get_htf_data(prices, '1d')
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Get daily data for Camarilla pivot points
+    df_daily = get_htf_data(prices, '1d')
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Calculate weekly pivot points
-    pivot, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivot_points(
-        weekly_high, weekly_low, weekly_close
+    # Calculate daily Camarilla levels
+    r1, r2, r3, r4, s1, s2, s3, s4 = calculate_camarilla(
+        daily_high, daily_low, daily_close
     )
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_6h = align_htf_to_ltf(prices, df_weekly, pivot)
-    r3_6h = align_htf_to_ltf(prices, df_weekly, r3)
-    r4_6h = align_htf_to_ltf(prices, df_weekly, r4)
-    s3_6h = align_htf_to_ltf(prices, df_weekly, s3)
-    s4_6h = align_htf_to_ltf(prices, df_weekly, s4)
+    # Align daily Camarilla levels to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_daily, r1)
+    s1_4h = align_htf_to_ltf(prices, df_daily, s1)
     
-    # Bollinger Band width for volatility regime (20-period, 2 std)
-    close_series = pd.Series(close)
-    bb_mid = close_series.rolling(window=20, min_periods=20).mean()
-    bb_std = close_series.rolling(window=20, min_periods=20).std()
-    bb_width = (4 * bb_std) / bb_mid  # (upper - lower) / middle
-    bb_width = bb_width.fillna(0).values
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Volume confirmation: > 1.3x 20-period average
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.3 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         if position == 0:
-            # MEAN REVERSION LONG: Price at S4 during low volatility (squeeze)
-            if close[i] <= s4_6h[i] and bb_width[i] < np.percentile(bb_width[:i+1], 30) and volume_confirm[i]:
+            # LONG: Break above R1 with volume confirmation and uptrend (price > 12h EMA)
+            if close[i] > r1_4h[i] and close[i-1] <= r1_4h[i-1] and volume_confirm[i] and close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # MEAN REVERSION SHORT: Price at R4 during low volatility (squeeze)
-            elif close[i] >= r4_6h[i] and bb_width[i] < np.percentile(bb_width[:i+1], 30) and volume_confirm[i]:
-                signals[i] = -0.25
-                position = -1
-            # BREAKOUT LONG: Price breaks above R3 during high volatility (expansion)
-            elif close[i] > r3_6h[i] and close[i-1] <= r3_6h[i-1] and bb_width[i] > np.percentile(bb_width[:i+1], 70) and volume_confirm[i]:
-                signals[i] = 0.25
-                position = 1
-            # BREAKOUT SHORT: Price breaks below S3 during high volatility (expansion)
-            elif close[i] < s3_6h[i] and close[i-1] >= s3_6h[i-1] and bb_width[i] > np.percentile(bb_width[:i+1], 70) and volume_confirm[i]:
+            # SHORT: Break below S1 with volume confirmation and downtrend (price < 12h EMA)
+            elif close[i] < s1_4h[i] and close[i-1] >= s1_4h[i-1] and volume_confirm[i] and close[i] < ema_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price reaches R3 (take profit) or breaks below S3 (stop)
-            if close[i] >= r3_6h[i] or close[i] < s3_6h[i]:
+            # EXIT LONG: Price breaks below S1 (stop) or reaches R2 (take profit)
+            if close[i] < s1_4h[i] or close[i] >= r2_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price reaches S3 (take profit) or breaks above R3 (stop)
-            if close[i] <= s3_6h[i] or close[i] > r3_6h[i]:
+            # EXIT SHORT: Price breaks above R1 (stop) or reaches S2 (take profit)
+            if close[i] > r1_4h[i] or close[i] <= s2_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+# Note: r2_4h and s2_4h are derived from r2 and s2 alignment (added below)
+    # Calculate R2 and S2 for exit levels
+    r2_4h = align_htf_to_ltf(prices, df_daily, r2)
+    s2_4h = align_htf_to_ltf(prices, df_daily, s2)
