@@ -1,16 +1,11 @@
-#!/usr/bin/env python3
-"""
-12h_Weekly_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
-Hypothesis: Camarilla pivot levels (R3, S3) from weekly timeframe breakouts on 12h timeframe,
-confirmed by weekly trend (price > weekly EMA34) and volume spikes (>2x 24-period average),
-capture momentum continuation in both bull and bear markets. Weekly pivot levels act as
-strong support/resistance, and breakouts with volume confirmation indicate institutional interest.
-Position size 0.25 limits risk; exit when price re-enters the weekly Camarilla levels
-or trend reverses. Targets 15-30 trades/year to minimize fee drift.
-"""
+# 4D_SMART_MONEY_CONFIRMATION
+# Hypothesis: Smart money leaves footprints via volume spikes at key structural levels (4h swing highs/lows).
+# We detect accumulation/distribution by combining: 1) 4h swing points (fractals), 2) Volume spikes (>2x 20-period avg),
+# 3) 1-day trend filter (price vs EMA50). Works in bull/bear by following institutional flow.
+# Target: 25-40 trades/year (~100-160 total) to minimize fee drag while capturing high-probability moves.
 
-name = "12h_Weekly_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4D_SMART_MONEY_CONFIRMATION"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,63 +22,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivots and trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly trend filter: EMA(34) on close
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 1d trend filter: EMA(50) on close
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate weekly Camarilla levels: R3, S3
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We use R3 and S3 as breakout levels
-    H = df_1w['high'].values
-    L = df_1w['low'].values
-    C = df_1w['close'].values
+    # Volume confirmation: current volume > 2.0x 20-period average (approx 10 hours)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
     
-    # Calculate Camarilla levels for each weekly bar
-    camarilla_R3 = C + ((H - L) * 1.1 / 4)
-    camarilla_S3 = C - ((H - L) * 1.1 / 4)
+    # Swing point detection (fractals) - 4-bar pattern: low-low-high-high for resistance, high-high-low-low for support
+    # Bearish swing (resistance): high[-2] > high[-3] and high[-2] > high[-1] and high[-2] > high[-4]
+    # Bullish swing (support): low[-2] < low[-3] and low[-2] < low[-1] and low[-2] < low[-4]
+    swing_high = np.zeros(n, dtype=bool)
+    swing_low = np.zeros(n, dtype=bool)
     
-    # Align Camarilla levels to 12h timeframe (weekly levels are constant within the week)
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_S3)
-    
-    # Volume confirmation: current volume > 2.0x 24-period average (12 days on 12h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    for i in range(4, n):
+        # Bearish swing high (resistance level)
+        if (high[i-2] > high[i-3] and 
+            high[i-2] > high[i-1] and 
+            high[i-2] > high[i-4]):
+            swing_high[i-2] = True
+        # Bullish swing low (support level)
+        if (low[i-2] < low[i-3] and 
+            low[i-2] < low[i-1] and 
+            low[i-2] < low[i-4]):
+            swing_low[i-2] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(34, n):  # Start after warmup for EMA34
+    for i in range(5, n):  # Start after warmup for swing detection
         if position == 0:
-            # LONG: Breakout above weekly R3 with volume confirmation and uptrend
-            if (close[i] > camarilla_R3_aligned[i] and 
-                volume_filter[i] and 
-                close[i] > ema34_1w_aligned[i]):
+            # LONG: Price approaches swing low support with volume spike and uptrend
+            if (swing_low[i] and 
+                close[i] <= low[i] * 1.002 and  # Near swing low (within 0.2%)
+                volume_spike[i] and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below weekly S3 with volume confirmation and downtrend
-            elif (close[i] < camarilla_S3_aligned[i] and 
-                  volume_filter[i] and 
-                  close[i] < ema34_1w_aligned[i]):
+            # SHORT: Price approaches swing high resistance with volume spike and downtrend
+            elif (swing_high[i] and 
+                  close[i] >= high[i] * 0.998 and  # Near swing high (within 0.2%)
+                  volume_spike[i] and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price re-enters below weekly R3 or trend reverses
-            if (close[i] < camarilla_R3_aligned[i]) or \
-               (close[i] < ema34_1w_aligned[i]):
+            # EXIT LONG: Price reaches swing high resistance or trend reverses
+            if (swing_high[i] and close[i] >= high[i] * 0.998) or \
+               (close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price re-enters above weekly S3 or trend reverses
-            if (close[i] > camarilla_S3_aligned[i]) or \
-               (close[i] > ema34_1w_aligned[i]):
+            # EXIT SHORT: Price reaches swing low support or trend reverses
+            if (swing_low[i] and close[i] <= low[i] * 1.002) or \
+               (close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
