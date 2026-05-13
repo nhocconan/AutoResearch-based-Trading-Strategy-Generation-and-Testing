@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator with 1d EMA34 trend filter and volatility-adjusted position sizing.
-# Williams Alligator: Jaw (EMA13, 8-period smoothed), Teeth (EMA8, 5-period smoothed), Lips (EMA5, 3-period smoothed).
-# Long when Lips > Teeth > Jaw (bullish alignment) AND price > 1d EMA34.
-# Short when Lips < Teeth < Jaw (bearish alignment) AND price < 1d EMA34.
-# Position size scaled by ATR regime: 0.25 in high volatility (ATR14 > ATR50), 0.15 in low volatility.
-# Uses discrete levels to minimize fee churn. Designed for 12-37 trades/year by requiring strong Alligator alignment and daily trend filter.
-# Works in bull markets via bullish Alligator alignment and in bear markets via bearish Alligator alignment.
+# Hypothesis: 1h Camarilla R1/S1 breakout with 4h trend filter (EMA50) and volume confirmation
+# Long when price breaks above R1 AND close > 4h EMA50 AND volume > 1.5x 20-period average
+# Short when price breaks below S1 AND close < 4h EMA50 AND volume > 1.5x 20-period average
+# Uses discrete position size 0.20 to minimize fee churn. Target: 15-37 trades/year by requiring confluence of 4h trend, 1h breakout, and volume spike.
+# Works in bull markets via breakouts with trend, in bear markets via breakdowns with trend filter.
 
-name = "12h_Williams_Alligator_1dTrend_VolRegime_v1"
-timeframe = "12h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_Volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,73 +21,71 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for HTF trend filter
+    # Get 4h data for HTF trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    
+    # Calculate EMA(50) on 4h close for trend filter
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # Calculate previous day's high, low, close for Camarilla levels
+    # Use 1d data to get proper daily OHLC
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(34) on 1d close for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Camarilla R1 and S1 levels for each 1d bar
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    camarilla_range = high_1d - low_1d
+    r1_1d = close_1d + 1.1 * camarilla_range / 12
+    s1_1d = close_1d - 1.1 * camarilla_range / 12
     
-    # Williams Alligator components
-    # Jaw: EMA(13) smoothed by 8 periods
-    jaw_raw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    jaw = pd.Series(jaw_raw).ewm(span=8, adjust=False, min_periods=8).mean().values
+    # Al Camarilla levels to 1h timeframe (wait for daily close)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Teeth: EMA(8) smoothed by 5 periods
-    teeth_raw = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    teeth = pd.Series(teeth_raw).ewm(span=5, adjust=False, min_periods=5).mean().values
-    
-    # Lips: EMA(5) smoothed by 3 periods
-    lips_raw = pd.Series(close).ewm(span=5, adjust=False, min_periods=5).mean().values
-    lips = pd.Series(lips_raw).ewm(span=3, adjust=False, min_periods=3).mean().values
-    
-    # ATR(14) and ATR(50) for volatility regime
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # first bar
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    
-    # Volatility regime: ATR14 > ATR50 (high volatility) -> larger size, else smaller size
-    vol_regime = atr14 > atr50
-    position_size = np.where(vol_regime, 0.25, 0.15)
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
-           np.isnan(atr14[i]) or np.isnan(atr50[i]):
+        if np.isnan(ema50_4h_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or \
+           np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Bullish Alligator alignment (Lips > Teeth > Jaw) AND price > 1d EMA34
-            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema34_1d_aligned[i]:
-                signals[i] = position_size[i]
+            # LONG: price breaks above R1 AND price > 4h EMA50 AND volume filter
+            if close[i] > r1_1d_aligned[i] and close[i] > ema50_4h_aligned[i] and volume_filter[i]:
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Bearish Alligator alignment (Lips < Teeth < Jaw) AND price < 1d EMA34
-            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and close[i] < ema34_1d_aligned[i]:
-                signals[i] = -position_size[i]
+            # SHORT: price breaks below S1 AND price < 4h EMA50 AND volume filter
+            elif close[i] < s1_1d_aligned[i] and close[i] < ema50_4h_aligned[i] and volume_filter[i]:
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Loss of bullish alignment OR price < 1d EMA34 (trend break)
-            if not (lips[i] > teeth[i] and teeth[i] > jaw[i]) or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: price breaks below S1 OR price < 4h EMA50 (trend break)
+            if close[i] < s1_1d_aligned[i] or close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = position_size[i]
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Loss of bearish alignment OR price > 1d EMA34 (trend break)
-            if not (lips[i] < teeth[i] and teeth[i] < jaw[i]) or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: price breaks above R1 OR price > 4h EMA50 (trend break)
+            if close[i] > r1_1d_aligned[i] or close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -position_size[i]
+                signals[i] = -0.20
     
     return signals
