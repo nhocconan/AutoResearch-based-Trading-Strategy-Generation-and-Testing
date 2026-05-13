@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter, volume confirmation (>1.5x 20-bar avg volume), and session filter (08-20 UTC) to reduce noise. Uses 1h timeframe targeting 60-150 total trades over 4 years. Camarilla pivot points provide precise intraday support/resistance levels. 4h EMA50 ensures alignment with medium-term trend. Volume spike filters weak breakouts. Session filter avoids low-liquidity periods. Discrete position sizing (0.20) minimizes fee churn. Works in bull (follows trend) and bear (avoids false breakouts via volume/session filters).
+# Hypothesis: 6h Williams Alligator with 1w EMA34 trend filter, volume confirmation (>1.5x 20-bar avg volume), and weekly choppiness regime filter (CHOP > 61.8 = range -> avoid entries, CHOP < 38.2 = trend -> allow breakout entries). Uses 6h timeframe to target 50-150 total trades over 4 years. Williams Alligator (Jaw/Teeth/Lips) provides trend direction and dynamic support/resistance. Weekly trend filter and regime filter reduce false signals in bear markets. Discrete position sizing (0.25) minimizes fee churn.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hEMA50_VolumeSession_v1"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_1wEMA34_VolumeChopRegime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,85 +19,116 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA50 for trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate 1w EMA34 for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla pivot points (using previous day's OHLC)
-    # For 1h timeframe, we use 1d HTF to get daily OHLC
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
+    # Calculate weekly Choppiness Index (CHOP) on 14-period for regime filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w_arr = df_1w['close'].values
     
-    # Calculate daily typical price for Camarilla
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    # Camarilla levels: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    camarilla_r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 12.0
-    camarilla_s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 12.0
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w_arr, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w_arr, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    true_range_sum = pd.Series(true_range).rolling(window=14, min_periods=14).sum().values
+    chop_1w = 100 * np.log10(atr_sum / true_range_sum) / np.log10(14)
+    chop_1w = np.where(true_range_sum == 0, 50, chop_1w)  # avoid div by zero
+    chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w)
     
-    # Align Camarilla levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    # Williams Alligator: Jaw (13-period SMMA, 8-bar shift), Teeth (8-period SMMA, 5-bar shift), Lips (5-period SMMA, 3-bar shift)
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=np.float64)
+        if len(arr) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # Apply shifts: Jaw shifted 8 bars, Teeth shifted 5 bars, Lips shifted 3 bars
+    jaw_shifted = np.roll(jaw, 8)
+    teeth_shifted = np.roll(teeth, 5)
+    lips_shifted = np.roll(lips, 3)
+    # Set shifted values to NaN for invalid positions
+    jaw_shifted[:8] = np.nan
+    teeth_shifted[:5] = np.nan
+    lips_shifted[:3] = np.nan
+    
+    # Align to LTF (already accounts for completed bar timing)
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw_shifted) if len(df_1w) > 0 else np.full(n, np.nan)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth_shifted) if len(df_1w) > 0 else np.full(n, np.nan)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips_shifted) if len(df_1w) > 0 else np.full(n, np.nan)
     
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):  # start after lookback
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(avg_volume[i])):
-            signals[i] = 0.0
-            continue
-        
-        # Apply session filter
-        if not in_session[i]:
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(avg_volume[i]) or 
+            np.isnan(chop_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Break above R1, price > 4h EMA50, volume spike (>1.5x avg)
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_4h_aligned[i] and 
-                volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = 0.20
+            # LONG: Lips > Teeth > Jaw (bullish alignment), close > 1w EMA34, volume spike (>1.5x avg), trending regime (CHOP < 38.2)
+            if (lips_aligned[i] > teeth_aligned[i] and 
+                teeth_aligned[i] > jaw_aligned[i] and 
+                close[i] > ema_34_1w_aligned[i] and 
+                volume[i] > 1.5 * avg_volume[i] and 
+                chop_1w_aligned[i] < 38.2):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Break below S1, price < 4h EMA50, volume spike (>1.5x avg)
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_4h_aligned[i] and 
-                  volume[i] > 1.5 * avg_volume[i]):
-                signals[i] = -0.20
+            # SHORT: Lips < Teeth < Jaw (bearish alignment), close < 1w EMA34, volume spike (>1.5x avg), trending regime (CHOP < 38.2)
+            elif (lips_aligned[i] < teeth_aligned[i] and 
+                  teeth_aligned[i] < jaw_aligned[i] and 
+                  close[i] < ema_34_1w_aligned[i] and 
+                  volume[i] > 1.5 * avg_volume[i] and 
+                  chop_1w_aligned[i] < 38.2):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close if price breaks below S1 (reversal) or volume drops
-            if close[i] < s1_aligned[i]:
+            # EXIT LONG: Close position if Alligator alignment breaks (Lips < Teeth OR Teeth < Jaw) OR chop becomes too high (choppy market)
+            if (lips_aligned[i] < teeth_aligned[i] or 
+                teeth_aligned[i] < jaw_aligned[i] or 
+                chop_1w_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close if price breaks above R1 (reversal) or volume drops
-            if close[i] > r1_aligned[i]:
+            # EXIT SHORT: Close position if Alligator alignment breaks (Lips > Teeth OR Teeth > Jaw) OR chop becomes too high (choppy market)
+            if (lips_aligned[i] > teeth_aligned[i] or 
+                teeth_aligned[i] > jaw_aligned[i] or 
+                chop_1w_aligned[i] > 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
