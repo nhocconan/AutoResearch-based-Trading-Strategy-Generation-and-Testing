@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_PriceAction_Reversal
-# Hypothesis: Price rejecting weekly pivot levels (R1/S1) with momentum exhaustion (RSI divergence) captures reversals in both bull and bear markets.
-# Uses weekly pivots as key support/resistance and RSI divergence for confirmation.
-# Entry: Long when price > weekly S1 + RSI bullish divergence; Short when price < weekly R1 + RSI bearish divergence.
-# Exit: Mean reversion to weekly pivot point (PP) to avoid overstaying in extended moves.
-# Target: 20-40 trades/year on 6h to stay within optimal range while capturing significant reversals.
+# 12h_Woody_CCI_ZeroReject_Trend
+# Hypothesis: Uses Woodies CCI with zero-reject method on 12h timeframe combined with 1-week EMA trend filter and volume confirmation.
+# In ranging markets, CCI crosses zero with momentum; in trending markets, price respects weekly EMA.
+# Long: CCI crosses above zero + price > weekly EMA + volume spike. Short: CCI crosses below zero + price < weekly EMA + volume spike.
+# Exit: CCI returns to zero (mean reversion) to avoid overstaying.
+# Target: 12-30 trades/year on 12h to stay within optimal range while capturing momentum in both bull and bear markets.
 
-name = "6h_WeeklyPivot_PriceAction_Reversal"
-timeframe = "6h"
+name = "12h_Woody_CCI_ZeroReject_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,36 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data (as HTF for weekly pivots)
-    df_weekly = get_htf_data(prices, '1w')
-    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    # Align to 6h timeframe with 1-bar delay (wait for weekly close)
-    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    # Woodies CCI (20-period)
+    typical_price = (high + low + close) / 3.0
+    sma_tp = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    mad = pd.Series(typical_price).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    # Avoid division by zero
+    mad = np.where(mad == 0, 1e-10, mad)
+    cci = (typical_price - sma_tp) / (0.015 * mad)
 
-    # RSI for divergence detection
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Weekly EMA for trend filter (from 1w data)
+    df_1w = get_htf_data(prices, '1w')
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(14, n):
+    for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(cci[i]) or np.isnan(cci[i-1]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,43 +57,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # Check for RSI divergence
-            bullish_div = False
-            bearish_div = False
-            if i >= 3:
-                # Bullish divergence: price makes lower low, RSI makes higher low
-                if (close[i] < close[i-2] and 
-                    close[i-2] < close[i-4] if i >= 4 else False and
-                    rsi[i] > rsi[i-2] and 
-                    rsi[i-2] > rsi[i-4] if i >= 4 else False):
-                    bullish_div = True
-                # Bearish divergence: price makes higher high, RSI makes lower high
-                elif (close[i] > close[i-2] and 
-                      close[i-2] > close[i-4] if i >= 4 else False and
-                      rsi[i] < rsi[i-2] and 
-                      rsi[i-2] < rsi[i-4] if i >= 4 else False):
-                    bearish_div = True
-
-            # LONG: Price above S1 + bullish RSI divergence
-            if (close[i] > s1_aligned[i] and bullish_div):
+            # LONG: CCI crosses above zero + price > weekly EMA + volume spike
+            if (cci[i-1] <= 0 and cci[i] > 0 and 
+                close[i] > ema_1w_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below R1 + bearish RSI divergence
-            elif (close[i] < r1_aligned[i] and bearish_div):
+            # SHORT: CCI crosses below zero + price < weekly EMA + volume spike
+            elif (cci[i-1] >= 0 and cci[i] < 0 and 
+                  close[i] < ema_1w_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Mean reversion to weekly pivot point
-            if close[i] < pp_aligned[i]:
+            # EXIT LONG: CCI returns to zero (mean reversion)
+            if cci[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Mean reversion to weekly pivot point
-            if close[i] > pp_aligned[i]:
+            # EXIT SHORT: CCI returns to zero (mean reversion)
+            if cci[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
