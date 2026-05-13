@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter_Volume_Confirmation
-Hypothesis: Use daily Kaufman Adaptive Moving Average (KAMA) to capture trend direction, confirmed by volume spikes (volume > 1.5x 20-day average). KAMA adapts to market noise, reducing false signals in choppy markets while capturing true trends. Long when price crosses above KAMA with volume confirmation, short when price crosses below KAMA with volume confirmation. Designed for 1d timeframe to limit trades (<25/year) and avoid fee drag, effective in both bull (trend following) and bear (mean reversion during trend exhaustion) markets.
+6h_Donchian_Breakout_1dTrend_Volume
+Hypothesis: 6-hour Donchian channel breakout (20-period) in the direction of 1-day trend (EMA50) with volume confirmation (volume > 1.5x 20-period average). This strategy captures momentum bursts aligned with the daily trend, using the Donchian channel as a dynamic breakout filter. Designed for 6h to limit trades (target 50-150 over 4 years) and avoid fee drag. Works in bull markets via breakout continuation and in bear markets via short breakdowns with trend filter.
 """
 
-name = "1d_KAMA_Trend_Filter_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,80 +17,68 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA calculation
+    # Get daily data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Kaufman Adaptive Moving Average (KAMA)
-    # Parameters: fast=2, slow=30 (standard)
-    fast_sc = 2 / (2 + 1)      # smoothing constant for fastest EMA
-    slow_sc = 2 / (30 + 1)     # smoothing constant for slowest EMA
-    
-    # Calculate efficiency ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    volatility_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
-    
-    # Avoid division by zero
-    er = np.where(volatility_sum != 0, change / volatility_sum, 0)
-    
-    # Calculate smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Align KAMA to daily timeframe (no extra delay needed)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Calculate volume average (20-day) for volume spike filter
+    # Calculate volume average (20-period) for volume confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Donchian channel (20-period) on 6h data
+    # Upper band: highest high over past 20 periods
+    # Lower band: lowest low over past 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(kama_aligned[i-1]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i]) or 
+            np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-day average
-        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirmed = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Price crosses above KAMA with volume confirmation
-            if close[i-1] <= kama_aligned[i-1] and close[i] > kama_aligned[i] and vol_spike:
+            # LONG: price breaks above Donchian upper + volume + price above daily EMA50 (uptrend)
+            if close[i] > donchian_upper[i] and vol_confirmed and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price crosses below KAMA with volume confirmation
-            elif close[i-1] >= kama_aligned[i-1] and close[i] < kama_aligned[i] and vol_spike:
+            # SHORT: price breaks below Donchian lower + volume + price below daily EMA50 (downtrend)
+            elif close[i] < donchian_lower[i] and vol_confirmed and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA
-            if close[i] < kama_aligned[i]:
+            # EXIT LONG: price breaks below Donchian lower or trend changes (price below EMA50)
+            if close[i] < donchian_lower[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA
-            if close[i] > kama_aligned[i]:
+            # EXIT SHORT: price breaks above Donchian upper or trend changes (price above EMA50)
+            if close[i] > donchian_upper[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
