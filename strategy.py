@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 6h_Donchian20_WeeklyPivotDirection_VolumeConfirmation
-# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation captures momentum in both bull and bear markets. Weekly pivot direction avoids counter-trend trades, volume confirms strength, and Donchian breakout provides clear entry/exit.
+# 4h_Bollinger_Bands_Breakout_1dTrend_Volume
+# Hypothesis: Price breaking out of Bollinger Bands with 1d EMA trend and volume filter captures momentum with controlled frequency. Works in bull/bear via 1d trend filter and volatility-based bands.
 
-name = "6h_Donchian20_WeeklyPivotDirection_VolumeConfirmation"
-timeframe = "6h"
+name = "4h_Bollinger_Bands_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -20,7 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # ATR for volatility normalization
+    # ATR for dynamic scaling and stop context (not used in signal, but for context)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -30,29 +30,27 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
 
-    # Weekly pivot direction (load once, align)
-    df_1w = get_htf_data(prices, '1w')
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_pivot_dir = np.where(weekly_close > weekly_pivot, 1, -1)  # 1 = bullish bias, -1 = bearish bias
-    weekly_pivot_dir_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_dir)
+    # Bollinger Bands (20, 2)
+    close_s = pd.Series(close)
+    bb_mid = close_s.rolling(window=20, min_periods=20).mean()
+    bb_std = close_s.rolling(window=20, min_periods=20).std()
+    bb_upper = (bb_mid + 2 * bb_std).values
+    bb_lower = (bb_mid - 2 * bb_std).values
 
-    # Volume confirmation: volume > 1.5x 20-period average
+    # 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+
+    # Volume filter: >1.8x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(weekly_pivot_dir_aligned[i]) or np.isnan(vol_avg_20[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,30 +59,30 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price breaks above Donchian high + weekly pivot bullish + volume spike
-            if (close[i] > donchian_high[i] and 
-                weekly_pivot_dir_aligned[i] == 1 and
-                volume[i] > vol_avg_20[i] * 1.5):
+            # LONG: Close above upper band + 1d EMA34 uptrend + volume spike
+            if (close[i] > bb_upper[i] and 
+                close[i] > ema34_1d_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.8):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low + weekly pivot bearish + volume spike
-            elif (close[i] < donchian_low[i] and 
-                  weekly_pivot_dir_aligned[i] == -1 and
-                  volume[i] > vol_avg_20[i] * 1.5):
+            # SHORT: Close below lower band + 1d EMA34 downtrend + volume spike
+            elif (close[i] < bb_lower[i] and 
+                  close[i] < ema34_1d_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.8):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low or volume drops
-            if close[i] < donchian_low[i] or volume[i] < vol_avg_20[i] * 1.2:
+            # EXIT LONG: Close below middle band or volatility drop
+            if close[i] < bb_mid.iloc[i] or volume[i] < vol_avg_20[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high or volume drops
-            if close[i] > donchian_high[i] or volume[i] < vol_avg_20[i] * 1.2:
+            # EXIT SHORT: Close above middle band or volatility drop
+            if close[i] > bb_mid.iloc[i] or volume[i] < vol_avg_20[i] * 1.1:
                 signals[i] = 0.0
                 position = 0
             else:
