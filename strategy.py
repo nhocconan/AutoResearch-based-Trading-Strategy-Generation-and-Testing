@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter
-Hypothesis: On daily timeframe, Camarilla pivot levels (R1/S1) act as significant support/resistance.
-Breakouts above R1 or below S1 with volume confirmation and weekly trend alignment capture
-major momentum moves while avoiding false breakouts. Targets 30-100 trades over 4 years to
-minimize fee drag. Works in both bull and bear markets by following the weekly trend.
+6h_ElderRay_BullBearPower_Regime
+Hypothesis: Elder Ray Bull/Bear Power with regime filter (ADX > 20) captures
+trend momentum in both bull and bear markets. Bull Power > 0 and Bear Power < 0
+with price > EMA20 for longs, and vice versa for shorts. ADX ensures we only
+trade in trending conditions, reducing whipsaw. Position size 0.25 targets
+~20-40 trades/year to minimize fee drag.
 """
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,63 +26,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and Camarilla calculation
-    df_1w = get_htf_data(prices, '1w')
+    # EMA20 for trend filter
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla levels for each weekly bar
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12, PP = (H+L+C)/3
-    h_1w = df_1w['high'].values
-    l_1w = df_1w['low'].values
-    c_1w = df_1w['close'].values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    camarilla_pp = (h_1w + l_1w + c_1w) / 3.0
-    camarilla_r1 = c_1w + (h_1w - l_1w) * 1.1 / 12.0
-    camarilla_s1 = c_1w - (h_1w - l_1w) * 1.1 / 12.0
+    # ADX for trend strength (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth with Wilder's smoothing (alpha = 1/period)
+        atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        
+        atr[period-1] = np.mean(tr[:period])
+        plus_dm_smooth = np.zeros_like(high)
+        minus_dm_smooth = np.zeros_like(high)
+        plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+        minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+        
+        for i in range(period, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        plus_di = 100 * plus_dm_smooth / atr
+        minus_di = 100 * minus_dm_smooth / atr
+        dx = np.zeros_like(high)
+        dx[period:] = 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:])
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        return adx
     
-    # Align Camarilla levels to daily chart (no additional delay needed)
-    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pp)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
-    
-    # Weekly trend filter: EMA50 on weekly close
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average (approx 1 month)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    adx = calculate_adx(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after warmup
+    for i in range(20, n):  # Start after warmup
         if position == 0:
-            # LONG: Breakout above R1 with volume confirmation and weekly uptrend
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume_filter[i] and 
-                close[i] > ema50_1w_aligned[i]):
+            # LONG: Bull Power > 0, price > EMA20, ADX > 20 (trending)
+            if (bull_power[i] > 0 and 
+                close[i] > ema20[i] and 
+                adx[i] > 20):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Breakdown below S1 with volume confirmation and weekly downtrend
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume_filter[i] and 
-                  close[i] < ema50_1w_aligned[i]):
+            # SHORT: Bear Power < 0, price < EMA20, ADX > 20 (trending)
+            elif (bear_power[i] < 0 and 
+                  close[i] < ema20[i] and 
+                  adx[i] > 20):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to pivot point or trend reverses
-            if (close[i] < camarilla_pp_aligned[i]) or \
-               (close[i] < ema50_1w_aligned[i]):
+            # EXIT LONG: Bull Power <= 0 or price < EMA20 or ADX < 20 (no trend)
+            if (bull_power[i] <= 0) or \
+               (close[i] < ema20[i]) or \
+               (adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to pivot point or trend reverses
-            if (close[i] > camarilla_pp_aligned[i]) or \
-               (close[i] > ema50_1w_aligned[i]):
+            # EXIT SHORT: Bear Power >= 0 or price > EMA20 or ADX < 20 (no trend)
+            if (bear_power[i] >= 0) or \
+               (close[i] > ema20[i]) or \
+               (adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
