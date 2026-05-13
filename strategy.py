@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1H_Camarilla_R1S1_Breakout_4HTrend_1DVolume"
-timeframe = "1h"
+name = "1d_KAMA_Trend_1wATR_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,89 +12,113 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 4H and 1D data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    
+    # Load 1W data ONCE for ATR filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:  # Need enough for ATR(14)
         return np.zeros(n)
     
-    # 4H EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1D Volume average for volume filter
-    volume_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Calculate ATR(14) on 1W
+    def calculate_atr(high, low, close, period=14):
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        atr = np.full_like(tr, np.nan)
+        if len(tr) >= period:
+            atr[period-1] = np.nanmean(tr[1:period])
+            for i in range(period, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        return atr
     
-    # Pre-calculate session hours (08-20 UTC) for filtering
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    atr_1w = calculate_atr(high_1w, low_1w, close_1w, 14)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate KAMA on 1D
+    def kama(close, er_period=10, fast_sc=2, slow_sc=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=er_period))
+        change = np.concatenate([[np.nan] * er_period, change])
+        volatility = np.abs(np.diff(close))
+        volatility = np.concatenate([[np.nan], volatility])
+        
+        er = np.full_like(close, np.nan)
+        if len(volatility) >= er_period:
+            vol_sum = np.nansum(volatility[1:er_period+1]) if er_period > 0 else 0
+            if vol_sum > 0:
+                er[er_period] = change[er_period] / vol_sum
+            for i in range(er_period+1, len(close)):
+                vol_sum = vol_sum - volatility[i-er_period] + volatility[i]
+                if vol_sum > 0:
+                    er[i] = change[i] / vol_sum
+        
+        # Smoothing Constants
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        
+        # KAMA
+        kama_val = np.full_like(close, np.nan)
+        kama_val[0] = close[0]
+        for i in range(1, len(close)):
+            if not np.isnan(sc[i]):
+                kama_val[i] = kama_val[i-1] + sc[i] * (close[i] - kama_val[i-1])
+            else:
+                kama_val[i] = kama_val[i-1]
+        return kama_val
     
-    # Camarilla R1, S1 levels (using previous day's data)
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.0833 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.0833 / 12
-    
-    # Align Camarilla levels to 1H timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    kama_val = kama(close)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after sufficient data for indicators
-        # Skip if any required data is NaN
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_avg_1d_aligned[i])):
+    for i in range(30, n):  # Start after sufficient data
+        if (np.isnan(kama_val[i]) or np.isnan(atr_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0 if position == 0 else (0.20 if position == 1 else -0.20)
-            continue
+        # Trend filter: price relative to KAMA
+        price_above_kama = close[i] > kama_val[i]
+        price_below_kama = close[i] < kama_val[i]
         
-        # Trend filter: price above/below 4H EMA50
-        price_above_ema = prices['close'].iloc[i] > ema50_4h_aligned[i]
-        price_below_ema = prices['close'].iloc[i] < ema50_4h_aligned[i]
-        
-        # Volume filter: current volume > 1.5x 1D average volume
-        volume_filter = prices['volume'].iloc[i] > 1.5 * vol_avg_1d_aligned[i]
+        # ATR filter: only trade when volatility is elevated (above average)
+        # Using 50-period average of ATR as threshold
+        if i >= 50:
+            atr_avg = np.nanmean(atr_1w_aligned[i-50:i])
+            high_volatility = atr_1w_aligned[i] > atr_avg
+        else:
+            high_volatility = True  # Allow trading until we have enough data for average
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R1 + uptrend + volume
-            if (prices['close'].iloc[i] > camarilla_r1_aligned[i] and 
-                price_above_ema and volume_filter):
-                signals[i] = 0.20
+            # LONG: price above KAMA + high volatility
+            if price_above_kama and high_volatility:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S1 + downtrend + volume
-            elif (prices['close'].iloc[i] < camarilla_s1_aligned[i] and 
-                  price_below_ema and volume_filter):
-                signals[i] = -0.20
+            # SHORT: price below KAMA + high volatility
+            elif price_below_kama and high_volatility:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Camarilla S1 or trend weakens
-            if (prices['close'].iloc[i] < camarilla_s1_aligned[i] or 
-                not price_above_ema):
+            # EXIT LONG: price crosses below KAMA or volatility drops
+            if not price_above_kama or not high_volatility:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Camarilla R1 or trend weakens
-            if (prices['close'].iloc[i] > camarilla_r1_aligned[i] or 
-                not price_below_ema):
+            # EXIT SHORT: price crosses above KAMA or volatility drops
+            if not price_below_kama or not high_volatility:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
