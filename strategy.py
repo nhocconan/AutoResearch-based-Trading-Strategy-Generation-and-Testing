@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_v3
-Hypothesis: Camarilla pivot levels (R1, S1) from the daily chart act as strong support/resistance levels.
-A breakout above R1 with 1d uptrend and volume confirmation signals a long entry.
-A breakdown below S1 with 1d downtrend and volume confirmation signals a short entry.
-This strategy works in both bull and bear markets by following the higher timeframe (1d) trend.
-Target: 12-37 trades/year per signal.
-Version 3: Increased signal threshold (0.30) to reduce trade frequency and added stricter volume confirmation (2.0x average) to reduce false signals.
+4h_Keltner_Channel_Breakout_Trend_Volume
+Hypothesis: Keltner Channel (20, ATR=2) breakouts with 4h trend (EMA50) and volume confirmation work in both bull and bear markets.
+Breakout above upper band with uptrend and volume spike = long.
+Breakdown below lower band with downtrend and volume spike = short.
+Exit on opposite band touch or trend reversal. Uses 1d trend filter for higher timeframe bias.
+Target: 20-50 trades/year per symbol.
 """
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation_v3"
-timeframe = "12h"
+name = "4h_Keltner_Channel_Breakout_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,37 +22,39 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
+    # Keltner Channel: 20 EMA, ATR(20) * 2
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[0.0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    upper_band = ema_20 + 2 * atr_20
+    lower_band = ema_20 - 2 * atr_20
+    
+    # 4h trend: EMA50
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_4h = close > ema_50
+    downtrend_4h = close < ema_50
+    
+    # 1d trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels for each 1d bar
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    cam_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    cam_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
-    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
-    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
-    
-    # 1d trend: 34 EMA
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = close_1d > ema_34_1d
-    downtrend_1d = close_1d < ema_34_1d
-    
-    # Align 1d trend to 12h
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = df_1d['close'].values > ema_50_1d
+    downtrend_1d = df_1d['close'].values < ema_50_1d
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
-    # Volume confirmation: volume > 2.0 * 20-period average (stricter to reduce trades)
+    # Volume confirmation: volume > 2.0 * 20-period average
     vol_ma = np.zeros(n)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -62,38 +63,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Get aligned values for current bar
-        r1 = cam_r1_aligned[i]
-        s1 = cam_s1_aligned[i]
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
+    for i in range(50, n):
+        # Get values
+        upband = upper_band[i]
+        lowband = lower_band[i]
+        uptrend = uptrend_4h[i]
+        downtrend = downtrend_4h[i]
+        uptrend_htf = uptrend_1d_aligned[i]
+        downtrend_htf = downtrend_1d_aligned[i]
         vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: price breaks above R1, 1d uptrend, volume confirmation
-            if close[i] > r1 and uptrend and vol_conf:
-                signals[i] = 0.30
+            # LONG: break above upper band, 4h uptrend, 1d uptrend filter, volume confirmation
+            if close[i] > upband and uptrend and uptrend_htf and vol_conf:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1, 1d downtrend, volume confirmation
-            elif close[i] < s1 and downtrend and vol_conf:
-                signals[i] = -0.30
+            # SHORT: break below lower band, 4h downtrend, 1d downtrend filter, volume confirmation
+            elif close[i] < lowband and downtrend and downtrend_htf and vol_conf:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below S1 or 1d trend turns down
-            if close[i] < s1 or not uptrend:
+            # EXIT LONG: touch lower band or 4h trend turns down
+            if close[i] < lowband or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above R1 or 1d trend turns up
-            if close[i] > r1 or not downtrend:
+            # EXIT SHORT: touch upper band or 4h trend turns up
+            if close[i] > upband or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
