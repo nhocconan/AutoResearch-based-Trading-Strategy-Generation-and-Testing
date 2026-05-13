@@ -1,12 +1,11 @@
-#%%
 #!/usr/bin/env python3
 """
-1h_RSI_MeanReversion_4hTrend_Filter
-Hypothesis: In 1h timeframe, use RSI(14) for mean reversion entries (RSI<30 long, RSI>70 short) but only in the direction of the 4h Supertrend (ATR=10, multiplier=3) to avoid counter-trend trades. Add volume confirmation (volume > 1.5x 20-period average) and session filter (08-20 UTC) to reduce false signals. Designed for 1h to target 15-35 trades/year with tight entries. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+12h_Keltner_Channel_Breakout
+Hypothesis: Keltner Channel breakouts on 12h timeframe capture trend momentum, filtered by 1d ADX (trending market) and volume spike to avoid whipsaws. Long when price closes above upper KC (EMA20 + 2*ATR) with ADX>25 and volume>1.5x 20-period average. Short when price closes below lower KC (EMA20 - 2*ATR) with same filters. Uses 1d timeframe for trend filter to reduce noise and improve reliability in both bull and bear markets. Designed for low trade frequency (target 12-30/year) to minimize fee drag.
 """
 
-name = "1h_RSI_MeanReversion_4hTrend_Filter"
-timeframe = "1h"
+name = "12h_Keltner_Channel_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,105 +22,113 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Pre-calculate session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for Supertrend calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get daily data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR(10) for Supertrend
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.max([high_4h[0] - low_4h[0], np.abs(high_4h[0] - close_4h[0]), np.abs(low_4h[0] - close_4h[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # Calculate ADX on daily timeframe (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] > minus_dm[i]:
+                minus_dm[i] = 0
+            elif minus_dm[i] > plus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smoothed values using Wilder's smoothing (EMA-like with alpha=1/period)
+        atr = np.zeros_like(tr)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        
+        atr[period-1] = np.mean(tr[1:period])
+        plus_dm_sum = np.sum(plus_dm[1:period])
+        minus_dm_sum = np.sum(minus_dm[1:period])
+        
+        for i in range(period, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_sum = plus_dm_sum - (plus_dm_sum/period) + plus_dm[i]
+            minus_dm_sum = minus_dm_sum - (minus_dm_sum/period) + minus_dm[i]
+            plus_di[i] = 100 * plus_dm_sum / atr[i] if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_sum / atr[i] if atr[i] != 0 else 0
+        
+        dx = np.zeros_like(high)
+        dx[period:] = 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:])
+        adx = np.zeros_like(high)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(high)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        return adx
     
-    # Calculate Supertrend
-    upper_band = (high_4h + low_4h) / 2 + 3 * atr
-    lower_band = (high_4h + low_4h) / 2 - 3 * atr
+    adx_14 = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_14_aligned = align_htf_to_ltf(prices, df_1d, adx_14)
     
-    supertrend = np.zeros_like(close_4h)
-    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
+    # Calculate EMA20 and ATR for Keltner Channel on 12h data
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First bar
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    for i in range(1, len(close_4h)):
-        if close_4h[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close_4h[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
+    # Keltner Channel bands
+    upper_kc = ema_20 + 2 * atr
+    lower_kc = ema_20 - 2 * atr
     
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    # Align Supertrend direction to 1h timeframe
-    supertrend_direction_aligned = align_htf_to_ltf(prices, df_4h, direction)
-    
-    # Calculate RSI(14) on 1h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate volume average (20-period) for volume spike filter
+    # Volume spike filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(rsi[i]) or np.isnan(rsi[i-1]) or 
-            np.isnan(supertrend_direction_aligned[i]) or 
-            np.isnan(vol_ma_20[i]) or not in_session[i]):
+    for i in range(30, n):  # Start after warmup period
+        # Skip if any required data is NaN
+        if (np.isnan(adx_14_aligned[i]) or np.isnan(ema_20[i]) or 
+            np.isnan(upper_kc[i]) or np.isnan(lower_kc[i]) or 
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-period average
+        # Volume spike condition
         vol_spike = volume[i] > 1.5 * vol_ma_20[i]
+        # ADX trend filter: trending market (ADX > 25)
+        trending = adx_14_aligned[i] > 25
         
         if position == 0:
-            # LONG: RSI crosses above 30 (oversold bounce) + volume spike + 4h uptrend
-            if rsi[i-1] <= 30 and rsi[i] > 30 and vol_spike and supertrend_direction_aligned[i] == 1:
-                signals[i] = 0.20
+            # LONG: Price closes above upper KC + volume spike + trending market
+            if close[i] > upper_kc[i] and vol_spike and trending:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: RSI crosses below 70 (overbought rejection) + volume spike + 4h downtrend
-            elif rsi[i-1] >= 70 and rsi[i] < 70 and vol_spike and supertrend_direction_aligned[i] == -1:
-                signals[i] = -0.20
+            # SHORT: Price closes below lower KC + volume spike + trending market
+            elif close[i] < lower_kc[i] and vol_spike and trending:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI crosses below 70 or 4h trend turns down
-            if rsi[i] < 70 or supertrend_direction_aligned[i] == -1:
+            # EXIT LONG: Price closes below EMA20 (middle of KC) or ADX weakens
+            if close[i] < ema_20[i] or adx_14_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI crosses above 30 or 4h trend turns up
-            if rsi[i] > 30 or supertrend_direction_aligned[i] == 1:
+            # EXIT SHORT: Price closes above EMA20 or ADX weakens
+            if close[i] > ema_20[i] or adx_14_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
-
-#%%
