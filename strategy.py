@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume
-Hypothesis: On daily timeframe, Camarilla R1/S1 breakouts with volume confirmation and weekly trend filter capture institutional order flow. Weekly trend (price > EMA50) ensures alignment with higher timeframe momentum, reducing false signals in ranging markets. Designed for low trade frequency (15-25/year) to minimize fee drag while capturing strong directional moves in both bull and bear markets.
+4h_Camarilla_R3S3_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance. A breakout above R3 or below S3 with volume confirmation and aligned 1d trend (close > EMA34) signals continuation. Uses 0.30 position size to balance risk/return and limit trade frequency (~20-40/year) to minimize fee drag in 4-hour bars. Works in both bull and bear markets by following the dominant 1d trend.
 """
 
-name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,65 +22,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for trend filter and Camarilla calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1d trend filter: EMA(34) on close
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Camarilla levels from previous day
-    # R1 = close + 1.12 * (high - low) / 12
-    # S1 = close - 1.12 * (high - low) / 12
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
+    # Calculate Camarilla levels from previous 1d bar
+    # R3 = close + 1.1*(high - low)
+    # S3 = close - 1.1*(high - low)
+    # Note: We use the previous day's HLC to avoid look-ahead
+    camarilla_high = df_1d['high'].values
+    camarilla_low = df_1d['low'].values
+    camarilla_close = df_1d['close'].values
     
-    # Handle first bar
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    camarilla_range = camarilla_high - camarilla_low
+    r3 = camarilla_close + 1.1 * camarilla_range
+    s3 = camarilla_close - 1.1 * camarilla_range
     
-    camarilla_width = (prev_high - prev_low) * 1.12 / 12
-    r1 = prev_close + camarilla_width
-    s1 = prev_close - camarilla_width
+    # Align Camarilla levels to 4h timeframe (they update only when new 1d bar forms)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume confirmation: current volume > 1.8x 20-day average
+    # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from second bar (need previous day)
+    for i in range(1, n):  # Start from 1 to have previous bar for breakout
         if position == 0:
-            # LONG: Close breaks above R1, volume confirmation, price above weekly EMA50 (uptrend)
-            if (close[i] > r1[i] and 
+            # LONG: Close breaks above R3, volume confirmation, price above 1d EMA34 (uptrend)
+            if (close[i] > r3_aligned[i] and 
                 volume_filter[i] and 
-                close[i] > ema50_1w_aligned[i]):
-                signals[i] = 0.25
+                close[i] > ema34_1d_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Close breaks below S1, volume confirmation, price below weekly EMA50 (downtrend)
-            elif (close[i] < s1[i] and 
+            # SHORT: Close breaks below S3, volume confirmation, price below 1d EMA34 (downtrend)
+            elif (close[i] < s3_aligned[i] and 
                   volume_filter[i] and 
-                  close[i] < ema50_1w_aligned[i]):
-                signals[i] = -0.25
+                  close[i] < ema34_1d_aligned[i]):
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close breaks below S1 (reversal) OR weekly trend turns bearish
-            if (close[i] < s1[i]) or (close[i] < ema50_1w_aligned[i]):
+            # EXIT LONG: Close breaks below S3 (reversal) OR volume drops significantly
+            if (close[i] < s3_aligned[i]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Close breaks above R1 (reversal) OR weekly trend turns bullish
-            if (close[i] > r1[i]) or (close[i] > ema50_1w_aligned[i]):
+            # EXIT SHORT: Close breaks above R3 (reversal) OR volume drops significantly
+            if (close[i] > r3_aligned[i]) or \
+               not volume_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
