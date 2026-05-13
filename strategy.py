@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-# Long when price breaks above 4h Donchian upper (20-period high) AND close > 12h EMA50 AND volume > 1.5x 20-period average.
-# Short when price breaks below 4h Donchian lower (20-period low) AND close < 12h EMA50 AND volume > 1.5x 20-period average.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA34 trend filter and volume confirmation.
+# Long when price breaks above 1h Camarilla R3 AND close > 4h EMA34 AND volume > 1.5x 20-period average.
+# Short when price breaks below 1h Camarilla S3 AND close < 4h EMA34 AND volume > 1.5x 20-period average.
 # Uses ATR-based trailing stop (2.0x) for risk control.
-# Donchian channels provide clear structure, 12h EMA50 filters intermediate trend, volume spike confirms participation.
-# Target: 20-40 trades/year (80-160 total over 4 years) on 4h timeframe.
+# Camarilla pivots provide intraday support/resistance, 4h EMA34 filters intermediate trend, volume spike confirms participation.
+# Target: 15-37 trades/year (60-150 total over 4 years) on 1h timeframe with session filter (08-20 UTC).
 
-name = "4h_Donchian20_12hEMA50_Volume_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_4hEMA34_Volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,6 +23,11 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     # Calculate ATR(14) for stoploss
     tr1 = high - low
@@ -32,27 +37,30 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 4h data for Donchian channels
+    # Get 1h data for Camarilla pivots (using previous bar's OHLC)
+    # Camarilla levels based on previous bar's range
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # First bar: use current close as previous
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    
+    # Calculate Camarilla levels for 1h timeframe
+    # R3 = Close + (High - Low) * 1.1/4
+    # S3 = Close - (High - Low) * 1.1/4
+    camarilla_upper = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_lower = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Get 4h data for EMA34 trend filter
     df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    
-    # Calculate EMA50 on 12h close
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA34 on 4h close
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Align HTF indicators to LTF
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_4h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_4h, donchian_lower)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
     # Calculate volume confirmation: volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,20 +73,31 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_upper[i]) or np.isnan(camarilla_lower[i]) or 
+            np.isnan(ema34_4h_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
+        # Apply session filter: only trade between 08-20 UTC
+        if not in_session[i]:
+            signals[i] = 0.0
+            # Carry forward tracking values when filtered out
+            if i > 0:
+                if position == 1:
+                    highest_since_entry[i] = highest_since_entry[i-1]
+                elif position == -1:
+                    lowest_since_entry[i] = lowest_since_entry[i-1]
+            continue
+        
         if position == 0:
-            # LONG: Price > 4h Donchian upper AND close > 12h EMA50 AND volume confirmation
-            if close[i] > donchian_upper_aligned[i] and close[i] > ema50_12h_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+            # LONG: Price > 1h Camarilla R3 AND close > 4h EMA34 AND volume confirmation
+            if close[i] > camarilla_upper[i] and close[i] > ema34_4h_aligned[i] and volume_confirm[i]:
+                signals[i] = 0.20
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < 4h Donchian lower AND close < 12h EMA50 AND volume confirmation
-            elif close[i] < donchian_lower_aligned[i] and close[i] < ema50_12h_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+            # SHORT: Price < 1h Camarilla S3 AND close < 4h EMA34 AND volume confirmation
+            elif close[i] < camarilla_lower[i] and close[i] < ema34_4h_aligned[i] and volume_confirm[i]:
+                signals[i] = -0.20
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
@@ -98,7 +117,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
@@ -113,7 +132,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
