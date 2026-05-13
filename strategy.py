@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation
 Hypothesis: Camarilla pivot levels (R1, S1) from the daily chart act as strong support/resistance levels.
 A breakout above R1 with 1d uptrend and volume confirmation signals a long entry.
 A breakdown below S1 with 1d downtrend and volume confirmation signals a short entry.
@@ -8,8 +8,8 @@ This strategy works in both bull and bear markets by following the higher timefr
 Target: 12-37 trades/year per symbol.
 """
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     cam_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     cam_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
     cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
     cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
     
@@ -48,7 +48,7 @@ def generate_signals(prices):
     uptrend_1d = close_1d > ema_34_1d
     downtrend_1d = close_1d < ema_34_1d
     
-    # Align 1d trend to 12h
+    # Align 1d trend to 4h
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
     
