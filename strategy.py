@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator + Elder Ray + Volume Spike strategy for BTC/ETH.
-# Uses Alligator (jaw/teeth/lips) for trend direction, Elder Ray (bull/bear power) for momentum confirmation,
-# and volume spike (>2.0x 20-bar avg) to filter false signals. Designed for low trade frequency
-# (<50 total 12h trades) to minimize fee drag while capturing strong momentum in both bull and bear markets.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (>2.0x 20-bar avg volume).
+# Uses tighter Camarilla levels (R3/S3) for stronger breakout signals, EMA34 for 1d trend alignment,
+# and high volume threshold to filter false breakouts. Designed for low trade frequency (<100 total 4h trades)
+# to minimize fee drag while capturing strong momentum moves in both bull and bear markets.
 
-name = "12h_Williams_Alligator_ElderRay_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,37 +22,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1w EMA for Alligator (jaw/teeth/lips)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
-        return np.zeros(n)
-    
-    # Williams Alligator: jaw=13, teeth=8, lips=5 (all SMMA)
-    close_1w = df_1w['close'].values
-    jaw = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips = pd.Series(close_1w).ewm(span=5, adjust=False, min_periods=5).mean().values
-    
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
-    
-    # Calculate 1d Elder Ray (bull/bear power)
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 34:
         return np.zeros(n)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Elder Ray: bull power = high - EMA13, bear power = low - EMA13
-    close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d Camarilla levels (based on prior 1d bar)
+    # R3 = close + 1.1*(high-low)*1.125/4
+    # S3 = close - 1.1*(high-low)*1.125/4
+    prior_1d_high = df_1d['high'].values
+    prior_1d_low = df_1d['low'].values
+    prior_1d_close = df_1d['close'].values
     
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    camarilla_r3 = prior_1d_close + 1.1 * (prior_1d_high - prior_1d_low) * 1.125 / 4
+    camarilla_s3 = prior_1d_close - 1.1 * (prior_1d_high - prior_1d_low) * 1.125 / 4
     
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Calculate average volume for confirmation (20-period)
     lookback_vol = 20
@@ -63,40 +52,41 @@ def generate_signals(prices):
     
     for i in range(max(lookback_vol, 1), n):
         # Skip if any required data is NaN
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Lips > Teeth > Jaw (bullish alignment), bull power > 0, volume spike
-            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and
-                bull_power_aligned[i] > 0 and
+            # LONG: Price breaks above Camarilla R3, close > 1d EMA34, volume spike (>2.0x avg)
+            if (high[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = 0.25
+                signals[i] = 0.25  # Reduced size to minimize fee drag
                 position = 1
-            # SHORT: Lips < Teeth < Jaw (bearish alignment), bear power < 0, volume spike
-            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and
-                  bear_power_aligned[i] < 0 and
+            # SHORT: Price breaks below Camarilla S3, close < 1d EMA34, volume spike (>2.0x avg)
+            elif (low[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = -0.25
+                signals[i] = -0.25  # Reduced size to minimize fee drag
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alligator turns bearish or volume drops
-            if (lips_aligned[i] < teeth_aligned[i]) or (volume[i] < 0.5 * avg_volume[i]):
+            # EXIT LONG: Close position if price breaks below Camarilla R3 or volume drops
+            if (low[i] < camarilla_r3_aligned[i]) or (volume[i] < 0.5 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # Maintain position
         elif position == -1:
-            # EXIT SHORT: Alligator turns bullish or volume drops
-            if (lips_aligned[i] > teeth_aligned[i]) or (volume[i] < 0.5 * avg_volume[i]):
+            # EXIT SHORT: Close position if price breaks above Camarilla S3 or volume drops
+            if (high[i] > camarilla_s3_aligned[i]) or (volume[i] < 0.5 * avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # Maintain position
     
     return signals
