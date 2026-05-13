@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_KeltnerChannel_Breakout_1dTrend"
-timeframe = "6h"
+name = "12h_DonchianBreakout_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,76 +15,67 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Load 1D data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1D for trend filter
+    # 1D EMA20 for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Align 1D EMA to 6H timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 12h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate ATR(20) on 6H for Keltner Channels
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    atr = np.full_like(tr, np.nan)
-    if len(tr) >= 20:
-        atr[19] = np.nanmean(tr[1:20])
-        for i in range(20, len(tr)):
-            atr[i] = (atr[i-1] * 19 + tr[i]) / 20
-    
-    # Calculate EMA(20) on 6H for Keltner center line
-    close_series = pd.Series(close)
-    ema20_6h = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner Channel parameters
-    kc_mult = 2.0
-    upper_keltner = ema20_6h + kc_mult * atr
-    lower_keltner = ema20_6h - kc_mult * atr
+    # 12h volume filter
+    volume_series = pd.Series(volume)
+    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(upper_keltner[i]) or 
-            np.isnan(lower_keltner[i]) or np.isnan(ema20_6h[i])):
+    for i in range(20, n):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma20[i]) or np.isnan(ema20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: Price above/below 1D EMA50
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
+        # Trend filter: price above/below 1D EMA20
+        price_above_ema = close[i] > ema20_1d_aligned[i]
+        price_below_ema = close[i] < ema20_1d_aligned[i]
+        
+        # Volume filter: volume above average
+        volume_ok = volume[i] > vol_ma20[i]
         
         if position == 0:
-            # LONG: Uptrend + break above upper Keltner channel
-            if uptrend and close[i] > upper_keltner[i]:
+            # LONG: Donchian breakout above + uptrend + volume
+            if close[i] > donchian_high[i] and price_above_ema and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Downtrend + break below lower Keltner channel
-            elif downtrend and close[i] < lower_keltner[i]:
+            # SHORT: Donchian breakout below + downtrend + volume
+            elif close[i] < donchian_low[i] and price_below_ema and volume_ok:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below center line or trend reverses
-            if close[i] < ema20_6h[i] or not uptrend:
+            # EXIT LONG: Donchian breakdown below or trend reversal
+            if close[i] < donchian_low[i] or not price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above center line or trend reverses
-            if close[i] > ema20_6h[i] or not downtrend:
+            # EXIT SHORT: Donchian breakout above or trend reversal
+            if close[i] > donchian_high[i] or not price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
