@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Price_Volume_Ratio_Spike_Trend_Filter
-# Hypothesis: Volume spikes with price rejection from key levels (VWAP, SMA) signal exhaustion and reversals.
-# Uses volume/price ratio > 2.0 as spike indicator, with 4h VWAP for context and 12h EMA for trend filter.
-# Works in bull (pullbacks in uptrend) and bear (bounces in downtrend) by trading reversals.
-# Target: 20-40 trades/year to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Camarilla R1/S1 breakouts with 12h EMA trend filter and volume confirmation capture institutional breakouts while avoiding false signals.
+# Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend).
+# Target: 25-40 trades/year to minimize fee drag and maximize edge.
 
-name = "4h_Price_Volume_Ratio_Spike_Trend_Filter"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,50 +22,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP (volume-weighted average price)
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = typical_price * volume
-    vwap_cumsum = np.cumsum(vwap_numerator)
-    volume_cumsum = np.cumsum(volume)
-    vwap = vwap_cumsum / volume_cumsum
+    # Calculate daily Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Price/volume ratio spike: volume > 2x average AND price deviation from VWAP
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    price_deviation = np.abs(close - vwap) / vwap  # Normalized deviation
-    volume_spike = volume > (2.0 * vol_ma)
-    price_rejection = price_deviation > 0.008  # 0.8% deviation from VWAP
+    # Camarilla levels: R1, S1 based on previous day
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d + 1.1 * camarilla_range / 12.0
+    s1 = close_1d - 1.1 * camarilla_range / 12.0
     
-    # Get 12h data for EMA trend filter
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Get 12h EMA for trend filter
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):  # Start after warmup
+    for i in range(100, n):
         if position == 0:
-            # LONG: Price rejection below VWAP (long wick) with volume spike in uptrend
-            if close[i] < vwap[i] and low[i] < vwap[i] * 0.992 and volume_spike[i] and close[i] > ema_12h_aligned[i]:
+            # LONG: Break above R1 with volume in uptrend (price > 12h EMA)
+            if high[i] > r1_aligned[i] and volume_confirm[i] and close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price rejection above VWAP (short wick) with volume spike in downtrend
-            elif close[i] > vwap[i] and high[i] > vwap[i] * 1.008 and volume_spike[i] and close[i] < ema_12h_aligned[i]:
+            # SHORT: Break below S1 with volume in downtrend (price < 12h EMA)
+            elif low[i] < s1_aligned[i] and volume_confirm[i] and close[i] < ema_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses back above VWAP or trend weakens
-            if close[i] > vwap[i] or close[i] < ema_12h_aligned[i]:
+            # EXIT LONG: Price closes below 12h EMA or reverses below S1
+            if close[i] < ema_12h_aligned[i] or close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses back below VWAP or trend weakens
-            if close[i] < vwap[i] or close[i] > ema_12h_aligned[i]:
+            # EXIT SHORT: Price closes above 12h EMA or reverses above R1
+            if close[i] > ema_12h_aligned[i] or close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
