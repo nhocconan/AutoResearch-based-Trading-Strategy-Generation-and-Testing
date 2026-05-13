@@ -1,83 +1,125 @@
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 """
-6h_Alligator_AllLines_ElderRay_Trend
-Hypothesis: Combining Williams Alligator (JAWS/TEETH/LIPS) with Elder Ray (Bull/Bear Power) on 6h timeframe
-provides robust trend detection with momentum confirmation, working in both bull and bear markets.
-Alligator lines define trend direction (bullish when LIPS>TEETH>JAWS, bearish when LIPS<TEETH<JAWS).
-Elder Ray confirms trend strength (Bull Power > 0 and rising for longs, Bear Power < 0 and falling for shorts).
-Trades only when both indicators agree, reducing false signals and whipsaws.
-Target: 15-35 trades/year per symbol.
+1d_Pivot_Price_Action_Strategy
+Hypothesis: Daily price action at key weekly pivot points (R1/S1) with volume confirmation 
+and volatility filter works in both bull and bear markets. Uses weekly pivots as 
+structural support/resistance, enters on rejection or breakout with volume spike.
+Exit on opposite pivot touch or volatility expansion. Target: 10-25 trades/year.
 """
 
-name = "6h_Alligator_AllLines_ElderRay_Trend"
-timeframe = "6h"
+name = "1d_Pivot_Price_Action_Strategy"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_true_range(high, low, close):
+    """Calculate True Range"""
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[0.0], np.maximum(tr1, np.maximum(tr2, tr3))])
+    return tr
+
+def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
+    tr = calculate_true_range(high, low, close)
+    atr = np.zeros_like(close, dtype=float)
+    if len(close) < period:
+        return atr
+    # First ATR is simple average
+    atr[period-1] = np.mean(tr[1:period])
+    # Wilder's smoothing: ATR[t] = (ATR[t-1] * (period-1) + TR[t]) / period
+    for i in range(period, len(close)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    return atr
+
+def calculate_pivot_points(high, low, close):
+    """Calculate standard pivot points: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    return pivot, r1, s1
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator: SMAs of median price (HL/2)
-    median_price = (high + low) / 2.0
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate ATR for volatility filter (14-period)
+    atr_14 = calculate_atr(high, low, close, 14)
+    atr_ma = np.zeros(n)
+    for i in range(14, n):
+        atr_ma[i] = np.mean(atr_14[i-14:i])
+    # Low volatility filter: avoid choppy markets
+    low_vol = atr_14 < 0.8 * atr_ma
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Smooth Elder Ray for trend confirmation (3-period EMA)
-    bull_power_smooth = pd.Series(bull_power).ewm(span=3, adjust=False, min_periods=3).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=3, adjust=False, min_periods=3).mean().values
+    # Calculate weekly pivot points
+    wp_high = df_1w['high'].values
+    wp_low = df_1w['low'].values
+    wp_close = df_1w['close'].values
     
-    # Alligator trend conditions
-    bullish_alligator = (lips > teeth) & (teeth > jaw)
-    bearish_alligator = (lips < teeth) & (teeth < jaw)
+    wp_pivot, wp_r1, wp_s1 = calculate_pivot_points(wp_high, wp_low, wp_close)
     
-    # Elder Ray trend conditions (require positive/negative and rising/falling)
-    bullish_elder = (bull_power_smooth > 0) & (bull_power_smooth > np.roll(bull_power_smooth, 1))
-    bearish_elder = (bear_power_smooth < 0) & (bear_power_smooth < np.roll(bear_power_smooth, 1))
+    # Align weekly pivots to daily timeframe
+    wp_pivot_aligned = align_htf_to_ltf(prices, df_1w, wp_pivot)
+    wp_r1_aligned = align_htf_to_ltf(prices, df_1w, wp_r1)
+    wp_s1_aligned = align_htf_to_ltf(prices, df_1w, wp_s1)
     
-    # Combine signals: both indicators must agree
-    bullish = bullish_alligator & bullish_elder
-    bearish = bearish_alligator & bearish_elder
+    # Volume confirmation: volume > 1.5 * 20-day average
+    vol_ma = np.zeros(n)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_conf = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):  # Start after warmup period
+        # Get current values
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        r1 = wp_r1_aligned[i]
+        s1 = wp_s1_aligned[i]
+        vol_ok = volume_conf[i]
+        vol_filter = low_vol[i]
+        
         if position == 0:
-            # LONG: bullish alignment from both indicators
-            if bullish[i]:
+            # LONG ENTRY: Price rejects S1 with bullish close and volume
+            # Conditions: low touches/goes below S1, closes back above S1, volume spike
+            if curr_low <= s1 and curr_close > s1 and vol_ok and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: bearish alignment from both indicators
-            elif bearish[i]:
+            # SHORT ENTRY: Price rejects R1 with bearish close and volume
+            # Conditions: high touches/goes above R1, closes back below R1, volume spike
+            elif curr_high >= r1 and curr_close < r1 and vol_ok and vol_filter:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: either indicator turns bearish
-            if not (bullish_alligator[i] and bullish_elder[i]):
+            # EXIT LONG: Price reaches R1 or volatility expands
+            if curr_high >= r1 or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: either indicator turns bullish
-            if not (bearish_alligator[i] and bearish_elder[i]):
+            # EXIT SHORT: Price reaches S1 or volatility expands
+            if curr_low <= s1 or not vol_filter:
                 signals[i] = 0.0
                 position = 0
             else:
