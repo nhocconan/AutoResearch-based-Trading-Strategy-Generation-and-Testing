@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-1h_Donchian_Breakout_Trend_Volume
-Hypothesis: 1-hour Donchian breakouts with 4h trend and volume confirmation work in both bull and bear markets.
-Breakout above 20-period high with 4h uptrend and volume spike = long.
-Breakdown below 20-period low with 4h downtrend and volume spike = short.
-Exit on opposite band touch or trend reversal.
-Uses 1d trend filter for higher timeframe bias. Uses 4h EMA50 for trend.
-Target: 15-37 trades/year per session (60-150 total over 4 years).
+6h_WeeklyPivot_PriceAction_Verification
+Hypothesis: Weekly pivot levels (calculated from prior week's OHLC) act as strong support/resistance.
+In trending markets, price pulls back to weekly pivot levels (R1/S1, R2/S2) before continuing.
+In ranging markets, price respects weekly pivot levels as boundaries.
+Entry: Limit orders at weekly pivot levels with rejection candlestick patterns (pin bar, engulfing).
+Exit: Opposite pivot level or trend reversal.
+Uses volume confirmation to avoid false breakouts.
+Designed for 6H timeframe to reduce noise and capture multi-day swings.
+Target: 15-35 trades/year per symbol.
 """
 
-name = "1h_Donchian_Breakout_Trend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_PriceAction_Verification"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -27,82 +29,119 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel: 20-period high/low
-    high_20 = np.zeros(n)
-    low_20 = np.zeros(n)
-    for i in range(20, n):
-        high_20[i] = np.max(high[i-20:i])
-        low_20[i] = np.min(low[i-20:i])
-    
-    # 4h trend: EMA50
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly pivot points from prior week's OHLC
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    uptrend_4h = close > ema_50_4h_aligned
-    downtrend_4h = close < ema_50_4h_aligned
     
-    # 1d trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    uptrend_1d = close > ema_50_1d_aligned
-    downtrend_1d = close < ema_50_1d_aligned
+    # Calculate weekly pivot: PP = (H + L + C) / 3
+    # R1 = 2*PP - L, S1 = 2*PP - H
+    # R2 = PP + (H - L), S2 = PP - (H - L)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Volume confirmation: volume > 2.0 * 20-period average
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    
+    # Align weekly pivot levels to 6H timeframe (already delayed by weekly close)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # Trend filter: 24-period EMA (~4 days on 6H)
+    ema_24 = pd.Series(close).ewm(span=24, adjust=False, min_periods=24).mean().values
+    uptrend = close > ema_24
+    downtrend = close < ema_24
+    
+    # Volume confirmation: volume > 1.5 * 24-period average
     vol_ma = np.zeros(n)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 2.0 * vol_ma
+    for i in range(24, n):
+        vol_ma[i] = np.mean(volume[i-24:i])
+    volume_conf = volume > 1.5 * vol_ma
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Candlestick patterns for rejection/continuation
+    # Bullish engulfing: current green candle fully engulfs previous red candle
+    bullish_engulf = (close > open_) & (open_ < close) & \
+                     (close[:-1] < open_[:-1]) & (open_[:-1] > close[:-1]) & \
+                     (close >= open_[:-1]) & (open_ <= close[:-1])
+    # Shift to align with current candle
+    bullish_engulf = np.concatenate([[False], bullish_engulf[:-1]])
+    
+    # Bearish engulfing: current red candle fully engulfs previous green candle
+    bearish_engulf = (close < open_) & (open_ > close) & \
+                     (close[:-1] > open_[:-1]) & (open_[:-1] < close[:-1]) & \
+                     (close <= open_[:-1]) & (open_ >= close[:-1])
+    bearish_engulf = np.concatenate([[False], bearish_engulf[:-1]])
+    
+    # Pin bar patterns
+    # Bullish pin: long lower wick, small body, close near high
+    body_size = np.abs(close - open_)
+    upper_wick = high - np.maximum(close, open_)
+    lower_wick = np.minimum(close, open_) - low
+    bullish_pin = (lower_wick > 2 * body_size) & (upper_wick < 0.5 * body_size)
+    # Bearish pin: long upper wick
+    bearish_pin = (upper_wick > 2 * body_size) & (lower_wick < 0.5 * body_size)
+    
+    # Combine rejection signals
+    bullish_reject = bullish_engulf | bullish_pin
+    bearish_reject = bearish_engulf | bearish_pin
+    
+    # Align open prices for candle calculations
+    open_ = prices['open'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if not session_filter[i]:
+    for i in range(24, n):
+        # Skip if no weekly data yet
+        if np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             signals[i] = 0.0
             continue
-        
-        # Get values
-        upper = high_20[i]
-        lower = low_20[i]
-        uptrend_4h_val = uptrend_4h[i]
-        downtrend_4h_val = downtrend_4h[i]
-        uptrend_1d_val = uptrend_1d[i]
-        downtrend_1d_val = downtrend_1d[i]
-        vol_conf = volume_conf[i]
+            
+        pp_val = pp_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
         
         if position == 0:
-            # LONG: break above 20-period high, 4h uptrend, 1d uptrend, volume confirmation
-            if close[i] > upper and uptrend_4h_val and uptrend_1d_val and vol_conf:
-                signals[i] = 0.20
+            # LONG: price near support with bullish rejection
+            near_s1 = abs(low[i] - s1_val) / s1_val < 0.005  # within 0.5%
+            near_s2 = abs(low[i] - s2_val) / s2_val < 0.005
+            
+            if ((near_s1 or near_s2) and bullish_reject[i] and uptrend[i] and volume_conf[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: break below 20-period low, 4h downtrend, 1d downtrend, volume confirmation
-            elif close[i] < lower and downtrend_4h_val and downtrend_1d_val and vol_conf:
-                signals[i] = -0.20
+            # SHORT: price near resistance with bearish rejection
+            elif ((abs(high[i] - r1_val) / r1_val < 0.005 or abs(high[i] - r2_val) / r2_val < 0.005) and 
+                  bearish_reject[i] and downtrend[i] and volume_conf[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: touch 20-period low or 4h trend turns down
-            if close[i] < lower or not uptrend_4h_val:
+            # EXIT LONG: price reaches resistance or trend turns down
+            if (abs(high[i] - r1_val) / r1_val < 0.005 or 
+                abs(high[i] - r2_val) / r2_val < 0.005 or 
+                not uptrend[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: touch 20-period high or 4h trend turns up
-            if close[i] > upper or not downtrend_4h_val:
+            # EXIT SHORT: price reaches support or trend turns up
+            if (abs(low[i] - s1_val) / s1_val < 0.005 or 
+                abs(low[i] - s2_val) / s2_val < 0.005 or 
+                not downtrend[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
