@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_RVI_Signal_1dTrend_Volume
-# Hypothesis: Relative Vigor Index (RVI) crossovers on 4h with 1d EMA trend filter and volume spike confirmation.
-# RVI measures conviction of price moves by comparing closing-open ranges to high-low ranges.
-# Long when RVI crosses above its signal line in uptrend with volume spike.
-# Short when RVI crosses below its signal line in downtrend with volume spike.
-# Uses 1d EMA50 for trend filter to avoid counter-trend trades.
-# Target: 20-50 trades/year per symbol to minimize fee decay while capturing momentum shifts.
+# 1d_KAMA_Trend_With_Volume_And_Chop_Filter
+# Hypothesis: Kaufman's Adaptive Moving Average (KAMA) provides adaptive trend filtering,
+# which works well in both trending and ranging markets when combined with volume confirmation
+# and Choppiness Index regime filter to avoid false signals in choppy conditions.
+# Uses KAMA crossover signals with volume > 1.5x 20-period average and Choppiness Index > 61.8 (ranging)
+# or < 38.2 (trending) to adapt strategy to market regime.
+# Target: 7-25 trades/year per symbol with disciplined risk control via trailing stop.
 
-name = "4h_RVI_Signal_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_Volume_And_Chop_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,72 +17,75 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
 
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_ = prices['open'].values
     volume = prices['volume'].values
 
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter and regime detection
+    df_1w = get_htf_data(prices, '1w')
 
-    # Calculate RVI (Relative Vigor Index) on 4h
-    # Numerator: (close - open) + 2*(close_prev - open_prev) + 2*(close_prev2 - open_prev2) + (close_prev3 - open_prev3)
-    # Denominator: (high - low) + 2*(high_prev - low_prev) + 2*(high_prev2 - low_prev2) + (high_prev3 - low_prev3)
-    # RVI = SMA(numerator, 4) / SMA(denominator, 4)
-    # Signal line = EMA(RVI, 4)
+    # Calculate KAMA ( Kaufman's Adaptive Moving Average )
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None
+    # Proper ER calculation: |net change| / sum(|abs changes|) over period
+    er = np.zeros_like(close)
+    for i in range(10, n):  # ER period = 10
+        if i >= 10:
+            net_change = np.abs(close[i] - close[i-10])
+            total_change = np.sum(np.abs(np.diff(close[i-10:i+1])))
+            er[i] = net_change / total_change if total_change > 0 else 0
+    # SC = [ER * (fastest SC - slowest SC) + slowest SC]^2
+    fastest_sc = 2 / (2 + 1)   # EMA(2)
+    slowest_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fastest_sc - slowest_sc) + slowest_sc) ** 2
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Start after ER period
+    for i in range(10, n):
+        if not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
 
-    a = close - open_
-    b = close - open_
-    c = close - open_
-    d = close - open_
+    # Align KAMA to daily timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
 
-    # Shifted values for numerator
-    a1 = np.roll(a, 1)
-    a2 = np.roll(a, 2)
-    a3 = np.roll(a, 3)
-    b1 = np.roll(b, 1)
-    b2 = np.roll(b, 2)
-    b3 = np.roll(b, 3)
-    c1 = np.roll(c, 1)
-    c2 = np.roll(c, 2)
-    c3 = np.roll(c, 3)
-    d1 = np.roll(d, 1)
-    d2 = np.roll(d, 2)
-    d3 = np.roll(d, 3)
-
-    num = (a + 2*b1 + 2*b2 + b3)  # close-open components
-    den = (high - low) + 2*(np.roll(high-low, 1)) + 2*(np.roll(high-low, 2)) + (np.roll(high-low, 3))
-
-    # Avoid division by zero
-    den = np.where(den == 0, 1e-10, den)
-    rvi_raw = num / den
-
-    # Smooth with 4-period SMA
-    rvi = pd.Series(rvi_raw).rolling(window=4, min_periods=4).mean().values
-    # Signal line: 4-period EMA of RVI
-    rvi_signal = pd.Series(rvi).ewm(span=4, adjust=False, min_periods=4).mean().values
-
-    # Trend filter: 1d EMA50
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Weekly trend filter: price vs weekly EMA34
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
 
     # Volume confirmation: current volume > 1.5 x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     volume_spike = volume > (1.5 * vol_ma)
+
+    # Choppiness Index for regime detection (14-period)
+    chop = np.full_like(close, np.nan)
+    for i in range(14, n):
+        true_range = np.maximum(high[i] - low[i],
+                               np.maximum(np.abs(high[i] - close[i-1]),
+                                          np.abs(low[i] - close[i-1])))
+        atr14 = np.sum(true_range[i-14:i+1]) / 14
+        highest_high = np.max(high[i-14:i+1])
+        lowest_low = np.min(low[i-14:i+1])
+        if atr14 > 0:
+            chop[i] = 100 * np.log10(highest_high - lowest_low) / np.log10(14) / (atr14 * 14)
+        else:
+            chop[i] = 50
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(20, n):
+    for i in range(30, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(rvi[i]) or 
-            np.isnan(rvi_signal[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(volume_spike[i]) or 
+            np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,33 +93,47 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
+        # Regime filter: Only trade in trending markets (CHOP < 38.2) or strong reversals in chop (CHOP > 61.8)
+        is_trending = chop[i] < 38.2
+        is_choppy = chop[i] > 61.8
+
         if position == 0:
-            # LONG: RVI crosses above signal line in uptrend with volume spike
-            if (rvi[i] > rvi_signal[i] and 
-                rvi[i-1] <= rvi_signal[i-1] and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume_spike[i]):
+            # LONG: Price above KAMA AND above weekly EMA34 in uptrend OR oversold bounce in chop
+            if ((close[i] > kama_aligned[i] and 
+                 close[i] > ema34_1w_aligned[i] and 
+                 volume_spike[i] and 
+                 is_trending) or
+                (close[i] < kama_aligned[i] * 0.98 and  # Oversold condition
+                 volume_spike[i] and 
+                 is_choppy)):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RVI crosses below signal line in downtrend with volume spike
-            elif (rvi[i] < rvi_signal[i] and 
-                  rvi[i-1] >= rvi_signal[i-1] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume_spike[i]):
+            # SHORT: Price below KAMA AND below weekly EMA34 in downtrend OR overbought bounce in chop
+            elif ((close[i] < kama_aligned[i] and 
+                   close[i] < ema34_1w_aligned[i] and 
+                   volume_spike[i] and 
+                   is_trending) or
+                  (close[i] > kama_aligned[i] * 1.02 and  # Overbought condition
+                   volume_spike[i] and 
+                   is_choppy)):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RVI crosses below signal line
-            if rvi[i] < rvi_signal[i] and rvi[i-1] >= rvi_signal[i-1]:
+            # EXIT LONG: Price below KAMA OR trend turns down OR chop increases significantly
+            if (close[i] < kama_aligned[i] or 
+                close[i] < ema34_1w_aligned[i] or
+                chop[i] > 50):  # Exit if market becomes choppy
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RVI crosses above signal line
-            if rvi[i] > rvi_signal[i] and rvi[i-1] <= rvi_signal[i-1]:
+            # EXIT SHORT: Price above KAMA OR trend turns up OR chop increases significantly
+            if (close[i] > kama_aligned[i] or 
+                close[i] > ema34_1w_aligned[i] or
+                chop[i] > 50):  # Exit if market becomes choppy
                 signals[i] = 0.0
                 position = 0
             else:
