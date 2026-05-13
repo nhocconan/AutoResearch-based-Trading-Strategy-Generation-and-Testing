@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: Camarilla pivot levels (R1, S1) from the daily chart act as strong support/resistance levels.
-A breakout above R1 with 1d uptrend and volume confirmation signals a long entry.
-A breakdown below S1 with 1d downtrend and volume confirmation signals a short entry.
-This strategy works in both bull and bear markets by following the higher timeframe (1d) trend.
-Target: 12-37 trades/year per symbol.
+1d_1w_1wKeltner_MeanReversion
+Hypothesis: In high-volatility regimes (1w ATR expansion), price reverts to the 1w KAMA.
+Enter long when price touches lower Keltner channel (KAMA - 1.5*ATR) in an oversold RSI condition.
+Enter short when price touches upper Keltner channel (KAMA + 1.5*ATR) in an overbought RSI condition.
+Use 1w trend filter to avoid counter-trend trades. Designed for low-frequency, high-conviction trades.
+Target: 7-25 trades/year per symbol.
 """
 
-name = "4h_1d_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "4h"
+name = "1d_1w_1wKeltner_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,78 +18,128 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for KAMA, ATR, RSI
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate Camarilla pivot levels for each 1d bar
-    # R1 = close + (high - low) * 1.1/12
-    # S1 = close - (high - low) * 1.1/12
-    cam_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    cam_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Calculate 1w KAMA (using close prices)
+    def calculate_kama(close, length=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, prepend=close[0]))
+        abs_change = np.abs(np.diff(close, prepend=close[0]))
+        er = np.zeros_like(close)
+        for i in range(length, len(close)):
+            if np.sum(abs_change[i-length+1:i+1]) > 0:
+                er[i] = change[i] / np.sum(abs_change[i-length+1:i+1])
+            else:
+                er[i] = 0
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
-    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
+    kama_1w = calculate_kama(close_1w, length=10, fast=2, slow=30)
     
-    # 1d trend: 34 EMA
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = close_1d > ema_34_1d
-    downtrend_1d = close_1d < ema_34_1d
+    # Calculate 1w ATR
+    def calculate_atr(high, low, close, length=14):
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        atr = np.zeros_like(close)
+        for i in range(length, len(close)):
+            if i == length:
+                atr[i] = np.nanmean(tr[i-length+1:i+1])
+            else:
+                atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
+        return atr
     
-    # Align 1d trend to 4h
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    atr_1w = calculate_atr(high_1w, low_1w, close_1w, length=14)
     
-    # Volume confirmation: volume > 1.5 * 20-period average
-    vol_ma = np.zeros(n)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    volume_conf = volume > 1.5 * vol_ma
+    # Calculate 1w RSI
+    def calculate_rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        for i in range(length, len(close)):
+            if i == length:
+                avg_gain[i] = np.mean(gain[i-length+1:i+1])
+                avg_loss[i] = np.mean(loss[i-length+1:i+1])
+            else:
+                avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i]) / length
+                avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i]) / length
+        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi_1w = calculate_rsi(close_1w, length=14)
+    
+    # 1w trend: 50 EMA
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1w = close_1w > ema_50_1w
+    downtrend_1w = close_1w < ema_50_1w
+    
+    # Align all 1w indicators to daily timeframe
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    uptrend_1w_aligned = align_htf_to_ltf(prices, df_1w, uptrend_1w)
+    downtrend_1w_aligned = align_htf_to_ltf(prices, df_1w, downtrend_1w)
+    
+    # Calculate Keltner channels
+    upper_keltner = kama_1w_aligned + 1.5 * atr_1w_aligned
+    lower_keltner = kama_1w_aligned - 1.5 * atr_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(100, n):
-        # Get aligned values for current bar
-        r1 = cam_r1_aligned[i]
-        s1 = cam_s1_aligned[i]
-        uptrend = uptrend_1d_aligned[i]
-        downtrend = downtrend_1d_aligned[i]
-        vol_conf = volume_conf[i]
+    for i in range(50, n):
+        kama = kama_1w_aligned[i]
+        upper = upper_keltner[i]
+        lower = lower_keltner[i]
+        rsi = rsi_1w_aligned[i]
+        uptrend = uptrend_1w_aligned[i]
+        downtrend = downtrend_1w_aligned[i]
         
         if position == 0:
-            # LONG: price breaks above R1, 1d uptrend, volume confirmation
-            if close[i] > r1 and uptrend and vol_conf:
+            # LONG: price touches lower Keltner, RSI oversold, in 1w uptrend (avoid counter-trend)
+            if close[i] <= lower and rsi < 30 and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S1, 1d downtrend, volume confirmation
-            elif close[i] < s1 and downtrend and vol_conf:
+            # SHORT: price touches upper Keltner, RSI overbought, in 1w downtrend
+            elif close[i] >= upper and rsi > 70 and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below S1 or 1d trend turns down
-            if close[i] < s1 or not uptrend:
+            # EXIT LONG: price crosses above KAMA or RSI overbought
+            if close[i] >= kama or rsi > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above R1 or 1d trend turns up
-            if close[i] > r1 or not downtrend:
+            # EXIT SHORT: price crosses below KAMA or RSI oversold
+            if close[i] <= kama or rsi < 30:
                 signals[i] = 0.0
                 position = 0
             else:
