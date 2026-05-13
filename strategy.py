@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Williams %R extreme reversal with 1d EMA34 trend filter and volume spike confirmation.
-# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 (bullish trend) AND volume > 2.0x average.
-# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 (bearish trend) AND volume > 2.0x average.
-# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.25.
-# Williams %R identifies exhaustion points, 1d EMA34 filters for trend alignment, volume spike confirms conviction.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and volume confirmation.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Long when Bull Power > 0 AND Bear Power < previous Bear Power AND 1d EMA34 rising AND volume > 1.3x average.
+# Short when Bear Power > 0 AND Bull Power < previous Bull Power AND 1d EMA34 falling AND volume > 1.3x average.
+# Uses ATR(14) trailing stop (2.5x) for risk control. Discrete sizing 0.28.
+# Elder Ray measures bull/bear strength relative to EMA13, EMA34 filters higher-timeframe trend, volume confirms conviction.
+# Target: 50-150 total trades over 4 years (12-37/year) on 6h.
 
-name = "4h_WilliamsR_Extreme_1dEMA34_VolumeSpike_ATRStop_v1"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_1dEMA34_Volume_ATRStop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -35,12 +36,12 @@ def generate_signals(prices):
     # Calculate average volume for confirmation
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Williams %R(14)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero when highest_high == lowest_low
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate EMA13 for Elder Ray (on 6h data)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components
+    bull_power = high - ema_13  # Bull Power = High - EMA13
+    bear_power = ema_13 - low   # Bear Power = EMA13 - Low
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -49,7 +50,7 @@ def generate_signals(prices):
     # Calculate EMA(34) on 1d data
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
+    # Align 1d EMA34 to 6h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
@@ -59,24 +60,27 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) AND price > 1d EMA34 AND volume > 2.0x average
-            if (williams_r[i] < -80 and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = 0.25
+            # LONG: Bull Power > 0 AND Bear Power decreasing AND 1d EMA34 rising AND volume > 1.3x average
+            if (bull_power[i] > 0 and 
+                bear_power[i] < bear_power[i-1] and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+                volume[i] > 1.3 * avg_volume[i]):
+                signals[i] = 0.28
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Williams %R > -20 (overbought) AND price < 1d EMA34 AND volume > 2.0x average
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume[i] > 2.0 * avg_volume[i]):
-                signals[i] = -0.25
+            # SHORT: Bear Power > 0 AND Bull Power decreasing AND 1d EMA34 falling AND volume > 1.3x average
+            elif (bear_power[i] > 0 and 
+                  bull_power[i] < bull_power[i-1] and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+                  volume[i] > 1.3 * avg_volume[i]):
+                signals[i] = -0.28
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
             else:
@@ -96,7 +100,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 highest_since_entry[i] = np.nan
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
                 # Carry forward tracking
                 if i > 0:
                     highest_since_entry[i] = highest_since_entry[i-1]
@@ -111,7 +115,7 @@ def generate_signals(prices):
                 # Reset tracking when flat
                 lowest_since_entry[i] = np.nan
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
                 # Carry forward tracking
                 if i > 0:
                     lowest_since_entry[i] = lowest_since_entry[i-1]
