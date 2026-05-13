@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_1dVolume
-Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance in ranging markets, with weekly trend filter (EMA50) to avoid counter-trend trades, and daily volume surge to confirm institutional participation. Works in bull markets by buying pullbacks to S3 in uptrends and in bear markets by selling bounces to R3 in downtrends.
+4H_RSI_Momentum_With_Volume_Filter
+Hypothesis: RSI momentum combined with volume confirmation captures trend continuations in both bull and bear markets. Uses RSI > 55 for long momentum and RSI < 45 for short momentum, requiring volume > 1.5x average to confirm institutional participation. Includes 4h trend filter via EMA(50) to avoid counter-trend trades.
 """
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_1dVolume"
-timeframe = "12h"
+name = "4H_RSI_Momentum_With_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,108 +17,74 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate 5-period Camarilla levels (R3, S3)
-    camarilla_period = 5
-    camarilla_multiplier = 1.1/2  # For R3/S3 levels
+    # Calculate RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    r3 = np.full(n, np.nan)
-    s3 = np.full(n, np.nan)
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    for i in range(camarilla_period-1, n):
-        window_high = np.max(high[i-camarilla_period+1:i+1])
-        window_low = np.min(low[i-camarilla_period+1:i+1])
-        window_close = close[i]
-        
-        # Calculate pivot point
-        pivot = (window_high + window_low + window_close) / 3
-        
-        # Calculate R3 and S3 levels
-        r3[i] = pivot + camarilla_multiplier * (window_high - window_low)
-        s3[i] = pivot - camarilla_multiplier * (window_high - window_low)
+    for i in range(14, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Get weekly data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    close_1w = df_1w['close'].values
-    
-    # Calculate 50-period EMA on weekly
+    # Calculate EMA(50) for trend filter
     ema_period = 50
-    ema_1w = np.zeros_like(close_1w)
+    ema = np.zeros_like(close)
+    ema[0] = close[0]
     alpha = 2 / (ema_period + 1)
+    for i in range(1, len(close)):
+        ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
     
-    # Initialize with SMA
-    ema_1w[ema_period-1] = np.mean(close_1w[:ema_period])
-    for i in range(ema_period, len(close_1w)):
-        ema_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_1w[i-1]
-    
-    # Align weekly EMA to 12h timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Get daily data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 20-period average volume on daily
-    vol_ma_period = 20
-    vol_ma_1d = np.zeros_like(volume_1d)
-    for i in range(vol_ma_period-1, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-vol_ma_period+1:i+1])
-    
-    # Align daily volume average to 12h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate volume average (20-period)
+    vol_ma_20 = np.zeros_like(volume)
+    for i in range(19, len(volume)):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # Weekly trend filter: price above/below EMA50
-        weekly_uptrend = close[i] > ema_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_1w_aligned[i]
-        
-        # Daily volume confirmation: current 12h volume > 1.5x daily average volume
-        # Convert daily average to 12h equivalent (approx: daily volume / 2)
-        vol_threshold = vol_ma_1d_aligned[i] * 1.5
-        vol_confirm = volume[i] > vol_threshold
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Price at S3 support + weekly uptrend + volume confirmation
-            if (close[i] <= s3[i] and weekly_uptrend and vol_confirm):
+            # LONG: RSI > 55 (bullish momentum) + price > EMA(50) (uptrend) + volume confirmation
+            if rsi[i] > 55 and close[i] > ema[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at R3 resistance + weekly downtrend + volume confirmation
-            elif (close[i] >= r3[i] and weekly_downtrend and vol_confirm):
+            # SHORT: RSI < 45 (bearish momentum) + price < EMA(50) (downtrend) + volume confirmation
+            elif rsi[i] < 45 and close[i] < ema[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above midpoint or weekly trend changes
-            midpoint = (r3[i] + s3[i]) / 2
-            if (close[i] >= midpoint or not weekly_uptrend):
+            # EXIT LONG: RSI < 50 (loss of momentum) or price < EMA(50) (trend break)
+            if rsi[i] < 50 or close[i] < ema[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below midpoint or weekly trend changes
-            midpoint = (r3[i] + s3[i]) / 2
-            if (close[i] <= midpoint or not weekly_downtrend):
+            # EXIT SHORT: RSI > 50 (loss of bearish momentum) or price > EMA(50) (trend break)
+            if rsi[i] > 50 or close[i] > ema[i]:
                 signals[i] = 0.0
                 position = 0
             else:
