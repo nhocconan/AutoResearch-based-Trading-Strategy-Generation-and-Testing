@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Use Camarilla pivot points on 1h for entry timing, with daily trend and volume confirmation.
-# The Camarilla R1/S1 levels provide tight breakout zones. Only trade in direction of daily trend.
-# Volume spike confirms breakout strength. Works in bull/bear by following daily trend.
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years).
-# Uses 1h for entry timing, daily for trend filter (higher timeframe = fewer, higher quality signals).
+# 6h_ADX_Supertrend_Momentum
+# Hypothesis: Combine ADX trend strength with Supertrend momentum and volume confirmation.
+# ADX > 25 filters for trending markets, Supertrend gives direction, volume confirms momentum.
+# Works in bull/bear by only taking strong trend moves. Target: 20-30 trades/year.
 
-name = "1h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "1h"
+name = "6h_ADX_Supertrend_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,60 +22,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for trend and volume filters
+    # Get 1d data for ADX and Supertrend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
 
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
 
-    # Calculate daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_uptrend = close_1d > ema50_1d
-    daily_downtrend = close_1d < ema50_1d
+    # Calculate ATR for Supertrend
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
 
-    # Calculate Camarilla pivot points for 1h (using previous 1h bar's OHLC)
-    # Camarilla formulas: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    # We need previous bar's OHLC, so shift by 1
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # First bar will have invalid values (rolled from last), set to 0 so range is 0
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Supertrend calculation
+    upper_band = (high_1d + low_1d) / 2 + 3 * atr
+    lower_band = (high_1d + low_1d) / 2 - 3 * atr
+    supertrend = np.zeros_like(close_1d)
+    supertrend_direction = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
 
-    hl_range = prev_high - prev_low
-    camarilla_R1 = prev_close + 1.1 * hl_range / 12
-    camarilla_S1 = prev_close - 1.1 * hl_range / 12
+    for i in range(1, len(close_1d)):
+        if close_1d[i] > upper_band[i-1]:
+            supertrend_direction[i] = 1
+        elif close_1d[i] < lower_band[i-1]:
+            supertrend_direction[i] = -1
+        else:
+            supertrend_direction[i] = supertrend_direction[i-1]
+            if supertrend_direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if supertrend_direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+
+        supertrend[i] = lower_band[i] if supertrend_direction[i] == 1 else upper_band[i]
+
+    # Calculate ADX
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
+
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
 
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma)
 
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align HTF indicators to 6h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_1d, supertrend_direction)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(1, n):  # Start from 1 to have valid previous bar data
-        # Get aligned daily values for current 1h bar
-        if i < len(daily_uptrend):
-            up_trend = daily_uptrend[i]
-            down_trend = daily_downtrend[i]
-        else:
-            up_trend = False
-            down_trend = False
+    for i in range(14, n):  # Start after ADX warmup
+        # Get aligned values
+        st = supertrend_aligned[i]
+        std = supertrend_dir_aligned[i]
+        adx_val = adx_aligned[i]
+        vol_spike = volume_spike_aligned[i]
 
-        vol_spike = volume_spike[i] if i < len(volume_spike) else False
-        in_sess = in_session[i]
-
-        if not in_sess:
+        if np.isnan(st) or np.isnan(std) or np.isnan(adx_val):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,31 +101,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Daily uptrend + price breaks above Camarilla R1 + volume spike
-            if (up_trend and 
-                close[i] > camarilla_R1[i] and vol_spike):
-                signals[i] = 0.20
+            # LONG: Uptrend (Supertrend direction = 1) + Strong trend (ADX > 25) + Volume spike
+            if std == 1 and adx_val > 25 and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Daily downtrend + price breaks below Camarilla S1 + volume spike
-            elif (down_trend and 
-                  close[i] < camarilla_S1[i] and vol_spike):
-                signals[i] = -0.20
+            # SHORT: Downtrend (Supertrend direction = -1) + Strong trend (ADX > 25) + Volume spike
+            elif std == -1 and adx_val > 25 and vol_spike:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below Camarilla S1 or trend changes
-            if (close[i] < camarilla_S1[i] or not up_trend):
+            # EXIT LONG: Trend weakness (ADX < 20) or Supertrend flip
+            if adx_val < 20 or std == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above Camarilla R1 or trend changes
-            if (close[i] > camarilla_R1[i] or not down_trend):
+            # EXIT SHORT: Trend weakness (ADX < 20) or Supertrend flip
+            if adx_val < 20 or std == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
