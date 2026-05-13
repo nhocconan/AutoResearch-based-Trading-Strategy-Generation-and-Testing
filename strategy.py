@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1d_ChaikinMoneyFlow_1dTrend_WeeklyTrend
-# Hypothesis: Chaikin Money Flow (CMF) detects accumulation/distribution. 
-# Long when CMF > 0.1 + price > 200-day EMA + weekly EMA20 > weekly EMA50 (bullish weekly trend).
-# Short when CMF < -0.1 + price < 200-day EMA + weekly EMA20 < weekly EMA50 (bearish weekly trend).
-# Uses 200-day EMA as trend filter and weekly EMA crossover for higher timeframe trend confirmation.
-# Target: 15-25 trades/year (~60-100 total over 4 years) to minimize fee drag.
+# 12h_Donchian_Breakout_Volume_Trend
+# Hypothesis: Donchian(20) breakout on 12h timeframe with volume confirmation and 1d EMA trend filter.
+# Works in bull via upward breakouts above resistance and in bear via downward breakdowns below support.
+# Volume filter ensures breakouts have conviction. EMA filter avoids counter-trend trades.
+# Target: 20-40 trades/year (80-160 total over 4 years) to stay within fee limits.
 
-name = "1d_ChaikinMoneyFlow_1dTrend_WeeklyTrend"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 60:
         return np.zeros(n)
 
     high = prices['high'].values
@@ -24,34 +23,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Money Flow Multiplier and Money Flow Volume
-    mfm = ((close - low) - (high - close)) / (high - low)
-    mfm = np.where((high - low) == 0, 0, mfm)  # avoid division by zero
-    mfv = mfm * volume
+    # Donchian channels: 20-period high and low
+    lookback = 20
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
 
-    # Chaikin Money Flow (20-period)
-    cmf = np.full_like(close, np.nan, dtype=float)
-    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0)
+    # 1d EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
 
-    # 200-day EMA for trend filter
-    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
-
-    # Get weekly data for higher timeframe trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Volume filter: >1.8x 20-period average
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(200, n):
+    for i in range(lookback, n):
         # Skip if any required value is NaN
-        if (np.isnan(cmf[i]) or np.isnan(ema200[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,30 +51,32 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: CMF > 0.1 (accumulation) + price > EMA200 + weekly EMA20 > EMA50
-            if (cmf[i] > 0.1 and 
-                close[i] > ema200[i] and
-                ema20_1w_aligned[i] > ema50_1w_aligned[i]):
+            # LONG: Price breaks above Donchian high + volume spike + above 1d EMA50
+            if (close[i] > donchian_high[i] and 
+                volume[i] > vol_avg_20[i] * 1.8 and
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: CMF < -0.1 (distribution) + price < EMA200 + weekly EMA20 < EMA50
-            elif (cmf[i] < -0.1 and 
-                  close[i] < ema200[i] and
-                  ema20_1w_aligned[i] < ema50_1w_aligned[i]):
+            # SHORT: Price breaks below Donchian low + volume spike + below 1d EMA50
+            elif (close[i] < donchian_low[i] and 
+                  volume[i] > vol_avg_20[i] * 1.8 and
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: CMF < 0 (distribution) or weekly trend turns bearish
-            if (cmf[i] < 0 or ema20_1w_aligned[i] < ema50_1w_aligned[i]):
+            # EXIT LONG: Price re-enters Donchian channel (below midpoint) or trend change
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: CMF > 0 (accumulation) or weekly trend turns bullish
-            if (cmf[i] > 0 or ema20_1w_aligned[i] > ema50_1w_aligned[i]):
+            # EXIT SHORT: Price re-enters Donchian channel (above midpoint) or trend change
+            midpoint = (donchian_high[i] + donchian_low[i]) / 2
+            if close[i] > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
