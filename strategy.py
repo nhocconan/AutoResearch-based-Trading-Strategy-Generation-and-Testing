@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Momentum_Breakout
-Hypothesis: RSI momentum breakouts on 4h timeframe capture trend continuation while avoiding false signals.
-Uses RSI(14) crossing above 60 for long and below 40 for short with volume confirmation and 1d EMA trend filter.
-Exit on RSI reversal to 50 level. Position size 0.25 targets ~25-35 trades/year to minimize fee drag.
-Designed to work in both bull and bear markets by combining momentum with trend filter.
+1d_Weekly_Pivot_R1_S1_Breakout_Trend_Volume
+Hypothesis: Weekly pivot levels (R1/S1) provide strong weekly support/resistance on daily charts.
+Breakouts above weekly R1 or below weekly S1 with volume confirmation and daily trend alignment
+capture multi-week momentum moves while avoiding false breakouts. Exit on reversion to weekly pivot point (PP).
+This strategy targets 10-30 trades per year to minimize fee drift and works in both bull and bear markets
+by using trend alignment to filter direction and volume to confirm momentum.
 """
 
-name = "4h_RSI_Momentum_Breakout"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_R1_S1_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,53 +26,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly pivot points
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12, PP = (H+L+C)/3
+    h_1w = df_1w['high'].values
+    l_1w = df_1w['low'].values
+    c_1w = df_1w['close'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    weekly_pp = (h_1w + l_1w + c_1w) / 3.0
+    weekly_r1 = c_1w + (h_1w - l_1w) * 1.1 / 12.0
+    weekly_s1 = c_1w - (h_1w - l_1w) * 1.1 / 12.0
+    
+    # Align weekly pivot levels to daily chart
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # Daily trend filter: EMA50
+    ema50_daily = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume confirmation: current volume > 2.0x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after warmup
+    for i in range(50, n):  # Start after warmup
         if position == 0:
-            # LONG: RSI breaks above 60 with volume confirmation and uptrend
-            if (rsi[i] > 60 and rsi[i-1] <= 60 and 
+            # LONG: Breakout above weekly R1 with volume confirmation and uptrend
+            if (close[i] > weekly_r1_aligned[i] and 
                 volume_filter[i] and 
-                close[i] > ema50_1d_aligned[i]):
+                close[i] > ema50_daily[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: RSI breaks below 40 with volume confirmation and downtrend
-            elif (rsi[i] < 40 and rsi[i-1] >= 40 and 
+            # SHORT: Breakdown below weekly S1 with volume confirmation and downtrend
+            elif (close[i] < weekly_s1_aligned[i] and 
                   volume_filter[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+                  close[i] < ema50_daily[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to 50 or trend reverses
-            if (rsi[i] < 50) or (close[i] < ema50_1d_aligned[i]):
+            # EXIT LONG: Price returns to weekly pivot point or trend reverses
+            if (close[i] < weekly_pp_aligned[i]) or \
+               (close[i] < ema50_daily[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to 50 or trend reverses
-            if (rsi[i] > 50) or (close[i] > ema50_1d_aligned[i]):
+            # EXIT SHORT: Price returns to weekly pivot point or trend reverses
+            if (close[i] > weekly_pp_aligned[i]) or \
+               (close[i] > ema50_daily[i]):
                 signals[i] = 0.0
                 position = 0
             else:
