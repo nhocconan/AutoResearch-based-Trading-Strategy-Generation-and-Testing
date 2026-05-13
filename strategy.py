@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_Breakout_1dTrend_Volume_Confirm"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,61 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20 periods)
-    donchian_len = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    for i in range(donchian_len - 1, n):
-        upper[i] = np.max(high[i-donchian_len+1:i+1])
-        lower[i] = np.min(low[i-donchian_len+1:i+1])
+    # Calculate Camarilla levels from previous day
+    close_1d = np.zeros(n)
+    high_1d = np.zeros(n)
+    low_1d = np.zeros(n)
+    for i in range(n):
+        # Use daily data from previous close
+        if i == 0:
+            close_1d[i] = close[0]
+            high_1d[i] = high[0]
+            low_1d[i] = low[0]
+        else:
+            # Check if current bar is first 4h bar of a new day
+            if prices['open_time'].iloc[i].date() != prices['open_time'].iloc[i-1].date():
+                close_1d[i] = close[i-1]  # Previous bar's close as yesterday's close
+                high_1d[i] = high[i-1]    # Previous bar's high as yesterday's high
+                low_1d[i] = low[i-1]      # Previous bar's low as yesterday's low
+            else:
+                close_1d[i] = close_1d[i-1]
+                high_1d[i] = high_1d[i-1]
+                low_1d[i] = low_1d[i-1]
+    
+    # Calculate Camarilla R1, S1 levels
+    R1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    S1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
     # 1d trend filter: EMA(34)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    close_1d_vals = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d_vals).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current volume > 1.8 x 20-period average
-    vol_len = 20
-    vol_ma = np.full(n, np.nan)
-    for i in range(vol_len - 1, n):
-        vol_ma[i] = np.mean(volume[i-vol_len+1:i+1])
+    # Volume filter: current volume > 1.5 x 20-period average
+    vol_ma_20 = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(max(donchian_len, vol_len), n):
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+    for i in range(20, n):
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or 
             np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+            np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        vol_confirm = volume[i] > 1.8 * vol_ma[i]
+        vol_spike = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Break above upper Donchian with 1d uptrend and volume confirmation
-            if close[i] > upper[i] and close[i] > ema34_1d_aligned[i] and vol_confirm:
+            # LONG: Break above R1 with 1d uptrend and volume spike
+            if close[i] > R1[i] and close[i] > ema34_1d_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below lower Donchian with 1d downtrend and volume confirmation
-            elif close[i] < lower[i] and close[i] < ema34_1d_aligned[i] and vol_confirm:
+            # SHORT: Break below S1 with 1d downtrend and volume spike
+            elif close[i] < S1[i] and close[i] < ema34_1d_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below lower Donchian
-            if close[i] < lower[i]:
+            # EXIT LONG: Close below S1
+            if close[i] < S1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above upper Donchian
-            if close[i] > upper[i]:
+            # EXIT SHORT: Close above R1
+            if close[i] > R1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
