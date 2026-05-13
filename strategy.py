@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_SpreadFilter
-# Hypothesis: Use daily Camarilla pivot points (R1/S1) for breakout entries with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above daily R1 in uptrend with volume spike, short when price breaks below daily S1 in downtrend with volume spike.
-# Exit when price returns to daily pivot point (PP) or trend changes.
-# Added spread filter: require price to be outside 1.5x ATR(20) band around Camarilla levels to avoid false breakouts in low volatility.
-# Designed for moderate trade frequency (75-200 total trades over 4 years) with clear entry/exit rules to avoid overtrading.
+# 1d_Camarilla_R3_S3_Breakout_1wTrend_Volume
+# Hypothesis: Use weekly Camarilla pivot levels (R3/S3) for breakout entries with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above weekly R3 in uptrend with volume spike, short when price breaks below weekly S3 in downtrend with volume spike.
+# Exit when price returns to weekly pivot point (PP) or trend changes.
+# Weekly pivots provide stronger support/resistance than daily, reducing false breakouts.
+# Designed for low trade frequency (30-100 total trades over 4 years) to minimize fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_SpreadFilter"
-timeframe = "4h"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,36 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla pivot point calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for Camarilla pivot point calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily Camarilla pivot points: R1, S1, PP
-    # Camarilla formulas:
+    # Calculate weekly Camarilla pivot points: PP, R3, S3
+    # Standard Camarilla formulas:
     # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pp_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    r1_1d = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.1 / 12
-    s1_1d = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.1 / 12
+    # R3 = PP + (H - L) * 1.1 / 4
+    # S3 = PP - (H - L) * 1.1 / 4
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
+    pp_1w = (high_w + low_w + close_w) / 3
+    r3_1w = pp_1w + (high_w - low_w) * 1.1 / 4
+    s3_1w = pp_1w - (high_w - low_w) * 1.1 / 4
     
-    # Align daily Camarilla levels to 4h timeframe
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d.values)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d.values)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d.values)
+    # Align weekly Camarilla levels to 1d timeframe
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
 
-    # Get daily data for EMA trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Get weekly data for EMA trend filter
+    ema_50_1w = pd.Series(close_w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
 
-    # ATR for spread filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first value
-    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-
-    # Volume filter: >1.5x 20-period average
+    # Volume filter: >1.8x 20-period average
     vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
 
     signals = np.zeros(n)
@@ -61,9 +56,9 @@ def generate_signals(prices):
 
     for i in range(20, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(pp_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(vol_avg_20[i]) or np.isnan(atr_20[i])):
+        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or 
+            np.isnan(pp_1w_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,40 +66,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Spread filter: require price to be outside 1.5x ATR band around Camarilla levels
-        r1_band = 1.5 * atr_20[i]
-        s1_band = 1.5 * atr_20[i]
-        r1_upper = r1_1d_aligned[i] + r1_band
-        s1_lower = s1_1d_aligned[i] - s1_band
-
         if position == 0:
-            # LONG: Price breaks above R1 + 1.5*ATR + price above 1d EMA50 (uptrend) + volume spike
-            if (close[i] > r1_upper and 
-                close[i] > ema_50_1d_aligned[i] and
-                volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = 0.25
+            # LONG: Price breaks above R3 + price above weekly EMA50 (uptrend) + volume spike
+            if (close[i] > r3_1w_aligned[i] and 
+                close[i] > ema_50_1w_aligned[i] and
+                volume[i] > vol_avg_20[i] * 1.8):
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Price breaks below S1 - 1.5*ATR + price below 1d EMA50 (downtrend) + volume spike
-            elif (close[i] < s1_lower and 
-                  close[i] < ema_50_1d_aligned[i] and
-                  volume[i] > vol_avg_20[i] * 1.5):
-                signals[i] = -0.25
+            # SHORT: Price breaks below S3 + price below weekly EMA50 (downtrend) + volume spike
+            elif (close[i] < s3_1w_aligned[i] and 
+                  close[i] < ema_50_1w_aligned[i] and
+                  volume[i] > vol_avg_20[i] * 1.8):
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
             # EXIT LONG: Price returns to pivot point (PP) or trend changes (price below EMA50)
-            if (close[i] <= pp_1d_aligned[i] or close[i] < ema_50_1d_aligned[i]):
+            if (close[i] <= pp_1w_aligned[i] or close[i] < ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # EXIT SHORT: Price returns to pivot point (PP) or trend changes (price above EMA50)
-            if (close[i] >= pp_1d_aligned[i] or close[i] > ema_50_1d_aligned[i]):
+            if (close[i] >= pp_1w_aligned[i] or close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
 
     return signals
