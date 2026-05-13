@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above upper BB after low volatility (BBW < 20th percentile), close > 1d EMA50, volume > 1.5x 20-bar avg.
-# Short when price breaks below lower BB after low volatility, close < 1d EMA50, volume > 1.5x 20-bar avg.
-# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 6h timeframe.
-# Bollinger Band squeeze identifies low volatility primed for breakout; 1d EMA50 filters direction; volume confirms momentum.
+# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above Donchian upper band (20-period high) and close > 1w EMA50 with volume > 1.5x 20-bar average.
+# Short when price breaks below Donchian lower band (20-period low) and close < 1w EMA50 with volume > 1.5x 20-bar average.
+# Uses discrete sizing 0.25 to target 50-150 total trades over 4 years on 12h timeframe.
+# Donchian channels provide robust structure; 1w EMA50 filters counter-trend noise on weekly timeframe; volume confirms momentum.
 # Designed for fewer, higher-quality trades to avoid fee drag while working in both bull and bear markets.
 
-name = "6h_BBand_Squeeze_Breakout_1dEMA50_Trend_VolumeConfirm"
-timeframe = "6h"
+name = "12h_Donchian20_1wEMA50_Trend_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,80 +16,66 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Bollinger Bands (20, 2)
-    lookback_bb = 20
-    bb_mid = pd.Series(close).rolling(window=lookback_bb, min_periods=lookback_bb).mean().values
-    bb_std = pd.Series(close).rolling(window=lookback_bb, min_periods=lookback_bb).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = bb_upper - bb_lower
+    # Calculate Donchian channels (20-period) - using prior candle only to avoid look-ahead
+    lookback_dc = 20
+    upper_band = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().shift(1).values
+    lower_band = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().shift(1).values
     
-    # Bollinger Band Width percentile (200 lookback for regime)
-    lookback_percentile = 200
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=lookback_percentile, min_periods=lookback_percentile//2).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100 if len(x) == lookback_percentile else np.nan, raw=False
-    ).values
-    bb_width_percentile = np.where(np.isnan(bb_width_percentile), 50, bb_width_percentile)  # fill NaN with median
-    
-    # Average volume for confirmation (20-period)
+    # Calculate average volume for confirmation (20-period)
     lookback_vol = 20
     avg_volume = pd.Series(volume).rolling(window=lookback_vol, min_periods=lookback_vol).mean().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback_bb, lookback_percentile, lookback_vol) + 1
-    for i in range(start_idx, n):
+    for i in range(max(lookback_dc, lookback_vol, 1), n):
         # Skip if any required data is NaN
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_width_percentile[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(avg_volume[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper BB after squeeze (BBW < 20th percentile), close > 1d EMA50, volume spike
-            if (close[i] > bb_upper[i] and 
-                bb_width_percentile[i] < 20 and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # LONG: Price breaks above Donchian upper band, close > 1w EMA50, volume spike
+            if (high[i] > upper_band[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
                 volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower BB after squeeze, close < 1d EMA50, volume spike
-            elif (close[i] < bb_lower[i] and 
-                  bb_width_percentile[i] < 20 and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # SHORT: Price breaks below Donchian lower band, close < 1w EMA50, volume spike
+            elif (low[i] < lower_band[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
                   volume[i] > 1.5 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below lower BB OR volume drops below average
-            if (close[i] < bb_lower[i] or 
+            # EXIT LONG: Price breaks below Donchian lower band OR volume drops below average
+            if (low[i] < lower_band[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above upper BB OR volume drops below average
-            if (close[i] > bb_upper[i] or 
+            # EXIT SHORT: Price breaks above Donchian upper band OR volume drops below average
+            if (high[i] > upper_band[i] or 
                 volume[i] < avg_volume[i]):
                 signals[i] = 0.0
                 position = 0
