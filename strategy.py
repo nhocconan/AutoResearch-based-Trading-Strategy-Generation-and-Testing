@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_R1_S1_Breakout_1dTrend_VolumeConfirmation
-Hypothesis: Price breaking above Camarilla R1 or below S1 on 12h with 1d trend alignment and volume confirmation provides high-probability trend-following entries. Works in bull/bear markets by following the 1d trend direction. Target: 12-37 trades/year per symbol.
+6h_1d_ChaikinOscillator_Trend
+Hypothesis: Chaikin Oscillator (3,10) on 1d provides institutional accumulation/distribution signals. 
+Trade in direction of 1d trend (EMA50) when Chaikin Oscillator crosses zero with confirmation from 
+increasing volume. Works in both bull/bear markets by following higher timeframe trend. 
+Target: 15-25 trades/year per symbol.
 """
 
-name = "12h_1d_Camarilla_Pivot_R1_S1_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "12h"
+name = "6h_1d_ChaikinOscillator_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,72 +20,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Calculate 12h Camarilla pivot levels (R1, S1)
-    # Pivot = (H + L + C) / 3
-    pivot = (high + low + close) / 3.0
-    range_hl = high - low
-    r1 = close + range_hl * 1.1 / 12
-    s1 = close - range_hl * 1.1 / 12
-    
-    # Get 1d data for trend filter and volume average
+    # Get 1d data for Chaikin Oscillator and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 1d trend: 34 EMA
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    uptrend_1d = close_1d > ema_34_1d
-    downtrend_1d = close_1d < ema_34_1d
+    # Money Flow Multiplier = ((Close - Low) - (High - Close)) / (High - Low)
+    # Avoid division by zero
+    hl_range = high_1d - low_1d
+    hl_range = np.where(hl_range == 0, 1e-10, hl_range)
+    mfm = ((close_1d - low_1d) - (high_1d - close_1d)) / hl_range
     
-    # 1d volume average (20-period)
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Money Flow Volume = MFM * Volume
+    mfv = mfm * volume_1d
     
-    # Align 1d indicators to 12h
+    # Chaikin Oscillator = (3-period EMA of MFV) - (10-period EMA of MFV)
+    mfv_series = pd.Series(mfv)
+    ema3 = mfv_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10 = mfv_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    chaikin_osc = ema3 - ema10
+    
+    # 1d trend: 50 EMA
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    uptrend_1d = close_1d > ema_50_1d
+    downtrend_1d = close_1d < ema_50_1d
+    
+    # Align 1d indicators to 6h
+    chaikin_osc_aligned = align_htf_to_ltf(prices, df_1d, chaikin_osc)
     uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
     downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average volume on 6h
+    volume = prices['volume'].values
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 1.5)
+    
+    # Detect Chaikin Oscillator zero crosses
+    # Bullish cross: CO crosses above zero
+    bullish_cross = (chaikin_osc_aligned > 0) & (np.roll(chaikin_osc_aligned, 1) <= 0)
+    # Bearish cross: CO crosses below zero
+    bearish_cross = (chaikin_osc_aligned < 0) & (np.roll(chaikin_osc_aligned, 1) >= 0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(50, n):
+        # Handle first element roll
+        if i == 0:
+            bullish_cross[i] = False
+            bearish_cross[i] = False
+        
         # Get aligned values
         uptrend = uptrend_1d_aligned[i]
         downtrend = downtrend_1d_aligned[i]
-        vol_ma = vol_ma_20_1d_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period 1d MA
-        vol_confirm = volume[i] > 1.5 * vol_ma if not np.isnan(vol_ma) else False
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # LONG: Price breaks above R1, 1d uptrend, volume confirmation
-            if close[i] > r1[i] and uptrend and vol_confirm:
+            # LONG: 1d uptrend + bullish Chaikin cross + volume spike
+            if uptrend and bullish_cross[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1, 1d downtrend, volume confirmation
-            elif close[i] < s1[i] and downtrend and vol_confirm:
+            # SHORT: 1d downtrend + bearish Chaikin cross + volume spike
+            elif downtrend and bearish_cross[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1 or 1d trend turns down
-            if close[i] < s1[i] or not uptrend:
+            # EXIT LONG: 1d trend turns down or bearish Chaikin cross
+            if not uptrend or bearish_cross[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1 or 1d trend turns up
-            if close[i] > r1[i] or not downtrend:
+            # EXIT SHORT: 1d trend turns up or bullish Chaikin cross
+            if not downtrend or bullish_cross[i]:
                 signals[i] = 0.0
                 position = 0
             else:
