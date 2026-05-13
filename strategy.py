@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_RSI_Momentum_Volume"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Breakout_1W_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,80 +12,82 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h RSI(14) for momentum
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:i+1])
-            avg_loss[i] = np.mean(loss[1:i+1])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # Ichimoku components (9, 26, 52)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # Daily EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (high_52 + low_52) / 2
+    
+    # Weekly trend filter: price above/below weekly EMA50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume filter: current volume > 1.5 x 20-period average
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma_20[i] = np.mean(volume[i-19:i+1])
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        if np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
+    for i in range(52, n):
+        # Skip if any required data is NaN
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or 
+            np.isnan(ema50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        vol_condition = volume[i] > 1.5 * vol_ma_20[i]
+        # Determine cloud boundaries
+        upper_cloud = np.maximum(senkou_a[i], senkou_b[i])
+        lower_cloud = np.minimum(senkou_a[i], senkou_b[i])
         
         if position == 0:
-            # LONG: RSI > 55 (momentum), price above EMA50, volume, session
-            if rsi[i] > 55 and close[i] > ema50_1d_aligned[i] and vol_condition and in_session:
-                signals[i] = 0.20
+            # LONG: Price breaks above cloud + TK cross bullish + weekly uptrend
+            if (close[i] > upper_cloud and 
+                tenkan[i] > kijun[i] and 
+                close[i] > ema50_1w_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: RSI < 45 (momentum), price below EMA50, volume, session
-            elif rsi[i] < 45 and close[i] < ema50_1d_aligned[i] and vol_condition and in_session:
-                signals[i] = -0.20
+            # SHORT: Price breaks below cloud + TK cross bearish + weekly downtrend
+            elif (close[i] < lower_cloud and 
+                  tenkan[i] < kijun[i] and 
+                  close[i] < ema50_1w_aligned[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI < 40 or price below EMA50
-            if rsi[i] < 40 or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Price re-enters cloud or TK cross bearish
+            if (close[i] < upper_cloud or tenkan[i] < kijun[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI > 60 or price above EMA50
-            if rsi[i] > 60 or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Price re-enters cloud or TK cross bullish
+            if (close[i] > lower_cloud or tenkan[i] > kijun[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
