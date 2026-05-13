@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-# 1h_Engulfing_4hTrend_1dVolFilter
-# Hypothesis: Bullish/bearish engulfing candles on 1h capture momentum shifts, filtered by 4h trend (EMA50) and 1d volume surge to avoid false signals.
-# Works in bull markets by taking longs in uptrends and in bear markets by taking shorts in downtrends.
-# Volume filter ensures trades occur during periods of heightened interest, reducing whipsaw.
-# Target: 20-30 trades/year per symbol.
+# 12h_KAMA_Direction_1dTrend_VolumeSpike
+# Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a smooth trend line.
+# In trending markets, price stays close to KAMA; in ranging markets, it diverges.
+# We go long when price crosses above KAMA with volume spike and 1d uptrend (price > 1d EMA34).
+# We go short when price crosses below KAMA with volume spike and 1d downtrend (price < 1d EMA34).
+# Exit when price crosses back over KAMA.
+# Uses 12h timeframe with 1d trend filter to reduce whipsaw and capture major trends.
+# Designed to work in bull (buy in uptrend) and bear (sell in downtrend) markets.
+# Target: 15-30 trades/year per symbol.
 
-name = "1h_Engulfing_4hTrend_1dVolFilter"
-timeframe = "1h"
+name = "12h_KAMA_Direction_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,42 +25,56 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
     volume = prices['volume'].values
 
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
-
-    # Get 1d data for volume filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    volume_1d = df_1d['volume'].values
 
-    # Calculate 4h EMA50 for trend
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    close_1d = df_1d['close'].values
 
-    # Calculate 1d average volume (20-period) for surge filter
-    vol_avg_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_avg_1d[i] = np.mean(volume_1d[i-20:i])
-    vol_surge_1d = volume_1d > (1.5 * vol_avg_1d)
-    vol_surge_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_surge_1d.astype(float))
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on 12h close
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close[i] - close[i-1]| over 10 periods
+    # Avoid division by zero
+    er = np.zeros_like(change)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
 
-    # Detect engulfing candles on 1h
-    bullish_engulfing = (close > open_price) & (open_price > np.roll(close, 1)) & (close > np.roll(open_price, 1))
-    bearish_engulfing = (close < open_price) & (open_price < np.roll(close, 1)) & (close < np.roll(open_price, 1))
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+
+    # Initialize KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # Start after first ER calculation
+
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+
+    # Get 1d EMA34 for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+
+    # Volume confirmation: current volume > 2.0 x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_spike = volume > (2.0 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(50, n):
-        # Skip if data not ready
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_surge_1d_aligned[i])):
+    for i in range(10, n):
+        # Skip if data is not ready
+        if (np.isnan(kama[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(ema_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,29 +83,29 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: bullish engulfing + 4h uptrend + 1d volume surge
-            if bullish_engulfing[i] and close[i] > ema_4h_aligned[i] and vol_surge_1d_aligned[i] > 0.5:
-                signals[i] = 0.20
+            # LONG: price crosses above KAMA with volume spike and 1d EMA uptrend
+            if close[i] > kama[i] and close[i-1] <= kama[i-1] and volume_spike[i] and close[i] > ema_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: bearish engulfing + 4h downtrend + 1d volume surge
-            elif bearish_engulfing[i] and close[i] < ema_4h_aligned[i] and vol_surge_1d_aligned[i] > 0.5:
-                signals[i] = -0.20
+            # SHORT: price crosses below KAMA with volume spike and 1d EMA downtrend
+            elif close[i] < kama[i] and close[i-1] >= kama[i-1] and volume_spike[i] and close[i] < ema_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: bearish engulfing or trend reversal
-            if bearish_engulfing[i] or close[i] < ema_4h_aligned[i]:
+            # EXIT LONG: price crosses below KAMA
+            if close[i] < kama[i] and close[i-1] >= kama[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: bullish engulfing or trend reversal
-            if bullish_engulfing[i] or close[i] > ema_4h_aligned[i]:
+            # EXIT SHORT: price crosses above KAMA
+            if close[i] > kama[i] and close[i-1] <= kama[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
 
     return signals
