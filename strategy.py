@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high AND 1d EMA34 rising AND volume > 1.5x MA20 volume.
-# Short when price breaks below Donchian(20) low AND 1d EMA34 falling AND volume > 1.5x MA20 volume.
-# Uses ATR(14) trailing stop (2.0x) for exits. Discrete sizing 0.25.
-# Donchian channels provide clear structure, EMA34 filters trend direction, volume confirms conviction.
-# Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Hypothesis: 1d Williams %R mean reversion with 1w EMA34 trend filter and ATR-based exit.
+# Long when Williams %R < -80 AND 1w EMA34 rising; Short when Williams %R > -20 AND 1w EMA34 falling.
+# Uses ATR(14) trailing stop (2.0x) for risk control. Discrete sizing 0.25.
+# Williams %R identifies overbought/oversold conditions, effective in ranging markets.
+# Target: 30-100 total trades over 4 years (7-25/year) on 1d.
 
-name = "4h_Donchian20_1dEMA34_VolumeBreakout_ATRStop_v1"
-timeframe = "4h"
+name = "1d_WilliamsR_MeanReversion_1wEMA34_ATRStop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,63 +15,58 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero (when high == low)
+    williams_r[highest_high == lowest_low] = -50.0
     
-    # Volume MA(20) for confirmation
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get 1w data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate EMA(34) on 1w data
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1w EMA34 to 1d timeframe (wait for 1w bar to close)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     # ATR(14) for trailing stop
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate EMA(34) on 1d data
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d EMA34 to 4h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
     lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(20, n):  # Start after sufficient data for indicators
+    for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma20[i]) or np.isnan(atr[i]) or np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high AND 1d EMA34 rising AND volume > 1.5x MA20
-            if (close[i] > highest_high[i-1] and 
-                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
-                volume[i] > 1.5 * vol_ma20[i]):
+            # LONG: Williams %R < -80 (oversold) AND 1w EMA34 rising
+            if williams_r[i] < -80 and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price breaks below Donchian low AND 1d EMA34 falling AND volume > 1.5x MA20
-            elif (close[i] < lowest_low[i-1] and 
-                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
-                  volume[i] > 1.5 * vol_ma20[i]):
+            # SHORT: Williams %R > -20 (overbought) AND 1w EMA34 falling
+            elif williams_r[i] > -20 and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
