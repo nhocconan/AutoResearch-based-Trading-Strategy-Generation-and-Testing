@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume confirmation.
-# Long when price breaks above 20-day high, 1w EMA34 is rising, and volume > 1.5x 20-period average.
-# Short when price breaks below 20-day low, 1w EMA34 is falling, and volume > 1.5x 20-period average.
-# Uses ATR(14) trailing stop (2.0x) for risk control.
-# Uses discrete position sizing (0.25) to minimize fee churn.
-# Target: 30-100 total trades over 4 years (7-25/year) on 1d.
+# Hypothesis: 12h Williams Alligator + 1d Trend Filter + Volume Spike
+# Long when Alligator jaws (13-period smoothed median) turns up, price > teeth (8-period), and 1d EMA34 rising + volume > 2x 20-period average
+# Short when jaws turn down, price < teeth, and 1d EMA34 falling + volume > 2x 20-period average
+# Williams Alligator is effective in ranging and trending markets, with jaws/teeth/lips providing dynamic support/resistance
+# Uses ATR(14) trailing stop (2.5x) for risk control
+# Discrete position sizing 0.25 to minimize fee churn
+# Target: 50-150 total trades over 4 years (12-37/year) on 12h
 
-name = "1d_Donchian20_Breakout_1wEMA34_Trend_Volume_v1"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dEMA34_Trend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,23 +33,43 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period high/low)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams Alligator on 12h timeframe
+    # Median price = (high + low) / 2
+    median_price = (high + low) / 2
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Jaws: 13-period SMMA smoothed 8 bars ahead
+    jaws_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
+    jaws = np.roll(jaws_raw, 8)  # Smoothed 8 bars ahead
+    jaws[:8] = np.nan  # First 8 values invalid due to roll
     
-    # Calculate EMA(34) on 1w data
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Teeth: 8-period SMMA smoothed 5 bars ahead
+    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth_raw, 5)  # Smoothed 5 bars ahead
+    teeth[:5] = np.nan  # First 5 values invalid due to roll
     
-    # Align 1w EMA34 to 1d timeframe (wait for 1w bar to close)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Lips: 5-period SMMA smoothed 3 bars ahead
+    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips_raw, 3)  # Smoothed 3 bars ahead
+    lips[:3] = np.nan  # First 3 values invalid due to roll
     
-    # Calculate volume confirmation: volume > 1.5x 20-period average
+    # Align Alligator components to 12h timeframe (wait for 12h bar to close)
+    jaws_aligned = align_htf_to_ltf(prices, prices, jaws)  # Self-align since calculated on LTf
+    teeth_aligned = align_htf_to_ltf(prices, prices, teeth)
+    lips_aligned = align_htf_to_ltf(prices, prices, lips)
+    
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Calculate EMA(34) on 1d data
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA34 to 12h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate volume confirmation: volume > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,19 +78,25 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > 20-day high AND 1w EMA34 rising (trending up) AND volume confirmation
-            if close[i] > highest_20[i] and ema_34_1w_aligned[i] > ema_34_1w_aligned[i-1] and volume_confirm[i]:
+            # LONG: Jaws turning up (jaws > previous jaws) AND price > teeth AND 1d EMA34 rising AND volume confirmation
+            if (jaws_aligned[i] > jaws_aligned[i-1] and 
+                close[i] > teeth_aligned[i] and 
+                ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < 20-day low AND 1w EMA34 falling (trending down) AND volume confirmation
-            elif close[i] < lowest_20[i] and ema_34_1w_aligned[i] < ema_34_1w_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Jaws turning down (jaws < previous jaws) AND price < teeth AND 1d EMA34 falling AND volume confirmation
+            elif (jaws_aligned[i] < jaws_aligned[i-1] and 
+                  close[i] < teeth_aligned[i] and 
+                  ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -82,8 +109,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
+            # EXIT LONG: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -97,8 +124,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
