@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 1d_1w_RSI_Pullback_Trend_Follower
-# Hypothesis: Capture multi-week trends in BTC/ETH by buying pullbacks to weekly VWAP during strong weekly uptrends (and vice versa for shorts), using daily RSI for entry timing and volume confirmation to avoid false signals. Weekly trend filter prevents counter-trend trades. Designed to work in both bull and bear markets by following the dominant weekly trend.
+# 6h_PivotBreakout_VolumeRegime
+# Hypothesis: Buy breakouts above R3 and sell breakdowns below S3 of daily Camarilla pivots,
+# filtered by 12h trend and volume spike. Works in both bull and bear markets by
+# capturing momentum bursts during regime shifts while avoiding chop.
+# Uses daily pivots for structure, 12h EMA for trend, and volume spike for confirmation.
+# Targets 15-30 trades/year with disciplined entries to minimize fee drag.
 
-name = "1d_1w_RSI_Pullback_Trend_Follower"
-timeframe = "1d"
+name = "6h_PivotBreakout_VolumeRegime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,44 +24,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for trend filter and VWAP
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    volume_1w = df_1w['volume'].values
-
-    # Weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Weekly VWAP (volume-weighted average price)
-    vwap_1w = (np.cumsum(volume_1w * (high_1w + low_1w + close_1w) / 3) / np.cumsum(volume_1w))
-    vwap_1w = np.where(np.cumsum(volume_1w) == 0, np.nan, vwap_1w)
-
-    # Align weekly indicators to daily timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
-
-    # Daily RSI(14) for entry timing
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-
-    # Daily volume confirmation: volume > 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_surge = volume > 1.5 * vol_ma  # 50% above average
-
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Camarilla pivot levels from daily OHLC
+    # Formula: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    # But we only need R3 and S3 for entry, R4/S4 for stop (not implemented here)
+    # Actually, standard Camarilla: 
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # R2 = C + ((H-L) * 1.1/6)
+    # R1 = C + ((H-L) * 1.1/12)
+    # PP = (H + L + C) / 3
+    # S1 = C - ((H-L) * 1.1/12)
+    # S2 = C - ((H-L) * 1.1/6)
+    # S3 = C - ((H-L) * 1.1/4)
+    # S4 = C - ((H-L) * 1.1/2)
+    # We use R3 and S3 as entry triggers
+    
+    # Calculate once for the whole daily array
+    H_1d = df_1d['high'].values
+    L_1d = df_1d['low'].values
+    C_1d = df_1d['close'].values
+    
+    # Avoid division by zero and handle NaN
+    diff = H_1d - L_1d
+    # Only calculate where we have valid data
+    valid = ~(np.isnan(H_1d) | np.isnan(L_1d) | np.isnan(C_1d) | (diff == 0))
+    
+    R3 = np.full_like(C_1d, np.nan)
+    S3 = np.full_like(C_1d, np.nan)
+    R3[valid] = C_1d[valid] + (diff[valid] * 1.1 / 4)
+    S3[valid] = C_1d[valid] - (diff[valid] * 1.1 / 4)
+    
+    # Get 12h trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # EMA50 on 12h for trend
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume spike detector: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
+    
+    # Align all to 6h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_12h, volume_spike.astype(float))  # bool to float for alignment
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-
-    for i in range(20, n):  # Start after warmup
+    
+    # Minimum bars needed for indicators
+    start_idx = max(50, 20)  # EMA50 needs 50, volume MA needs 20
+    
+    for i in range(start_idx, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(vwap_1w_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_surge[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,34 +90,40 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
 
-        # Determine weekly trend
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
-
-        # Price relative to weekly VWAP
-        price_near_vwap = abs(close[i] - vwap_1w_aligned[i]) / vwap_1w_aligned[i] < 0.02  # Within 2% of VWAP
-
+        # Volume spike confirmation (current bar)
+        vol_spike = volume_spike_aligned[i] > 0.5  # Convert back to boolean
+        
+        # Trend filter: 12h EMA50
+        uptrend = close[i] > ema50_12h_aligned[i]
+        downtrend = close[i] < ema50_12h_aligned[i]
+        
+        # Breakout conditions
+        # Long: price breaks above R3 with volume spike in uptrend
+        long_breakout = (close[i] > R3_aligned[i]) and vol_spike and uptrend
+        # Short: price breaks below S3 with volume spike in downtrend
+        short_breakout = (close[i] < S3_aligned[i]) and vol_spike and downtrend
+        
+        # Exit conditions: opposite breakout or loss of trend
+        exit_long = (close[i] < S3_aligned[i]) or (not uptrend)
+        exit_short = (close[i] > R3_aligned[i]) or (not downtrend)
+        
         if position == 0:
-            # LONG: Weekly uptrend + price near weekly VWAP (pullback) + RSI < 40 (not overbought) + volume surge
-            if weekly_uptrend and price_near_vwap and rsi[i] < 40 and vol_surge[i]:
+            if long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Weekly downtrend + price near weekly VWAP (pullback) + RSI > 60 (not oversold) + volume surge
-            elif weekly_downtrend and price_near_vwap and rsi[i] > 60 and vol_surge[i]:
+            elif short_breakout:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Weekly trend turns down OR price moves 2% above VWAP (take profit) OR RSI > 70 (overbought)
-            if not weekly_uptrend or close[i] > vwap_1w_aligned[i] * 1.02 or rsi[i] > 70:
+            if exit_long:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Weekly trend turns up OR price moves 2% below VWAP (take profit) OR RSI < 30 (oversold)
-            if not weekly_downtrend or close[i] < vwap_1w_aligned[i] * 0.98 or rsi[i] < 30:
+            if exit_short:
                 signals[i] = 0.0
                 position = 0
             else:
