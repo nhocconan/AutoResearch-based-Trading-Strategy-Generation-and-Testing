@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 12h HMA21 trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high, 12h HMA21 is rising, and volume > 1.5x 20-period average.
-# Short when price breaks below 20-period Donchian low, 12h HMA21 is falling, and volume > 1.5x 20-period average.
-# Uses ATR(14) trailing stop (2.0x) for risk control.
-# Donchian channels provide robust support/resistance that work across market regimes.
-# 12h HMA21 trend filter ensures we trade with the intermediate-term trend, reducing whipsaws.
-# Volume confirmation adds validity to breakouts. Target: 75-200 total trades over 4 years (19-50/year) on 4h.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+# Long when price breaks above 20-day Donchian high, 1w EMA50 is rising, and volume > 1.5x 20-day average.
+# Short when price breaks below 20-day Donchian low, 1w EMA50 is falling, and volume > 1.5x 20-day average.
+# Uses ATR(14) trailing stop (2.5x) for risk control.
+# Donchian channels provide robust trend-following structure that works in both bull and bear markets.
+# 1w EMA50 ensures we trade with the long-term trend, reducing whipsaws during corrections.
+# Volume confirmation adds validity to breakouts. Target: 30-100 total trades over 4 years (7-25/year) on 1d.
 
-name = "4h_Donchian20_Breakout_12hHMA21_Trend_Volume_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wEMA50_Trend_Volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -33,46 +33,21 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate 20-period Donchian channels (highest high, lowest low over 20 periods)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 20-day Donchian channels (based on previous 20 days)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # Get 12h data for HMA21 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate HMA(21) on 12h data
-    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    # Calculate EMA(50) on 1w data
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, mode='valid') / weights.sum()
+    # Align 1w EMA50 to 1d timeframe (wait for 1w bar to close)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Pad arrays for WMA calculation
-    wma_half = np.full_like(close_12h, np.nan)
-    wma_full = np.full_like(close_12h, np.nan)
-    
-    for i in range(len(close_12h)):
-        if i >= half_len - 1:
-            wma_half[i] = wma(close_12h[i - half_len + 1:i + 1], half_len)
-        if i >= 21 - 1:
-            wma_full[i] = wma(close_12h[i - 21 + 1:i + 1], 21)
-    
-    # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
-    raw_hma = 2 * wma_half - wma_full
-    hma_21_12h = np.full_like(close_12h, np.nan)
-    for i in range(len(raw_hma)):
-        if i >= sqrt_len - 1 and not np.isnan(raw_hma[i - sqrt_len + 1:i + 1]).any():
-            hma_21_12h[i] = wma(raw_hma[i - sqrt_len + 1:i + 1], sqrt_len)
-    
-    # Align 12h HMA21 to 4h timeframe (wait for 12h bar to close)
-    hma_21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
-    
-    # Calculate volume confirmation: volume > 1.5x 20-period average
+    # Calculate volume confirmation: volume > 1.5x 20-day average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma_20)
     
@@ -84,18 +59,18 @@ def generate_signals(prices):
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(hma_21_12h_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Donchian high AND 12h HMA21 rising (trending up) AND volume confirmation
-            if close[i] > donchian_high[i] and hma_21_12h_aligned[i] > hma_21_12h_aligned[i-1] and volume_confirm[i]:
+            # LONG: Price > Donchian high AND 1w EMA50 rising (trending up) AND volume confirmation
+            if close[i] > donchian_high[i] and ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Donchian low AND 12h HMA21 falling (trending down) AND volume confirmation
-            elif close[i] < donchian_low[i] and hma_21_12h_aligned[i] < hma_21_12h_aligned[i-1] and volume_confirm[i]:
+            # SHORT: Price < Donchian low AND 1w EMA50 falling (trending down) AND volume confirmation
+            elif close[i] < donchian_low[i] and ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -108,8 +83,8 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
+            # EXIT LONG: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] < (highest_since_entry[i] - 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
@@ -123,8 +98,8 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.0x ATR)
-            trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
+            # EXIT SHORT: trailing stop hit (2.5x ATR)
+            trailing_stop = close[i] > (lowest_since_entry[i] + 2.5 * atr[i])
             if trailing_stop:
                 signals[i] = 0.0
                 position = 0
