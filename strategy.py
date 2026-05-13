@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band AND close > 1w EMA50 AND volume > 2.0x 20-period average.
-# Short when price breaks below Donchian lower band AND close < 1w EMA50 AND volume > 2.0x 20-period average.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Long when price breaks above Camarilla R3 AND close > 1d EMA34 AND volume > 2.0x 20-period average.
+# Short when price breaks below Camarilla S3 AND close < 1d EMA34 AND volume > 2.0x 20-period average.
 # Exit on ATR(14) trailing stop (2.0x) or opposite breakout.
-# Uses 1d primary timeframe with 1w trend filter for noise reduction, targeting 30-100 total trades over 4 years.
-# Donchian channels provide clear trend-following structure, 1w EMA50 filters long-term trend,
+# Uses 12h primary timeframe with 1d trend filter for noise reduction, targeting 50-150 total trades over 4 years.
+# Camarilla levels provide precise intraday support/resistance, 1d EMA34 filters primary trend,
 # volume confirms breakout authenticity. Designed to work in both bull and bear markets via strict entry conditions.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -33,31 +33,40 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian channels (20-period) using previous period's data to avoid look-ahead
-    # Upper band = highest high of previous 20 periods
-    # Lower band = lowest low of previous 20 periods
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels (R3, S3) using previous day's data to avoid look-ahead
+    # Typical Price = (high + low + close) / 3
+    # Pivot = (high_prev + low_prev + close_prev) / 3
+    # R3 = pivot + (high_prev - low_prev) * 1.1 / 4
+    # S3 = pivot - (high_prev - low_prev) * 1.1 / 4
+    typical_price = (high + low + close) / 3.0
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_typical = (prev_high + prev_low + prev_close) / 3.0
     # Shift by 1 to use only completed periods (avoid look-ahead)
-    upper_band = np.roll(highest_high, 1)
-    lower_band = np.roll(lowest_low, 1)
+    pivot = np.roll(prev_typical, 1)
+    prev_high_minus_low = np.roll(prev_high - prev_low, 1)
+    r3 = pivot + (prev_high_minus_low * 1.1 / 4.0)
+    s3 = pivot - (prev_high_minus_low * 1.1 / 4.0)
     # First bar uses current values (no previous data)
-    upper_band[0] = highest_high[0]
-    lower_band[0] = lowest_low[0]
+    pivot[0] = prev_typical[0]
+    prev_high_minus_low[0] = (prev_high - prev_low)[0]
+    r3[0] = pivot[0] + (prev_high_minus_low[0] * 1.1 / 4.0)
+    s3[0] = pivot[0] - (prev_high_minus_low[0] * 1.1 / 4.0)
     
-    # Get 1w data for EMA50 trend filter (MTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for EMA34 trend filter (MTF)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1w close
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA34 on 1d close
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF arrays to 1d timeframe (wait for completed 1w bar)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align HTF arrays to 12h timeframe (wait for completed 1d bar)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current 1d volume > 2.0x 20-period average (spike confirmation)
-    vol_ma_1d = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_1d)
+    # Volume filter: current 12h volume > 2.0x 20-period average (spike confirmation)
+    vol_ma_12h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * vol_ma_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,19 +75,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ma_1d[i])):
+        if (np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_12h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above upper band AND close > 1w EMA50 AND volume spike
-            if close[i] > upper_band[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
+            # LONG: price breaks above R3 AND close > 1d EMA34 AND volume spike
+            if close[i] > r3[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price breaks below lower band AND close < 1w EMA50 AND volume spike
-            elif close[i] < lower_band[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
+            # SHORT: price breaks below S3 AND close < 1d EMA34 AND volume spike
+            elif close[i] < s3[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
