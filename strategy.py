@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-# 6h_Keltner_Trend_RSI_Momentum
-# Hypothesis: Price tends to revert to the mean within a Keltner channel during sideways markets, 
-# but breaks out with momentum when the channel expands in trending conditions.
-# Uses 60-period EMA as midline, 2x ATR for channel width, and 14-period RSI for momentum confirmation.
-# In uptrends (price above EMA), go long when price touches lower band and RSI > 50.
-# In downtrends (price below EMA), go short when price touches upper band and RSI < 50.
-# Includes 1-day trend filter to ensure alignment with higher timeframe momentum.
-# Designed for 6h timeframe to balance trade frequency and signal quality.
-# Expected trades: 20-50 per year per symbol to minimize fee drag.
+# 12h_TRIX_VolumeSpike_Trend
+# Hypothesis: TRIX momentum combined with volume spike and 1w trend filter on 12h timeframe.
+# Long when TRIX crosses above zero with volume spike and 1w uptrend.
+# Short when TRIX crosses below zero with volume spike and 1w downtrend.
+# TRIX filters noise and catches momentum shifts; volume confirms institutional participation.
+# Works in bull markets (TRIX > 0 in uptrend) and bear markets (TRIX < 0 in downtrend).
+# Target: 12-37 trades/year per symbol to minimize fee drag.
 
-name = "6h_Keltner_Trend_RSI_Momentum"
-timeframe = "6h"
+name = "12h_TRIX_VolumeSpike_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,47 +20,37 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
 
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Keltner Channel: 60-period EMA as midline, 2x ATR for width
-    ema60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    kc_upper = ema60 + 2 * atr
-    kc_lower = ema60 - 2 * atr
-
-    # RSI for momentum confirmation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-
-    # 1-day trend filter: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate TRIX on 12h close: EMA of EMA of EMA (15-period)
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3.pct_change())  # percentage change of triple EMA
+    trix_values = trix.values
+    
+    # 1w trend: EMA50
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1w trend to 12h timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume spike: volume > 2.0 * 3-period average (1.5 days worth at 12h)
+    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
+    volume_spike = volume > 2.0 * vol_ma_3
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(ema60[i]) or 
-            np.isnan(kc_upper[i]) or 
-            np.isnan(kc_lower[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(trix_values[i]) or 
+            np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,26 +59,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price at lower Keltner band, uptrend, RSI > 50
-            if close[i] <= kc_lower[i] and close[i] > ema60[i] and rsi[i] > 50 and ema50_1d_aligned[i] < close[i]:
+            # LONG: TRIX crosses above zero + volume spike + 1w uptrend
+            if trix_values[i] > 0 and trix_values[i-1] <= 0 and volume_spike[i] and close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price at upper Keltner band, downtrend, RSI < 50
-            elif close[i] >= kc_upper[i] and close[i] < ema60[i] and rsi[i] < 50 and ema50_1d_aligned[i] > close[i]:
+            # SHORT: TRIX crosses below zero + volume spike + 1w downtrend
+            elif trix_values[i] < 0 and trix_values[i-1] >= 0 and volume_spike[i] and close[i] < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses above midline or RSI drops below 40
-            if close[i] >= ema60[i] or rsi[i] < 40:
+            # EXIT LONG: TRIX crosses below zero or trend reversal
+            if trix_values[i] < 0 or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses below midline or RSI rises above 60
-            if close[i] <= ema60[i] or rsi[i] > 60:
+            # EXIT SHORT: TRIX crosses above zero or trend reversal
+            if trix_values[i] > 0 or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
