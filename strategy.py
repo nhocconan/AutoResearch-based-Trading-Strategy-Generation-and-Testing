@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Go long when price breaks above Camarilla R3 with 1d EMA50 uptrend and volume spike; short when breaks below S3 with downtrend and spike. Uses Camarilla levels from prior day for structure, trend filter for direction, volume for confirmation. Works in bull (breaks above R3 in uptrend) and bear (breaks below S3 in downtrend). Low frequency due to strict breakout and volume requirements.
+# 12h_Keltner_Channel_Breakout_1dTrend_VolumeFilter
+# Hypothesis: Enter long when price breaks above Keltner upper band (EMA20 + 2*ATR) during alignment with 1d EMA50 uptrend, confirmed by volume spike.
+# Enter short when price breaks below Keltner lower band (EMA20 - 2*ATR) during alignment with 1d EMA50 downtrend, confirmed by volume spike.
+# Keltner Channels adapt to volatility via ATR, providing dynamic support/resistance.
+# Trend filter ensures alignment with higher timeframe momentum, reducing false breakouts.
+# Volume spike confirms institutional participation in the breakout.
+# Works in bull (breakouts above upper band in uptrend) and bear (breakdowns below lower band in downtrend).
+# Low frequency due to ATR-based bands and strict volume confirmation.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Keltner_Channel_Breakout_1dTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,47 +26,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get daily data for Camarilla levels and trend
+    # Get daily data for ATR (needed for Keltner Channels)
     df_1d = get_htf_data(prices, '1d')
     
-    # Prior day's OHLC for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # True Range calculation for ATR
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]  # first value
+    tr1 = high - low
+    tr2 = np.abs(high - prev_close)
+    tr3 = np.abs(low - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels: R3, S3 using prior day's range
-    # R3 = close + 1.1*(high-low)/6
-    # S3 = close - 1.1*(high-low)/6
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # first bar uses current
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    rang = prev_high - prev_low
-    R3 = prev_close + 1.1 * rang / 6
-    S3 = prev_close - 1.1 * rang / 6
+    # Keltner Channels (EMA20, 2*ATR)
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper = ema20 + 2 * atr
+    lower = ema20 - 2 * atr
     
     # Daily trend: EMA50
+    close_1d = df_1d['close'].values
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily indicators to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align daily indicators to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume spike: volume > 2.0 * 6-period average (1.5 days worth at 4h)
-    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
-    volume_spike = volume > 2.0 * vol_ma_6
+    # Volume spike: volume > 2.0 * 4-period average (2 days worth at 12h)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_spike = volume > 2.0 * vol_ma_4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or 
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or 
             np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,26 +72,28 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R3 + daily uptrend + volume spike
-            if close[i] > R3_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > upper band + daily uptrend + volume spike
+            if close[i] > upper_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S3 + daily downtrend + volume spike
-            elif close[i] < S3_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < lower band + daily downtrend + volume spike
+            elif close[i] < lower_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S3 or trend reversal
-            if close[i] < S3_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close below EMA20 OR trend reversal
+            ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
+            if close[i] < ema20_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R3 or trend reversal
-            if close[i] > R3_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close above EMA20 OR trend reversal
+            ema20_aligned = align_htf_to_ltf(prices, df_1d, ema20)
+            if close[i] > ema20_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
