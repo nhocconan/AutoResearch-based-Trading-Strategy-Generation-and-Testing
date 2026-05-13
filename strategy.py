@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w ADX(14) regime filter and volume confirmation.
-# Long when price breaks above Donchian upper band with 1w ADX > 20 (trending) and volume > 1.5x 20-bar average.
-# Short when price breaks below Donchian lower band with 1w ADX > 20 and volume > 1.5x average.
+# Hypothesis: 12h Donchian(20) breakout with 1d ADX(14) regime filter and volume confirmation.
+# Long when price breaks above Donchian upper band with 1d ADX > 25 (trending) and volume > 1.8x 20-bar average.
+# Short when price breaks below Donchian lower band with 1d ADX > 25 and volume > 1.8x average.
 # Exit when price reverses and closes below/above the midpoint of the Donchian channel.
-# Uses discrete position sizing 0.25. Target: 30-100 total trades over 4 years on 1d timeframe.
+# Uses discrete position sizing 0.25. Target: 50-150 total trades over 4 years on 12h timeframe.
 # ADX regime filter ensures we only trade in strong trends, avoiding whipsaws in ranging markets.
 # Volume confirmation validates breakout strength. Donchian exit provides clear, objective stop.
 
-name = "1d_Donchian20_1wADX_Regime_Volume_Breakout_v1"
-timeframe = "1d"
+name = "12h_Donchian20_1dADX_Regime_Volume_Breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -37,26 +37,26 @@ def generate_signals(prices):
     # Calculate average volume for confirmation (20-period)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Get 1w data for ADX regime filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Get 1d data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX(14) on 1w data
+    # Calculate ADX(14) on 1d data
     period = 14
-    if len(close_1w) < period + 1:
-        adx_1w = np.full(len(close_1w), np.nan)
+    if len(close_1d) < period + 1:
+        adx_1d = np.full(len(close_1d), np.nan)
     else:
         # True Range
-        tr1 = pd.Series(high_1w).diff().abs()
-        tr2 = (pd.Series(high_1w) - pd.Series(close_1w).shift(1)).abs()
-        tr3 = (pd.Series(low_1w) - pd.Series(close_1w).shift(1)).abs()
+        tr1 = pd.Series(high_1d).diff().abs()
+        tr2 = (pd.Series(high_1d) - pd.Series(close_1d).shift(1)).abs()
+        tr3 = (pd.Series(low_1d) - pd.Series(close_1d).shift(1)).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
         
         # Directional Movement
-        up_move = pd.Series(high_1w).diff()
-        down_move = -pd.Series(low_1w).diff()
+        up_move = pd.Series(high_1d).diff()
+        down_move = -pd.Series(low_1d).diff()
         plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
         minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
         
@@ -71,10 +71,10 @@ def generate_signals(prices):
         
         # ADX
         dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx_1w = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+        adx_1d = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
     
-    # Align 1w ADX to 1d timeframe (wait for 1w bar to close)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    # Align 1d ADX to 12h timeframe (wait for 1d bar to close)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -82,21 +82,21 @@ def generate_signals(prices):
     for i in range(lookback + 20, n):  # Start after sufficient data
         # Skip if any required data is NaN
         if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(adx_1w_aligned[i]) or np.isnan(avg_volume[i])):
+            np.isnan(adx_1d_aligned[i]) or np.isnan(avg_volume[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper band with ADX > 20 and volume spike
+            # LONG: Price breaks above upper band with ADX > 25 and volume spike
             if (close[i] > upper_band[i] and 
-                adx_1w_aligned[i] > 20 and 
-                volume[i] > 1.5 * avg_volume[i]):
+                adx_1d_aligned[i] > 25 and 
+                volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower band with ADX > 20 and volume spike
+            # SHORT: Price breaks below lower band with ADX > 25 and volume spike
             elif (close[i] < lower_band[i] and 
-                  adx_1w_aligned[i] > 20 and 
-                  volume[i] > 1.5 * avg_volume[i]):
+                  adx_1d_aligned[i] > 25 and 
+                  volume[i] > 1.8 * avg_volume[i]):
                 signals[i] = -0.25
                 position = -1
             else:
