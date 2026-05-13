@@ -1,82 +1,86 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and ATR-based stoploss.
-# Enters long when price breaks above 20-day high with 1w bullish trend (close > EMA50) and ATR(14) < 0.08 * close (low volatility regime).
-# Enters short when price breaks below 20-day low with 1w bearish trend (close < EMA50) and ATR(14) < 0.08 * close.
-# Exits on opposite Donchian breakout or when ATR(14) > 0.15 * close (high volatility exit).
-# Uses discrete position sizing (0.25) to minimize fee drag and manage drawdown.
-# Designed for low trade frequency (~7-25/year) to work in both bull and bear markets by requiring volatility regime filter and multi-timeframe trend alignment.
+# Hypothesis: 12h Williams Fractal breakout with 1d trend filter and volume spike.
+# Enters long when price breaks above the most recent bullish Williams fractal with 1d bullish trend (close > EMA34) and volume > 2.0x MA20.
+# Enters short when price breaks below the most recent bearish Williams fractal with 1d bearish trend (close < EMA34) and volume > 2.0x MA20.
+# Exits when price crosses the 12h EMA50 (adaptive mean reversion).
+# Williams fractals require 2 extra bars for confirmation (additional_delay_bars=2).
+# Designed for low trade frequency (~12-37/year) to work in both bull and bear markets by requiring strong volume confirmation and trend alignment.
 
-name = "1d_Donchian20_Breakout_1wTrend_ATRStop"
-timeframe = "1d"
+name = "12h_WilliamsFractal_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Get 1d data for Williams fractals and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR(14) for volatility regime and stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Williams fractals on 1d data
+    bearish_fractal, bullish_fractal = compute_williams_fractals(high_1d, low_1d)
+    # Williams fractals need 2 extra bars for confirmation (center bar + 2 right bars)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    # Calculate 20-period Donchian channels (using previous 20 bars, not including current)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high = np.roll(high_roll, 1)  # Shift to use only past 20 bars
-    donchian_low = np.roll(low_roll, 1)
-    donchian_high[0] = np.nan  # First bar has no valid Donchian high
-    donchian_low[0] = np.nan   # First bar has no valid Donchian low
+    # Get 1d data for trend filter (EMA34)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Get 12h data for exit condition (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Volume filter: current volume > 2.0x 20-period average (stricter to reduce trades)
+    volume_series = pd.Series(volume)
+    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after sufficient data for all indicators
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]) or \
-           np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+    for i in range(100, n):  # Start after sufficient data for all indicators
+        if np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or \
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above 20-day high with 1w bullish trend and low volatility
-            if close[i] > donchian_high[i] and close[i] > ema50_1w_aligned[i] and atr[i] < 0.08 * close[i]:
+            # LONG: Price breaks above bullish fractal with 1d bullish trend and volume spike
+            if close[i] > bullish_fractal_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 20-day low with 1w bearish trend and low volatility
-            elif close[i] < donchian_low[i] and close[i] < ema50_1w_aligned[i] and atr[i] < 0.08 * close[i]:
+            # SHORT: Price breaks below bearish fractal with 1d bearish trend and volume spike
+            elif close[i] < bearish_fractal_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 20-day low OR high volatility (ATR > 15% of price)
-            if close[i] < donchian_low[i] or atr[i] > 0.15 * close[i]:
+            # EXIT LONG: Price crosses below 12h EMA50 (mean reversion in range)
+            if close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 20-day high OR high volatility (ATR > 15% of price)
-            if close[i] > donchian_high[i] or atr[i] > 0.15 * close[i]:
+            # EXIT SHORT: Price crosses above 12h EMA50 (mean reversion in range)
+            if close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
