@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 12h_PivotPoint_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts from daily Pivot Point R3/S3 levels on 12h timeframe with 1d EMA50 trend filter and volume spike confirmation.
-# Uses standard pivot point calculation from previous day's OHLC (more stable than Camarilla in ranging markets).
-# Trend filter: 1d EMA50 (only trade in direction of higher timeframe trend).
-# Volume confirmation: current volume > 2.0 x 20-period average.
-# Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation.
-# Target: 15-35 trades/year per symbol to minimize fee drag.
+# 6h_FisherTransform_Reversal_1dTrend
+# Hypothesis: Ehlers Fisher Transform on 6h with 1d trend filter and volume confirmation.
+# Fisher Transform identifies extreme price movements and potential reversals.
+# Long when Fisher crosses above -1.5 in uptrend with volume spike.
+# Short when Fisher crosses below +1.5 in downtrend with volume spike.
+# Uses 1d EMA50 for trend filter and volume > 2x 20-period average for confirmation.
+# Designed to capture reversals in both bull and bear markets with trend alignment.
+# Target: 12-37 trades/year per symbol to minimize fee drag while maintaining edge.
 
-name = "12h_PivotPoint_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_FisherTransform_Reversal_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,22 +26,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for pivot points and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
 
-    # Calculate Pivot Points for 12h using previous day's OHLC
-    # Standard pivot: P = (H + L + C) / 3
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    pivot_r3 = prev_high + 2 * (pivot - prev_low)
-    pivot_s3 = prev_low - 2 * (prev_high - pivot)
+    # Fisher Transform on 6h price
+    # Normalize price to [-1, 1] range over lookback period
+    def fisher_transform(price_series, length=10):
+        # Calculate highest high and lowest low over lookback
+        highest_high = pd.Series(price_series).rolling(window=length, min_periods=length).max().values
+        lowest_low = pd.Series(price_series).rolling(window=length, min_periods=length).min().values
+        
+        # Avoid division by zero
+        range_hl = highest_high - lowest_low
+        range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+        
+        # Normalize price to [-1, 1]
+        value = 2 * ((price_series - lowest_low) / range_hl - 0.5)
+        # Clamp to [-0.999, 0.999] to prevent infinity in log
+        value = np.clip(value, -0.999, 0.999)
+        
+        # Fisher Transform
+        fish = 0.5 * np.log((1 + value) / (1 - value))
+        
+        # Smoothed Fisher (signal line)
+        fish_smoothed = pd.Series(fish).ewm(span=3, adjust=False, min_periods=3).mean().values
+        return fish_smoothed
 
-    # Align Pivot levels to 12h timeframe
-    pivot_r3_aligned = align_htf_to_ltf(prices, df_1d, pivot_r3)
-    pivot_s3_aligned = align_htf_to_ltf(prices, df_1d, pivot_s3)
+    fish = fisher_transform(close, length=10)
 
     # Trend filter: 1d EMA50
     ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -55,8 +67,7 @@ def generate_signals(prices):
 
     for i in range(20, n):  # Start after sufficient warmup
         # Skip if any required value is NaN
-        if (np.isnan(pivot_r3_aligned[i]) or 
-            np.isnan(pivot_s3_aligned[i]) or 
+        if (np.isnan(fish[i]) or 
             np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(volume_spike[i])):
             if position != 0:
@@ -67,14 +78,14 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Break above Pivot R3 in uptrend with volume spike
-            if (close[i] > pivot_r3_aligned[i] and 
+            # LONG: Fisher crosses above -1.5 in uptrend with volume spike
+            if (fish[i] > -1.5 and fish[i-1] <= -1.5 and 
                 close[i] > ema50_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Break below Pivot S3 in downtrend with volume spike
-            elif (close[i] < pivot_s3_aligned[i] and 
+            # SHORT: Fisher crosses below +1.5 in downtrend with volume spike
+            elif (fish[i] < 1.5 and fish[i-1] >= 1.5 and 
                   close[i] < ema50_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -82,15 +93,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Pivot S3 or trend turns down
-            if close[i] < pivot_s3_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Fisher crosses below +1.5 or trend turns down
+            if fish[i] < 1.5 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Pivot R3 or trend turns up
-            if close[i] > pivot_r3_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Fisher crosses above -1.5 or trend turns up
+            if fish[i] > -1.5 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
