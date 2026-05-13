@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Camarilla_R3_S3_Breakout_1dTrend_Force_v4"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_1D_Trend_Force_v5"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,20 +17,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h period Camarilla levels (using previous 12h bar)
-    R3 = np.zeros(n)
-    S3 = np.zeros(n)
+    # Calculate 4h period Camarilla levels (using previous 4h bar)
+    R1 = np.zeros(n)
+    S1 = np.zeros(n)
     for i in range(1, n):
         prev_high = high[i-1]
         prev_low = low[i-1]
         prev_close = close[i-1]
         range_val = prev_high - prev_low
         if range_val > 0:
-            R3[i] = prev_close + range_val * 1.1 / 2
-            S3[i] = prev_close - range_val * 1.1 / 2
+            R1[i] = prev_close + range_val * 1.1 / 4
+            S1[i] = prev_close - range_val * 1.1 / 4
         else:
-            R3[i] = prev_close
-            S3[i] = prev_close
+            R1[i] = prev_close
+            S1[i] = prev_close
     
     # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -38,9 +38,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate EMA34 on daily close
-    ema_34 = np.zeros_like(close_1d)
-    ema_34[:] = np.nan
+    # Calculate EMA34 on daily close with proper handling
+    ema_34 = np.full_like(close_1d, np.nan, dtype=np.float64)
     alpha = 2 / (34 + 1)
     for i in range(len(close_1d)):
         if i == 0:
@@ -50,12 +49,11 @@ def generate_signals(prices):
         else:
             ema_34[i] = alpha * close_1d[i] + (1 - alpha) * ema_34[i-1]
     
-    # Align 1d EMA34 to 12h timeframe
+    # Align 1d EMA34 to 4h timeframe
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate volume average (20-period) for volume spike filter
-    vol_ma_20 = np.zeros_like(volume)
-    vol_ma_20[:] = np.nan
+    vol_ma_20 = np.full_like(volume, np.nan, dtype=np.float64)
     for i in range(19, len(volume)):
         vol_ma_20[i] = np.mean(volume[i-19:i+1])
     
@@ -64,7 +62,7 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3[i]) or np.isnan(S3[i]) or np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(ema_34_aligned[i]) or 
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
@@ -73,26 +71,26 @@ def generate_signals(prices):
         vol_spike = volume[i] > 2.0 * vol_ma_20[i]
         
         if position == 0:
-            # LONG: Close > R3 + volume spike + 1d uptrend (close > EMA34)
-            if (close[i] > R3[i] and vol_spike and close[i] > ema_34_aligned[i]):
+            # LONG: Close > R1 + volume spike + 1d uptrend (close > EMA34)
+            if (close[i] > R1[i] and vol_spike and close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S3 + volume spike + 1d downtrend (close < EMA34)
-            elif (close[i] < S3[i] and vol_spike and close[i] < ema_34_aligned[i]):
+            # SHORT: Close < S1 + volume spike + 1d downtrend (close < EMA34)
+            elif (close[i] < S1[i] and vol_spike and close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close < S3 (reversal to opposite level)
-            if close[i] < S3[i]:
+            # EXIT LONG: Close < S1 (reversal to opposite level)
+            if close[i] < S1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close > R3 (reversal to opposite level)
-            if close[i] > R3[i]:
+            # EXIT SHORT: Close > R1 (reversal to opposite level)
+            if close[i] > R1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
