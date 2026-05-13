@@ -1,14 +1,12 @@
+# SPDX-License-Identifier: MIT
 #!/usr/bin/env python3
-# 6h_Weekly_Pivot_DailyTrend_Breakout
-# Hypothesis: Enter long when price breaks above weekly R1 pivot with daily uptrend and volume confirmation.
-# Enter short when price breaks below weekly S1 pivot with daily downtrend and volume confirmation.
-# Weekly pivots provide significant support/resistance levels. Breakouts indicate institutional interest.
-# Daily trend filter ensures alignment with intermediate-term momentum. Volume surge confirms breakout strength.
-# Works in bull (breakouts above R1 in uptrend) and bear (breakdowns below S1 in downtrend).
-# Low frequency due to pivot breakout requirement and volume confirmation.
+"""
+4h_Donchian_Breakout_1dTrend_VolumeFilter
+Hypothesis: Enter long when price breaks above Donchian(20) upper band in direction of 1d EMA50 trend with volume confirmation. Enter short when price breaks below Donchian(20) lower band in direction of 1d EMA50 trend with volume confirmation. Exit on opposite band touch. Trend filter ensures alignment with higher timeframe momentum, reducing false breakouts in choppy markets. Volume confirmation ensures institutional participation. Works in bull (breakouts in uptrend) and bear (breakdowns in downtrend). Low frequency due to strict trend and volume requirements.
+"""
 
-name = "6h_Weekly_Pivot_DailyTrend_Breakout"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,41 +23,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Weekly Pivot Points (standard calculation)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
-    r2 = pivot + (high_1w - low_1w)
-    s2 = pivot - (high_1w - low_1w)
-    
-    # Get daily data for trend filter
+    # Get daily data for Donchian channels and trend
     df_1d = get_htf_data(prices, '1d')
+    
+    # Donchian Channels (20)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Daily trend: EMA50
     close_1d = df_1d['close'].values
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly pivots and daily EMA to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Align daily indicators to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume spike: volume > 2.0 * 4-period average (1 day worth at 6h)
-    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
-    volume_spike = volume > 2.0 * vol_ma_4
+    # Volume spike: volume > 2.0 * 6-period average (1 day worth at 4h)
+    vol_ma_6 = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    volume_spike = volume > 2.0 * vol_ma_6
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
+        if (np.isnan(upper_aligned[i]) or 
+            np.isnan(lower_aligned[i]) or 
             np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,26 +61,26 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > weekly R1 + daily uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
+            # LONG: Close > upper band + daily uptrend + volume spike
+            if close[i] > upper_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < weekly S1 + daily downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
+            # SHORT: Close < lower band + daily downtrend + volume spike
+            elif close[i] < lower_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below weekly pivot OR trend reversal
-            if close[i] < r1_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # EXIT LONG: Close below lower band
+            if close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above weekly S1 OR trend reversal
-            if close[i] > s1_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # EXIT SHORT: Close above upper band
+            if close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
