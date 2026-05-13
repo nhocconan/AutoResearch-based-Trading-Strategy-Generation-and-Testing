@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and choppiness regime filter.
-# Long when price breaks above Camarilla R3 AND 1d volume > 2.0x 20-period average AND 1d chop < 38.2 (trending).
-# Short when price breaks below Camarilla S3 AND 1d volume > 2.0x 20-period average AND 1d chop < 38.2 (trending).
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and ADX regime filter.
+# Long when price breaks above Camarilla R3 level AND 1d ADX > 25 (trending) AND volume > 1.8x 20-period average.
+# Short when price breaks below Camarilla S3 level AND 1d ADX > 25 AND volume > 1.8x 20-period average.
 # Uses ATR(14) trailing stop (2.0x) for risk control.
-# Camarilla levels provide high-probability reversal/breakout points from prior day's range.
-# 1d volume spike confirms institutional participation. Choppiness filter avoids false breakouts in ranges.
-# Target: 80-150 total trades over 4 years (20-37/year) on 12h.
+# Camarilla levels from 1d provide precise intraday support/resistance based on prior day's range.
+# 1d ADX > 25 ensures we only trade in strong trending conditions, avoiding whipsaws in chop.
+# Volume confirmation filters out weak breakouts. Target: 80-150 total trades over 4 years (20-38/year) on 4h.
 
-name = "12h_Camarilla_R3S3_Breakout_1dVolume_Chop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dADX_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -33,55 +33,56 @@ def generate_signals(prices):
     tr[0] = tr1[0]  # First bar has no previous close
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels (R3, S3) from prior 12h bar's range
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    # Use prior bar to avoid look-ahead
-    prior_high = np.roll(high, 1)
-    prior_low = np.roll(low, 1)
-    prior_close = np.roll(close, 1)
-    prior_high[0] = high[0]  # First bar: use current
-    prior_low[0] = low[0]
-    prior_close[0] = close[0]
-    
-    camarilla_range = prior_high - prior_low
-    r3 = prior_close + 1.1 * camarilla_range / 2.0
-    s3 = prior_close - 1.1 * camarilla_range / 2.0
-    
-    # Get 1d data for volume and choppiness
+    # Get 1d data for Camarilla levels and ADX
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d volume > 2.0x 20-period average
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (2.0 * vol_ma_20_1d)
+    # Calculate Camarilla levels from prior 1d bar
+    # R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    camarilla_range = (high_1d - low_1d) * 1.1
+    camarilla_r3 = close_1d + (camarilla_range / 4)
+    camarilla_s3 = close_1d - (camarilla_range / 4)
     
-    # Calculate 1d choppiness index (CHOP) - EHLERS version
+    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Calculate ADX(14) on 1d data
     # True Range
     tr1_1d = high_1d - low_1d
     tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
     tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
     tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
     tr_1d[0] = tr1_1d[0]
-    atr_1d_sum = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
-    # Highest high and lowest low over 14 periods
-    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Directional Movement
+    up_move = high_1d - np.roll(high_1d, 1)
+    down_move = np.roll(low_1d, 1) - low_1d
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Chop = 100 * log10(atr_1d_sum / (hh_1d - ll_1d)) / log10(14)
-    # Avoid division by zero
-    range_1d = hh_1d - ll_1d
-    chop_1d = np.zeros_like(range_1d, dtype=float)
-    mask = (range_1d > 0) & (~np.isnan(atr_1d_sum)) & (~np.isnan(range_1d))
-    chop_1d[mask] = 100 * np.log10(atr_1d_sum[mask] / range_1d[mask]) / np.log10(14)
-    chop_1d[~mask] = 50.0  # Neutral when range is zero
+    # Smoothed DM and TR
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
+    tr_smooth = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False).mean().values
     
-    # Align 1d indicators to 12h timeframe (wait for 1d bar to close)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    
+    # Align 1d ADX to 4h timeframe (wait for 1d bar to close)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Calculate volume confirmation: volume > 1.8x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -90,20 +91,19 @@ def generate_signals(prices):
     
     for i in range(100, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(volume_spike_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price > Camarilla R3 AND 1d volume spike AND 1d chop < 38.2 (trending)
-            if close[i] > r3[i] and volume_spike_1d_aligned[i] > 0.5 and chop_1d_aligned[i] < 38.2:
+            # LONG: Price > Camarilla R3 AND 1d ADX > 25 AND volume confirmation
+            if close[i] > camarilla_r3_aligned[i] and adx_1d_aligned[i] > 25 and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: Price < Camarilla S3 AND 1d volume spike AND 1d chop < 38.2 (trending)
-            elif close[i] < s3[i] and volume_spike_1d_aligned[i] > 0.5 and chop_1d_aligned[i] < 38.2:
+            # SHORT: Price < Camarilla S3 AND 1d ADX > 25 AND volume confirmation
+            elif close[i] < camarilla_s3_aligned[i] and adx_1d_aligned[i] > 25 and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
