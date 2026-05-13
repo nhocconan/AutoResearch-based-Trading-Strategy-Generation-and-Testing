@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# 4h_KAMA_Trend_VolumeBreakout
-# Hypothesis: KAMA adapts to market noise, providing a smooth trend filter. 
-# Combined with volume breakout above 20-period average and price closing beyond 
-# KAMA ± 1.5*ATR, this captures strong momentum moves while filtering chop. 
-# Works in bull/bear by following KAMA direction. Target: 20-30 trades/year.
+# 6h_RangeBreakout_WeeklyTrend
+# Hypothesis: In ranging markets (identified by weekly low volatility), 
+# breakouts from daily consolidation ranges (identified by narrow daily range) 
+# with volume confirmation capture explosive moves. Works in both bull and bear 
+# by trading breakouts in the direction of the weekly trend. 
+# Target: 15-25 trades/year per symbol.
 
-name = "4h_KAMA_Trend_VolumeBreakout"
-timeframe = "4h"
+name = "6h_RangeBreakout_WeeklyTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,57 +23,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for KAMA trend filter
+    # Get daily data for consolidation and volume filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
 
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
 
-    # Calculate KAMA (10,2,30) on 1d
-    def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        vol = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None
-        # Correct calculation of volatility (sum of absolute changes over ER period)
-        vol = np.zeros_like(close)
-        for i in range(len(close)):
-            if i == 0:
-                vol[i] = 0
-            else:
-                vol[i] = vol[i-1] + np.abs(close[i] - close[i-1])
-                if i >= er_length:
-                    vol[i] -= np.abs(close[i-er_length] - close[i-er_length-1]) if i-er_length-1 >= 0 else 0
-        # For simplicity, use rolling sum of absolute changes
-        change = np.abs(np.diff(close, prepend=close[0]))
-        vol_sum = pd.Series(change).rolling(window=er_length, min_periods=1).sum().values
-        # Avoid division by zero
-        er = np.where(vol_sum != 0, np.abs(np.diff(close, prepend=close[0])) / vol_sum, 0)
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
 
-    kama_1d = calculate_kama(close_1d, er_length=10, fast_sc=2, slow_sc=30)
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    close_1w = df_1w['close'].values
 
-    # ATR (14) for dynamic threshold
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Daily range (high - low) as percentage of price
+    daily_range_pct = (high_1d - low_1d) / close_1d
+    # 20-period average of daily range percentage
+    avg_daily_range_pct = pd.Series(daily_range_pct).rolling(window=20, min_periods=20).mean().values
+    # Current daily range as percentage
+    current_daily_range_pct = (high_1d - low_1d) / close_1d
 
-    # Volume average (20-period)
+    # Daily consolidation: today's range < 50% of 20-day average range
+    daily_consolidation = current_daily_range_pct < (0.5 * avg_daily_range_pct)
+
+    # Weekly trend: 50-period EMA on weekly close
+    weekly_ema50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_uptrend = close_1w > weekly_ema50
+    weekly_downtrend = close_1w < weekly_ema50
+
+    # 6h consolidation range: highest high and lowest low of last 4 bars (24h)
+    highest_high_24h = np.maximum.accumulate(high[::-1])[::-1]
+    lowest_low_24h = np.minimum.accumulate(low[::-1])[::-1]
+    # Shift to get past 4 bars only
+    highest_high_past = np.roll(highest_high_24h, 4)
+    lowest_low_past = np.roll(lowest_low_24h, 4)
+    # For first 4 bars, use NaN
+    highest_high_past[:4] = np.nan
+    lowest_low_past[:4] = np.nan
+
+    # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
+    volume_spike = volume > (1.5 * vol_ma)
 
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
-    for i in range(30, n):  # Start after warmup for KAMA and ATR
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(atr[i]) or 
+    for i in range(20, n):  # Start after warmup for daily averages
+        # Get aligned daily values for current 6h bar
+        if i < len(daily_consolidation):
+            cons = daily_consolidation[i]
+        else:
+            cons = False
+            
+        if i < len(weekly_uptrend):
+            up_trend = weekly_uptrend[i]
+            down_trend = weekly_downtrend[i]
+        else:
+            up_trend = False
+            down_trend = False
+            
+        if i < len(volume_spike):
+            vol_spike = volume_spike[i]
+        else:
+            vol_spike = False
+
+        # Handle NaN values from alignment
+        if (np.isnan(highest_high_past[i]) or np.isnan(lowest_low_past[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -83,26 +102,28 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Price closes above KAMA + 1.5*ATR with volume spike
-            if close[i] > kama_1d_aligned[i] + 1.5 * atr[i] and volume_spike[i]:
+            # LONG: Weekly uptrend + daily consolidation + upside breakout + volume spike
+            if (up_trend and cons and 
+                close[i] > highest_high_past[i] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price closes below KAMA - 1.5*ATR with volume spike
-            elif close[i] < kama_1d_aligned[i] - 1.5 * atr[i] and volume_spike[i]:
+            # SHORT: Weekly downtrend + daily consolidation + downside breakout + volume spike
+            elif (down_trend and cons and 
+                  close[i] < lowest_low_past[i] and vol_spike):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price closes below KAMA
-            if close[i] < kama_1d_aligned[i]:
+            # EXIT LONG: Price closes below 24h low or weekly trend changes
+            if (close[i] < lowest_low_past[i] or not up_trend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price closes above KAMA
-            if close[i] > kama_1d_aligned[i]:
+            # EXIT SHORT: Price closes above 24h high or weekly trend changes
+            if (close[i] > highest_high_past[i] or not down_trend):
                 signals[i] = 0.0
                 position = 0
             else:
