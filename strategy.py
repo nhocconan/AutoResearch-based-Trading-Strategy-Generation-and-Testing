@@ -3,7 +3,7 @@
 # Hypothesis: Use 1d Camarilla pivot levels (R1/S1) for breakout entries with 1d EMA50 trend filter and volume confirmation.
 # Long when price breaks above R1 in uptrend with volume spike, short when price breaks below S1 in downtrend with volume spike.
 # Exit when price returns to the 1d pivot level (PP) or trend changes.
-# Designed for moderate trade frequency (75-200 total trades over 4 years) with clear entry/exit rules to avoid overtrading.
+# Designed for low trade frequency (20-50 total trades over 4 years) to minimize fee drag and improve generalization.
 
 name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
@@ -23,26 +23,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
 
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for Camarilla pivot calculation and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d Camarilla pivot levels: R1, S1, and PP (pivot point)
-    # Camarilla formulas:
-    # PP = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     pp_1d = typical_price.values
     hl_range = df_1d['high'] - df_1d['low']
-    r1_1d = df_1d['close'].values + hl_range.values * 1.1 / 12
-    s1_1d = df_1d['close'].values - hl_range.values * 1.1 / 12
+    r1_1d = df_1d['close'].values + hl_range.values * 1.1 / 4
+    s1_1d = df_1d['close'].values - hl_range.values * 1.1 / 4
     
     # Align 1d Camarilla levels to 4h timeframe
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
 
-    # Get 1d data for EMA trend filter
+    # Calculate 1d EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
 
