@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
-# Hypothesis: Enter long when price breaks above Camarilla R1 level with 12h EMA50 uptrend and volume spike; enter short when price breaks below S1 level with 12h EMA50 downtrend and volume spike.
-# Camarilla levels provide precise intraday support/resistance. Trend filter ensures alignment with higher timeframe momentum.
-# Volume spike confirms institutional participation. Works in bull (breakouts above R1 in uptrend) and bear (breakdowns below S1 in downtrend).
-# Low frequency due to specific level breaks and strict volume confirmation.
+# 12h_Camarilla_Pivot_Bounce_1dTrend_Reversal
+# Hypothesis: Enter long at Camarilla S1 support during 1d uptrend when price shows rejection (close > open) and volume confirms.
+# Enter short at Camarilla R1 resistance during 1d downtrend when price shows rejection (close < open) and volume confirms.
+# Uses Camarilla levels from daily timeframe for institutional support/resistance.
+# Trend filter ensures alignment with higher timeframe momentum.
+# Works in bull (bounces at S1 in uptrend) and bear (rejections at R1 in downtrend).
+# Low frequency due to specific price action requirements at pivot levels.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_Bounce_1dTrend_Reversal"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,40 +23,56 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
 
-    # Get 12h data for Camarilla levels and trend
-    df_12h = get_htf_data(prices, '12h')
+    # Get daily data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels for each 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate Camarilla levels from previous day
+    # Using previous day's high, low, close to avoid look-ahead
+    phigh = df_1d['high'].shift(1).values  # Previous day high
+    plow = df_1d['low'].shift(1).values    # Previous day low
+    pclose = df_1d['close'].shift(1).values # Previous day close
     
-    # Camarilla levels: R1 = C + (H-L)*1.12, S1 = C - (H-L)*1.12
-    r1_12h = close_12h + (high_12h - low_12h) * 1.12
-    s1_12h = close_12h - (high_12h - low_12h) * 1.12
+    # Camarilla levels: H5, L5, H4, L4, H3, L3, H2, L2, H1, L1
+    # We focus on H3 (resistance) and L3 (support) for reversals
+    range_val = phigh - plow
+    h3 = pclose + range_val * 1.1 / 4
+    l3 = pclose - range_val * 1.1 / 4
+    h4 = pclose + range_val * 1.1 / 2
+    l4 = pclose - range_val * 1.1 / 2
     
-    # 12h trend: EMA50
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily trend: EMA50
+    ema50_1d = pd.Series(pclose).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 12h indicators to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align daily indicators to 12h timeframe
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume spike: volume > 2.0 * 3-period average (1.5 days worth at 4h)
-    vol_ma_3 = pd.Series(volume).rolling(window=3, min_periods=3).mean().values
-    volume_spike = volume > 2.0 * vol_ma_3
+    # Price action confirmation: rejection candle
+    # Bullish rejection: close > open (bullish candle)
+    # Bearish rejection: close < open (bearish candle)
+    bullish_rejection = close > open_price
+    bearish_rejection = close < open_price
+    
+    # Volume confirmation: volume > 1.5 * 4-period average (1 day worth at 12h)
+    vol_ma_4 = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    volume_confirm = volume > 1.5 * vol_ma_4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
 
     for i in range(100, n):
         # Skip if any required value is NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i])):
+        if (np.isnan(h3_aligned[i]) or 
+            np.isnan(l3_aligned[i]) or 
+            np.isnan(h4_aligned[i]) or 
+            np.isnan(l4_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,26 +81,34 @@ def generate_signals(prices):
             continue
 
         if position == 0:
-            # LONG: Close > R1 + 12h uptrend + volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema50_12h_aligned[i] and volume_spike[i]:
+            # LONG: Price at L3 support, bullish rejection, uptrend, volume
+            if (low[i] <= l3_aligned[i] * 1.005 and  # Allow small tolerance for wick
+                close[i] > l3_aligned[i] and
+                bullish_rejection[i] and
+                close[i] > ema50_1d_aligned[i] and
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close < S1 + 12h downtrend + volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema50_12h_aligned[i] and volume_spike[i]:
+            # SHORT: Price at H3 resistance, bearish rejection, downtrend, volume
+            elif (high[i] >= h3_aligned[i] * 0.995 and  # Allow small tolerance for wick
+                  close[i] < h3_aligned[i] and
+                  bearish_rejection[i] and
+                  close[i] < ema50_1d_aligned[i] and
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close below S1 OR trend reversal
-            if close[i] < s1_aligned[i] or close[i] < ema50_12h_aligned[i]:
+            # EXIT LONG: Price reaches L4 (stop) or H3 (target) or trend reversal
+            if close[i] <= l4_aligned[i] or close[i] >= h3_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close above R1 OR trend reversal
-            if close[i] > r1_aligned[i] or close[i] > ema50_12h_aligned[i]:
+            # EXIT SHORT: Price reaches H4 (stop) or L3 (target) or trend reversal
+            if close[i] >= h4_aligned[i] or close[i] <= l3_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
