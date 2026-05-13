@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_KAMA_Trend_1dRSI_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,106 +17,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1D data ONCE for RSI
+    # Load 1D data ONCE for Camarilla levels, trend and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate RSI(14) on 1D
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close)
-        delta = np.concatenate([[np.nan], delta])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
+    # Calculate previous day's Camarilla levels
+    def calculate_camarilla(high, low, close):
+        # Previous day's values
+        ph = np.concatenate([[np.nan], high[:-1]])
+        pl = np.concatenate([[np.nan], low[:-1]])
+        pc = np.concatenate([[np.nan], close[:-1]])
         
-        avg_gain = np.full_like(close, np.nan)
-        avg_loss = np.full_like(close, np.nan)
+        # Camarilla levels
+        R1 = pc + 1.1 * (ph - pl) / 12
+        S1 = pc - 1.1 * (ph - pl) / 12
+        R2 = pc + 1.1 * (ph - pl) / 6
+        S2 = pc - 1.1 * (ph - pl) / 6
+        R3 = pc + 1.1 * (ph - pl) / 4
+        S3 = pc - 1.1 * (ph - pl) / 4
+        R4 = pc + 1.1 * (ph - pl) / 2
+        S4 = pc - 1.1 * (ph - pl) / 2
         
-        # First values
-        if len(gain) >= period:
-            avg_gain[period-1] = np.nanmean(gain[1:period])
-            avg_loss[period-1] = np.nanmean(loss[1:period])
-            
-            # Wilder's smoothing
-            for i in range(period, len(gain)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.full_like(close, np.nan)
-        valid = ~np.isnan(avg_loss) & (avg_loss != 0)
-        rs[valid] = avg_gain[valid] / avg_loss[valid]
-        
-        rsi = np.full_like(close, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+        return R1, S1, R2, S2, R3, S3, R4, S4
     
-    rsi_1d = calculate_rsi(close_1d, 14)
+    R1, S1, R2, S2, R3, S3, R4, S4 = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align 1D RSI to 12H timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1D EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 12H KAMA (Kaufman Adaptive Moving Average)
-    def calculate_kama(close, er_period=10, fast_ema=2, slow_ema=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, er_period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > er_period else np.array([])
-        # Better approach: compute volatility as sum of absolute changes over er_period window
-        volatility = np.array([np.sum(np.abs(np.diff(close[i-er_period+1:i+1])) if i >= er_period-1 else np.nan) for i in range(len(close))])
-        er = np.where(volatility != 0, change / volatility, 0)
-        er = np.concatenate([[np.nan] * (er_period-1), er]) if len(er) < len(close) else er
-        
-        # Smoothing constants
-        sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-        
-        kama = np.full_like(close, np.nan)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            if not np.isnan(sc[i]):
-                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-            else:
-                kama[i] = kama[i-1]
-        return kama
+    # Calculate 1D volume average for volume spike filter
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    kama_12h = calculate_kama(close, er_period=10, fast_ema=2, slow_ema=30)
+    # Align 1D indicators to 4H timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(30, n):  # Start after sufficient data
-        if np.isnan(rsi_1d_aligned[i]) or np.isnan(kama_12h[i]):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # RSI filter: Avoid extreme overbought/oversold
-        rsi_ok = (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
+        # Trend filter: price above/below EMA34
+        uptrend = close[i] > ema34_1d_aligned[i]
+        downtrend = close[i] < ema34_1d_aligned[i]
         
-        # Price relative to KAMA
-        price_above_kama = close[i] > kama_12h[i]
-        price_below_kama = close[i] < kama_12h[i]
+        # Volume filter: current volume > 1.5x average volume
+        volume_spike = volume[i] > 1.5 * vol_avg_1d_aligned[i]
         
         if position == 0:
-            # LONG: Price above KAMA + not overbought
-            if price_above_kama and rsi_ok:
+            # LONG: price breaks above R1 + uptrend + volume spike
+            if close[i] > R1_aligned[i] and uptrend and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below KAMA + not oversold
-            elif price_below_kama and rsi_ok:
+            # SHORT: price breaks below S1 + downtrend + volume spike
+            elif close[i] < S1_aligned[i] and downtrend and volume_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below KAMA or RSI overbought
-            if price_below_kama or rsi_1d_aligned[i] >= 70:
+            # EXIT LONG: price breaks below S1 or trend changes
+            if close[i] < S1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above KAMA or RSI oversold
-            if price_above_kama or rsi_1d_aligned[i] <= 30:
+            # EXIT SHORT: price breaks above R1 or trend changes
+            if close[i] > R1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
