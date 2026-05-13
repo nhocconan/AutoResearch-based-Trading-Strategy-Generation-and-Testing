@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
 # Long when price breaks above 1d Camarilla R3 level AND close > 1d EMA34 AND volume > 2.0x 20-period average.
 # Short when price breaks below 1d Camarilla S3 level AND close < 1d EMA34 AND volume > 2.0x 20-period average.
 # Uses ATR-based trailing stop (2.0x) for risk control.
-# Camarilla levels provide precise intraday support/resistance, 1d EMA34 filters intermediate trend,
-# volume spike confirms institutional participation. Target: 20-40 trades/year (80-160 total over 4 years) on 4h timeframe.
+# Camarilla levels provide intraday support/resistance, 1d EMA34 filters intermediate trend, volume spike confirms institutional participation.
+# Target: 12-25 trades/year (50-100 total over 4 years) on 6h timeframe.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -38,17 +38,24 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla levels (R3, S3)
-    # Camarilla formula: R4 = close + 1.1*(high-low)*1.1/2, R3 = close + 1.1*(high-low)*1.1/4
-    #                  S3 = close - 1.1*(high-low)*1.1/4, S4 = close - 1.1*(high-low)*1.1/2
-    diff_1d = high_1d - low_1d
-    camarilla_r3 = close_1d + 1.1 * diff_1d * 1.1 / 4
-    camarilla_s3 = close_1d - 1.1 * diff_1d * 1.1 / 4
+    # Calculate 1d Camarilla levels (based on previous day's range)
+    # Camarilla R3 = close + 1.1*(high-low)/2
+    # Camarilla S3 = close - 1.1*(high-low)/2
+    # Using previous day's values (shifted by 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = close_1d[0]  # First bar uses current close
+    prev_high_1d[0] = high_1d[0]
+    prev_low_1d[0] = low_1d[0]
     
-    # Calculate EMA34 on 1d close
+    camarilla_r3 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 2
+    camarilla_s3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 2
+    
+    # Calculate 1d EMA34
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align HTF indicators to LTF (4h)
+    # Align HTF indicators to LTF
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
