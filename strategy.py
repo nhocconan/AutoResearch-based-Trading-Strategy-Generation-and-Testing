@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1dTrend
-Hypothesis: Use Ichimoku cloud from 1d timeframe to determine trend direction, with 6h Tenkan/Kijun cross for entry timing. 
-Long when price above 1d cloud + 6h Tenkan crosses above Kijun. Short when price below 1d cloud + 6h Tenkan crosses below Kijun.
-Exit when price crosses opposite cloud boundary or Tenkan/Kijun reverse. 
-Ichimoku works in both bull (trend following) and bear (counter-trend reversals) markets by capturing momentum shifts.
-Designed for 6h timeframe to limit trades (target: 50-150 total over 4 years) and avoid fee drag.
+12h_KAMA_Trend_Filter_v1
+Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) on 12h to capture trend direction, filtered by 1d RSI to avoid extremes and volume confirmation. KAMA adapts to market noise, reducing whipsaws in sideways markets while capturing trends. Works in bull markets by riding trends and in bear markets by avoiding false signals during low volatility. Target: 20-50 trades/year on 12h timeframe to minimize fee drag.
 """
 
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend"
-timeframe = "6h"
+name = "12h_KAMA_Trend_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,73 +17,128 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
+    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     
-    # Get daily data for Ichimoku cloud calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Get 12h data (primary timeframe)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 1d data for RSI filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Ichimoku components (standard periods: 9, 26, 52)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
-                     pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
-                    pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_span_a_1d = ((tenkan_sen_1d + kijun_sen_1d) / 2).shift(26)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_span_b_1d = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
-                         pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    # Calculate KAMA on 12h close
+    # Efficiency Ratio (ER) = |change| / volatility
+    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
+    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)  # placeholder, will compute properly below
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_1d.values)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_1d.values)
-    span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_1d.values)
-    span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_1d.values)
+    # Proper ER calculation over 10-period window
+    def calculate_kama(close_array, er_period=10, fast_sc=2, slow_sc=30):
+        n_len = len(close_array)
+        kama = np.zeros(n_len)
+        kama[0] = close_array[0]
+        
+        # Calculate Efficiency Ratio
+        change = np.abs(np.diff(close_array, prepend=close_array[0]))
+        vol = np.abs(np.diff(close_array))
+        
+        er = np.zeros(n_len)
+        er[0] = 0
+        for i in range(1, n_len):
+            if i < er_period:
+                er[i] = np.sum(change[1:i+1]) / np.sum(vol[1:i+1]) if np.sum(vol[1:i+1]) > 0 else 0
+            else:
+                er[i] = np.sum(change[i-er_period+1:i+1]) / np.sum(vol[i-er_period+1:i+1]) if np.sum(vol[i-er_period+1:i+1]) > 0 else 0
+        
+        # Smoothing constants
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        
+        # Calculate KAMA
+        for i in range(1, n_len):
+            kama[i] = kama[i-1] + sc[i] * (close_array[i] - kama[i-1])
+        
+        return kama
+    
+    kama_12h = calculate_kama(close_12h, er_period=10, fast_sc=2, slow_sc=30)
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    
+    # Calculate RSI on 1d close
+    def calculate_rsi(close_array, period=14):
+        n_len = len(close_array)
+        delta = np.diff(close_array, prepend=close_array[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros(n_len)
+        avg_loss = np.zeros(n_len)
+        
+        # Initial average
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        
+        # Wilder smoothing
+        for i in range(period+1, n_len):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi_1d = calculate_rsi(close_1d, period=14)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate volume average on 1d for spike detection
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):
+    for i in range(50, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(span_a_aligned[i]) or np.isnan(span_b_aligned[i])):
+        if (np.isnan(kama_12h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        top_cloud = max(span_a_aligned[i], span_b_aligned[i])
-        bottom_cloud = min(span_a_aligned[i], span_b_aligned[i])
+        # Volume spike condition: current 1d volume > 1.5x 20-day average
+        # Need to get current 1d volume aligned to 12h
+        vol_1d_current = volume_1d[np.searchsorted(df_1d.index.values[:len(df_1d)], 
+                                                   pd.Timestamp(prices['open_time'].iloc[i]), 
+                                                   side='right') - 1] if i > 0 else volume_1d[0]
+        vol_spike = vol_1d_current > 1.5 * vol_ma_20_1d_aligned[i] if not np.isnan(vol_ma_20_1d_aligned[i]) else False
         
         if position == 0:
-            # LONG: Price above cloud + Tenkan crosses above Kijun
-            if close[i] > top_cloud and tenkan_aligned[i-1] <= kijun_aligned[i-1] and tenkan_aligned[i] > kijun_aligned[i]:
+            # LONG: Price above KAMA + RSI not overbought ( < 70) + volume spike
+            if close[i] > kama_12h_aligned[i] and rsi_1d_aligned[i] < 70 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price below cloud + Tenkan crosses below Kijun
-            elif close[i] < bottom_cloud and tenkan_aligned[i-1] >= kijun_aligned[i-1] and tenkan_aligned[i] < kijun_aligned[i]:
+            # SHORT: Price below KAMA + RSI not oversold ( > 30) + volume spike
+            elif close[i] < kama_12h_aligned[i] and rsi_1d_aligned[i] > 30 and vol_spike:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price below cloud OR Tenkan crosses below Kijun
-            if close[i] < bottom_cloud or (tenkan_aligned[i-1] >= kijun_aligned[i-1] and tenkan_aligned[i] < kijun_aligned[i]):
+            # EXIT LONG: Price crosses below KAMA or RSI overbought
+            if close[i] < kama_12h_aligned[i] or rsi_1d_aligned[i] >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price above cloud OR Tenkan crosses above Kijun
-            if close[i] > top_cloud or (tenkan_aligned[i-1] <= kijun_aligned[i-1] and tenkan_aligned[i] > kijun_aligned[i]):
+            # EXIT SHORT: Price crosses above KAMA or RSI oversold
+            if close[i] > kama_12h_aligned[i] or rsi_1d_aligned[i] <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
