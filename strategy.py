@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-# Long when price breaks above 20-day high AND price > 1w EMA50 AND volume > 2.0x 20-day average.
-# Short when price breaks below 20-day low AND price < 1w EMA50 AND volume > 2.0x 20-day average.
-# Exit on ATR(14) trailing stop (2.0x). Uses 1d primary timeframe and 1w HTF for trend alignment.
-# Donchian channels provide robust trend-following structure, EMA50 filters intermediate trend on weekly,
-# volume spike confirms breakout authenticity. Designed for BTC/ETH with strict entry to avoid overtrading.
+# Hypothesis: 6h Williams %R reversal with 1d EMA50 trend filter and volume confirmation.
+# Long when Williams %R(14) crosses above -80 (oversold reversal) AND price > 1d EMA50 AND volume > 1.5x 20-period average.
+# Short when Williams %R(14) crosses below -20 (overbought reversal) AND price < 1d EMA50 AND volume > 1.5x 20-period average.
+# Exit on opposite Williams %R signal or ATR(14) trailing stop (2.0x).
+# Williams %R captures mean reversion in 6h swings, EMA50 filters intermediate trend on 1d, volume confirms momentum.
+# Designed for BTC/ETH with strict entry to avoid overtrading and work in both bull/bear regimes.
 
-name = "1d_Donchian20_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Reversal_1dEMA50_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,47 +29,50 @@ def generate_signals(prices):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar has no previous close
+    tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Get 1w data for EMA50 trend filter (MTF)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for EMA50 trend filter (MTF)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1w close
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA50 on 1d close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align HTF arrays to 1d timeframe (wait for completed 1w bar)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align HTF arrays to 6h timeframe (wait for completed 1d bar)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Donchian channels from 20-day period
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Williams %R(14) on 6h timeframe
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14)
+    # Handle division by zero when high == low
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
     
-    # Volume filter: current 1d volume > 2.0x 20-day average (spike confirmation)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma_20)
+    # Volume filter: current 6h volume > 1.5x 20-period average (momentum confirmation)
+    vol_ma_6h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     highest_since_entry = np.full(n, np.nan)  # Track highest high since entry for longs
     lowest_since_entry = np.full(n, np.nan)   # Track lowest low since entry for shorts
     
-    for i in range(100, n):  # Start after sufficient data for indicators
+    for i in range(50, n):  # Start after sufficient data for indicators
         # Skip if any required data is NaN
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_ma_20[i]) or 
-            np.isnan(low_ma_20[i]) or np.isnan(atr[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price > 20-day high AND price > 1w EMA50 AND volume spike
-            if close[i] > high_ma_20[i] and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
+            # LONG: Williams %R crosses above -80 (oversold reversal) AND price > 1d EMA50 AND volume spike
+            if i > 0 and williams_r[i-1] <= -80 and williams_r[i] > -80 and close[i] > ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 highest_since_entry[i] = high[i]  # Initialize tracking
-            # SHORT: price < 20-day low AND price < 1w EMA50 AND volume spike
-            elif close[i] < low_ma_20[i] and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
+            # SHORT: Williams %R crosses below -20 (overbought reversal) AND price < 1d EMA50 AND volume spike
+            elif i > 0 and williams_r[i-1] >= -20 and williams_r[i] < -20 and close[i] < ema50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 lowest_since_entry[i] = low[i]  # Initialize tracking
@@ -82,9 +85,10 @@ def generate_signals(prices):
         elif position == 1:
             # Update highest high since entry
             highest_since_entry[i] = max(highest_since_entry[i-1], high[i])
-            # EXIT LONG: trailing stop hit (2.0x ATR)
+            # EXIT LONG: Williams %R crosses above -20 (overbought) OR trailing stop hit (2.0x ATR)
+            williams_exit = i > 0 and williams_r[i-1] < -20 and williams_r[i] >= -20
             trailing_stop = close[i] < (highest_since_entry[i] - 2.0 * atr[i])
-            if trailing_stop:
+            if williams_exit or trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
@@ -97,9 +101,10 @@ def generate_signals(prices):
         elif position == -1:
             # Update lowest low since entry
             lowest_since_entry[i] = min(lowest_since_entry[i-1], low[i])
-            # EXIT SHORT: trailing stop hit (2.0x ATR)
+            # EXIT SHORT: Williams %R crosses below -80 (oversold) OR trailing stop hit (2.0x ATR)
+            williams_exit = i > 0 and williams_r[i-1] > -80 and williams_r[i] <= -80
             trailing_stop = close[i] > (lowest_since_entry[i] + 2.0 * atr[i])
-            if trailing_stop:
+            if williams_exit or trailing_stop:
                 signals[i] = 0.0
                 position = 0
                 # Reset tracking when flat
