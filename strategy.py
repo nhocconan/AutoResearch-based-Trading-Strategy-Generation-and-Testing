@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_SuperTrend_EMA200_Turn_Confirmation
-Hypothesis: SuperTrend(10,3) with EMA200 as trend filter and momentum confirmation (close > EMA50) works in both bull and bear markets.
-Enter long when SuperTrend flips to uptrend AND price > EMA200 AND close > EMA50.
-Enter short when SuperTrend flips to downtrend AND price < EMA200 AND close < EMA50.
-Exit on SuperTrend reversal. Uses 1d SuperTrend as higher timeframe filter to avoid counter-trend trades.
-Target: 25-50 trades/year per symbol.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels (R1/S1) from the prior day with breakout logic, 
+1d trend filter, and volume confirmation work across bull/bear markets. 
+Breakout above R1 with uptrend and volume spike = long. 
+Breakdown below S1 with downtrend and volume spike = short. 
+Exit on opposite level touch or trend reversal. 
+Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 """
 
-name = "4h_SuperTrend_EMA200_Turn_Confirmation"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,144 +19,77 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # SuperTrend parameters
-    atr_period = 10
-    multiplier = 3.0
-    
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[0.0], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Basic Upper and Lower Bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
-    
-    # Final Upper and Lower Bands
-    final_upper = np.zeros(n)
-    final_lower = np.zeros(n)
-    final_upper[0] = upper_band[0]
-    final_lower[0] = lower_band[0]
-    
-    for i in range(1, n):
-        final_upper[i] = upper_band[i] if (upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]) else final_upper[i-1]
-        final_lower[i] = lower_band[i] if (lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]) else final_lower[i-1]
-    
-    # SuperTrend
-    super_trend = np.zeros(n)
-    super_trend[0] = final_lower[0]
-    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    direction[0] = 1
-    
-    for i in range(1, n):
-        if close[i] > final_upper[i-1]:
-            direction[i] = 1
-        elif close[i] < final_lower[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        super_trend[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
-    
-    # EMA200 for long-term trend filter
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # EMA50 for momentum confirmation
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 1d SuperTrend as HTF filter
+    # Camarilla pivot levels (R1, S1) based on prior day's OHLC
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    # We use daily data to compute these levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d SuperTrend
+    # Calculate Camarilla levels for each day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[0.0], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    atr_1d = pd.Series(tr_1d).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    R1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    S1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    hl2_1d = (high_1d + low_1d) / 2
-    upper_band_1d = hl2_1d + multiplier * atr_1d
-    lower_band_1d = hl2_1d - multiplier * atr_1d
+    # Align R1 and S1 to 12h timeframe (wait for prior day to close)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    final_upper_1d = np.zeros(len(df_1d))
-    final_lower_1d = np.zeros(len(df_1d))
-    final_upper_1d[0] = upper_band_1d[0]
-    final_lower_1d[0] = lower_band_1d[0]
+    # 12h trend: EMA25
+    ema_25 = pd.Series(close).ewm(span=25, adjust=False, min_periods=25).mean().values
+    uptrend_12h = close > ema_25
+    downtrend_12h = close < ema_25
     
-    for i in range(1, len(df_1d)):
-        final_upper_1d[i] = upper_band_1d[i] if (upper_band_1d[i] < final_upper_1d[i-1] or close_1d[i-1] > final_upper_1d[i-1]) else final_upper_1d[i-1]
-        final_lower_1d[i] = lower_band_1d[i] if (lower_band_1d[i] > final_lower_1d[i-1] or close_1d[i-1] < final_lower_1d[i-1]) else final_lower_1d[i-1]
-    
-    super_trend_1d = np.zeros(len(df_1d))
-    direction_1d = np.ones(len(df_1d))
-    super_trend_1d[0] = final_lower_1d[0]
-    direction_1d[0] = 1
-    
-    for i in range(1, len(df_1d)):
-        if close_1d[i] > final_upper_1d[i-1]:
-            direction_1d[i] = 1
-        elif close_1d[i] < final_lower_1d[i-1]:
-            direction_1d[i] = -1
-        else:
-            direction_1d[i] = direction_1d[i-1]
-        
-        super_trend_1d[i] = final_lower_1d[i] if direction_1d[i] == 1 else final_upper_1d[i]
-    
-    # Align 1d SuperTrend direction to 4h
-    uptrend_1d = direction_1d == 1
-    downtrend_1d = direction_1d == -1
-    uptrend_1d_aligned = align_htf_to_ltf(prices, df_1d, uptrend_1d)
-    downtrend_1d_aligned = align_htf_to_ltf(prices, df_1d, downtrend_1d)
+    # Volume confirmation: volume > 2.0 * 20-period average
+    vol_ma = np.zeros(n)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    volume_conf = volume > 2.0 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(200, n):  # Wait for EMA200
+    for i in range(25, n):
         # Get values
-        st_dir = direction[i]  # 1 for uptrend, -1 for downtrend
-        price = close[i]
-        ema200 = ema_200[i]
-        ema50 = ema_50[i]
-        uptrend_htf = uptrend_1d_aligned[i]
-        downtrend_htf = downtrend_1d_aligned[i]
+        r1 = R1_aligned[i]
+        s1 = S1_aligned[i]
+        uptrend = uptrend_12h[i]
+        downtrend = downtrend_12h[i]
+        vol_conf = volume_conf[i]
         
         if position == 0:
-            # LONG: SuperTrend uptrend, price > EMA200, close > EMA50, 1d uptrend filter
-            if st_dir == 1 and price > ema200 and close[i] > ema50 and uptrend_htf:
+            # LONG: break above R1, 12h uptrend, volume confirmation
+            if close[i] > r1 and uptrend and vol_conf:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: SuperTrend downtrend, price < EMA200, close < EMA50, 1d downtrend filter
-            elif st_dir == -1 and price < ema200 and close[i] < ema50 and downtrend_htf:
+            # SHORT: break below S1, 12h downtrend, volume confirmation
+            elif close[i] < s1 and downtrend and vol_conf:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: SuperTrend turns down
-            if st_dir == -1:
+            # EXIT LONG: touch S1 or 12h trend turns down
+            if close[i] < s1 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: SuperTrend turns up
-            if st_dir == 1:
+            # EXIT SHORT: touch R1 or 12h trend turns up
+            if close[i] > r1 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
