@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter (price > 1w EMA50) and volume confirmation.
-# Long when price breaks above Donchian(20) high AND price > 1w EMA50 AND volume > 1.5x 20-day average volume.
-# Short when price breaks below Donchian(20) low AND price < 1w EMA50 AND volume > 1.5x 20-day average volume.
-# Exit when price touches the opposite Donchian(20) level (mean reversion) OR trend reversal (price crosses 1w EMA50).
-# Uses 1d timeframe for lower frequency, Donchian for structure, 1w EMA for trend filter, volume for confirmation.
-# Target: 30-100 total trades over 4 years (7-25/year). Works in bull via breakout continuation, bear via faded rallies.
+# Hypothesis: 6h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above 6h Donchian upper(20) AND price > 1d EMA50 AND volume > 1.5x average
+# Short when price breaks below 6h Donchian lower(20) AND price < 1d EMA50 AND volume > 1.5x average
+# Exit when price crosses the 6h Donchian midpoint (mean reversion) OR trend reversal
+# Uses 6h timeframe for lower frequency, Donchian for structure, 1d EMA for trend filter, volume for confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, bear via faded rallies.
 
-name = "1d_Donchian20_1wTrend_Volume_v1"
-timeframe = "1d"
+name = "6h_Donchian20_1dTrend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,60 +24,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation (already 1d, but using helper for consistency)
+    # Get 6h data for Donchian calculation
+    df_6h = get_htf_data(prices, '6h')
+    close_6h = df_6h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    volume_6h = df_6h['volume'].values
+    
+    # Calculate Donchian channels (20-period) on 6h
+    high_max_20 = pd.Series(high_6h).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low_6h).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_max_20 + low_min_20) / 2.0
+    
+    # Volume filter: current 6h volume > 1.5x 20-period average
+    vol_ma_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    volume_filter_6h = volume_6h > (1.5 * vol_ma_6h)
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Donchian(20) on 1d
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: current 1d volume > 1.5x 20-day average
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = volume_1d > (1.5 * vol_ma_1d)
-    
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate EMA(50) on 1w close for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate EMA(50) on 1d close for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(100, n):  # Start after sufficient data for all indicators
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_1d[i])):
+        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above Donchian(20) high AND price > 1w EMA50 AND volume confirmation
-            if close[i] > donchian_high[i] and close[i] > ema50_1w_aligned[i] and volume_filter_1d[i]:
+            # LONG: Break above upper Donchian AND price > 1d EMA50 AND volume confirmation
+            if close[i] > high_max_20[i] and close[i] > ema50_1d_aligned[i] and volume_filter_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below Donchian(20) low AND price < 1w EMA50 AND volume confirmation
-            elif close[i] < donchian_low[i] and close[i] < ema50_1w_aligned[i] and volume_filter_1d[i]:
+            # SHORT: Break below lower Donchian AND price < 1d EMA50 AND volume confirmation
+            elif close[i] < low_min_20[i] and close[i] < ema50_1d_aligned[i] and volume_filter_6h[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price touches Donchian(20) low (mean reversion) OR trend reversal (price < 1w EMA50)
-            if close[i] < donchian_low[i] or close[i] < ema50_1w_aligned[i]:
+            # EXIT LONG: Price crosses below Donchian midpoint OR trend reversal (price < 1d EMA50)
+            if close[i] < donchian_mid[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price touches Donchian(20) high (mean reversion) OR trend reversal (price > 1w EMA50)
-            if close[i] > donchian_high[i] or close[i] > ema50_1w_aligned[i]:
+            # EXIT SHORT: Price crosses above Donchian midpoint OR trend reversal (price > 1d EMA50)
+            if close[i] > donchian_mid[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
