@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and ATR-based volume spike.
-# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
-# Long when Bull Power > 0 AND Bear Power rising (less negative) AND price > 1d EMA34 (uptrend) AND volume spike.
-# Short when Bear Power < 0 AND Bull Power falling (less positive) AND price < 1d EMA34 (downtrend) AND volume spike.
-# Uses discrete sizing (0.0, ±0.25) to minimize fee churn. Targets 12-30 trades/year per symbol.
-# Works in bull via trend continuation, in bear via mean reversion from extreme power readings.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ATR-based volume spike and ADX trend filter.
+# Uses Camarilla pivot levels (R3/S3) from prior 1d for structure, ATR-normalized volume spike (>1.5x 20-bar ATR-scaled avg volume) for conviction,
+# and ADX > 25 on 12h to ensure trending markets. Discrete position sizing (0.0, ±0.25) minimizes fee churn.
+# Designed to capture strong breakouts in trending markets while avoiding false signals in ranging conditions. Targets 12-25 trades/year per symbol.
 
-name = "6h_ElderRay_BullBearPower_1dEMA34_ATRVolumeSpike_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dATRVolumeSpike_ADXFilter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,19 +23,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 6h Indicators (LTF) ---
-    # EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
-    
-    # Smoothed Elder Ray for trend confirmation (2-period smoothing)
-    bull_power_smooth = pd.Series(bull_power).ewm(span=2, adjust=False, min_periods=2).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=2, adjust=False, min_periods=2).mean().values
-    
-    # ATR(14) for volatility and volume spike calculation
+    # --- 12h Indicators (LTF) ---
+    # ATR(14) for volatility normalization
     high_shift = np.roll(high, 1)
     low_shift = np.roll(low, 1)
     close_shift = np.roll(close, 1)
@@ -53,59 +40,87 @@ def generate_signals(prices):
     vol_atr_ma_20 = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values
     volume_spike = vol_atr_ratio > (1.5 * vol_atr_ma_20)
     
+    # ADX (14) for trend strength on 12h
+    plus_dm = np.where((high - high_shift) > (low_shift - low), np.maximum(high - high_shift, 0), 0)
+    minus_dm = np.where((low_shift - low) > (high - high_shift), np.maximum(low_shift - low, 0), 0)
+    
+    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14
+    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA34 on 1d for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Camarilla levels (R3, S3) from prior 1d bar
+    camarilla_range = high_1d - low_1d
+    r3_1d = close_1d + 1.1 * camarilla_range / 2.0
+    s3_1d = close_1d - 1.1 * camarilla_range / 2.0
+    
+    # Align to 12h (wait for completed 1d bar)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(bull_power_smooth[i]) or
-            np.isnan(bear_power_smooth[i]) or
+        if (np.isnan(adx[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(ema34_1d_aligned[i])):
+            np.isnan(r3_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend from 1d EMA34
-        uptrend = close[i] > ema34_1d_aligned[i]
-        downtrend = close[i] < ema34_1d_aligned[i]
+        # Trend filter: only trade when ADX > 25 (trending market)
+        if adx[i] <= 25:
+            # In ranging/weak trend, stay flat
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                # Exit long if price touches S3 (mean reversion to lower level)
+                if close[i] <= s3_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Exit short if price touches R3 (mean reversion to upper level)
+                if close[i] >= r3_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            continue
         
+        # Trending regime: look for breakouts with volume confirmation
         if position == 0:
-            # LONG: Bull Power positive AND rising AND uptrend AND volume spike
-            if (bull_power[i] > 0 and 
-                bull_power_smooth[i] > bull_power_smooth[i-1] and 
-                uptrend and 
-                volume_spike[i]):
+            # LONG: Price breaks above R3 AND volume spike
+            if close[i] > r3_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power negative AND falling (more negative) AND downtrend AND volume spike
-            elif (bear_power[i] < 0 and 
-                  bear_power_smooth[i] < bear_power_smooth[i-1] and 
-                  downtrend and 
-                  volume_spike[i]):
+            # SHORT: Price breaks below S3 AND volume spike
+            elif close[i] < s3_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power turns negative OR power deteriorates
-            if bull_power[i] <= 0 or bull_power_smooth[i] < bull_power_smooth[i-1]:
+            # EXIT LONG: Price crosses below S3 (mean reversion)
+            if close[i] < s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power turns positive OR power deteriorates
-            if bear_power[i] >= 0 or bear_power_smooth[i] > bear_power_smooth[i-1]:
+            # EXIT SHORT: Price crosses above R3 (mean reversion)
+            if close[i] > r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
