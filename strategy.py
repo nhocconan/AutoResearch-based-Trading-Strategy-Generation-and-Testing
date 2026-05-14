@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and 1w volume confirmation.
-# Long when price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND 1w volume > 1.5 * 20-period average volume.
-# Short when price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND 1w volume > 1.5 * 20-period average volume.
-# Exit when price retraces to the Camarilla pivot point (prior day's close).
-# Uses discrete position sizing (0.25) to limit fee churn. Designed for 12h timeframe with strict entry conditions to avoid overtrading.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
+# Hypothesis: 12h strategy using Camarilla R3/S3 breakouts with 1d EMA34 trend filter and 1w volume spike confirmation.
+# Enters long when price closes above R3 in uptrend (close > EMA34) with volume confirmation (>1.5x 20w MA volume).
+# Enters short when price closes below S3 in downtrend (close < EMA34) with volume confirmation.
+# Exits when price retreats to the prior day's close (Camarilla pivot point).
+# Uses discrete position sizing (0.25) to minimize fee churn. Designed for low trade frequency (<40/year) to avoid fee drag.
+# Works in both bull and bear markets: trend filter ensures alignment with higher timeframe direction,
+# while volume confirmation avoids false breakouts in low-volatility regimes.
 
 name = "12h_Camarilla_R3S3_Breakout_1dEMA34_1wVolumeConfirm_v1"
 timeframe = "12h"
@@ -91,14 +92,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND volume confirmation
-            if (open_[i] <= camarilla_r3[i] and close[i] > camarilla_r3[i] and 
+            # LONG: price closes above R3 AND 1d close > 1d EMA34 (uptrend) AND volume confirmation
+            if (close[i] > camarilla_r3[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_confirm_1w_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND volume confirmation
-            elif (open_[i] >= camarilla_s3[i] and close[i] < camarilla_s3[i] and 
+            # SHORT: price closes below S3 AND 1d close < 1d EMA34 (downtrend) AND volume confirmation
+            elif (close[i] < camarilla_s3[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_confirm_1w_aligned[i] > 0.5):
                 signals[i] = -0.25
@@ -106,14 +107,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price retraces to Camarilla pivot point (CP)
+            # EXIT LONG: price retreats to Camarilla pivot point (CP)
             if close[i] <= camarilla_cp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price retraces to Camarilla pivot point (CP)
+            # EXIT SHORT: price retreats to Camarilla pivot point (CP)
             if close[i] >= camarilla_cp[i]:
                 signals[i] = 0.0
                 position = 0
