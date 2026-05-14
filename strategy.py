@@ -1,86 +1,101 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA(34) trend filter and 1d volume spike filter.
-# Long when price breaks above upper Donchian channel with 1w EMA(34) bullish (close > EMA) and 1d volume > 2.0x 20-period average.
-# Short when price breaks below lower Donchian channel with 1w EMA(34) bearish (close < EMA) and 1d volume > 2.0x 20-period average.
-# Exit on opposite Donchian level (lower for longs, upper for shorts).
-# Uses discrete position sizing (0.25) to minimize fee churn and volume spike filter to reduce false breakouts.
-# Target: 30-100 total trades over 4 years = 7-25/year for 1d timeframe.
-# Works in bull/bear: 1w EMA ensures trend alignment, Donchian(20) provides tight structure, volume spike confirms momentum.
+# Hypothesis: 12h Williams Alligator with 1d EMA(50) trend filter and 12h volume confirmation.
+# Long when price > Alligator Jaw (13-period SMMA) with 1d EMA(50) bullish (close > EMA) and 12h volume > 1.8x 20-period average.
+# Short when price < Alligator Jaw with 1d EMA(50) bearish (close < EMA) and 12h volume > 1.8x 20-period average.
+# Exit on opposite Alligator Teeth (8-period SMMA) for longs, Alligator Lips (5-period SMMA) for shorts.
+# Uses Williams Alligator (SMMA-based) for trend identification, which whipsaws less than EMA/HMA in ranging markets.
+# 1d EMA(50) ensures multi-timeframe trend alignment. Volume filter confirms institutional participation.
+# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe.
+# Works in bull/bear: 1d EMA filters counter-trend signals, Alligator adapts to volatility, volume avoids false breakouts.
 
-name = "1d_Donchian20_Breakout_1wEMA34_1dVolumeSpike"
-timeframe = "1d"
+name = "12h_WilliamsAlligator_1dEMA50_12hVolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(source, length):
+    """Smoothed Moving Average (SMMA) as used in Williams Alligator"""
+    if length < 1:
+        return np.full_like(source, np.nan, dtype=float)
+    result = np.full_like(source, np.nan, dtype=float)
+    if len(source) < length:
+        return result
+    # First value is SMA
+    result[length-1] = np.mean(source[:length])
+    # Subsequent values: SMMA = (PREV_SMMA * (length-1) + CURRENT_PRICE) / length
+    for i in range(length, len(source)):
+        result[i] = (result[i-1] * (length-1) + source[i]) / length
+    return result
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Indicators (LTF) ---
-    # 1d volume spike: > 2.0x 20-period average (tight filter to reduce trades)
+    # --- 12h Indicators (LTF) ---
+    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) - all SMMA
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
+    
+    # 12h volume confirmation: > 1.8x 20-period average (tight filter)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume > (2.0 * vol_ma_20)
+    volume_confirm = volume > (1.8 * vol_ma_20)
     
-    # 1d Donchian(20) channels
-    upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # --- 1w Indicators (HTF) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # --- 1d Indicators (HTF) ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # 1w EMA(34)
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d EMA(50)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(volume_spike_1d[i]) or
-            np.isnan(upper_20[i]) or
-            np.isnan(lower_20[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper Donchian + 1w EMA bullish (close > EMA) + 1d volume spike
-            if (close[i] > upper_20[i] and 
-                close[i] > ema_34_1w_aligned[i] and 
-                volume_spike_1d[i]):
+            # LONG: Price > Jaw + 1d EMA bullish + volume confirmation
+            if (close[i] > jaw[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian + 1w EMA bearish (close < EMA) + 1d volume spike
-            elif (close[i] < lower_20[i] and 
-                  close[i] < ema_34_1w_aligned[i] and 
-                  volume_spike_1d[i]):
+            # SHORT: Price < Jaw + 1d EMA bearish + volume confirmation
+            elif (close[i] < jaw[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below lower Donchian
-            if close[i] < lower_20[i]:
+            # EXIT LONG: Price < Teeth (8-period SMMA)
+            if close[i] < teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above upper Donchian
-            if close[i] > upper_20[i]:
+            # EXIT SHORT: Price > Lips (5-period SMMA)
+            if close[i] > lips[i]:
                 signals[i] = 0.0
                 position = 0
             else:
