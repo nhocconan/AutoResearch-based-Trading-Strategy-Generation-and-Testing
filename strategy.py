@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Camarilla R1/S1 breakout with 1w EMA34 trend filter and 1d volume confirmation (>1.5x 20-period average).
-# Long when close breaks above R1 AND close > 1w EMA34 (bullish trend) AND volume > 1.5x MA20.
-# Short when close breaks below S1 AND close < 1w EMA34 (bearish trend) AND volume > 1.5x MA20.
-# Exit when price returns to Camarilla Pivot Point (PP) or crosses 1w EMA34 in opposite direction.
-# Uses 1w HTF for trend to reduce noise and overtrading. Volume confirmation (>1.5x) reduces false signals.
-# Target: 30-100 total trades over 4 years (7-25/year) to stay within fee drag limits for 1d timeframe.
-# Camarilla pivot levels provide intraday support/resistance; breakouts with volume and HTF trend filter capture strong moves.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation (>1.5x 20-period average).
+# Long when price breaks above R3 AND close > 1d EMA34 (bullish trend) AND volume > 1.5x MA20.
+# Short when price breaks below S3 AND close < 1d EMA34 (bearish trend) AND volume > 1.5x MA20.
+# Exit when price reverts to the 1d VWAP (mean reversion to daily fair value).
+# Camarilla levels from 1d provide intraday support/resistance; 1d EMA34 filters for higher-timeframe trend;
+# volume confirmation reduces false breakouts. Works in bull (breakouts continue) and bear (breakdowns continue).
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits for 6h timeframe.
 
-name = "1d_Camarilla_R1S1_Breakout_1wEMA34_1dVolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,77 +26,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Indicators (LTF) ---
-    # Camarilla pivot levels (based on previous day's OHLC)
-    # PP = (high + low + close) / 3
-    # R1 = PP + (high - low) * 1.1 / 12
-    # S1 = PP - (high - low) * 1.1 / 12
-    # We need previous day's data, so shift by 1
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = prev_high[1] if n > 1 else 0  # fill first value
-    prev_low[0] = prev_low[1] if n > 1 else 0
-    prev_close[0] = prev_close[1] if n > 1 else 0
-    
-    pp = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pp + (prev_high - prev_low) * 1.1 / 12.0
-    s1 = pp - (prev_high - prev_low) * 1.1 / 12.0
-    
-    # 1d volume confirmation: > 1.5x 20-period average
+    # --- 6h Indicators (LTF) ---
+    # Volume confirmation: > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = volume > (1.5 * vol_ma_20)
+    volume_confirm_6h = volume > (1.5 * vol_ma_20)
     
-    # --- 1w Indicators (HTF) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # --- 1d Indicators (HTF) ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
     
-    # 1w EMA(34) - trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Extract 1d OHLC for Camarilla calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for 1d: R3, S3, R4, S4
+    # Camarilla: R4 = close + ((high-low) * 1.1/2), R3 = close + ((high-low) * 1.1/4)
+    #          S3 = close - ((high-low) * 1.1/4), S4 = close - ((high-low) * 1.1/2)
+    camarilla_range = high_1d - low_1d
+    r3 = close_1d + (camarilla_range * 1.1 / 4)
+    s3 = close_1d - (camarilla_range * 1.1 / 4)
+    r4 = close_1d + (camarilla_range * 1.1 / 2)
+    s4 = close_1d - (camarilla_range * 1.1 / 2)
+    
+    # Align Camarilla levels to 6h timeframe (wait for 1d bar to close)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # 1d EMA(34) - trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 1d VWAP for exit (volume-weighted average price)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume'].values).cumsum() / df_1d['volume'].values.cumsum()
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_34_1w_aligned[i]) or
-            np.isnan(r1[i]) or
-            np.isnan(s1[i]) or
-            np.isnan(pp[i]) or
-            np.isnan(volume_confirm_1d[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or
+            np.isnan(volume_confirm_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: close breaks above R1 AND close > 1w EMA34 (bullish trend) AND volume confirm
-            if (close[i] > r1[i] and 
-                close[i] > ema_34_1w_aligned[i] and 
-                volume_confirm_1d[i]):
+            # LONG: Price breaks above R3 AND bullish trend AND volume confirmation
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_confirm_6h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: close breaks below S1 AND close < 1w EMA34 (bearish trend) AND volume confirm
-            elif (close[i] < s1[i] and 
-                  close[i] < ema_34_1w_aligned[i] and 
-                  volume_confirm_1d[i]):
+            # SHORT: Price breaks below S3 AND bearish trend AND volume confirmation
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_confirm_6h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price returns to PP OR close < 1w EMA34 (trend change)
-            if (close[i] <= pp[i] or 
-                close[i] < ema_34_1w_aligned[i]):
+            # EXIT LONG: Price reverts to 1d VWAP (mean reversion) OR breaks below S3 (failed breakout)
+            if (close[i] <= vwap_1d_aligned[i] or 
+                close[i] < s3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price returns to PP OR close > 1w EMA34 (trend change)
-            if (close[i] >= pp[i] or 
-                close[i] > ema_34_1w_aligned[i]):
+            # EXIT SHORT: Price reverts to 1d VWAP (mean reversion) OR breaks above R3 (failed breakdown)
+            if (close[i] >= vwap_1d_aligned[i] or 
+                close[i] > r3_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
