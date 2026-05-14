@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -36,8 +37,22 @@ from research_rules import (
     test_symbol_pass,
     train_symbol_pass,
 )
-from results_db import append_results, query_best_kept_sharpe, query_last_experiment_num  # noqa: F401
-from validator import validate_strategy as shared_validate_strategy, summarize_validation_errors
+from results_db import (
+    append_results,
+    compute_focus_score,
+    delete_test_result,
+    get_conn,
+    query_best_focus_score,
+    query_exhausted_families,
+    query_last_experiment_num,  # noqa: F401
+    query_strategy_family_stats,
+    strategy_family_key,
+)
+from validator import (
+    run_prefix_lookahead_check,
+    summarize_validation_errors,
+    validate_strategy as shared_validate_strategy,
+)
 
 
 STRATEGY_FILE = Path("strategy.py")
@@ -54,6 +69,131 @@ SELF_IMPROVEMENT_INPUTS = [
 SELF_IMPROVEMENT_STALE_AFTER_S = 12 * 3600
 SELF_IMPROVEMENT_RETRY_AFTER_S = 30 * 60
 _last_self_improvement_trigger_at = 0.0
+BTC_ETH_SYMBOLS = {"BTCUSDT", "ETHUSDT"}
+
+
+def normalize_strategy_code(code: str) -> str:
+    """Normalize strategy code for clone detection.
+
+    Ignore comments, blank lines, shebang, and the strategy name assignment so
+    cosmetic renames do not bypass duplicate detection.
+    """
+    normalized_lines: list[str] = []
+    for raw_line in code.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#!"):
+            continue
+        if stripped.startswith("#"):
+            continue
+        if re.match(r'^name\s*=\s*["\'][^"\']+["\']\s*$', stripped):
+            normalized_lines.append('name = "__STRATEGY__"')
+            continue
+        normalized_lines.append(raw_line.rstrip())
+    return "\n".join(normalized_lines).strip()
+
+
+def code_fingerprint(code: str) -> str:
+    return hashlib.sha256(normalize_strategy_code(code).encode("utf-8")).hexdigest()
+
+
+def extract_strategy_name(code: str, fallback: str = "strategy") -> str:
+    match = re.search(r'^name\s*=\s*["\']([^"\']+)["\']', code, re.MULTILINE)
+    return match.group(1) if match else fallback
+
+
+def build_metrics_fingerprint(
+    train_results: list[dict],
+    test_results: list[dict],
+    test_pass_by_symbol: dict[str, bool],
+) -> tuple[tuple, ...]:
+    """Fingerprint strategy behavior from stored train/test metrics.
+
+    We intentionally round to the same precision used by results.db so two
+    materially identical strategies compare equal even if float noise differs.
+    """
+    rows: list[tuple] = []
+    for row in train_results:
+        rows.append((
+            "train",
+            row.get("symbol", ""),
+            "keep" if train_symbol_pass(row) else "discard",
+            round(float(row.get("sharpe_ratio", 0) or 0), 4),
+            round(float(row.get("total_return_pct", 0) or 0), 2),
+            round(float(row.get("max_drawdown_pct", 0) or 0), 2),
+            int(row.get("num_trades", 0) or 0),
+        ))
+    for row in test_results:
+        rows.append((
+            "test",
+            row.get("symbol", ""),
+            "keep" if test_pass_by_symbol.get(row.get("symbol", "")) else "discard",
+            round(float(row.get("sharpe_ratio", 0) or 0), 4),
+            round(float(row.get("total_return_pct", 0) or 0), 2),
+            round(float(row.get("max_drawdown_pct", 0) or 0), 2),
+            int(row.get("num_trades", 0) or 0),
+        ))
+    return tuple(sorted(rows))
+
+
+def fetch_db_metrics_fingerprint(strategy_name: str) -> tuple[tuple, ...]:
+    """Load a saved strategy's metrics fingerprint from results.db."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT period, symbol, status, sharpe, return_pct, max_dd_pct, trades
+            FROM results
+            WHERE strategy = ?
+            ORDER BY period, symbol
+            """,
+            (strategy_name,),
+        ).fetchall()
+    return tuple(
+        (
+            row[0],
+            row[1],
+            row[2],
+            round(float(row[3] or 0), 4),
+            round(float(row[4] or 0), 2),
+            round(float(row[5] or 0), 2),
+            int(row[6] or 0),
+        )
+        for row in rows
+    )
+
+
+def find_duplicate_saved_strategy(
+    strategy_name: str,
+    strategy_code: str,
+    train_results: list[dict],
+    test_results: list[dict],
+    test_pass_by_symbol: dict[str, bool],
+) -> tuple[str, str] | None:
+    """Return duplicate type + existing strategy name when this is a clone."""
+    new_code_fp = code_fingerprint(strategy_code)
+    family = strategy_family_key(strategy_name)
+
+    family_candidates: list[str] = []
+    for path in sorted(STRATEGIES_DIR.glob("*.py")):
+        existing_name = path.stem
+        if existing_name == strategy_name:
+            continue
+        try:
+            existing_code_fp = code_fingerprint(path.read_text())
+        except Exception:
+            continue
+        if existing_code_fp == new_code_fp:
+            return ("code", existing_name)
+        if strategy_family_key(existing_name) == family:
+            family_candidates.append(existing_name)
+
+    new_metrics_fp = build_metrics_fingerprint(train_results, test_results, test_pass_by_symbol)
+    if not new_metrics_fp:
+        return None
+
+    for existing_name in family_candidates:
+        if fetch_db_metrics_fingerprint(existing_name) == new_metrics_fp:
+            return ("metrics", existing_name)
+    return None
 
 
 def load_research_state() -> dict:
@@ -433,10 +573,15 @@ Use the mtf_data module which loads ACTUAL Binance HTF candles:
 from mtf_data import get_htf_data, align_htf_to_ltf
 df_4h = get_htf_data(prices, '4h')  # loads actual Binance 4h parquet — call ONCE before the loop!
 ema_4h = pd.Series(df_4h['close'].values).ewm(span=21).mean().values
-ema_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1) for completed bars only
+ema_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # available only after the 4h bar closes
 # NEVER call get_htf_data() inside a for-loop! It loads a Parquet file each call = 45K file reads!
 ```
-This ensures: correct 4h boundaries, no look-ahead (shift by 1 HTF bar),
+For lagging HTF indicators, add extra delay:
+```
+bearish_fractal, bullish_fractal = compute_williams_fractals(df_1d['high'].values, df_1d['low'].values)
+bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+```
+This ensures: correct 4h boundaries, no look-ahead (completed HTF bars only),
 works on SOLUSDT with data gaps. 46 strategies failed audit without this.
 SOLUSDT has 2 data gaps of ~3 days. Synthetic date_range misaligns after gaps."""
 
@@ -463,6 +608,84 @@ def _build_db_summary(primary_tf: str) -> str:
         return "\n".join(lines)
     except Exception:
         return ""
+
+
+def _build_family_avoidance_summary() -> str:
+    """Summarize saturated families so the LLM stops emitting endless variants."""
+    try:
+        families = query_exhausted_families(limit=8, min_variants=4)
+    except Exception:
+        return ""
+    if not families:
+        return ""
+
+    lines = [
+        "\nSATURATED FAMILIES (avoid tiny variants unless you add a new BTC/ETH edge):"
+    ]
+    for item in families:
+        lines.append(
+            "  "
+            f"{item['family']} | {item['total_variants']} variants | "
+            f"{item['kept_variants']} kept | "
+            f"best BTC/ETH test={item['best_btc_eth_sharpe']:.2f} | "
+            f"best SOL test={item['best_sol_sharpe']:.2f}"
+        )
+    lines.append("→ Changing only timeframe, MA lengths, or version suffix does NOT count as a new idea.\n")
+    return "\n".join(lines)
+
+
+def evaluate_strategy_quality(
+    strategy_name: str,
+    strategy_code: str,
+    train_results: list[dict],
+    test_results: list[dict],
+    test_pass_by_symbol: dict[str, bool],
+) -> tuple[bool, float, str, dict]:
+    """Decide whether a kept strategy is materially useful, not just another SOL-only clone."""
+    kept_test_rows = []
+    for row in test_results:
+        if test_pass_by_symbol.get(row.get("symbol", "")):
+            kept_test_rows.append(
+                {"symbol": row.get("symbol", ""), "sharpe": float(row.get("sharpe_ratio", 0) or 0)}
+            )
+
+    focus_score = compute_focus_score(kept_test_rows)
+    kept_symbols = {row["symbol"] for row in kept_test_rows}
+    btc_eth_kept = kept_symbols & BTC_ETH_SYMBOLS
+    family_stats = query_strategy_family_stats(strategy_name=strategy_name)
+    family_variants = int(family_stats.get("distinct_strategies", 0) or 0)
+    family_best_btc_eth = float(family_stats.get("best_btc_eth_sharpe", 0) or 0)
+    family_best_focus = float(family_stats.get("best_focus_score", 0) or 0)
+
+    if kept_symbols == {"SOLUSDT"}:
+        return False, focus_score, "SOL-only pass; require BTC or ETH evidence", family_stats
+
+    if family_variants >= 3 and not btc_eth_kept and family_best_btc_eth > 0:
+        return False, focus_score, (
+            f"duplicate family '{family_stats['family']}' already has BTC/ETH winner "
+            f"(best {family_best_btc_eth:.3f})"
+        ), family_stats
+
+    if family_variants >= 4 and focus_score <= family_best_focus + 0.10:
+        return False, focus_score, (
+            f"duplicate family '{family_stats['family']}' without material score improvement "
+            f"({focus_score:.3f} <= prior {family_best_focus:.3f} + 0.10)"
+        ), family_stats
+
+    duplicate = find_duplicate_saved_strategy(
+        strategy_name=strategy_name,
+        strategy_code=strategy_code,
+        train_results=train_results,
+        test_results=test_results,
+        test_pass_by_symbol=test_pass_by_symbol,
+    )
+    if duplicate:
+        dup_kind, existing_name = duplicate
+        if dup_kind == "code":
+            return False, focus_score, f"duplicate code clone of saved strategy '{existing_name}'", family_stats
+        return False, focus_score, f"duplicate metrics clone of saved strategy '{existing_name}'", family_stats
+
+    return True, focus_score, "", family_stats
 
 
 def load_recent_history_from_db(n: int = 20) -> list[dict]:
@@ -687,6 +910,7 @@ REMEMBER: call get_htf_data() ONCE before loop, use aligned arrays inside."""
 
     # Add DB-level "what works" summary for context (load top performers)
     db_summary = _build_db_summary(primary_tf)
+    family_avoidance = _build_family_avoidance_summary()
 
     return f"""EXPERIMENT #{experiment_num:03d}
 {phase_hint}
@@ -710,6 +934,7 @@ RULES:
 - More than 400 total 4h-equivalent trades usually means overtrading and fee drag.
 - USE leverage=1.0 (no leverage).
 {db_summary}
+{family_avoidance}
 CURRENT strategy.py:
 ```python
 {current_strategy}
@@ -723,6 +948,8 @@ INSTRUCTIONS:
    df_htf = get_htf_data(prices, '1d'); vals = your_indicator(df_htf); aligned = align_htf_to_ltf(prices, df_htf, vals)
 4. Use proper min_periods on all rolling calculations.
 5. VERIFY: estimate how many bars will trigger entry. If signal flips every few bars → too loose.
+6. BTC and ETH are the primary targets. SOL-only winners are low value and will usually be discarded.
+7. Do NOT emit another tiny variant of an already-saturated family unless it adds a clear new BTC/ETH edge.
 
 OUTPUT: Complete strategy.py code only. Start with #!/usr/bin/env python3"""
 
@@ -778,13 +1005,13 @@ def main():
 
     best_strategy_code = STRATEGY_FILE.read_text()
 
-    # Initialize best_sharpe from existing results (don't start from -999)
-    best_sharpe = 0.0  # Minimum bar: must beat Sharpe=0 (better than doing nothing)
+    # Initialize best BTC/ETH-weighted test score from existing results.
+    best_score = 0.0
     try:
-        prev_best = query_best_kept_sharpe()
-        if prev_best > best_sharpe:
-            best_sharpe = prev_best
-            print(f"  Resuming from previous best Sharpe: {best_sharpe:.3f}")
+        prev_best = query_best_focus_score()
+        if prev_best > best_score:
+            best_score = prev_best
+            print(f"  Resuming from previous best focus score: {best_score:.3f}")
     except Exception:
         pass
 
@@ -898,8 +1125,7 @@ def main():
             continue
 
         # Extract strategy name for display
-        name_match = re.search(r'^name\s*=\s*["\']([^"\']+)["\']', new_code, re.MULTILINE)
-        strategy_name = name_match.group(1) if name_match else f"strategy_{experiment_num:03d}"
+        strategy_name = extract_strategy_name(new_code, fallback=f"strategy_{experiment_num:03d}")
         print(f"  Strategy: {strategy_name}")
 
         # Write and commit
@@ -917,6 +1143,7 @@ def main():
         any_kept = False
         all_train_results = []
         all_test_results = []
+        test_pass_by_symbol: dict[str, bool] = {}
 
         for symbol in symbols:
             # --- Train ---
@@ -934,6 +1161,7 @@ def main():
                 all_train_results.extend(train_result)
 
                 if not train_pass:
+                    delete_test_result(strategy_name, symbol)
                     print(f"    {symbol} → train FAIL, skip test")
                     continue
 
@@ -953,59 +1181,81 @@ def main():
                     if test_pass:
                         print(f"    {symbol} ✓ KEPT (train+test pass)")
                         any_kept = True
+                        test_pass_by_symbol[symbol] = True
                     else:
                         print(f"    {symbol} → test FAIL")
+                        test_pass_by_symbol[symbol] = False
 
                 except Exception as e:
+                    delete_test_result(strategy_name, symbol)
                     print(f"    {symbol} test ERROR: {e}")
+                    test_pass_by_symbol[symbol] = False
 
             except TimeoutError as e:
+                delete_test_result(strategy_name, symbol)
                 print(f"    {symbol} train TIMEOUT: {e} — skipping")
+                test_pass_by_symbol[symbol] = False
                 continue
             except Exception as e:
+                delete_test_result(strategy_name, symbol)
                 print(f"    {symbol} train ERROR: {e}")
+                test_pass_by_symbol[symbol] = False
                 continue
 
         # --- Prefix look-ahead test (once, on first symbol) ---
         if any_kept:
             print("  [2b/4] Running look-ahead prefix test...")
             try:
-                import importlib.util as _ilu
-                _spec = _ilu.spec_from_file_location("_strat_test", str(STRATEGY_FILE))
-                _mod = _ilu.module_from_spec(_spec)
-                _spec.loader.exec_module(_mod)
-                from prepare import load_klines, load_config as _lc
-                import pandas as _pd, numpy as _np
-                _cfg = _lc()
-                _prices = load_klines(symbols[0], _mod.timeframe)
-                _signals_full = _mod.generate_signals(_prices)
-                _la_ok = True
-                _checkpoints = sorted({500, 1000, 2000, 5000, len(_prices) // 4, len(_prices) // 2})
-                for _cp in _checkpoints:
-                    if _cp >= len(_prices) or _cp <= 64:
-                        continue
-                    _sig_p = _mod.generate_signals(_prices.iloc[:_cp].reset_index(drop=True))
-                    _diff = _np.where(_np.abs(_sig_p - _signals_full[:_cp]) > 1e-9)[0]
-                    if len(_diff):
-                        _la_ok = False
-                        print(f"  [LOOKAHEAD FAIL] checkpoint {_cp} first_mismatch={int(_diff[0])} last_mismatch={int(_diff[-1])}")
-                        break
+                _la_ok, _la_msg = run_prefix_lookahead_check(str(STRATEGY_FILE), symbol=symbols[0])
                 if not _la_ok:
+                    print(f"  [LOOKAHEAD FAIL] {_la_msg}")
                     print(f"  [SKIP] Look-ahead FAIL — discarding all")
                     any_kept = False
                 else:
-                    print("  [OK] Prefix look-ahead test passed")
+                    print(f"  [OK] {_la_msg}")
             except Exception as _e:
                 print(f"  [WARN] Prefix test error: {_e}")
 
-        # Save strategy if any symbol kept
+        quality_ok = any_kept
+        quality_reason = ""
+        strategy_score = 0.0
+        family_stats = {
+            "family": strategy_family_key(strategy_name),
+            "distinct_strategies": 0,
+            "best_btc_eth_sharpe": 0.0,
+            "best_focus_score": 0.0,
+        }
         if any_kept:
+            quality_ok, strategy_score, quality_reason, family_stats = evaluate_strategy_quality(
+                strategy_name=strategy_name,
+                strategy_code=new_code,
+                train_results=all_train_results,
+                test_results=all_test_results,
+                test_pass_by_symbol=test_pass_by_symbol,
+            )
+            if quality_ok:
+                best_score = max(best_score, strategy_score)
+                print(
+                    f"  [3/4] Quality gate PASS | score={strategy_score:.3f} | "
+                    f"family={family_stats['family']}"
+                )
+            else:
+                print(
+                    f"  [3/4] Quality gate FAIL | score={strategy_score:.3f} | "
+                    f"{quality_reason}"
+                )
+
+        # Save strategy only if it passes quality gate
+        if quality_ok:
             save_strategy(strategy_name)
             kept_count = sum(1 for r in all_test_results if r.get("sharpe_ratio", 0) > 0)
             print(f"  [4/4] ✓ STRATEGY SAVED ({kept_count}/{len(symbols)} symbols pass train+test)")
             best_strategy_code = new_code
         else:
-            print(f"  [4/4] ✗ No symbol passed both train+test")
+            if any_kept and quality_reason:
+                print(f"  [4/4] ✗ Rejected after quality gate: {quality_reason}")
+            else:
+                print(f"  [4/4] ✗ No symbol passed both train+test")
             git_revert_strategy()
             STRATEGY_FILE.write_text(best_strategy_code)
 
@@ -1014,16 +1264,18 @@ def main():
         avg_sharpe = sum(r["sharpe_ratio"] for r in bt_results) / max(1, len(bt_results))
         avg_return = sum(r["total_return_pct"] for r in bt_results) / max(1, len(bt_results))
         avg_trades = sum(r["num_trades"] for r in bt_results) / max(1, len(bt_results))
-        status = "keep" if any_kept else "discard"
+        status = "keep" if quality_ok else "discard"
 
         # Diagnose failure reason for LLM history feedback
         tf_match = re.search(r'timeframe\s*=\s*["\'](\w+)["\']', new_code)
         strategy_tf = tf_match.group(1) if tf_match else ""
         overtrade_thresh = {"4h": 400, "6h": 300, "12h": 200, "1d": 150, "1h": 600}
         fail_reason = ""
-        if not any_kept:
+        if not quality_ok:
             thresh = overtrade_thresh.get(strategy_tf, 500)
-            if avg_trades > thresh:
+            if quality_reason:
+                fail_reason = re.sub(r"[^a-z0-9]+", "_", quality_reason.lower()).strip("_")[:80]
+            elif avg_trades > thresh:
                 fail_reason = f"overtrading({avg_trades:.0f}tr>>{thresh}max)"
             elif avg_trades < TRAIN_MIN_TRADES:
                 fail_reason = f"too_few_trades({avg_trades:.0f}tr<<{TRAIN_MIN_TRADES}min)"
@@ -1036,7 +1288,7 @@ def main():
                 fail_reason = "btc_eth_fail_sol_only"
 
         # Save doc for kept strategies
-        if any_kept:
+        if quality_ok:
             doc_path = DOCS_DIR / f"{strategy_name}.md"
             doc_path.parent.mkdir(parents=True, exist_ok=True)
             doc_path.write_text(f"""# Strategy: {strategy_name}
@@ -1064,7 +1316,7 @@ def main():
 {datetime.now().strftime('%Y-%m-%d %H:%M')}
 """)
         else:
-            print(f"  [4/4] ✗ DISCARD (Sharpe {avg_sharpe:.3f} ≤ best {best_sharpe:.3f})")
+            print(f"  [4/4] ✗ DISCARD (score {strategy_score:.3f} | best {best_score:.3f})")
             git_revert_strategy()
             STRATEGY_FILE.write_text(best_strategy_code)
             test_results = []
@@ -1082,13 +1334,15 @@ def main():
             "avg_trades": avg_trades,
             "tf": strategy_tf,
             "fail_reason": fail_reason,
+            "family": family_stats.get("family", strategy_family_key(strategy_name)),
+            "score": strategy_score,
             "description": description,
         })
 
         # Progress summary every 10 experiments
         if experiment_num % 10 == 0:
             kept = sum(1 for h in history if h["status"] == "keep")
-            print(f"\n  ── Summary: {experiment_num} experiments, {kept} kept, best Sharpe={best_sharpe:.3f} ──")
+            print(f"\n  ── Summary: {experiment_num} experiments, {kept} kept, best focus score={best_score:.3f} ──")
 
         save_research_state(
             status="idle",

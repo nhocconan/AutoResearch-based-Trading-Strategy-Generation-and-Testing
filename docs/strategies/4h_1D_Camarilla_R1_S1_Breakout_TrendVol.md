@@ -1,0 +1,121 @@
+# Strategy: 4h_1D_Camarilla_R1_S1_Breakout_TrendVol
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | 0.846 | +55.1% | -6.1% | 215 | PASS |
+| ETHUSDT | 0.242 | +31.3% | -11.7% | 207 | PASS |
+| SOLUSDT | 0.757 | +86.9% | -20.2% | 171 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.671 | +0.7% | -4.7% | 86 | FAIL |
+| ETHUSDT | 1.158 | +22.4% | -7.3% | 79 | PASS |
+| SOLUSDT | 0.789 | +16.6% | -8.5% | 57 | PASS |
+
+## Code
+```python
+#!/usr/bin/env python3
+"""
+4h_1D_Camarilla_R1_S1_Breakout_TrendVol
+Hypothesis: 4-hour breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
+Only takes long when price breaks above R1 with volume spike and daily uptrend, short when breaks below S1 with volume spike and daily downtrend.
+Uses tight entry conditions (trend + volume + level break) to target 25-50 trades per year on 4h timeframe, avoiding overtrading.
+Works in bull markets via trend-following breaks and in bear markets via counter-trend reversals at extreme daily levels.
+"""
+
+name = "4h_1D_Camarilla_R1_S1_Breakout_TrendVol"
+timeframe = "4h"
+leverage = 1.0
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Volume spike: >2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Daily data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Daily Camarilla R1 and S1 from previous day
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    rang_1d = prev_high_1d - prev_low_1d
+    R1_1d = prev_close_1d + 1.1 * rang_1d * 1.0 / 4
+    S1_1d = prev_close_1d - 1.1 * rang_1d * 1.0 / 4
+    
+    # Align daily levels to 4h timeframe
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    for i in range(50, n):
+        if (np.isnan(R1_1d_aligned[i]) or 
+            np.isnan(S1_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if position == 0:
+            # LONG: Price breaks above R1 + volume spike + price above daily EMA50 (daily uptrend)
+            if (close[i] > R1_1d_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema_50_1d_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # SHORT: Price breaks below S1 + volume spike + price below daily EMA50 (daily downtrend)
+            elif (close[i] < S1_1d_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema_50_1d_aligned[i]):
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # EXIT LONG: Price re-enters previous day's H-L range OR closes below daily EMA50
+            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
+               close[i] < ema_50_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: Price re-enters previous day's H-L range OR closes above daily EMA50
+            if (close[i] < R1_1d_aligned[i] and close[i] > S1_1d_aligned[i]) or \
+               close[i] > ema_50_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    return signals
+```
+
+## Last Updated
+2026-05-12 11:15

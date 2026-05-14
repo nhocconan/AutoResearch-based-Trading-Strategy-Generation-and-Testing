@@ -1,0 +1,173 @@
+# Strategy: 4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATR_v1
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | 0.289 | +35.0% | -10.8% | 180 | PASS |
+| ETHUSDT | 0.200 | +31.1% | -13.3% | 174 | PASS |
+| SOLUSDT | 0.730 | +104.0% | -17.2% | 159 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.059 | +5.2% | -7.3% | 66 | FAIL |
+| ETHUSDT | 0.933 | +21.7% | -9.2% | 60 | PASS |
+| SOLUSDT | 0.848 | +20.9% | -8.3% | 52 | PASS |
+
+## Code
+```python
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Camarilla R3/S3 breakout + 1d EMA34 trend filter + volume confirmation + ATR trailing stop.
+# Long when price breaks above Camarilla R3 AND price > 1d EMA34 (uptrend) AND volume > 2x 20-period median.
+# Short when price breaks below Camarilla S3 AND price < 1d EMA34 (downtrend) AND volume > 2x 20-period median.
+# Exit on ATR trailing stop (2.0x ATR from extreme) or Camarilla breakout in opposite direction.
+# Camarilla levels provide high-probability reversal/breakout points; 1d EMA34 filters counter-trend trades; volume confirms institutional participation.
+# Target: 30-60 trades/year on 4h timeframe. Works in bull (buy breakouts) and bear (sell breakdowns).
+
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_ATR_v1"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Calculate 1d EMA34 for trend filter (loaded once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate EMA34 on 1d close
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate 20-period ATR for trailing stop
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Calculate 20-period volume median for volume confirmation
+    vol_median_20 = pd.Series(volume).rolling(window=20, min_periods=20).median().values
+    
+    # Calculate Camarilla levels from previous day (using daily OHLC)
+    # We'll use the previous day's high, low, close to calculate today's levels
+    # Since we're on 4h timeframe, we need to get daily data and align it
+    df_1d_ohlc = get_htf_data(prices, '1d')
+    if len(df_1d_ohlc) < 1:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels for each day: H, L, C from previous day
+    # Camarilla R3 = C + (H-L)*1.1/2
+    # Camarilla S3 = C - (H-L)*1.1/2
+    prev_high = df_1d_ohlc['high'].shift(1).values  # Previous day's high
+    prev_low = df_1d_ohlc['low'].shift(1).values    # Previous day's low
+    prev_close = df_1d_ohlc['close'].shift(1).values # Previous day's close
+    
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d_ohlc, camarilla_s3)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
+    
+    # Start after warmup for EMA34, ATR, and volume median
+    start_idx = 50
+    
+    for i in range(start_idx, n):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(vol_median_20[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i])):
+            signals[i] = 0.0
+            if position != 0:
+                position = 0
+            continue
+        
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_volume = volume[i]
+        curr_atr = atr[i]
+        
+        # Trend filter: 1d EMA34 direction
+        uptrend = curr_close > ema_34_1d_aligned[i]
+        downtrend = curr_close < ema_34_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 2x 20-period volume median
+        if vol_median_20[i] <= 0 or np.isnan(vol_median_20[i]):
+            volume_confirm = False
+        else:
+            volume_confirm = curr_volume > (vol_median_20[i] * 2.0)
+        
+        # Camarilla breakout conditions
+        breakout_up = curr_close > camarilla_r3_aligned[i]  # break above R3
+        breakout_down = curr_close < camarilla_s3_aligned[i]  # break below S3
+        
+        if position == 0:  # Flat - look for new entries
+            # Long: Breakout up AND uptrend AND volume spike
+            if breakout_up and uptrend and volume_confirm:
+                signals[i] = 0.25
+                position = 1
+                entry_price = curr_close
+                highest_since_entry = curr_close
+                lowest_since_entry = curr_close
+            # Short: Breakout down AND downtrend AND volume spike
+            elif breakout_down and downtrend and volume_confirm:
+                signals[i] = -0.25
+                position = -1
+                entry_price = curr_close
+                highest_since_entry = curr_close
+                lowest_since_entry = curr_close
+            else:
+                signals[i] = 0.0
+        
+        elif position == 1:  # Long position
+            # Update highest high since entry for trailing stop
+            if curr_close > highest_since_entry:
+                highest_since_entry = curr_close
+            
+            # Exit conditions: ATR trailing stop OR Camarilla breakout down
+            stop_price = highest_since_entry - 2.0 * curr_atr
+            if curr_close < stop_price or breakout_down:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:  # Short position
+            # Update lowest low since entry for trailing stop
+            if curr_close < lowest_since_entry:
+                lowest_since_entry = curr_close
+            
+            # Exit conditions: ATR trailing stop OR Camarilla breakout up
+            stop_price = lowest_since_entry + 2.0 * curr_atr
+            if curr_close > stop_price or breakout_up:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    return signals
+```
+
+## Last Updated
+2026-05-01 14:22

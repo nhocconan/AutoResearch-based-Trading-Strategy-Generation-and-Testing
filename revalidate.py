@@ -17,7 +17,7 @@ from backtest import run_strategy_backtest
 from evaluate import compute_metrics, metrics_to_tsv_row
 from research_rules import test_symbol_pass, train_symbol_pass
 from results_db import upsert_results, delete_strategy, metrics_to_db_dict
-from validator import validate_file
+from validator import run_prefix_lookahead_check, validate_file
 
 STRATEGIES_DIR = Path("strategies")
 DOCS_DIR = Path("docs/strategies")
@@ -113,6 +113,12 @@ def main():
             print("  INVALID: purged stored rows/docs and skipped backtest")
             for error in validation.errors[:5]:
                 print(f"    - {error}")
+            continue
+        prefix_ok, prefix_msg = run_prefix_lookahead_check(str(path))
+        if not prefix_ok:
+            purge_invalid_strategy(path.stem)
+            print("  INVALID: prefix look-ahead audit failed; purged stored rows/docs and skipped backtest")
+            print(f"    - {prefix_msg}")
             continue
 
         # Remove old rows before inserting fresh ones so invalid/stale rows cannot survive.

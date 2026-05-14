@@ -3,25 +3,30 @@
 ## Train Results
 | Symbol | Sharpe | Return | Max DD | Trades | Status |
 |--------|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.009 | +20.9% | -5.0% | 520 | FAIL |
-| ETHUSDT | -0.033 | +19.3% | -6.7% | 485 | FAIL |
-| SOLUSDT | 0.257 | +35.8% | -11.1% | 416 | PASS |
+| BTCUSDT | -0.503 | +5.1% | -8.2% | 372 | FAIL |
+| ETHUSDT | -0.228 | +11.7% | -12.9% | 351 | FAIL |
+| SOLUSDT | 0.335 | +41.2% | -16.4% | 281 | PASS |
 
 ## Test Results (2025+)
 | Symbol | Sharpe | Return | Max DD | Trades | Status |
 |--------|--------|--------|--------|--------|--------|
-| SOLUSDT | 0.065 | +6.5% | -7.6% | 162 | PASS |
+| SOLUSDT | 0.617 | +12.6% | -5.6% | 110 | PASS |
 
 ## Code
 ```python
 #!/usr/bin/env python3
+# 6h_daily_pivot_breakout_volume_v1
+# Hypothesis: 6h strategy using 1d Camarilla pivot levels with volume confirmation.
+# Long when price breaks above R4 with volume > 1.5x 20-period average.
+# Short when price breaks below S4 with volume > 1.5x 20-period average.
+# Exit on close back inside R3/S3 levels.
+# Uses daily structure for key levels, 6h for execution, volume for breakout confirmation.
+# Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets.
+# Target: 12-30 trades/year (50-120 total over 4 years) on BTC/ETH/SOL.
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Strategy: 6h Daily Pivot Breakout with Volume Filter
-# Hypothesis: Daily pivot levels act as major support/resistance. Price breaking above R1 with volume indicates institutional buying, leading to continuation. Price breaking below S1 with volume indicates institutional selling, leading to continuation. Works in both bull and bear markets because: In bull, breaks above R1 continue up; breaks below S1 get bought (mean reversion). In bear, breaks below S1 continue down; breaks above R1 get sold (mean reversion). Volume filter ensures only institutional participation triggers entries.
-# Target: 12-30 trades/year (48-120 over 4 years).
 
 name = "6h_daily_pivot_breakout_volume_v1"
 timeframe = "6h"
@@ -29,89 +34,92 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 2:
+    # Volume average for confirmation (20-period)
+    volume_s = pd.Series(volume)
+    volume_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # Get 1d data for Camarilla pivot levels (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate daily data (previous day's OHLC)
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Shift by 1 to use previous day's data (avoid look-ahead)
-    prev_daily_high = np.roll(daily_high, 1)
-    prev_daily_low = np.roll(daily_low, 1)
-    prev_daily_close = np.roll(daily_close, 1)
-    prev_daily_high[0] = prev_daily_high[1] if len(prev_daily_high) > 1 else 0
-    prev_daily_low[0] = prev_daily_low[1] if len(prev_daily_low) > 1 else 0
-    prev_daily_close[0] = prev_daily_close[1] if len(prev_daily_close) > 1 else 0
+    # Typical price for pivot calculation
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Calculate daily pivot points
-    # Pivot = (High + Low + Close) / 3
-    # R1 = (2 * Pivot) - Low
-    # S1 = (2 * Pivot) - High
-    # R2 = Pivot + (High - Low)
-    # S2 = Pivot - (High - Low)
-    daily_pivot = (prev_daily_high + prev_daily_low + prev_daily_close) / 3.0
-    daily_r1 = (2 * daily_pivot) - prev_daily_low
-    daily_s1 = (2 * daily_pivot) - prev_daily_high
-    daily_r2 = daily_pivot + (prev_daily_high - prev_daily_low)
-    daily_s2 = daily_pivot - (prev_daily_high - prev_daily_low)
+    # Camarilla levels
+    pivot = typical_price
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    r2 = close_1d + (range_1d * 1.1 / 6)
+    s2 = close_1d - (range_1d * 1.1 / 6)
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    s3 = close_1d - (range_1d * 1.1 / 4)
+    r4 = close_1d + (range_1d * 1.1 / 2)
+    s4 = close_1d - (range_1d * 1.1 / 2)
     
-    # Align to 6h timeframe (use previous day's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_daily, daily_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_daily, daily_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_daily, daily_s1)
-    r2_aligned = align_htf_to_ltf(prices, df_daily, daily_r2)
-    s2_aligned = align_htf_to_ltf(prices, df_daily, daily_s2)
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    # Align all levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     signals = np.zeros(n)
-    position = 0  # Track position: 1=long, -1=short, 0=flat
+    position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if required data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(vol_ma[i])):
+    for i in range(50, n):  # Start after warmup
+        # Skip if any required data is NaN
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(volume_ma[i]) or np.isnan(close[i]) or np.isnan(volume[i])):
             signals[i] = 0.0
             continue
         
+        # Volume confirmation: current volume > 1.5x 20-period average
+        volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+        
         if position == 1:  # Long position
-            # Exit: price falls to pivot or volume drops
-            if close[i] <= pivot_aligned[i] or not vol_filter[i]:
+            # Exit: Price closes back below R3 (take profit) or below S4 (stop)
+            if close[i] < r3_aligned[i] or close[i] < s4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = 0.25  # Maintain long
+                signals[i] = 0.25
+                
         elif position == -1:  # Short position
-            # Exit: price rises to pivot or volume drops
-            if close[i] >= pivot_aligned[i] or not vol_filter[i]:
+            # Exit: Price closes back above S3 (take profit) or above R4 (stop)
+            if close[i] > s3_aligned[i] or close[i] > r4_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
-                signals[i] = -0.25  # Maintain short
-        else:  # Flat, look for entry
-            # Long: price breaks above R1 with volume (continuation in bull, mean reversion in bear)
-            if high[i] > r1_aligned[i] and close[i] > r1_aligned[i] and vol_filter[i]:
+                signals[i] = -0.25
+        else:  # Flat
+            # Check for breakout with volume confirmation
+            bullish_breakout = (close[i] > r4_aligned[i]) and volume_confirmed
+            bearish_breakout = (close[i] < s4_aligned[i]) and volume_confirmed
+            
+            if bullish_breakout:
                 position = 1
                 signals[i] = 0.25
-            # Short: price breaks below S1 with volume (continuation in bear, mean reversion in bull)
-            elif low[i] < s1_aligned[i] and close[i] < s1_aligned[i] and vol_filter[i]:
+            elif bearish_breakout:
                 position = -1
                 signals[i] = -0.25
     
@@ -119,4 +127,4 @@ def generate_signals(prices):
 ```
 
 ## Last Updated
-2026-04-07 09:37
+2026-04-09 00:55

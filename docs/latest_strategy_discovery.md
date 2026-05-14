@@ -1,61 +1,61 @@
 # Latest Strategy Discovery
 
-Generated: 2026-04-08 00:01:02 UTC
+Generated: 2026-05-14 02:32:40 UTC
 
 ## Results-Driven Direction
-- Recent discard buckets: {"deep_drawdown": 10, "too_few_trades": 162, "negative_sharpe": 228, "other": 0}
+- Recent discard buckets: {"deep_drawdown": 1, "too_few_trades": 203, "negative_sharpe": 196, "other": 0}
 - Active kept strategy rows: 12 sampled train winners, 12 sampled test winners
 - Most common kept strategy prefixes:
-  - 4h: 295 kept rows
-  - 6h: 292 kept rows
-  - 12h: 127 kept rows
-  - 1d: 74 kept rows
-  - mtf: 58 kept rows
-  - 1h: 24 kept rows
-  - kama: 14 kept rows
-  - daily: 9 kept rows
-- Fresh web themes: trend, volume, breakout, momentum, funding, regime, volatility
+  - 4h: 16799 kept rows
+  - 6h: 9729 kept rows
+  - 12h: 6690 kept rows
+  - 1d: 2897 kept rows
+  - 4H: 1268 kept rows
+  - 1h: 733 kept rows
+  - 6H: 676 kept rows
+  - 12H: 396 kept rows
+- Fresh web themes: volume, breakout, trend, funding, momentum, regime
 
 ## Fresh Web Discoveries
 - [The funding rate: how it helps anticipate price reversals in bitcoin and Ethereum - ForkLog](https://news.google.com/rss/articles/CBMipwFBVV95cUxPWG5pZGhNZnNOMXFFd1UzY2I1WXZlUVVjQ1BiaXVwWGhjdW05SEM0b0hoN085d1lJdWNQS1N1MEJtV1VPbTEwaUVBTW03eDVCQk05MHo3MVJndGkxQVE0VnNjUWdVV3VXRFBPODhpekxEQ0p4bUFkSzFsMWtMb2xvTy1tVks0VUhIeDdhSFlRSTFkSUp2R1poWlVZS2cyVXgtUUdZNDVobw?oc=5) | ForkLog | Wed, 04 Feb 2026 08:00:00 GMT | query=`crypto funding rate trading strategy perp futures`
-- [PMO Meaning in Crypto: Price Momentum Oscillator Explained - West Africa Trade Hub](https://news.google.com/rss/articles/CBMinAFBVV95cUxPMERLQXdkOWI2bUZlUklYVm9LWkJQcFZrelRsTFVzRjJFVzlKMTRJVkF4b25obGhmdlh5MjhIaUFQdjFtcm8zRGxsV1JnMlZ4WTJPa2t5Z0VkbkJlc1V2ZjdhcUVKbzZxb2dvM2JDSHFqSWU2RHl4b3ZMQmRGaHd3ai1aOFl3UEtUZE1BTDUzTGl4RjNJWkxVVUNGMWc?oc=5) | West Africa Trade Hub | Thu, 26 Feb 2026 08:00:00 GMT | query=`crypto futures trading strategy volume breakout trend filter`
-- [Perpetual Futures Guide: How Perps Work, Funding Rates & Trading Strategies - Bitget](https://news.google.com/rss/articles/CBMiXEFVX3lxTE1TVC1tYWZTbmJlYmVoQk5SeTRpbmRGZDJNQlRUdjgyUktxYmR1QWhXVVZJUFV3WWNBQU9oMG9jMThlNmtoZ2JpUjVqSExBUTZITzE3V2k5Vmo1QjNu0gFiQVVfeXFMTWxrZzhhYWlhZ2hydFNCV2xlTHlpQ0RWVEJhRTViWDdxbXBQaDlTa1Jrd1Uzc1M0MnUtNktOR2RiTFlzSXQ4QVNsV3I2YUhQalhyZkg3dUI3Z21MN0dwbWV3dEE?oc=5) | Bitget | Thu, 05 Mar 2026 08:00:00 GMT | query=`crypto funding rate trading strategy perp futures`
-- [Turning the Tide - Volatility Breakout Trading System Strategy and Rolling Position Trading Method and Rolling Position Trading System Design - Binance](https://news.google.com/rss/articles/CBMiY0FVX3lxTE5RNGNOaXJFWHJCQ1FtZExPS0pqdDFmRkVDYUxxRS1LV0IxNHlmbkUyYkhsaDF2eFp3bjE0WnZpMkxkaS01WTg3WVBueWV3ZGZFdjBuejRTYmdDRGRrbGduZFNOQQ?oc=5) | Binance | Thu, 04 Sep 2025 07:00:00 GMT | query=`crypto futures trading strategy volume breakout trend filter`
-- [Volume Profile: Reading the Market's True Story for CRYPTO:XMRUSD by officialjackofalltrades - TradingView](https://news.google.com/rss/articles/CBMingFBVV95cUxNektlSERDcDBXQVVab0QySHdwRDZnT3VLN1JTbE4yTlhqUXlfMWpUTDFPOGQyN002bHotOTlwNTVUTDg1MVJORkRRQWJIaVVXSUswUGszclVSNXRVaU5tUGVsU2RfaVhQc0FVdFVBMHZSQXFocXc0Y0hBcktfSldSWm5MVFlTdWVfQnp1UTZlMjNiVGJ1OVZaQzZ3ZEE3UQ?oc=5) | TradingView | Sat, 21 Feb 2026 08:00:00 GMT | query=`tradingview strategy crypto breakout volume trend`
-- [What Are Funding Rates In Crypto? The 2026 Guide To Market Trends & Yield - Outlook India](https://news.google.com/rss/articles/CBMiwgFBVV95cUxQTUJDVVVFMHp4cVAyTzVyTk8yRmR4VmVxaTJPX0NUOWZPWmlZZmJCM3E4MjV1V1dTcXFQRVkwbmlkSnRIMXBEbHVqVEtjZnpDSV9yRXNaSVlmN2s3eEwtU0NKOF9IWlZSVnNOSmxad1VvaEd3cURZQm5sWmhpN3lnUTJqbzVRd0poOEdxS09QbDZaalY1ZGllNWR6N1A0a3hiMlVGQktPNnRYRTBISHBEeE8tR2NYUTcxek9UWmlkazNoQQ?oc=5) | Outlook India | Mon, 30 Mar 2026 13:45:55 GMT | query=`crypto funding rate trading strategy perp futures`
+- [Beginner's Guide: Calculating Futures Funding Rates - Bitget](https://news.google.com/rss/articles/CBMiXEFVX3lxTE94djRHUVg3V1JPUXRiZmJZU0ZCZnhMb2tFXzFpcGtJd201ZUJNWEIyNDhIakQ0OUpPeGNoX2JLeGZyUGZ5QmdaRHh2MjJOWW1vdlJuQXh6MmdVa3I20gFiQVVfeXFMUFpMUlJNdzdVZHhseS1UQ2IyZ0d0bEdnclFtaGh0UzY3V3BCajczRWNjaWk0MHZCTTFwWVg3eHM2Um1oVFUwWUR4dEF4V1ZFaGJxdVp2VEs0c2R3ekFTVDRQcnc?oc=5) | Bitget | Tue, 12 May 2026 06:33:24 GMT | query=`crypto funding rate trading strategy perp futures`
 - [Zenbot Scan Tools: Automated Crypto Trading & Market Analysis Guide 2026 - Bitget](https://news.google.com/rss/articles/CBMiXEFVX3lxTE56dzJidmNob3RtRWY3QW53aHIzTktQQ0hEMGRBY3pDNzExOVdOajI0OXFWT3puQ3pVZ1ZZY0RtUXJBTEpva2hicUp3Rm9UX3Bmd0c1THN0cU9LSDJB0gFiQVVfeXFMUEVPZFMtMkZ4ZnZGY0JtM2hpaXRFV1kzcHZzQXRvaFE0YThkaDNlYUwteWRlX3NsRTcwdkhlLUpHSlNZS3RFM1ZmWG51SnA5WFEwUGEyQTVvYTN3eFZHeHN2QkE?oc=5) | Bitget | Tue, 17 Mar 2026 07:00:00 GMT | query=`algorithmic trading crypto regime filter momentum strategy`
-- [Ondo exec explains how perpetual futures stay in line with spot prices - thestreet.com](https://news.google.com/rss/articles/CBMisAFBVV95cUxQcFdtdWlMMmF5SmFVcm1tUzREOU5vbTdrVktuMXZqYUJqX2N2UjlLQkktVlU1TURLelhQa0k0dzhZdXFBN0thVjhjYUZLMVNlbnhPN3lMb3Z4MUY5VWhBb096NDJacWtJbVpvZ1dvWWlURmNSdEdRYUxyUXlhSjNHQzVySzZxb280dVk2YnJYeFo3dS1IRk1TcjVxZHhaWlhUalZXV2JVTGdyQVNvandfRg?oc=5) | thestreet.com | Tue, 10 Feb 2026 08:00:00 GMT | query=`crypto funding rate trading strategy perp futures`
+- [Breakout Participation Gate [AGPro Series] — Indicator by AGProLabs - TradingView](https://news.google.com/rss/articles/CBMijgFBVV95cUxQaEpSeHRFMWJoajZYVkdBcFpWaVlNNTY3d3VfU1p3dHNGMXREbVo5cFlFamR5elRjV19hYlU2dURLNlQ1cUJiYm0tc0t5dXlWUlhCUXViZTJWRXFvek80ZUNSa3MxX0pES0tZRWVCYUxTSHhIeUlnRmF5NjUwcEVjem9XNHZNREhEb1RlMy13?oc=5) | TradingView | Tue, 12 May 2026 16:33:04 GMT | query=`crypto futures trading strategy volume breakout trend filter`
+- [What Serious Crypto Traders Know About Perpetual Futures - Yellow.com](https://news.google.com/rss/articles/CBMidkFVX3lxTE1QNDg1ZllMaHBZUDZzTlF5VnNoLUJVTHViZ3lFVGJpZ0s2a3dmcEdnRWFYRkMwVmc4V3JrMHJmaXI2NlZHTkQ5d2ZIRGlZUk5hem92V1FBbkkzQ2ZVYmtoWlY1QWo0ZXlQa0FoeV9uQ2FFLXlKS3c?oc=5) | Yellow.com | Tue, 05 May 2026 05:28:57 GMT | query=`crypto funding rate trading strategy perp futures`
 - [Trading Games: Beating Passive Strategies in the Bullish Crypto Market - Palazzi - 2025 - Journal of Futures Markets - Wiley Online Library](https://news.google.com/rss/articles/CBMiakFVX3lxTE5LN3o2bHVTVi1ocjZvYkhQVkRGRUVhRmZHbmZQd0ZERl9uYkd1V2ZTcVoxanlvOHg1NlR4SkJ1WTREVjBaR1pLQVJSUFk1VTlWQWVwVUc1cWMwQ294cDhrRFFDSE56T3F4WGc?oc=5) | Wiley Online Library | Tue, 05 Aug 2025 07:00:00 GMT | query=`algorithmic trading crypto regime filter momentum strategy`
-- [Perps Meaning in Crypto: A Guide to Perpetual Futures - West Africa Trade Hub](https://news.google.com/rss/articles/CBMilgFBVV95cUxQOFdNWHgySXpMYkdWcE5UaFJNaEItQzBHRS00d3JkdzVRczA4MWZiU1dtRW5uVWhCMHhTb2RqMk1FdlZlSTdwZU81eGtPTGZ2MHlobC03TUNHNlNaWEM5WE53T2tYRzEweWVSTVcwOHBEellpaGtnNDJHVkJRQk9qYkZlT1BRNUpraUc4cDNsQWNCSmEyMEE?oc=5) | West Africa Trade Hub | Thu, 26 Feb 2026 08:00:00 GMT | query=`crypto funding rate trading strategy perp futures`
+- [The Opening Gap Playbook for CRYPTO:SOLUSD by officialjackofalltrades - TradingView](https://news.google.com/rss/articles/CBMigAFBVV95cUxPQ0ZweW5aZUZ3ai00ZElfRmZKQld4QnJoeHdocWlPWjJiNFh4M3EyR2xyQlo1cGhEV3BENlhMbmppckMzR29KWUxHRkxuTkwzT0dtX3B5c2lZRm1fbERXdHFYSnJzYW1VSjh2MmJUUDk3OUZnRlNEVWk5U1dqVFlSWQ?oc=5) | TradingView | Thu, 12 Mar 2026 07:00:00 GMT | query=`tradingview strategy crypto breakout volume trend`
+- [BTCUSD CM Futures Contract (May 2026) Trade Ideas — OKX:BTCUSD08K2026 - TradingView](https://news.google.com/rss/articles/CBMiowFBVV95cUxOemN5c2ZXOW9OQzN2VFdsNXVWSkNWQWdIZ254eWhieWd0UWRKR3ktTHRHVVRUNk1sbEJUNVQySU5RdUhXS2kwM181Z3llakpZXy0wcnRjaE5ZSUFnWUdTck1aemRtU0tEbnVzY096OVZMTHNYc2xCTUxZQkViX0VxZDJnYXViV2tHWTdwY1ZxUGlpamRfTWJNUXVZdHlwd2hIR0VR?oc=5) | TradingView | Thu, 07 May 2026 16:39:05 GMT | query=`tradingview strategy crypto breakout volume trend`
 - [ORB Breakout Strategy with VWAP and Volume Filters by luiscaballero - TradingView](https://news.google.com/rss/articles/CBMimwFBVV95cUxNNFdKVkRxRzBXYzZuN1l5MDVVMlBSTm9pVlZnWUNodWJVV1JuX09TZzFHdjUxSUZpOFo0czlSTjAyd0VtTEJGV3NmMTlZb0VjZ3Ita3lsN3JOTTQwQ2xMUlVBdlB2N3VaUnFUc25XQkxWN3AzcC1xM2ZkemZIX2Z3ck1ZLTh5YkJoZmoyRUloMHEyYlNVZ3FWQWxKQQ?oc=5) | TradingView | Sun, 04 Jan 2026 08:00:00 GMT | query=`tradingview strategy crypto breakout volume trend`
-- [BTCUSD CM Futures Contract (Apr 2026) Trade Ideas — OKX:BTCUSD10J2026 - TradingView](https://news.google.com/rss/articles/CBMiowFBVV95cUxPTks2c3hGWkw3SXNrakF5dW44ZXhMcEtQWVhTN2Q2ZElpajRoSFNaUW10S2ozSjYzaXdyQVV5dzcwXzhDRXJjRTlIWmoyWm1sWVR1TFRpRG5ub1hxNnE0Wk5MOGFYTXRjb1JyeHBsQXp4aDdhM0l4dXloZ3M5SFcxU21WbzczVEk3T3FYWXpsRGR2a2dmclBmZ3kzekp1SS1tS0s0?oc=5) | TradingView | Sat, 04 Apr 2026 17:00:29 GMT | query=`crypto futures trading strategy volume breakout trend filter`
-- [XRP Hits Exact Bull Target as Top Traders Celebrate Perfect Market Call - TradingView](https://news.google.com/rss/articles/CBMiyAFBVV95cUxQVjFFWmh1VFM1TkFGTHNNZG5DRG91NjRsRzFHNVRoRGVvVXhPSGt2bmw2OWJFVnRLSEFDS3VNTXFQX3MxZzgwUjViUGNyUXpQRm0tdjIyNmljaWNvZ2dLdDNqRGJ4T2w3RG4xQzZfNW5HSmxkRVA1Z2ZUNmRaaExxQ1dhYThMMnd3clpKVEhXSEpGcm1QSFlraVBsSkVlOXczb0pQTGlvUWgtZ041SHZsdjRIYWFmWHVBRmJZNGVRTkhzZ3Zob0RMMg?oc=5) | TradingView | Mon, 24 Nov 2025 08:00:00 GMT | query=`tradingview strategy crypto breakout volume trend`
-- [BTIC on Bitcoin Friday Futures against APAC Close Trade Ideas — CME:BAB01K2026 - TradingView](https://news.google.com/rss/articles/CBMiigFBVV95cUxObENweFNheHl6ZXEwRmFOZUhuWkdRb1hDUWdfLXp1ZjBVcXQ5NXAzdG5PclBvNmM5NnlST1hmU2JmWXJYRlYtZFNfaHE4Z2dYVlBIc2hVYmVfY0dENzZ6QVpvNU1yaWFJY0I4VlFqSjVmM3hyNlZ5a0huNGdKUVhLWjM3NTIzYUs2MFE?oc=5) | TradingView | Fri, 03 Apr 2026 17:42:34 GMT | query=`tradingview strategy crypto breakout volume trend`
-- [Binance Coin vs US Dollar Trade Ideas — B2PRIME:BNBUSD - TradingView](https://news.google.com/rss/articles/CBMiggFBVV95cUxOdDVEWXdmMzlwQWdxZkVta1g0b2FVdW0yOUhiMFN3WnUtQmltWUFTLVdGNGg0YVJnUGRpWkdfTjVaSUlOVTA2VjVkTDltc21yVjZNTmpGY0VJTmNtV185cFkyZHM1eFp3NS04QTl3bXgzdmZBd1pvSElMaG1COV9NRVdn?oc=5) | TradingView | Fri, 03 Apr 2026 11:53:07 GMT | query=`tradingview strategy crypto breakout volume trend`
-- [ATOM Trading Strategies: Technical Analysis & Risk Management Guide - Bitget](https://news.google.com/rss/articles/CBMiWEFVX3lxTE5vbHlVOFAzUy1vSHFtSk8zbFJmZTZ2bjk1MVR5WEVHWDVlQlB0M2w3UmpmVnF6YTlkdDJwVTVELW8wc2VYb3JQWUlqalhiZHV0Tzc4QWF6S1bSAV5BVV95cUxQbGJNZnZhcTlNUmJQOFVSeHBpbUh6Z0J6Y3RGRzNUQlNNT2hZTnhsd2ItN1lSX3JFeXhrNVZBTmt4VTc1NnI1LWFORERjak1RMWVZZ25NemxYRk5IMWZR?oc=5) | Bitget | Tue, 17 Mar 2026 07:00:00 GMT | query=`crypto futures trading strategy volume breakout trend filter`
-- [Jam Algo BOT: estrategia de QuantumSignalsAI - TradingView](https://news.google.com/rss/articles/CBMiVkFVX3lxTFBLWWdkWVNhRjBtN3ROaW01Z2dGOFo3M19YdDVtTkw1OHprVnJDbzcxZGt0dnA5ckpqc19OZ1BoTHJld3pWT2hYN2JrY256Qnc4NW56VTl3?oc=5) | TradingView | Sun, 01 Mar 2026 08:00:00 GMT | query=`algorithmic trading crypto regime filter momentum strategy`
-- [Directional Strength Index [Quantum Algo] — Indicator by Quantum-Algo - TradingView](https://news.google.com/rss/articles/CBMijAFBVV95cUxQV1dzdEJObzNqYy0xZTR1cEtKMWd3Rl8zb1BDSlp2ZE1PanRkWXFWNGE4cEdJWHRkemdkaU1kZkVkZGl5VXNCZ3I0OWNTTG5OQzBUM01iYjExTkk5b25vclBpWnZHdmpoLWk0V0xqMjNFa3JYRjhieWJmSVdVZjlCUl9JYlFuY2M4QkVTZA?oc=5) | TradingView | Fri, 27 Mar 2026 18:40:47 GMT | query=`algorithmic trading crypto regime filter momentum strategy`
+- [Crypto Non-Causality & AMD Confluence Strategy [Alpha Council] by mjrodriguezorlich69 - TradingView](https://news.google.com/rss/articles/CBMipgFBVV95cUxOb1VpQU95NE5uWEM1ZW5CSjA1d1hINVY3MVJxbGw5MTRvSFdHaGp4OWdDdU9EWmVnYm4xckdzV2ptQktlMmFlVWcza1pJVDZqQUR2YS1PbURMZ0c4dS11cEJObmdSeTBzbURmTzlNeFhIMnhnMk9rSzUtcnBpMWpHcVZDd1BYSTlscnl3OE5wNGlSZS1zdzlSZ0FWbTBPSF9WTnlxWlpB?oc=5) | TradingView | Sun, 03 May 2026 07:00:00 GMT | query=`algorithmic trading crypto regime filter momentum strategy`
+- [BTIC on Bitcoin Friday Futures against London Close Trade Ideas — CME:BLB05M2026 - TradingView](https://news.google.com/rss/articles/CBMiigFBVV95cUxOajlvcmFBLU8tU0UtRlRBQWtEajdTWnNneUlCRmpZVE1sblJUeVB5RjdBYW4tM2xJUVFkVWZGSWYzSG12VjNYRWJtWTJOZDNLWlB3cWU1elZGVHFZN2tXdmRYSkYwbk5RS2hEcE9veDJFcTAtVHZWb0tpd1BKVko2ODF3R2ZVOWR4aHc?oc=5) | TradingView | Sat, 09 May 2026 00:14:45 GMT | query=`crypto futures trading strategy volume breakout trend filter`
+- [Revealing the Surprising BTC Perp Long/Short Ratios on Top Exchanges - CryptoRank](https://news.google.com/rss/articles/CBMidEFVX3lxTE9FbmxPOEduS3MxWGx2bURMMkIxaWhVX2JTX19HLVZzQXU0eWd5ZWk2bkl3Q2kyZE5fSXlMMzlZYlhzM2tpWDFxN3lKNXhDTm1sRWszZlJPY2NvSmhYTXlzTzJyZ0Y2Vks1dUFHTjFTbEU3YkV2?oc=5) | CryptoRank | Sat, 02 May 2026 06:59:31 GMT | query=`crypto funding rate trading strategy perp futures`
+- [How to day trade crypto using ChatGPT and Grok - TradingView](https://news.google.com/rss/articles/CBMirwFBVV95cUxNa0s1bnlXMzQ1T3MwWnpOZFQ5aXdxelJ3MWZhNzg0azd0T2s0Qk1yU0ZkTndqbWVPa3l3b2xRV1FCN1ZuUlhvZzRMNDBmdHFoTjZVX2dFWnRiQW1GMXlfY3c4OGNOdzdLSFdkSXJXdVNLU1pSNDg5SUNtNXlvbEFNemVYTy1TdEdPai1xUzlQOTlHSWstSmw0dGdzNW42Sm5veWZHLXdlS0k4am9fS25r?oc=5) | TradingView | Mon, 22 Sep 2025 07:00:00 GMT | query=`tradingview strategy crypto breakout volume trend`
+- [Unlock Crypto Profits: 5 Swing Trading Secrets You Can’t Miss! - Phemex](https://news.google.com/rss/articles/CBMid0FVX3lxTFBMaXBuV1luSEpFQVR2QXkxWHUzVFdZWHBCSldMaUkyRUhjcUtFNUZVcnJLenFIR3g1THFpMGZvNU5ZVUF1bHd6RDg4bUNfa3k0ODlESWQxSXNrSEszR0xBeGFnNERZQWpuaXNJal8xVVNNLXhRbXNF?oc=5) | Phemex | Mon, 20 Apr 2026 07:00:00 GMT | query=`crypto futures trading strategy volume breakout trend filter`
+- [What Is a Perpetual Futures Contract? The Complete Crypto Trader's Guide - Phemex](https://news.google.com/rss/articles/CBMicEFVX3lxTE96cldVVkd4emR4Q3lYeUJtdU1LVWdOc2dNUGhMc0J1QkNEMVV6eE5Oa2hfWG1lSXZBVkxDVHNseU5GVmt2Sm9jb2U3NzZPU3k0ZDBSTzl6aWVscHQ2NUFMaTJoU0x1UlltRTFmWXNQa00?oc=5) | Phemex | Mon, 16 Mar 2026 07:00:00 GMT | query=`crypto funding rate trading strategy perp futures`
+- [Everyone Uses VWAP Wrong for CME_MINI:ES1! by EdgeTools - TradingView](https://news.google.com/rss/articles/CBMifkFVX3lxTE5YZGlOZWs2aEh1Y19JTnVkN3cxcTBiUWRydWNGdUwtUUlOX3RPaXFvZ05PUHlHLWNwaGdacldFemd6cTZjY3BWYUxoVThQc2thbVktek5BMlNkQkdDdWVzXzhGUHRKVzJxdlhyb3otTk5KcFRoUUhUZDlNZzIyQQ?oc=5) | TradingView | Sat, 21 Feb 2026 08:00:00 GMT | query=`tradingview strategy crypto breakout volume trend`
+- [Multi Cycles Predictive System ML - GBM Integrated — Indicator by jaydesaigu - TradingView](https://news.google.com/rss/articles/CBMimAFBVV95cUxOSzBZUkx4ME9VYkRmNXZJSjk1V2xxUWIyOXdHWEs4TXkteUczRGhxbjNtMHoxOEd5S3VwMldrQTFXbWhMNjNrUjZXVkpyMnF0OXRfcmp2NER5Q2dRc29qRjBibS1wVzJlOU56Z2xhdnZpMGtHQ3puYWFxenYtYXo1YWVPU1ltR01TOGx0YXFYaWRUaTJvQm9yTQ?oc=5) | TradingView | Sat, 10 Jan 2026 08:00:00 GMT | query=`algorithmic trading crypto regime filter momentum strategy`
+- [XRP Trading Strategies: Technical Analysis & Risk Management Guide - Bitget](https://news.google.com/rss/articles/CBMiYEFVX3lxTE8tZmIzajB2Y1lwZ0pBVU8zbUtiY3BXY3RUOFdQTTcwQzYwZWt6TzFFOGdEdHViRUdFamp2RnNKTC1wMGw2YzBrbWpEQW5MaUhwX096eWwxZDUtTy1NbzlyLdIBZkFVX3lxTE4zRzRsNmlUaXRGTHNBYkZ3M0NINUJiaXBGZlJfMHF6cXBqc1Nta3J0ZVdRS2VrWU81bXpMOVQwOUdtSnNVXzQ3dkljV2ozR1hwNzlFbUpOLWJ3R2VMNFh6Q05FeHh1QQ?oc=5) | Bitget | Mon, 16 Mar 2026 07:00:00 GMT | query=`crypto futures trading strategy volume breakout trend filter`
 - [15 Trading Strategies That Actually Matter Now - Programming Insider](https://news.google.com/rss/articles/CBMihAFBVV95cUxQSHM3NGVRdDlrbUJucG9XVGREUURHMG5NazE0dVF6VjBFcFlSMWhjSThFVGRnU0xlZGhBMzVYbUd0MFRld196UGx0eGV1UjF4TFZmc21MeFR3WExPNjk0T3FTRHZvWE5jN3pkcE5fSHNJNGdmTjdLZERNeUtSX2tEblQtOEs?oc=5) | Programming Insider | Fri, 23 Jan 2026 08:00:00 GMT | query=`algorithmic trading crypto regime filter momentum strategy`
 
 ## Current Winners Snapshot
 ### Train
-- 6h_market_regime_camellia_1w_v1 | SOLUSDT | Sharpe=1.697 | Ret=+386.9% | DD=-12.0% | Trades=27
-- 1h_adx_trend_4h1d_confluence_v1 | SOLUSDT | Sharpe=1.542 | Ret=+199.1% | DD=-12.5% | Trades=1557
-- 6h_chaikin_money_flow_1d_trend_volume_v1 | SOLUSDT | Sharpe=1.536 | Ret=+310.7% | DD=-20.2% | Trades=25
-- 12h_camarilla_pivot_1w_trend_volume_v1 | SOLUSDT | Sharpe=1.406 | Ret=+328.0% | DD=-21.4% | Trades=92
-- 6h_vwap_trend_12h_filter_v1 | SOLUSDT | Sharpe=1.397 | Ret=+270.2% | DD=-15.7% | Trades=130
-- 6h_weekly_pivot_1d_trend_volume_v1 | SOLUSDT | Sharpe=1.372 | Ret=+288.4% | DD=-20.3% | Trades=101
-- 4h_ema_touch_1d_trend_volume_v1 | SOLUSDT | Sharpe=1.357 | Ret=+241.5% | DD=-13.1% | Trades=350
-- 12h_supertrend_1d_trend_volume_v1 | SOLUSDT | Sharpe=1.344 | Ret=+297.6% | DD=-25.6% | Trades=48
+- 1h_SwingReversal_4hTrend_Filter | SOLUSDT | Sharpe=9.512 | Ret=+6366.0% | DD=-4.0% | Trades=857
+- 1h_SwingReversal_4hTrend_Filter | ETHUSDT | Sharpe=9.454 | Ret=+1273.3% | DD=-3.4% | Trades=993
+- 1h_SwingReversal_4hTrend_Filter | BTCUSDT | Sharpe=8.919 | Ret=+664.0% | DD=-2.1% | Trades=997
+- 6h_HTF_Structure_Aligned_Trend | SOLUSDT | Sharpe=3.667 | Ret=+581.9% | DD=-3.8% | Trades=567
+- 6h_HTF_Structure_Aligned_Trend | ETHUSDT | Sharpe=3.216 | Ret=+200.9% | DD=-2.7% | Trades=566
+- 6h_HTF_Structure_Aligned_Trend | BTCUSDT | Sharpe=2.914 | Ret=+133.5% | DD=-2.7% | Trades=497
+- 6h_Volume_Weighted_CCI_Trend | SOLUSDT | Sharpe=1.864 | Ret=+424.3% | DD=-16.8% | Trades=135
+- 4h_1d_1w_camarilla_breakout_adx_volume_v1 | SOLUSDT | Sharpe=1.824 | Ret=+543.8% | DD=-19.5% | Trades=30
 ### Test
-- 4h_atr_breakout_1d_trend_volume_v1 | SOLUSDT | Sharpe=1.875 | Ret=+42.3% | DD=-8.3% | Trades=62
-- 4h_atr_breakout_1d_trend_volume_v2 | SOLUSDT | Sharpe=1.875 | Ret=+42.3% | DD=-8.3% | Trades=62
-- 4h_atr_breakout_12h_trend_volume_v1 | SOLUSDT | Sharpe=1.738 | Ret=+40.9% | DD=-7.1% | Trades=74
-- 4h_camarilla_pivot_1d_volume_v2 | ETHUSDT | Sharpe=1.507 | Ret=+34.8% | DD=-7.4% | Trades=36
-- 4h_rsi_pullback_12h_ema_trend_v1 | ETHUSDT | Sharpe=1.268 | Ret=+22.8% | DD=-5.8% | Trades=29
-- 4h_volume_price_action_v1 | SOLUSDT | Sharpe=1.125 | Ret=+31.1% | DD=-12.7% | Trades=51
-- 6h_camarilla_pivot_1d_ema_volume_v1 | ETHUSDT | Sharpe=1.040 | Ret=+24.6% | DD=-8.0% | Trades=59
-- mtf_1h_hma_rsi_pullback_4h1d_atr_v1 | SOLUSDT | Sharpe=1.034 | Ret=+28.0% | DD=-10.9% | Trades=729
+- 1h_SwingReversal_4hTrend_Filter | SOLUSDT | Sharpe=11.594 | Ret=+162.5% | DD=-1.5% | Trades=241
+- 1h_SwingReversal_4hTrend_Filter | ETHUSDT | Sharpe=9.877 | Ret=+112.7% | DD=-1.1% | Trades=275
+- 1h_SwingReversal_4hTrend_Filter | BTCUSDT | Sharpe=9.490 | Ret=+60.0% | DD=-0.8% | Trades=305
+- 6h_Ichimoku_Cloud_TK_Cross_Trend_V1 | SOLUSDT | Sharpe=2.113 | Ret=+23.6% | DD=-4.1% | Trades=86
+- 4H_Camarilla_R1_S1_Breakout_1D_Trend_Force_v2 | ETHUSDT | Sharpe=2.073 | Ret=+37.0% | DD=-5.1% | Trades=87
+- 4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeSpike_ChopRegime_v1 | ETHUSDT | Sharpe=2.055 | Ret=+46.1% | DD=-7.2% | Trades=63
+- 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Momentum_v2 | ETHUSDT | Sharpe=1.933 | Ret=+34.6% | DD=-6.4% | Trades=83
+- 4h_Camarilla_H3L3_Breakout_1dEMA34_Trend_VolumeSpike_ATRStop_v3 | ETHUSDT | Sharpe=1.908 | Ret=+36.6% | DD=-6.4% | Trades=89
 
 ## How To Use
 - `auto_concept_research.py` should read this file and bias concept generation toward fresh web themes that do not contradict current repo winners.

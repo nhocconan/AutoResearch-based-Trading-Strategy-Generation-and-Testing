@@ -196,8 +196,8 @@ Primary setup uses official Ollama for both cloud and local execution. Configure
 # Official Ollama Cloud
 OLLAMA_API_KEY=your-key
 OLLAMA_BASE_URL=https://ollama.com/api/chat
-OLLAMA_MODEL=nemotron-3-super
-OLLAMA_ANALYSIS_MODEL=glm-5
+OLLAMA_MODEL=glm-5.1:cloud
+OLLAMA_ANALYSIS_MODEL=glm-5.1:cloud
 
 # Optional local override
 # OLLAMA_BASE_URL=http://127.0.0.1:11434/api/chat
@@ -205,16 +205,15 @@ OLLAMA_ANALYSIS_MODEL=glm-5
 ```
 
 Recommended cloud models for this repo from current benchmarks:
-- `nemotron-3-super`: fastest valid large-prompt code generation
-- `glm-5`: strongest review/reasoning model in our pipeline-analysis benchmark
+- `glm-5.1:cloud`: required model for auto-research generation and analysis
 - `qwen3-coder-next`: slower but coding-focused fallback
 - `gemma3:27b`: working Google-family fallback on cloud
 
 `gemma4` is currently a local Ollama option here. The Ollama Cloud API did not expose it in our tests, even though the local library page exists.
 
 Suggested model split:
-- `OLLAMA_MODEL=nemotron-3-super` for `agent_research.py`
-- `OLLAMA_ANALYSIS_MODEL=glm-5` for `auto_concept_research.py` and `auto_process_review.py`
+- `OLLAMA_MODEL=glm-5.1:cloud` for `agent_research.py`
+- `OLLAMA_ANALYSIS_MODEL=glm-5.1:cloud` for `auto_concept_research.py` and `auto_process_review.py`
 - Optional `OLLAMA_CONVERT_MODEL=qwen3-coder-next` for Pine-to-Python conversion tools
 
 ## License

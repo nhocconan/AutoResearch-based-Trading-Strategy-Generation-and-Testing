@@ -1,0 +1,130 @@
+# Strategy: 6h_Camarilla_R4_S4_Breakout_1dEMA34_Volume
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.058 | +16.4% | -14.4% | 239 | FAIL |
+| ETHUSDT | 0.124 | +25.9% | -16.4% | 237 | PASS |
+| SOLUSDT | 0.716 | +108.0% | -18.5% | 232 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| ETHUSDT | 0.469 | +13.6% | -8.6% | 74 | PASS |
+| SOLUSDT | 0.554 | +15.5% | -12.0% | 73 | PASS |
+
+## Code
+```python
+# BTC/ETH 6h Camarilla R4/S4 Breakout with 1D EMA34 Filter
+# Hypothesis: Price breaking R4/S4 levels with volume confirmation and trend alignment
+# captures strong momentum moves while avoiding false breakouts. Works in bull/bear
+# by filtering with daily trend (EMA34) and requiring volume spikes.
+
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get daily data for calculations (called ONCE before loop)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate daily EMA34 for trend filter (vectorized)
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        alpha = 2 / (34 + 1)
+        ema_34_1d[0] = close_1d[0]
+        for i in range(1, len(close_1d)):
+            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
+    
+    # Calculate previous day's OHLC for Camarilla (avoid look-ahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    
+    # Camarilla R4 and S4 calculation
+    range_hl = prev_high - prev_low
+    camarilla_factor = range_hl * 1.1 / 4
+    r4 = prev_close + camarilla_factor
+    s4 = prev_close - camarilla_factor
+    
+    # Align daily indicators to 6h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate 6-period volume average for spike detection (6h x 1 = 1 day)
+    vol_ma = np.full(n, np.nan)
+    vol_period = 6
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    
+    signals = np.zeros(n)
+    position = 0
+    size = 0.25
+    
+    # Warmup period
+    start_idx = max(34, vol_period) + 5
+    
+    for i in range(start_idx, n):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        price = close[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        
+        # Volume spike filter: at least 1.5x average volume
+        vol_filter = vol_ratio > 1.5
+        
+        if position == 0:
+            # Long: Price breaks above R4 with volume and above daily EMA34
+            if price > r4_aligned[i] and vol_filter and price > ema_34_1d_aligned[i]:
+                signals[i] = size
+                position = 1
+            # Short: Price breaks below S4 with volume and below daily EMA34
+            elif price < s4_aligned[i] and vol_filter and price < ema_34_1d_aligned[i]:
+                signals[i] = -size
+                position = -1
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # Long exit: Price closes below S4 or below daily EMA34
+            if price < s4_aligned[i] or price < ema_34_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = size
+        elif position == -1:
+            # Short exit: Price closes above R4 or above daily EMA34
+            if price > r4_aligned[i] or price > ema_34_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -size
+    
+    return signals
+
+name = "6h_Camarilla_R4_S4_Breakout_1dEMA34_Volume"
+timeframe = "6h"
+leverage = 1.0
+```
+
+## Last Updated
+2026-04-27 12:55

@@ -1,0 +1,141 @@
+# Strategy: 4h_Donchian_Breakout_1dEMA34_VolumeConfirm_v1
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | 0.385 | +40.8% | -15.0% | 138 | PASS |
+| ETHUSDT | 0.565 | +59.8% | -12.3% | 124 | PASS |
+| SOLUSDT | 0.708 | +109.7% | -25.1% | 124 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.604 | -0.5% | -8.1% | 52 | FAIL |
+| ETHUSDT | 1.298 | +29.9% | -8.6% | 48 | PASS |
+| SOLUSDT | 0.912 | +22.6% | -11.4% | 38 | PASS |
+
+## Code
+```python
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Donchian breakout captures strong momentum moves in both bull and bear markets
+# Long when price breaks above 20-period high AND price > 1d EMA34 AND volume > 2x 20-period average
+# Short when price breaks below 20-period low AND price < 1d EMA34 AND volume > 2x 20-period average
+# Uses ATR-based trailing stop (2.5x ATR) for risk management
+# Discrete position sizing (0.30) to minimize fee churn while maintaining sufficient exposure
+# Target: 20-50 trades/year on 4h timeframe to avoid fee drag while capturing breakout moves
+# Works in bull markets via long breakouts with HTF uptrend
+# Works in bear markets via short breakdowns with HTF downtrend
+# Volume confirmation ensures breakouts have conviction, reducing false signals
+
+name = "4h_Donchian_Breakout_1dEMA34_VolumeConfirm_v1"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate ATR for stoploss (using 14-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr_first = np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])
+    tr = np.concatenate([[tr_first], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
+    
+    start_idx = 34  # warmup for EMA and Donchian
+    
+    for i in range(start_idx, n):
+        curr_close = close[i]
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_ema_1d = ema_34_1d_aligned[i]
+        curr_atr = atr[i]
+        
+        # Donchian channels: 20-period high/low
+        if i >= 20:
+            donch_high = np.max(high[i-20:i])
+            donch_low = np.min(low[i-20:i])
+        else:
+            donch_high = curr_high
+            donch_low = curr_low
+        
+        # Volume spike confirmation: current volume > 2x 20-period average
+        if i >= 20:
+            vol_ma_20 = np.mean(volume[i-20:i])
+        else:
+            vol_ma_20 = 0.0
+        vol_spike = volume[i] > 2.0 * vol_ma_20 if vol_ma_20 > 0 else False
+        
+        # Handle exits and stoploss
+        if position == 1:  # Long position
+            # Update highest high since entry
+            highest_high_since_entry = max(highest_high_since_entry, curr_high)
+            # Trailing stop: 2.5 * ATR below highest high
+            stop_price = highest_high_since_entry - 2.5 * curr_atr
+            # Exit conditions: price below trailing stop OR price breaks below Donchian low
+            if curr_close < stop_price or curr_close < donch_low:
+                signals[i] = 0.0
+                position = 0
+                highest_high_since_entry = 0.0
+            else:
+                signals[i] = 0.30
+                
+        elif position == -1:  # Short position
+            # Update lowest low since entry
+            lowest_low_since_entry = min(lowest_low_since_entry, curr_low)
+            # Trailing stop: 2.5 * ATR above lowest low
+            stop_price = lowest_low_since_entry + 2.5 * curr_atr
+            # Exit conditions: price above trailing stop OR price breaks above Donchian high
+            if curr_close > stop_price or curr_close > donch_high:
+                signals[i] = 0.0
+                position = 0
+                lowest_low_since_entry = 0.0
+            else:
+                signals[i] = -0.30
+                
+        else:  # Flat - look for new entries
+            # Long entry: price breaks above Donchian high AND price > 1d EMA34 AND volume spike
+            if curr_close > donch_high and curr_close > curr_ema_1d and vol_spike:
+                signals[i] = 0.30
+                position = 1
+                highest_high_since_entry = curr_high
+            # Short entry: price breaks below Donchian low AND price < 1d EMA34 AND volume spike
+            elif curr_close < donch_low and curr_close < curr_ema_1d and vol_spike:
+                signals[i] = -0.30
+                position = -1
+                lowest_low_since_entry = curr_low
+            else:
+                signals[i] = 0.0
+    
+    return signals
+```
+
+## Last Updated
+2026-04-29 15:22

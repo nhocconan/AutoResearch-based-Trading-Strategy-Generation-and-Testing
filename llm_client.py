@@ -251,9 +251,11 @@ class LLMClient:
 
         base_url = self._get_base_url() or "http://127.0.0.1:11434/api/chat"
         primary_model = self._get_model()
-        fallbacks = self.provider_config.get("fallback_models", [])
+        fallbacks = [] if self.model_override else self.provider_config.get("fallback_models", [])
         models_to_try = [primary_model] + fallbacks
         extra_options = self.provider_config.get("options", {})
+        parsed_base = urlparse(base_url)
+        is_ollama_cloud = (parsed_base.hostname or "").lower() == "ollama.com"
 
         last_err = None
         for model in models_to_try:
@@ -267,13 +269,25 @@ class LLMClient:
                     **extra_options,
                 },
             }
+            if is_ollama_cloud:
+                # Ollama Cloud models such as glm-5.1:cloud may emit tokens into
+                # `message.thinking` and leave `message.content` empty unless
+                # thinking is explicitly disabled.
+                payload["think"] = False
             try:
                 resp = self._client.post(base_url, json=payload, timeout=self._get_timeout())
                 resp.raise_for_status()
                 data = resp.json()
                 if model != primary_model:
                     print(f"  [OLLAMA] {primary_model} unavailable, using {model}")
-                return data["message"]["content"]
+                message_data = data.get("message", {})
+                content = message_data.get("content", "")
+                if content:
+                    return content
+                thinking = message_data.get("thinking", "")
+                if thinking and not is_ollama_cloud:
+                    return thinking
+                return ""
             except Exception as e:
                 last_err = e
                 status = getattr(getattr(e, 'response', None), 'status_code', None)

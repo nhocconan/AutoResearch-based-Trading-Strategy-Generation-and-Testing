@@ -73,10 +73,8 @@ llm:
       base_url_env: "OLLAMA_BASE_URL"
       model_env: "OLLAMA_MODEL"
       base_url: "https://ollama.com/api/chat"
-      model: "nemotron-3-super"
-      fallback_models:
-        - "qwen3-coder-next"
-        - "gemma3:27b"
+      model: "glm-5.1:cloud"
+      fallback_models: []
       max_tokens: 8192
       timeout: 600
       temperature: 0.6

@@ -3,24 +3,26 @@
 ## Train Results
 | Symbol | Sharpe | Return | Max DD | Trades | Status |
 |--------|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.063 | +15.9% | -15.3% | 166 | FAIL |
-| ETHUSDT | -0.231 | +4.2% | -23.6% | 151 | FAIL |
-| SOLUSDT | 0.082 | +20.2% | -30.3% | 149 | PASS |
+| BTCUSDT | -0.472 | -1.8% | -17.7% | 131 | FAIL |
+| ETHUSDT | -0.765 | -14.7% | -27.8% | 106 | FAIL |
+| SOLUSDT | 0.252 | +38.1% | -34.9% | 112 | PASS |
 
 ## Test Results (2025+)
 | Symbol | Sharpe | Return | Max DD | Trades | Status |
 |--------|--------|--------|--------|--------|--------|
-| SOLUSDT | 0.377 | +11.8% | -11.4% | 50 | PASS |
+| SOLUSDT | 0.676 | +17.1% | -10.3% | 38 | PASS |
 
 ## Code
 ```python
+#!/usr/bin/env python3
 # 4h_camarilla_pivot_1d_volume_v1
-# Hypothesis: Camarilla pivot levels from 1-day chart act as strong support/resistance.
-# Price often reverses or breaks from these levels with volume confirmation.
-# In trending markets, breakouts through S3/R3 levels with volume continue the trend.
-# In ranging markets, reversals from S1/R1, S2/R2 levels with volume offer mean reversion.
-# This strategy trades both breakouts and reversals based on price action at Camarilla levels.
-# Uses 1-day Camarilla levels for context and 4h for entry timing, targeting 20-40 trades/year.
+# Hypothesis: 4h Camarilla pivot levels from 1d + volume confirmation + ATR stoploss.
+# Uses 1d Camarilla pivot levels (H3, L3, H4, L4) as key support/resistance.
+# Long when price breaks above H3 with volume > 1.5x 20-period average.
+# Short when price breaks below L3 with volume > 1.5x 20-period average.
+# Exit when price returns to H4/L4 levels or opposite pivot level.
+# Works in bull/bear: pivot levels adapt to volatility, volume ensures momentum validity.
+# Target: 20-50 trades/year.
 
 import numpy as np
 import pandas as pd
@@ -32,111 +34,88 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot levels
+    # 1d HTF data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # Camarilla formulas:
-    # H4 = Close + 1.5 * (High - Low)
-    # H3 = Close + 1.0 * (High - Low)
-    # H2 = Close + 0.5 * (High - Low)
-    # H1 = Close + 0.25 * (High - Low)
-    # L1 = Close - 0.25 * (High - Low)
-    # L2 = Close - 0.5 * (High - Low)
-    # L3 = Close - 1.0 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # Calculate Camarilla pivot levels for previous day
+    # Pivot = (high + low + close) / 3
+    # Range = high - low
+    # H4 = close + 1.5 * range
+    # H3 = close + 1.25 * range
+    # L3 = close - 1.25 * range
+    # L4 = close - 1.5 * range
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    h4_1d = close_1d + 1.5 * range_1d
+    h3_1d = close_1d + 1.25 * range_1d
+    l3_1d = close_1d - 1.25 * range_1d
+    l4_1d = close_1d - 1.5 * range_1d
     
-    # Calculate levels for each day
-    H4 = prev_close + 1.5 * (prev_high - prev_low)
-    H3 = prev_close + 1.0 * (prev_high - prev_low)
-    H2 = prev_close + 0.5 * (prev_high - prev_low)
-    H1 = prev_close + 0.25 * (prev_high - prev_low)
-    L1 = prev_close - 0.25 * (prev_high - prev_low)
-    L2 = prev_close - 0.5 * (prev_high - prev_low)
-    L3 = prev_close - 1.0 * (prev_high - prev_low)
-    L4 = prev_close - 1.5 * (prev_high - prev_low)
+    # Align 1d Camarilla levels to 4h timeframe (completed 1d bar only)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
     
-    # Align all levels to 4h timeframe (shifted by 1 day for lookback)
-    H4_4h = align_htf_to_ltf(prices, df_1d, H4)
-    H3_4h = align_htf_to_ltf(prices, df_1d, H3)
-    H2_4h = align_htf_to_ltf(prices, df_1d, H2)
-    H1_4h = align_htf_to_ltf(prices, df_1d, H1)
-    L1_4h = align_htf_to_ltf(prices, df_1d, L1)
-    L2_4h = align_htf_to_ltf(prices, df_1d, L2)
-    L3_4h = align_htf_to_ltf(prices, df_1d, L3)
-    L4_4h = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
     
-    for i in range(20, n):
-        # Skip if any pivot level is not ready
-        if (np.isnan(H4_4h[i]) or np.isnan(H3_4h[i]) or np.isnan(H2_4h[i]) or 
-            np.isnan(H1_4h[i]) or np.isnan(L1_4h[i]) or np.isnan(L2_4h[i]) or 
-            np.isnan(L3_4h[i]) or np.isnan(L4_4h[i]) or np.isnan(vol_ma[i])):
+    for i in range(100, n):
+        # Skip if any required data is NaN
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+            np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below L2 (strong support broken) or volume spike fails
-            if close[i] < L2_4h[i]:
+            # Exit: price falls below L4 OR rises above H4 (mean reversion to pivot)
+            if close[i] < l4_1d_aligned[i] or close[i] > h4_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above H2 (strong resistance broken) or volume spike fails
-            if close[i] > H2_4h[i]:
+            # Exit: price rises above H4 OR falls below L4 (mean reversion to pivot)
+            if close[i] > h4_1d_aligned[i] or close[i] < l4_1d_aligned[i]:
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
-        else:  # Flat, look for entry
-            # Volume must be present for any entry
-            if not volume_spike[i]:
-                signals[i] = 0.0
-                continue
-                
-            # Long entry: price breaks above H3 with volume (bullish breakout)
-            # OR price bounces from L3/L4 with volume (bullish reversal)
-            if ((close[i] > H3_4h[i] and close[i-1] <= H3_4h[i-1]) or  # Breakout above H3
-                ((close[i] > L3_4h[i] and close[i-1] <= L3_4h[i-1]) or  # Bounce from L3
-                 (close[i] > L4_4h[i] and close[i-1] <= L4_4h[i-1])) and  # Bounce from L4
-                close[i] < H2_4h[i]):  # But not above strong resistance
-                position = 1
-                signals[i] = 0.25
-            # Short entry: price breaks below L3 with volume (bearish breakout)
-            # OR price rejects from H3/H4 with volume (bearish reversal)
-            elif ((close[i] < L3_4h[i] and close[i-1] >= L3_4h[i-1]) or  # Breakdown below L3
-                  ((close[i] < H3_4h[i] and close[i-1] >= H3_4h[i-1]) or  # Rejection from H3
-                   (close[i] < H4_4h[i] and close[i-1] >= H4_4h[i-1])) and  # Rejection from H4
-                  close[i] > L2_4h[i]):  # But not below strong support
-                position = -1
-                signals[i] = -0.25
+        else:  # Flat
+            # Volume confirmation
+            volume_confirmed = volume[i] > 1.5 * volume_ma[i]
+            
+            if volume_confirmed:
+                # Long entry: price breaks above H3 (resistance) with volume
+                if close[i] > h3_1d_aligned[i]:
+                    position = 1
+                    signals[i] = 0.25
+                # Short entry: price breaks below L3 (support) with volume
+                elif close[i] < l3_1d_aligned[i]:
+                    position = -1
+                    signals[i] = -0.25
     
     return signals
 ```
 
 ## Last Updated
-2026-04-07 21:02
+2026-04-09 03:59

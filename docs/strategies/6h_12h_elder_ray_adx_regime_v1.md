@@ -1,0 +1,159 @@
+# Strategy: 6h_12h_elder_ray_adx_regime_v1
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.049 | +13.6% | -24.0% | 346 | FAIL |
+| ETHUSDT | 0.212 | +33.5% | -19.1% | 312 | PASS |
+| SOLUSDT | 1.241 | +335.4% | -32.1% | 330 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| ETHUSDT | 0.846 | +25.3% | -12.6% | 111 | PASS |
+| SOLUSDT | 0.152 | +7.6% | -15.1% | 105 | PASS |
+
+## Code
+```python
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Hypothesis: 6h Elder Ray + 12h ADX regime
+    # Bull regime: 12h ADX > 25 + price > 12h EMA50 → long when 6h Bull Power > 0
+    # Bear regime: 12h ADX > 25 + price < 12h EMA50 → short when 6h Bear Power < 0
+    # Range regime: 12h ADX < 20 → fade at 6h extremes (Bull Power < 0 for short, Bear Power > 0 for long)
+    # Uses discrete sizing 0.25 to minimize fee churn. Target: 12-30 trades/year.
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    
+    # Get 12h data for regime and trend filters
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate 12h ADX(14)
+    def calculate_adx(high, low, close, period=14):
+        n = len(high)
+        tr = np.zeros(n)
+        plus_dm = np.zeros(n)
+        minus_dm = np.zeros(n)
+        
+        for i in range(1, n):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+        
+        # Wilder's smoothing
+        atr = np.zeros(n)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, n):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = np.zeros(n)
+        minus_di = np.zeros(n)
+        dx = np.zeros(n)
+        
+        for i in range(period, n):
+            if atr[i] > 0:
+                plus_di[i] = 100 * (np.mean(plus_dm[i-period+1:i+1]) / atr[i])
+                minus_di[i] = 100 * (np.mean(minus_dm[i-period+1:i+1]) / atr[i])
+                if plus_di[i] + minus_di[i] > 0:
+                    dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        adx = np.zeros(n)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, n):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
+    
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # Calculate 12h EMA50
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Calculate 6h Elder Ray components
+    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13_6h
+    bear_power = low - ema13_6h
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    for i in range(50, n):
+        # Skip if data not ready
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Determine 12h regime
+        strong_trend = adx_12h_aligned[i] > 20
+        ranging = adx_12h_aligned[i] < 20
+        bullish_trend = strong_trend and (close[i] > ema50_12h_aligned[i])
+        bearish_trend = strong_trend and (close[i] < ema50_12h_aligned[i])
+        
+        # Entry logic
+        long_entry = False
+        short_entry = False
+        
+        if bullish_trend:
+            # Bull regime: long on bullish momentum
+            long_entry = bull_power[i] > 0
+        elif bearish_trend:
+            # Bear regime: short on bearish momentum
+            short_entry = bear_power[i] < 0
+        elif ranging:
+            # Range regime: mean reversion at extremes
+            long_entry = bear_power[i] > 0  # Oversold bounce
+            short_entry = bull_power[i] < 0  # Overbought rejection
+        
+        # Exit logic: reverse signal or regime change
+        long_exit = (bearish_trend and bear_power[i] < 0) or ranging
+        short_exit = (bullish_trend and bull_power[i] > 0) or ranging
+        
+        if long_entry and position != 1:
+            position = 1
+            signals[i] = 0.25
+        elif short_entry and position != -1:
+            position = -1
+            signals[i] = -0.25
+        elif position == 1 and long_exit:
+            position = 0
+            signals[i] = 0.0
+        elif position == -1 and short_exit:
+            position = 0
+            signals[i] = 0.0
+        else:
+            # Hold current position
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+    
+    return signals
+
+name = "6h_12h_elder_ray_adx_regime_v1"
+timeframe = "6h"
+leverage = 1.0
+```
+
+## Last Updated
+2026-04-12 21:40

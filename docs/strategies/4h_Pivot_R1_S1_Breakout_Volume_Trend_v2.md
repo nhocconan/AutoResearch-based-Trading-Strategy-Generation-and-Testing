@@ -1,0 +1,116 @@
+# Strategy: 4h_Pivot_R1_S1_Breakout_Volume_Trend_v2
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | 0.018 | +21.6% | -6.7% | 186 | PASS |
+| ETHUSDT | 0.287 | +32.9% | -7.4% | 158 | PASS |
+| SOLUSDT | 0.750 | +78.5% | -20.3% | 129 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -1.844 | -5.5% | -7.3% | 72 | FAIL |
+| ETHUSDT | 0.331 | +9.5% | -7.8% | 61 | PASS |
+| SOLUSDT | 0.241 | +8.6% | -6.8% | 45 | PASS |
+
+## Code
+```python
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "4h_Pivot_R1_S1_Breakout_Volume_Trend_v2"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get daily data for pivot calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Daily high, low, close for Camarilla pivot calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate daily pivot point
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate R1 and S1 using Camarilla formula
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align daily pivot levels to 4h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Volume confirmation: current volume > 2.5x 20-period average (4h) - stricter filter
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Trend filter: price above/below 50-period EMA (more reliable than 34)
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    start_idx = 50
+    
+    for i in range(start_idx, n):
+        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(ema_50[i])):
+            signals[i] = 0.0
+            continue
+        
+        price = close[i]
+        vol = volume[i]
+        vol_ma = vol_ma_20[i]
+        pivot = pivot_1d_aligned[i]
+        r1 = r1_1d_aligned[i]
+        s1 = s1_1d_aligned[i]
+        ema = ema_50[i]
+        
+        volume_confirmed = vol > 2.5 * vol_ma
+        
+        if position == 0:
+            # Long: break above R1 with volume and above EMA
+            if price > r1 and volume_confirmed and price > ema:
+                signals[i] = 0.25
+                position = 1
+            # Short: break below S1 with volume and below EMA
+            elif price < s1 and volume_confirmed and price < ema:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Exit: price below pivot or EMA
+            if price < pivot or price < ema:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit: price above pivot or EMA
+            if price > pivot or price > ema:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    return signals
+```
+
+## Last Updated
+2026-04-19 09:23

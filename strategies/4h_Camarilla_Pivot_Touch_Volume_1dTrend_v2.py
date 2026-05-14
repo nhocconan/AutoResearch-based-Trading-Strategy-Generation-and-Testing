@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""
+4h_Camarilla_Pivot_Touch_Volume_1dTrend_v2
+Hypothesis: Uses daily Camarilla pivot levels (R1/S1) with volume spike confirmation and 1-day EMA trend filter.
+Trades breakouts in trending markets (EMA34) and mean-reversion at pivot levels in ranging markets.
+Designed for low trade frequency (<30/year) to avoid fee drag while capturing high-probability moves.
+"""
+
+name = "4h_Camarilla_Pivot_Touch_Volume_1dTrend_v2"
+timeframe = "4h"
+leverage = 1.0
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Get 1d data for Camarilla pivots and EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # 4h OHLCV
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # --- 1d EMA34 for trend filter ---
+    close_1d = df_1d['close']
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # --- Daily Camarilla Pivot Levels (R1, S1) ---
+    # Based on previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate pivot and levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)  # R1
+    s1 = pivot - (range_1d * 1.1 / 12)  # S1
+    
+    # Align to 4h (Camarilla levels are valid for the entire day)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # --- Volume Spike Detection (2x 20-period EMA) ---
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
+    vol_spike = volume > (2.0 * vol_ema.values)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    # Start after warmup
+    start_idx = 50
+    
+    for i in range(start_idx, n):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(vol_spike[i])):
+            # Maintain position if valid, otherwise flat
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Determine trend based on price vs EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        
+        # Breakout signals (price crosses R1/S1 with volume spike)
+        long_breakout = (high[i] > r1_aligned[i]) and vol_spike[i]
+        short_breakout = (low[i] < s1_aligned[i]) and vol_spike[i]
+        
+        # Mean reversion at pivot levels (price touches S1/R1 without breakout)
+        # Only in non-trending conditions (price near EMA)
+        near_ema = abs(close[i] - ema_34_1d_aligned[i]) < (0.01 * ema_34_1d_aligned[i])  # Within 1% of EMA
+        long_reversion = (low[i] <= s1_aligned[i]) and near_ema and not vol_spike[i]
+        short_reversion = (high[i] >= r1_aligned[i]) and near_ema and not vol_spike[i]
+        
+        if position == 0:
+            if price_above_ema:
+                # Uptrend: favor long breakouts, avoid shorts
+                if long_breakout:
+                    signals[i] = 0.25
+                    position = 1
+            elif price_below_ema:
+                # Downtrend: favor short breakouts, avoid longs
+                if short_breakout:
+                    signals[i] = -0.25
+                    position = -1
+            else:
+                # Near EMA: allow mean reversion at pivot levels
+                if long_reversion:
+                    signals[i] = 0.25
+                    position = 1
+                elif short_reversion:
+                    signals[i] = -0.25
+                    position = -1
+        else:
+            # Exit conditions
+            if position == 1:
+                # Exit long: price touches S1 (support) or breaks below EMA
+                exit_signal = (low[i] <= s1_aligned[i]) or (close[i] < ema_34_1d_aligned[i])
+                if exit_signal:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Exit short: price touches R1 (resistance) or breaks above EMA
+                exit_signal = (high[i] >= r1_aligned[i]) or (close[i] > ema_34_1d_aligned[i])
+                if exit_signal:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+    
+    return signals
