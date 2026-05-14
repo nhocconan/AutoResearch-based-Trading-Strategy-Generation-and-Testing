@@ -1,101 +1,91 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Williams Alligator with 1w EMA50 trend filter and 1d volume confirmation (>1.5x 20-period average).
-# Alligator Jaw (TEMA13), Teeth (TEMA8), Lips (TEMA5). Long when Lips > Teeth > Jaw AND close > 1w EMA50 AND volume > 1.5x MA20.
-# Short when Lips < Teeth < Jaw AND close < 1w EMA50 AND volume > 1.5x MA20.
-# Exit when Alligator alignment breaks (Lips crosses Teeth or Teeth crosses Jaw) OR price crosses 1w EMA50 in opposite direction.
-# Uses 1w HTF for trend to reduce noise and overtrading. Volume confirmation (>1.5x) reduces false signals.
-# Target: 30-100 total trades over 4 years (7-25/year) to stay within fee drag limits for 1d timeframe.
-# Williams Alligator identifies trending vs ranging markets; effective in both bull and bear markets when combined with HTF trend filter.
+# Hypothesis: 6h Williams %R Extreme Reversal with 12h EMA50 trend filter and volume confirmation (>1.8x 20-period average).
+# Williams %R measures overbought/oversold conditions: > -20 = overbought, < -80 = oversold.
+# Long when Williams %R crosses above -80 from below (oversold reversal) AND close > 12h EMA50 (bullish trend) AND volume > 1.8x MA20.
+# Short when Williams %R crosses below -20 from above (overbought reversal) AND close < 12h EMA50 (bearish trend) AND volume > 1.8x MA20.
+# Exit when Williams %R crosses above -50 (for long) or below -50 (for short) OR price crosses 12h EMA50 in opposite direction.
+# Uses 12h HTF for trend alignment to reduce whipsaws. Volume confirmation filters low-momentum false signals.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits for 6h timeframe.
+# Williams %R is effective in ranging markets and captures reversals at extremes, complementing trend filter.
 
-name = "1d_WilliamsAlligator_1wEMA50_1dVolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_WilliamsR_Extreme_12hEMA50_6hVolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def tema(series, period):
-    """Triple Exponential Moving Average"""
-    ema1 = pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean()
-    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
-    ema3 = ema2.ewm(span=period, adjust=False, min_periods=period).mean()
-    return 3 * (ema1 - ema2) + ema3
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Indicators (LTF) ---
-    # Williams Alligator: Jaw (TEMA13), Teeth (TEMA8), Lips (TEMA5)
-    jaw = tema(close, 13).values
-    teeth = tema(close, 8).values
-    lips = tema(close, 5).values
-    # 1d volume confirmation: > 1.5x 20-period average (tight filter to reduce trades)
+    # --- 6h Indicators (LTF) ---
+    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    # Replace division by zero or invalid with -50 (neutral)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    
+    # 6h volume confirmation: > 1.8x 20-period average (tight filter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = volume > (1.5 * vol_ma_20)
+    volume_confirm_6h = volume > (1.8 * vol_ma_20)
     
-    # --- 1w Indicators (HTF) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # --- 12h Indicators (HTF) ---
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # 1w EMA(50) - trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 12h EMA(50) - trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(jaw[i]) or
-            np.isnan(teeth[i]) or
-            np.isnan(lips[i]) or
-            np.isnan(volume_confirm_1d[i])):
+        if (np.isnan(williams_r[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(volume_confirm_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Lips > Teeth > Jaw (bullish alignment) AND close > 1w EMA50 (bullish trend) AND volume confirm
-            if (lips[i] > teeth[i] and 
-                teeth[i] > jaw[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume_confirm_1d[i]):
+            # LONG: Williams %R crosses above -80 (from below) AND close > 12h EMA50 (bullish trend) AND volume confirm
+            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+                close[i] > ema_50_12h_aligned[i] and 
+                volume_confirm_6h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Lips < Teeth < Jaw (bearish alignment) AND close < 1w EMA50 (bearish trend) AND volume confirm
-            elif (lips[i] < teeth[i] and 
-                  teeth[i] < jaw[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume_confirm_1d[i]):
+            # SHORT: Williams %R crosses below -20 (from above) AND close < 12h EMA50 (bearish trend) AND volume confirm
+            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+                  close[i] < ema_50_12h_aligned[i] and 
+                  volume_confirm_6h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Alligator alignment breaks (Lips crosses Teeth or Teeth crosses Jaw) OR price < 1w EMA50 (trend change)
-            if (lips[i] <= teeth[i] or 
-                teeth[i] <= jaw[i] or 
-                close[i] < ema_50_1w_aligned[i]):
+            # EXIT LONG: Williams %R crosses above -50 (momentum weakening) OR price < 12h EMA50 (trend change)
+            if (williams_r[i] > -50 and williams_r[i-1] <= -50) or \
+               close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Alligator alignment breaks (Lips crosses Teeth or Teeth crosses Jaw) OR price > 1w EMA50 (trend change)
-            if (lips[i] >= teeth[i] or 
-                teeth[i] >= jaw[i] or 
-                close[i] > ema_50_1w_aligned[i]):
+            # EXIT SHORT: Williams %R crosses below -50 (momentum weakening) OR price > 12h EMA50 (trend change)
+            if (williams_r[i] < -50 and williams_r[i-1] >= -50) or \
+               close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
