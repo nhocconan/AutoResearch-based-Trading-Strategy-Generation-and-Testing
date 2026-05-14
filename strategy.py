@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h EMA(20) pullback strategy with 4h trend filter (EMA50) and session filter (08-20 UTC).
-# Long when: price > 4h EMA50 (bullish trend), price pulls back to touch 1h EMA20 from above, and session is active.
-# Short when: price < 4h EMA50 (bearish trend), price pulls back to touch 1h EMA20 from below, and session is active.
-# Exit on opposite 1h EMA20 touch or session end.
-# Uses 4h for trend direction (reduces whipsaw), 1h for precise entry timing, and session filter to avoid low-volatility periods.
-# Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
+# Hypothesis: 6h strategy using weekly pivot points (Camarilla) with daily trend filter and volume confirmation.
+# Long when price breaks above weekly R3 with price > 1d EMA50 (bullish trend) and 6h volume > 1.8x 24-period average.
+# Short when price breaks below weekly S3 with price < 1d EMA50 (bearish trend) and 6h volume > 1.8x 24-period average.
+# Exit on opposite weekly Camarilla level (S3 for longs, R3 for shorts).
+# Uses weekly Camarilla for structural levels (more significant than daily), 1d EMA50 for trend filter,
+# and volume spike to confirm participation. Target: 60-120 total trades over 4 years (15-30/year).
 
-name = "1h_EMA20_Pullback_4hEMA50_Trend_Session"
-timeframe = "1h"
+name = "6h_Camarilla_Weekly_R3S3_Breakout_1dEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,70 +16,87 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Precompute session hours (08-20 UTC) once before loop
-    hours = prices.index.hour  # open_time is already datetime64[ms], index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    # --- 6h Indicators (LTF) ---
+    # 6h volume confirmation: > 1.8x 24-period average (4 days)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike_6h = volume > (1.8 * vol_ma_24)
     
-    # --- 1h Indicators (LTF) ---
-    # 1h EMA(20) for pullback entries
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # --- 4h Indicators (HTF) ---
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # --- 1d Indicators (HTF) ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 60:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
+    close_1d = df_1d['close'].values
     
-    # 4h EMA(50) - trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # 1d EMA(50) - trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # --- Weekly Camarilla Pivot Points (Prior Week OHLC) ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    range_val = weekly_high - weekly_low
+    camarilla_r3_weekly = weekly_close + (range_val * 1.1 / 2)  # R3
+    camarilla_s3_weekly = weekly_close - (range_val * 1.1 / 2)  # S3
+    
+    # Align weekly levels to 6h timeframe (wait for weekly close)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_weekly)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_weekly)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # start after EMA20 warmup
-        # Skip if missing data or outside session
-        if (np.isnan(ema_20[i]) or 
-            np.isnan(ema_50_4h_aligned[i]) or
-            not in_session[i]):
+    for i in range(1, n):
+        # Skip if missing data
+        if (np.isnan(ema_50_aligned[i]) or
+            np.isnan(volume_spike_6h[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: bullish trend (price > 4h EMA50) + pullback to 1h EMA20 from above
-            if (close[i] > ema_50_4h_aligned[i] and 
-                low[i] <= ema_20[i] and 
-                close[i-1] > ema_20[i-1]):  # came from above
-                signals[i] = 0.20
+            # LONG: Price breaks above weekly R3 + price > 1d EMA50 (bullish) + 6h volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
+                close[i] > ema_50_aligned[i] and 
+                volume_spike_6h[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: bearish trend (price < 4h EMA50) + pullback to 1h EMA20 from below
-            elif (close[i] < ema_50_4h_aligned[i] and 
-                  high[i] >= ema_20[i] and 
-                  close[i-1] < ema_20[i-1]):  # came from below
-                signals[i] = -0.20
+            # SHORT: Price breaks below weekly S3 + price < 1d EMA50 (bearish) + 6h volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and 
+                  volume_spike_6h[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below 1h EMA20 or session ends next bar
-            if (low[i] < ema_20[i]) or (i+1 < n and not in_session[i+1]):
+            # EXIT LONG: Price breaks below weekly S3
+            if close[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above 1h EMA20 or session ends next bar
-            if (high[i] > ema_20[i]) or (i+1 < n and not in_session[i+1]):
+            # EXIT SHORT: Price breaks above weekly R3
+            if close[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
