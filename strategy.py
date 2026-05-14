@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and 1d volume confirmation (>1.5x 20-period average).
-# Long when price breaks above upper Donchian(20) AND close > 1w EMA50 (bullish trend) AND volume > 1.5x 20-period average.
-# Short when price breaks below lower Donchian(20) AND close < 1w EMA50 (bearish trend) AND volume > 1.5x 20-period average.
-# Exit when price retests the 20-period EMA (mean reversion) or opposite Donchian level touched.
-# Uses 1w HTF for trend to reduce noise and overtrading vs shorter trends. Volume confirmation (1.5x) reduces false signals.
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe to stay within fee drag limits.
-# Donchian channels provide structure, effective in both bull and bear markets when combined with HTF trend filter.
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 12h EMA34 trend filter and 6h volume confirmation (>1.5x 20-period average).
+# Bull Power = High - EMA13; Bear Power = EMA13 - Low.
+# Long when Bull Power > 0 AND close > 12h EMA34 (bullish trend) AND volume > 1.5x 20-period average.
+# Short when Bear Power > 0 AND close < 12h EMA34 (bearish trend) AND volume > 1.5x 20-period average.
+# Exit when Bull Power <= 0 (for long) or Bear Power <= 0 (for short) OR price crosses 12h EMA34.
+# Uses 12h HTF for trend to reduce noise and overtrading vs shorter trends. Volume confirmation (1.5x) reduces false signals.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits for 6h timeframe.
+# Elder Ray measures bull/bear power behind price moves, effective in both bull and bear markets when combined with HTF trend filter.
 
-name = "1d_Donchian20_Breakout_1wEMA50_1dVolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_12hEMA34_6hVolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,68 +27,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Indicators (LTF) ---
-    # 1d volume confirmation: > 1.5x 20-period average (tight filter to reduce trades)
+    # --- 6h Indicators (LTF) ---
+    # 6h volume confirmation: > 1.5x 20-period average (tight filter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = volume > (1.5 * vol_ma_20)
+    volume_confirm_6h = volume > (1.5 * vol_ma_20)
     
-    # 1d Donchian(20) - price channel structure
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = ema_13 - low
     
-    # 1d EMA(20) - exit mean reversion target
-    ema_20_1d = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # --- 1w Indicators (HTF) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # --- 12h Indicators (HTF) ---
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # 1w EMA(50) - trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 12h EMA(34) - trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i]) or
-            np.isnan(ema_20_1d[i]) or
-            np.isnan(volume_confirm_1d[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i]) or
+            np.isnan(volume_confirm_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper Donchian AND close > 1w EMA50 (bullish trend) AND volume confirm
-            if (close[i] > highest_20[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume_confirm_1d[i]):
+            # LONG: Bull Power > 0 AND close > 12h EMA34 (bullish trend) AND volume confirm
+            if (bull_power[i] > 0 and 
+                close[i] > ema_34_12h_aligned[i] and 
+                volume_confirm_6h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian AND close < 1w EMA50 (bearish trend) AND volume confirm
-            elif (close[i] < lowest_20[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume_confirm_1d[i]):
+            # SHORT: Bear Power > 0 AND close < 12h EMA34 (bearish trend) AND volume confirm
+            elif (bear_power[i] > 0 and 
+                  close[i] < ema_34_12h_aligned[i] and 
+                  volume_confirm_6h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price retests 20-period EMA (mean reversion) OR touches lower Donchian (opposite level)
-            if (close[i] <= ema_20_1d[i] or 
-                close[i] < lowest_20[i]):
+            # EXIT LONG: Bull Power <= 0 (weakening bulls) OR price crosses below 12h EMA34 (trend change)
+            if (bull_power[i] <= 0 or 
+                close[i] < ema_34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price retests 20-period EMA (mean reversion) OR touches upper Donchian (opposite level)
-            if (close[i] >= ema_20_1d[i] or 
-                close[i] > highest_20[i]):
+            # EXIT SHORT: Bear Power <= 0 (weakening bears) OR price crosses above 12h EMA34 (trend change)
+            if (bear_power[i] <= 0 or 
+                close[i] > ema_34_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
