@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and 1d volume spike confirmation.
-# Long when Bull Power > 0, ADX > 25 (trending), and 1d volume > 1.5x 20-period average.
-# Short when Bear Power < 0, ADX > 25 (trending), and 1d volume > 1.5x 20-period average.
-# Exit when Elder Power reverses sign or ADX < 20 (range regime).
-# Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear: ADX ensures we only trade strong trends,
-# Elder Ray captures trend strength via EMA(13) deviation, volume spike confirms institutional participation.
-# Target: 50-150 total trades over 4 years = 12-37/year for 6h timeframe.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA trend filter and 12h volume spike filter.
+# Long when price breaks above R3 with 1d EMA(34) bullish (close > EMA) and 12h volume > 2.0x 20-period average.
+# Short when price breaks below S3 with 1d EMA(34) bearish (close < EMA) and 12h volume > 2.0x 20-period average.
+# Exit on opposite Camarilla level (S3 for longs, R3 for shorts).
+# Uses discrete position sizing (0.25) to minimize fee churn and volume spike filter to reduce false breakouts.
+# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe.
+# Works in bull/bear: 1d EMA ensures trend alignment, Camarilla R3/S3 provides tight structure, volume spike confirms momentum.
 
-name = "6h_ElderRay_1dADX_1dVolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_12hVolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,95 +26,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 6h EMA(13) for Elder Ray ---
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # --- 12h Indicators (LTF) ---
+    # 12h volume spike: > 2.0x 20-period average (tight filter to reduce trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike_12h = volume > (2.0 * vol_ma_20)
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    
-    # 1d ADX(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = pd.Series(high_1d).diff().abs()
-    tr2 = (pd.Series(high_1d) - pd.Series(close_1d).shift()).abs()
-    tr3 = (pd.Series(low_1d) - pd.Series(close_1d).shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
+    # 1d EMA(34)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Directional Movement
-    up_move = pd.Series(high_1d).diff()
-    down_move = pd.Series(low_1d).diff().abs()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # --- 12h Camarilla Pivot Points (Prior Day OHLC) ---
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    df_1d_pivot = get_htf_data(prices, '1d')
+    if len(df_1d_pivot) == 0:
+        return np.zeros(n)
     
-    # Smoothed DM and TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
-    tr_smooth = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Precompute prior day's OHLC for each 12h bar
+    open_time = prices['open_time']
+    prior_day_start = open_time - pd.Timedelta(days=1)
+    prior_day_start = prior_day_start.dt.normalize()  # Start of prior day
     
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx_1d = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # 1d volume spike: > 1.5x 20-period average
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = df_1d['volume'].values > (1.5 * vol_ma_20_1d)
-    
-    # Align HTF indicators to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
+    for i in range(n):
+        pd_ts = prior_day_start.iloc[i]
+        day_mask = (df_1d_pivot['open_time'] >= pd_ts) & (df_1d_pivot['open_time'] < pd_ts + pd.Timedelta(days=1))
+        if day_mask.any():
+            day_data = df_1d_pivot.loc[day_mask]
+            high_val = day_data['high'].iloc[0]
+            low_val = day_data['low'].iloc[0]
+            close_val = day_data['close'].iloc[0]
+            range_val = high_val - low_val
+            camarilla_r3[i] = close_val + (range_val * 1.1 / 4)  # R3
+            camarilla_s3[i] = close_val - (range_val * 1.1 / 4)  # S3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_13[i]) or
-            np.isnan(adx_1d_aligned[i]) or
-            np.isnan(volume_spike_1d_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(volume_spike_12h[i]) or
+            np.isnan(camarilla_r3[i]) or
+            np.isnan(camarilla_s3[i])):
             signals[i] = 0.0
             continue
         
-        # Elder Ray components
-        bull_power = close[i] - ema_13[i]
-        bear_power = ema_13[i] - close[i]
-        
         if position == 0:
-            # LONG: Bull Power > 0 + ADX > 25 (strong trend) + 1d volume spike
-            if (bull_power > 0 and 
-                adx_1d_aligned[i] > 25 and 
-                volume_spike_1d_aligned[i] > 0.5):
+            # LONG: Price breaks above R3 + 1d EMA bullish (close > EMA) + 12h volume spike
+            if (close[i] > camarilla_r3[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_spike_12h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power > 0 + ADX > 25 (strong trend) + 1d volume spike
-            elif (bear_power > 0 and 
-                  adx_1d_aligned[i] > 25 and 
-                  volume_spike_1d_aligned[i] > 0.5):
+            # SHORT: Price breaks below S3 + 1d EMA bearish (close < EMA) + 12h volume spike
+            elif (close[i] < camarilla_s3[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_spike_12h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power <= 0 OR ADX < 20 (range) OR volume spike ends
-            if (bull_power <= 0 or 
-                adx_1d_aligned[i] < 20 or 
-                volume_spike_1d_aligned[i] <= 0.5):
+            # EXIT LONG: Price breaks below S3
+            if close[i] < camarilla_s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power <= 0 OR ADX < 20 (range) OR volume spike ends
-            if (bear_power <= 0 or 
-                adx_1d_aligned[i] < 20 or 
-                volume_spike_1d_aligned[i] <= 0.5):
+            # EXIT SHORT: Price breaks above R3
+            if close[i] > camarilla_r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
