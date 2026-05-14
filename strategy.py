@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and 4h volume spike confirmation.
-# Long when price breaks above R3 AND 12h close > EMA50 (uptrend) AND 4h volume > 1.5 * 20-period average volume.
-# Short when price breaks below S3 AND 12h close < EMA50 (downtrend) AND 4h volume > 1.5 * 20-period average volume.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and 1d volume spike confirmation.
+# Long when price breaks above R3 AND 4h close > EMA50 (uptrend) AND 1d volume > 1.5 * 20-period average volume.
+# Short when price breaks below S3 AND 4h close < EMA50 (downtrend) AND 1d volume > 1.5 * 20-period average volume.
 # Exit when price retraces to the prior day's close (Camarilla pivot point).
-# Uses discrete position sizing (0.25) to limit fee churn. Designed for 4h timeframe with strict entry conditions.
-# Volume spike threshold set to 1.5x to balance signal quality and trade frequency.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Uses discrete position sizing (0.20) to limit fee churn. Designed for 1h timeframe with strict entry conditions.
+# Session filter (08-20 UTC) to reduce noise trades. Target: 60-150 total trades over 4 years (15-37/year) for 1h.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_4hVolumeSpike_v1"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_4hEMA50_1dVolumeConfirm_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -26,31 +25,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA50 for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Calculate 4h EMA50 for trend filter (HTF)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate 4h volume confirmation filter (LTF)
-    if len(volume) < 20:
+    # Calculate 1d volume confirmation filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)  # Volume spike: 1.5x 20-period average
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_1d = volume_1d > (1.5 * vol_ma_20_1d)
+    volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d.astype(float))
     
     # Calculate Camarilla pivot points (based on previous day's OHLC)
     camarilla_r3 = np.full(n, np.nan)
     camarilla_s3 = np.full(n, np.nan)
     camarilla_cp = np.full(n, np.nan)  # Pivot point (close of prior day)
     
-    # Get 1d data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
-    
-    # For each 4h bar, use prior completed day's OHLC
+    # For each 1h bar, use prior completed day's OHLC
     for i in range(n):
         current_time = prices.iloc[i]['open_time']
         prior_day_start = current_time.normalize() - pd.Timedelta(days=1)
@@ -75,10 +72,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Pre-compute session hours to avoid datetime operations in loop
+    session_hours = prices.index.hour
+    
     for i in range(1, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(volume_confirm[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(volume_confirm_1d_aligned[i]) or
             np.isnan(camarilla_r3[i]) or
             np.isnan(camarilla_s3[i]) or
             np.isnan(camarilla_cp[i])):
@@ -86,7 +86,7 @@ def generate_signals(prices):
             continue
         
         # Session filter: 08-20 UTC
-        hour = prices.index[i].hour
+        hour = session_hours[i]
         in_session = 8 <= hour <= 20
         
         if not in_session:
@@ -94,17 +94,17 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: price breaks above R3 AND 12h close > 12h EMA50 (uptrend) AND volume confirmation
+            # LONG: price breaks above R3 AND 4h close > 4h EMA50 (uptrend) AND volume confirmation
             if (open_[i] <= camarilla_r3[i] and close[i] > camarilla_r3[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume_confirm[i]):
-                signals[i] = 0.25
+                close[i] > ema_50_4h_aligned[i] and 
+                volume_confirm_1d_aligned[i] > 0.5):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: price breaks below S3 AND 12h close < 12h EMA50 (downtrend) AND volume confirmation
+            # SHORT: price breaks below S3 AND 4h close < 4h EMA50 (downtrend) AND volume confirmation
             elif (open_[i] >= camarilla_s3[i] and close[i] < camarilla_s3[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume_confirm[i]):
-                signals[i] = -0.25
+                  close[i] < ema_50_4h_aligned[i] and 
+                  volume_confirm_1d_aligned[i] > 0.5):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
@@ -114,13 +114,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # EXIT SHORT: price retraces to Camarilla pivot point (CP)
             if close[i] >= camarilla_cp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
