@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and 1d volume spike confirmation.
-# Long when price breaks above 20-period high with 1d EMA50 uptrend and 1d volume > 2.0x 20-period average.
-# Short when price breaks below 20-period low with 1d EMA50 downtrend and 1d volume > 2.0x 20-period average.
-# Exit on opposite Donchian level (20-period low for longs, 20-period high for shorts).
-# Uses discrete position sizing (0.25) to minimize fee churn and strict volume confirmation to reduce false breakouts.
-# Target: 50-150 total trades over 4 years = 12-37/year for 12h timeframe.
-# Works in bull/bear: 1d EMA50 ensures strong trend alignment, Donchian provides clear structure, 1d volume spike confirms institutional participation.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX trend filter and 4h volume confirmation.
+# Long when price breaks above R3 with 1d ADX > 25 (strong trend) and 4h volume > 1.5x 20-period average.
+# Short when price breaks below S3 with 1d ADX > 25 and 4h volume > 1.5x 20-period average.
+# Exit on opposite Camarilla level (S3 for longs, R3 for shorts).
+# Uses discrete position sizing (0.25) to minimize fee churn and volume confirmation to reduce false breakouts.
+# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe.
+# Works in bull/bear: 1d ADX ensures strong trend alignment, Camarilla R3/S3 provides tight structure.
 
-name = "12h_Donchian20_Breakout_1dEMA50_1dVolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dADX_4hVolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,78 +20,131 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
-    # 12h Donchian channels
-    high_ma_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_ma_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # --- 4h Indicators (LTF) ---
+    # 4h volume confirmation: > 1.5x 20-period average (balanced to avoid overtrading)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_4h = volume > (1.5 * vol_ma_20)
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # 1d EMA50 trend
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d ADX calculation (14-period)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(tr)
+        plus_di = np.zeros_like(tr)
+        minus_di = np.zeros_like(tr)
+        dx = np.zeros_like(tr)
+        
+        atr[period] = np.mean(tr[1:period+1])
+        plus_dm_smooth = np.mean(plus_dm[1:period+1])
+        minus_dm_smooth = np.mean(minus_dm[1:period+1])
+        
+        for i in range(period+1, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            plus_dm_smooth = (plus_dm_smooth * (period-1) + plus_dm[i]) / period
+            minus_dm_smooth = (minus_dm_smooth * (period-1) + minus_dm[i]) / period
+            
+            plus_di[i] = 100 * plus_dm_smooth / atr[i] if atr[i] != 0 else 0
+            minus_di[i] = 100 * minus_dm_smooth / atr[i] if atr[i] != 0 else 0
+            dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100 if (plus_di[i] + minus_di[i]) != 0 else 0
+        
+        # ADX is smoothed DX
+        adx = np.zeros_like(dx)
+        adx[2*period] = np.mean(dx[period+1:2*period+1])
+        for i in range(2*period+1, len(dx)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # 1d EMA50 uptrend/downtrend signals
-    ema_50_uptrend = ema_50_1d_aligned > np.roll(ema_50_1d_aligned, 1)
-    ema_50_downtrend = ema_50_1d_aligned < np.roll(ema_50_1d_aligned, 1)
-    # Handle first value
-    ema_50_uptrend[0] = False
-    ema_50_downtrend[0] = False
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    adx_strong = adx_1d_aligned > 25  # Strong trend threshold
     
-    # 1d volume confirmation: > 2.0x 20-period average (volume spike)
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = volume_1d > (2.0 * vol_ma_20_1d)
-    
-    # Align 1d volume confirmation to 12h
-    volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d.astype(float))
+    # --- 4h Camarilla Pivot Points (Prior Day OHLC) ---
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    df_1d_pivot = get_htf_data(prices, '1d')
+    if len(df_1d_pivot) > 0:
+        # Map each 4h bar to prior day's OHLC
+        open_time = prices['open_time']
+        prior_day_start = open_time - pd.Timedelta(days=1)
+        prior_day_start = prior_day_start.dt.normalize()  # Start of prior day
+        
+        # Create series of prior day data aligned to 4h bars
+        for i in range(n):
+            pd_ts = prior_day_start.iloc[i]
+            day_mask = (df_1d_pivot['open_time'] >= pd_ts) & (df_1d_pivot['open_time'] < pd_ts + pd.Timedelta(days=1))
+            if day_mask.any():
+                day_data = df_1d_pivot.loc[day_mask]
+                high_val = day_data['high'].iloc[0]
+                low_val = day_data['low'].iloc[0]
+                close_val = day_data['close'].iloc[0]
+                range_val = high_val - low_val
+                camarilla_r3[i] = close_val + (range_val * 1.1 / 4)  # R3
+                camarilla_s3[i] = close_val - (range_val * 1.1 / 4)  # S3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_50_uptrend[i]) or 
-            np.isnan(ema_50_downtrend[i]) or
-            np.isnan(volume_confirm_1d_aligned[i]) or
-            np.isnan(high_ma_20[i]) or
-            np.isnan(low_ma_20[i])):
+        if (np.isnan(adx_strong[i]) or
+            np.isnan(volume_confirm_4h[i]) or
+            np.isnan(camarilla_r3[i]) or
+            np.isnan(camarilla_s3[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above 20-period high + 1d EMA50 uptrend + 1d volume spike
-            if (close[i] > high_ma_20[i] and 
-                ema_50_uptrend[i] and 
-                volume_confirm_1d_aligned[i] > 0.5):
+            # LONG: Price breaks above R3 + 1d ADX > 25 + 4h volume confirmation
+            if (close[i] > camarilla_r3[i] and 
+                adx_strong[i] and 
+                volume_confirm_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below 20-period low + 1d EMA50 downtrend + 1d volume spike
-            elif (close[i] < low_ma_20[i] and 
-                  ema_50_downtrend[i] and 
-                  volume_confirm_1d_aligned[i] > 0.5):
+            # SHORT: Price breaks below S3 + 1d ADX > 25 + 4h volume confirmation
+            elif (close[i] < camarilla_s3[i] and 
+                  adx_strong[i] and 
+                  volume_confirm_4h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below 20-period low
-            if close[i] < low_ma_20[i]:
+            # EXIT LONG: Price breaks below S3
+            if close[i] < camarilla_s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above 20-period high
-            if close[i] > high_ma_20[i]:
+            # EXIT SHORT: Price breaks above R3
+            if close[i] > camarilla_r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
