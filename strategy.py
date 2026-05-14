@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and ADX trend filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d volume spike and ADX trend filter.
 # Uses Camarilla pivot levels (R3/S3) from prior 1d for structure, volume spike for conviction,
-# and ADX > 25 to ensure trending markets (avoid ranging). Discrete position sizing (0.0, ±0.30)
+# and ADX > 25 to ensure trending markets (avoiding chop). Discrete position sizing (0.0, ±0.30)
 # minimizes fee churn. Designed to capture strong breakouts in trending markets while avoiding
-# whipsaws in chop. Targets 12-37 trades/year per symbol.
+# false signals in ranging conditions. Targets 20-50 trades/year per symbol.
 
-name = "12h_Camarilla_R3S3_Breakout_1dVolumeSpike_ADXFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dVolumeSpike_ADXFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,32 +24,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
+    # --- 4h Indicators (LTF) ---
     # Volume spike: > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
-    # ADX for trend strength (14-period)
-    # ADX = 100 * smoothed mean of |DI+ - DI-| / (DI+ + DI-)
-    # Simplified: use typical ATR-based calculation
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ADX (14) for trend strength
+    # +DM = max(high - prev_high, 0) if high - prev_high > prev_low - low else 0
+    # -DM = max(prev_low - low, 0) if prev_low - low > high - prev_high else 0
+    # TR = max(high - low, abs(high - prev_close), abs(low - prev_close))
+    # +DI = 100 * EWMA(+DM) / ATR
+    # -DI = 100 * EWMA(-DM) / ATR
+    # ADX = EWMA(|+DI - -DI| / (+DI + -DI))
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    close_shift = np.roll(close, 1)
+    high_shift[0] = high[0]
+    low_shift[0] = low[0]
+    close_shift[0] = close[0]
     
-    # Directional movement
-    up_move = high - np.concatenate([[high[0]], high[:-1]])
-    down_move = np.concatenate([[low[0]], low[:-1]]) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.where((high - high_shift) > (low_shift - low), np.maximum(high - high_shift, 0), 0)
+    minus_dm = np.where((low_shift - low) > (high - high_shift), np.maximum(low_shift - low, 0), 0)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - close_shift), np.abs(low - close_shift)))
     
-    # Smoothed DM and TR
-    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (np.abs(plus_di_14) + np.abs(minus_di_14) + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx = np.nan_to_num(adx, nan=20.0)  # fill NaN with neutral
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14
+    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
@@ -64,7 +66,7 @@ def generate_signals(prices):
     r3_1d = close_1d + 1.1 * camarilla_range / 2.0
     s3_1d = close_1d - 1.1 * camarilla_range / 2.0
     
-    # Align to 12h (wait for completed 1d bar)
+    # Align to 4h (wait for completed 1d bar)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -80,29 +82,28 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when trending (ADX > 25)
+        # Trend filter: only trade when ADX > 25 (trending market)
         if adx[i] <= 25:
-            # In ranging regime, stay flat to avoid whipsaw
+            # In ranging/weak trend, stay flat
             if position == 0:
                 signals[i] = 0.0
             elif position == 1:
-                # Exit long if price touches mid-point (neutral)
-                mid_1d = (r3_1d_aligned[i] + s3_1d_aligned[i]) / 2.0
-                if abs(close[i] - mid_1d) < 0.001 * close[i]:  # near mid
+                # Exit long if price touches S3 (mean reversion to lower level)
+                if close[i] <= s3_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.30
             elif position == -1:
-                mid_1d = (r3_1d_aligned[i] + s3_1d_aligned[i]) / 2.0
-                if abs(close[i] - mid_1d) < 0.001 * close[i]:
+                # Exit short if price touches R3 (mean reversion to upper level)
+                if close[i] >= r3_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = -0.30
             continue
         
-        # Trending regime: look for breakouts
+        # Trending regime: look for breakouts with volume confirmation
         if position == 0:
             # LONG: Price breaks above R3 AND volume spike
             if close[i] > r3_1d_aligned[i] and volume_spike[i]:
