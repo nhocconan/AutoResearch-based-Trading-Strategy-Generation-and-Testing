@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume spike and 1d EMA34 trend filter.
-# Uses Donchian channel (20-period high/low) from prior 4h for breakout structure, ATR-normalized volume spike (>1.8x 20-bar ATR-scaled avg volume) from 1d for conviction,
-# and 1d EMA34 > EMA89 for trend direction. Discrete position sizing (0.0, ±0.25) minimizes fee churn.
-# Designed to capture strong breakouts in trending markets while avoiding false signals in ranging conditions. Targets 20-40 trades/year per symbol.
+# Hypothesis: 1d KAMA trend direction with 1w EMA34 filter and RSI(14) mean reversion entries.
+# Uses Kaufman Adaptive Moving Average (KAMA) on 1d to determine primary trend,
+# 1-week EMA34 as higher-timeframe trend confirmation,
+# and RSI(14) < 30 for longs / > 70 for shorts as mean-reversion entries in the direction of trend.
+# Discrete position sizing (0.0, ±0.25) minimizes fee churn.
+# Designed to capture trend-following mean-reversion pulls in both bull and bear markets.
+# Targets 15-25 trades/year per symbol.
 
-name = "4h_Donchian20_Breakout_1dATRVolumeSpike_EMATrend_v1"
-timeframe = "4h"
+name = "1d_KAMA_Trend_1wEMA34_RSI_MR_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,99 +20,108 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    open_ = prices['open'].values
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # --- 4h Indicators (LTF) ---
-    # ATR(14) for volatility normalization
-    high_shift = np.roll(high, 1)
-    low_shift = np.roll(low, 1)
-    close_shift = np.roll(close, 1)
-    high_shift[0] = high[0]
-    low_shift[0] = low[0]
-    close_shift[0] = close[0]
+    # --- 1d Indicators (LTF) ---
+    # KAMA(10, 2, 30) - adaptive trend
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else np.abs(np.diff(close, prepend=close[0]))
+    # Correct volatility calculation: sum of absolute changes over lookback
+    volatility = pd.Series(close).rolling(window=10, min_periods=10).apply(lambda x: np.sum(np.abs(np.diff(x))), raw=True).values
+    volatility[0:10] = np.nan  # not enough data
+    er = np.where(volatility > 0, np.abs(np.diff(close, prepend=close[0])) / volatility, 0)
+    er[0] = 0  # first value
+    # Smooth ER
+    er_smoothed = pd.Series(er).ewm(span=10, adjust=False, min_periods=10).mean().values
+    sc = (er_smoothed * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    tr = np.maximum(high - low, np.maximum(np.abs(high - close_shift), np.abs(low - close_shift)))
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # RSI(14) for mean reversion entries
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Donchian channel (20) from prior bar
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    
-    # --- 1d Indicators (HTF) ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    # --- 1w Indicators (HTF) ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # ATR(14) on 1d for volume normalization
-    high_shift_1d = np.roll(high_1d, 1)
-    low_shift_1d = np.roll(low_1d, 1)
-    close_shift_1d = np.roll(close_1d, 1)
-    high_shift_1d[0] = high_1d[0]
-    low_shift_1d[0] = low_1d[0]
-    close_shift_1d[0] = close_1d[0]
-    
-    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - close_shift_1d), np.abs(low_1d - close_shift_1d)))
-    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # ATR-scaled volume MA: 20-period average of volume / ATR on 1d
-    vol_atr_ratio_1d = volume_1d / (atr_14_1d + 1e-10)
-    vol_atr_ma_20_1d = pd.Series(vol_atr_ratio_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = vol_atr_ratio_1d > (1.8 * vol_atr_ma_20_1d)
-    
-    # EMA34 and EMA89 on 1d for trend direction
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
-    trend_up_1d = ema34_1d > ema89_1d
-    trend_down_1d = ema34_1d < ema89_1d
-    
-    # Align 1d indicators to 4h (wait for completed 1d bar)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    trend_down_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
+    close_1w = df_1w['close'].values
+    # EMA34 on 1w
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(10, n):  # start after KAMA warmup
         # Skip if missing data
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(volume_spike_1d_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or np.isnan(trend_down_1d_aligned[i])):
+        if (np.isnan(kama[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(ema_34_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        if position == 0:
-            # LONG: Price breaks above Donchian high AND volume spike AND 1d trend up
-            if close[i] > donchian_high[i] and volume_spike_1d_aligned[i] and trend_up_1d_aligned[i]:
+        # Determine trend: price > KAMA = uptrend, price < KAMA = downtrend
+        uptrend = close[i] > kama[i]
+        downtrend = close[i] < kama[i]
+        
+        # HTF trend filter: only trade if 1w EMA34 agrees with 1d KAMA trend
+        if uptrend and close[i] > ema_34_1w_aligned[i]:
+            # Uptrend confirmed: look for RSI oversold longs
+            if position == 0 and rsi[i] < 30:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low AND volume spike AND 1d trend down
-            elif close[i] < donchian_low[i] and volume_spike_1d_aligned[i] and trend_down_1d_aligned[i]:
+            elif position == 1:
+                # Exit long on RSI overbought or trend change
+                if rsi[i] > 70 or close[i] < kama[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Exit short if uptrend confirmed
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+        elif downtrend and close[i] < ema_34_1w_aligned[i]:
+            # Downtrend confirmed: look for RSI overbought shorts
+            if position == 0 and rsi[i] > 70:
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # EXIT LONG: Price crosses below Donchian low (mean reversion) or trend flips down
-            if close[i] < donchian_low[i] or not trend_up_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # EXIT SHORT: Price crosses above Donchian high (mean reversion) or trend flips up
-            if close[i] > donchian_high[i] or not trend_down_1d_aligned[i]:
+            elif position == -1:
+                # Exit short on RSI oversold or trend change
+                if rsi[i] < 30 or close[i] > kama[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            elif position == 1:
+                # Exit long if downtrend confirmed
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = 0.0
+        else:
+            # No clear trend or HTF disagreement: stay flat
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                # Exit long if trend broken
+                signals[i] = 0.0
+                position = 0
+            elif position == -1:
+                # Exit short if trend broken
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
     
     return signals
