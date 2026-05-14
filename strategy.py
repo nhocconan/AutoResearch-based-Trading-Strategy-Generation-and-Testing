@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d volume spike and ADX trend filter.
-# Uses Camarilla pivot levels (R3/S3) from prior 1d for structure, volume spike for conviction,
-# and ADX > 25 on 12h to ensure trending markets (avoiding chop). Discrete position sizing (0.0, ±0.25)
-# minimizes fee churn. Designed to capture strong breakouts in trending markets while avoiding
-# false signals in ranging conditions. Targets 12-37 trades/year per symbol.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ATR-based volume spike and ADX trend filter.
+# Uses Camarilla pivot levels (R3/S3) from prior 1d for structure, ATR-normalized volume spike (>1.5x 20-bar ATR-scaled avg volume) for conviction,
+# and ADX > 20 to ensure trending markets. Discrete position sizing (0.0, ±0.25) minimizes fee churn.
+# Designed to capture strong breakouts in trending markets while avoiding false signals in ranging conditions. Targets 20-40 trades/year per symbol.
 
-name = "12h_Camarilla_R3S3_Breakout_1dVolumeSpike_ADXFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dATRVolumeSpike_ADXFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,12 +23,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
-    # Volume spike: > 2.0x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma_20)
-    
-    # ADX (14) for trend strength on 12h
+    # --- 4h Indicators (LTF) ---
+    # ATR(14) for volatility normalization
     high_shift = np.roll(high, 1)
     low_shift = np.roll(low, 1)
     close_shift = np.roll(close, 1)
@@ -37,11 +32,18 @@ def generate_signals(prices):
     low_shift[0] = low[0]
     close_shift[0] = close[0]
     
+    tr = np.maximum(high - low, np.maximum(np.abs(high - close_shift), np.abs(low - close_shift)))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # ATR-scaled volume MA: 20-period average of volume / ATR
+    vol_atr_ratio = volume / (atr_14 + 1e-10)
+    vol_atr_ma_20 = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values
+    volume_spike = vol_atr_ratio > (1.5 * vol_atr_ma_20)
+    
+    # ADX (14) for trend strength
     plus_dm = np.where((high - high_shift) > (low_shift - low), np.maximum(high - high_shift, 0), 0)
     minus_dm = np.where((low_shift - low) > (high - high_shift), np.maximum(low_shift - low, 0), 0)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - close_shift), np.abs(low - close_shift)))
     
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14
     minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14
     dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
@@ -60,7 +62,7 @@ def generate_signals(prices):
     r3_1d = close_1d + 1.1 * camarilla_range / 2.0
     s3_1d = close_1d - 1.1 * camarilla_range / 2.0
     
-    # Align to 12h (wait for completed 1d bar)
+    # Align to 4h (wait for completed 1d bar)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -76,8 +78,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade when ADX > 25 (trending market)
-        if adx[i] <= 25:
+        # Trend filter: only trade when ADX > 20 (trending market)
+        if adx[i] <= 20:
             # In ranging/weak trend, stay flat
             if position == 0:
                 signals[i] = 0.0
