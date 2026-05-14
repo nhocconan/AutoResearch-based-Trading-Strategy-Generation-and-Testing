@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h strategy using 4h Camarilla R1/S1 breakout with 1d EMA50 trend filter and session filter (08-20 UTC).
-# Long when price breaks above R1 with price > 1d EMA50 (bullish trend) and within active session.
-# Short when price breaks below S1 with price < 1d EMA50 (bearish trend) and within active session.
-# Exit on opposite Camarilla level (S1 for longs, R1 for shorts).
-# Uses 4h for signal direction (structure) and 1d EMA50 for regime filter to reduce false breakouts.
-# Session filter reduces noise during low-activity periods. Position size 0.20 to limit drawdown.
-# Target: 60-150 total trades over 4 years (15-37/year) to stay within fee drag limits for 1h timeframe.
+# Hypothesis: 6h Donchian(20) breakout with 1w ADX trend filter and 6h volume confirmation.
+# Long when price breaks above 20-period high with 1w ADX > 25 (strong trend) and 6h volume > 1.5x 20-period average.
+# Short when price breaks below 20-period low with 1w ADX > 25 (strong trend) and 6h volume > 1.5x 20-period average.
+# Exit on opposite 20-period Donchian level (low for longs, high for shorts).
+# Uses 1w HTF for trend strength to avoid whipsaws in ranging markets. Volume confirmation reduces false breakouts.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits for 6h timeframe.
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dEMA50_Session_v1"
-timeframe = "1h"
+name = "6h_Donchian20_Breakout_1wADX_6hVolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,102 +23,97 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # --- 4h Indicators (MTF for direction) ---
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # --- 6h Indicators (LTF) ---
+    # 6h Donchian channels: 20-period high/low
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = high_roll
+    donchian_low = low_roll
+    
+    # 6h volume confirmation: > 1.5x 20-period average (tight filter to reduce trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike_6h = volume > (1.5 * vol_ma_20)
+    
+    # --- 1w Indicators (HTF) ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Precompute prior day's OHLC for Camarilla (prior 4h day = prior 1d)
-    open_time_4h = df_4h['open_time']
-    prior_day_start = open_time_4h - pd.Timedelta(days=1)
-    prior_day_start = prior_day_start.dt.normalize()
+    # 1w ADX(14) - trend strength filter
+    # True Range
+    tr1 = pd.Series(high_1w).diff().abs()
+    tr2 = (pd.Series(high_1w) - pd.Series(close_1w).shift(1)).abs()
+    tr3 = (pd.Series(low_1w) - pd.Series(close_1w).shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1w = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Get 1d data for prior day OHLC
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) == 0:
-        return np.zeros(n)
+    # Directional Movement
+    up_move = pd.Series(high_1w).diff()
+    down_move = -pd.Series(low_1w).diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    df_1d = df_1d.copy()
-    df_1d['date'] = df_1d['open_time'].dt.date
-    prior_day_start_date = prior_day_start.dt.date
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Create mapping from date to OHLC
-    ohlc_map = df_1d.groupby('date').agg({
-        'high': 'first',
-        'low': 'first',
-        'close': 'first'
-    })
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr_1w
+    minus_di = 100 * minus_dm_smooth / atr_1w
     
-    camarilla_r1_4h = np.full(len(df_4h), np.nan)
-    camarilla_s1_4h = np.full(len(df_4h), np.nan)
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1w = adx
     
-    for i in range(len(df_4h)):
-        pd_date = prior_day_start_date.iloc[i]
-        if pd_date in ohlc_map.index:
-            day_data = ohlc_map.loc[pd_date]
-            high_val = day_data['high']
-            low_val = day_data['low']
-            close_val = day_data['close']
-            range_val = high_val - low_val
-            camarilla_r1_4h[i] = close_val + (range_val * 1.1 / 12)  # R1
-            camarilla_s1_4h[i] = close_val - (range_val * 1.1 / 12)  # S1
-    
-    # Align Camarilla levels to 1h timeframe (wait for completed 4h bar)
-    camarilla_r1_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1_4h)
-    camarilla_s1_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1_4h)
-    
-    # --- 1d Indicators (MTF for trend filter) ---
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # --- Session filter (08-20 UTC) ---
-    # open_time is already datetime64[ms], use index for hour
-    hours = prices.index.hour  # Pre-compute before loop
-    in_session = (hours >= 8) & (hours <= 20)
+    # Align 1w ADX to 6h timeframe (wait for completed 1w bar)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        # Skip if missing data or outside session
-        if (np.isnan(ema_50_aligned[i]) or
-            np.isnan(camarilla_r1_4h_aligned[i]) or
-            np.isnan(camarilla_s1_4h_aligned[i]) or
-            not in_session[i]):
+        # Skip if missing data
+        if (np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(volume_spike_6h[i]) or
+            np.isnan(adx_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + price > 1d EMA50 (bullish trend)
-            if (close[i] > camarilla_r1_4h_aligned[i] and 
-                close[i] > ema_50_aligned[i]):
-                signals[i] = 0.20
+            # LONG: Price breaks above Donchian high + 1w ADX > 25 (strong trend) + 6h volume spike
+            if (close[i] > donchian_high[i] and 
+                adx_1w_aligned[i] > 25 and 
+                volume_spike_6h[i]):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 + price < 1d EMA50 (bearish trend)
-            elif (close[i] < camarilla_s1_4h_aligned[i] and 
-                  close[i] < ema_50_aligned[i]):
-                signals[i] = -0.20
+            # SHORT: Price breaks below Donchian low + 1w ADX > 25 (strong trend) + 6h volume spike
+            elif (close[i] < donchian_low[i] and 
+                  adx_1w_aligned[i] > 25 and 
+                  volume_spike_6h[i]):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1
-            if close[i] < camarilla_s1_4h_aligned[i]:
+            # EXIT LONG: Price breaks below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1
-            if close[i] > camarilla_r1_4h_aligned[i]:
+            # EXIT SHORT: Price breaks above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
