@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and 4h volume spike confirmation.
-# Long when price breaks above R4 with price > 1d EMA34 (bullish trend) and 4h volume > 1.8x 24-period average.
-# Short when price breaks below S4 with price < 1d EMA34 (bearish trend) and 4h volume > 1.8x 24-period average.
-# Exit on opposite Camarilla level (S4 for longs, R4 for shorts).
-# Uses 1d HTF for trend to reduce noise and overtrading vs shorter trends. Volume spike confirmation (1.8x) reduces false breakouts.
-# Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits for 4h timeframe.
-# Camarilla R4/S4 levels are stronger breakout levels than R3/S3, leading to fewer but higher quality trades.
-# EMA34 on 1d provides smooth trend filter responsive enough for 4h breaks but resistant to whipsaw.
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 12h EMA34 trend filter and 6h volume confirmation.
+# Long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (low < EMA13) AND price > 12h EMA34 (bullish trend) AND 6h volume > 2.0x 20-period average.
+# Short when Bull Power < 0 AND Bear Power > 0 AND price < 12h EMA34 (bearish trend) AND 6h volume > 2.0x 20-period average.
+# Exit on opposite Elder Ray condition (Bull Power < 0 for longs, Bear Power > 0 for shorts).
+# Uses 12h HTF for trend to reduce noise and overtrading vs shorter trends. Volume confirmation (2.0x) reduces false signals.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits for 6h timeframe.
+# Elder Ray captures both trend and momentum, effective in both bull and bear markets when combined with HTF trend filter.
 
-name = "4h_Camarilla_R4S4_Breakout_1dEMA34_4hVolumeSpike_v1"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_12hEMA34_6hVolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     open_ = prices['open'].values
@@ -27,89 +26,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h Indicators (LTF) ---
-    # 4h volume confirmation: > 1.8x 24-period average (tight filter to reduce trades)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike_4h = volume > (1.8 * vol_ma_24)
+    # --- 6h Indicators (LTF) ---
+    # 6h EMA(13) for Elder Ray calculation
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Bull Power = Close - EMA13
+    bull_power = close - ema_13
+    # Bear Power = EMA13 - Low
+    bear_power = ema_13 - low
+    # 6h volume confirmation: > 2.0x 20-period average (tight filter to reduce trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_6h = volume > (2.0 * vol_ma_20)
     
-    # --- 1d Indicators (HTF) ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # --- 12h Indicators (HTF) ---
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # 1d EMA(34) - trend filter (responsive yet smooth for 4h trading)
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # --- 4h Camarilla Pivot Points (Prior Day OHLC) ---
-    camarilla_r4 = np.full(n, np.nan)
-    camarilla_s4 = np.full(n, np.nan)
-    df_1d_pivot = get_htf_data(prices, '1d')
-    if len(df_1d_pivot) == 0:
-        return np.zeros(n)
-    
-    # Vectorized prior day OHLC mapping for each 4h bar
-    open_time = prices['open_time']
-    prior_day_start = open_time - pd.Timedelta(days=1)
-    prior_day_start = prior_day_start.dt.normalize()  # Start of prior day
-    
-    # Precompute OHLC by date
-    df_1d_pivot = df_1d_pivot.copy()
-    df_1d_pivot['date'] = df_1d_pivot['open_time'].dt.date
-    ohlc_map = df_1d_pivot.groupby('date').agg({
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    })
-    
-    prior_day_dates = prior_day_start.dt.date
-    high_vals = prior_day_dates.map(ohlc_map['high'])
-    low_vals = prior_day_dates.map(ohlc_map['low'])
-    close_vals = prior_day_dates.map(ohlc_map['close'])
-    
-    # Calculate Camarilla levels
-    range_vals = high_vals - low_vals
-    camarilla_r4 = close_vals + (range_vals * 1.1 / 2)  # R4
-    camarilla_s4 = close_vals - (range_vals * 1.1 / 2)  # S4
+    # 12h EMA(34) - trend filter (smooth for 6h trading)
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_34_aligned[i]) or
-            np.isnan(volume_spike_4h[i]) or
-            np.isnan(camarilla_r4[i]) or
-            np.isnan(camarilla_s4[i])):
+        if (np.isnan(ema_34_12h_aligned[i]) or
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i]) or
+            np.isnan(volume_confirm_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R4 + price > 1d EMA34 (bullish) + 4h volume spike
-            if (close[i] > camarilla_r4[i] and 
-                close[i] > ema_34_aligned[i] and 
-                volume_spike_4h[i]):
+            # LONG: Bull Power > 0 AND Bear Power < 0 AND price > 12h EMA34 (bullish) AND 6h volume confirm
+            if (bull_power[i] > 0 and 
+                bear_power[i] < 0 and 
+                close[i] > ema_34_12h_aligned[i] and 
+                volume_confirm_6h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S4 + price < 1d EMA34 (bearish) + 4h volume spike
-            elif (close[i] < camarilla_s4[i] and 
-                  close[i] < ema_34_aligned[i] and 
-                  volume_spike_4h[i]):
+            # SHORT: Bull Power < 0 AND Bear Power > 0 AND price < 12h EMA34 (bearish) AND 6h volume confirm
+            elif (bull_power[i] < 0 and 
+                  bear_power[i] > 0 and 
+                  close[i] < ema_34_12h_aligned[i] and 
+                  volume_confirm_6h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S4
-            if close[i] < camarilla_s4[i]:
+            # EXIT LONG: Bull Power < 0 (momentum weakening)
+            if bull_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above R4
-            if close[i] > camarilla_r4[i]:
+            # EXIT SHORT: Bear Power > 0 (momentum weakening)
+            if bear_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
