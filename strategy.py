@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
-# Long when price breaks above 20-period high with 1d ADX > 20 and 4h volume > 1.5x 20-period average.
-# Short when price breaks below 20-period low with 1d ADX > 20 and 4h volume > 1.5x 20-period average.
-# Exit on opposite Donchian level (20-period low for longs, 20-period high for shorts).
+# Hypothesis: 1d Donchian(20) breakout with 1w ADX trend filter and 1d volume confirmation.
+# Long when price breaks above 20-day high with 1w ADX > 25 (strong trend) and 1d volume > 1.5x 20-period average.
+# Short when price breaks below 20-day low with 1w ADX > 25 and 1d volume > 1.5x 20-period average.
+# Exit on opposite 20-day level (20-day low for longs, 20-day high for shorts).
 # Uses discrete position sizing (0.25) to minimize fee churn and volume confirmation to reduce false breakouts.
-# Target: 75-200 total trades over 4 years = 19-50/year for 4h timeframe.
-# Works in bull/bear: 1d ADX ensures strong trend alignment, Donchian provides clear structure.
+# Target: 30-100 total trades over 4 years = 7-25/year for 1d timeframe.
+# Works in bull/bear: 1w ADX ensures strong trend alignment, Donchian provides clear structure.
 
-name = "4h_Donchian20_Breakout_1dADX_4hVolumeConfirm_v2"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wADX_1dVolumeConfirm"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -26,24 +26,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h Indicators (LTF) ---
-    # 4h volume confirmation: > 1.5x 20-period average
+    # --- 1d Indicators (LTF) ---
+    # 1d volume confirmation: > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_4h = volume > (1.5 * vol_ma_20)
+    volume_confirm_1d = volume > (1.5 * vol_ma_20)
     
-    # 4h Donchian channels (20-period)
+    # 1d Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # --- 1d Indicators (HTF) ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # --- 1w Indicators (HTF) ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1d ADX calculation (14-period) - Wilder's smoothing
+    # 1w ADX calculation (14-period)
     def calculate_adx(high, low, close, period=14):
         plus_dm = np.zeros_like(high)
         minus_dm = np.zeros_like(high)
@@ -85,9 +85,9 @@ def generate_signals(prices):
         
         return adx
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    adx_strong = adx_1d_aligned > 20  # Strong trend threshold (slightly lower for more signals)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, 14)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    adx_strong = adx_1w_aligned > 25  # Strong trend threshold
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -95,36 +95,36 @@ def generate_signals(prices):
     for i in range(1, n):
         # Skip if missing data
         if (np.isnan(adx_strong[i]) or
-            np.isnan(volume_confirm_4h[i]) or
+            np.isnan(volume_confirm_1d[i]) or
             np.isnan(donchian_high[i]) or
             np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high + 1d ADX > 20 + 4h volume confirmation
+            # LONG: Price breaks above 20-day high + 1w ADX > 25 + 1d volume confirmation
             if (close[i] > donchian_high[i] and 
                 adx_strong[i] and 
-                volume_confirm_4h[i]):
+                volume_confirm_1d[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low + 1d ADX > 20 + 4h volume confirmation
+            # SHORT: Price breaks below 20-day low + 1w ADX > 25 + 1d volume confirmation
             elif (close[i] < donchian_low[i] and 
                   adx_strong[i] and 
-                  volume_confirm_4h[i]):
+                  volume_confirm_1d[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below Donchian low
+            # EXIT LONG: Price breaks below 20-day low
             if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above Donchian high
+            # EXIT SHORT: Price breaks above 20-day high
             if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
