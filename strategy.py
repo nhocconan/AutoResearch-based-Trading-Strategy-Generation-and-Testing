@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and 12h volume confirmation (>1.8x 20-period average).
-# Long when price breaks above R3 AND close > 1d EMA34 (bullish trend) AND volume > 1.8x 20-period average.
-# Short when price breaks below S3 AND close < 1d EMA34 (bearish trend) AND volume > 1.8x 20-period average.
-# Exit when price retests the 1d EMA34 level (mean reversion to trend) or opposite Camarilla level touched.
-# Uses 1d HTF for trend to reduce noise and overtrading vs shorter trends. Volume confirmation (1.8x) reduces false signals.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits for 12h timeframe.
-# Camarilla pivot levels provide high-probability reversal/breakout levels, effective in both bull and bear markets when combined with HTF trend filter.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and 1d volume confirmation (>1.5x 20-period average).
+# Long when price breaks above upper Donchian(20) AND close > 1w EMA50 (bullish trend) AND volume > 1.5x 20-period average.
+# Short when price breaks below lower Donchian(20) AND close < 1w EMA50 (bearish trend) AND volume > 1.5x 20-period average.
+# Exit when price retests the 20-period EMA (mean reversion) or opposite Donchian level touched.
+# Uses 1w HTF for trend to reduce noise and overtrading vs shorter trends. Volume confirmation (1.5x) reduces false signals.
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe to stay within fee drag limits.
+# Donchian channels provide structure, effective in both bull and bear markets when combined with HTF trend filter.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_12hVolumeConfirm_v1"
-timeframe = "12h"
+name = "1d_Donchian20_Breakout_1wEMA50_1dVolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -26,74 +26,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
-    # 12h volume confirmation: > 1.8x 20-period average (tight filter to reduce trades)
+    # --- 1d Indicators (LTF) ---
+    # 1d volume confirmation: > 1.5x 20-period average (tight filter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_12h = volume > (1.8 * vol_ma_20)
+    volume_confirm_1d = volume > (1.5 * vol_ma_20)
     
-    # --- 12h Camarilla Pivot Levels (R3, S3) ---
-    # Calculate from previous 12h bar's OHLC
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan  # First bar has no previous
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # 1d Donchian(20) - price channel structure
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_ = prev_high - prev_low
-    r3 = pivot + (range_ * 1.1 / 2.0)  # R3 = pivot + (high-low)*1.1/2
-    s3 = pivot - (range_ * 1.1 / 2.0)  # S3 = pivot - (high-low)*1.1/2
+    # 1d EMA(20) - exit mean reversion target
+    ema_20_1d = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # --- 1d Indicators (HTF) ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # --- 1w Indicators (HTF) ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA(34) - trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w EMA(50) - trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(r3[i]) or
-            np.isnan(s3[i]) or
-            np.isnan(volume_confirm_12h[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or
+            np.isnan(ema_20_1d[i]) or
+            np.isnan(volume_confirm_1d[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND close > 1d EMA34 (bullish trend) AND volume confirm
-            if (close[i] > r3[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_confirm_12h[i]):
+            # LONG: Price breaks above upper Donchian AND close > 1w EMA50 (bullish trend) AND volume confirm
+            if (close[i] > highest_20[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_confirm_1d[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 AND close < 1d EMA34 (bearish trend) AND volume confirm
-            elif (close[i] < s3[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_confirm_12h[i]):
+            # SHORT: Price breaks below lower Donchian AND close < 1w EMA50 (bearish trend) AND volume confirm
+            elif (close[i] < lowest_20[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_confirm_1d[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price retests 1d EMA34 (mean reversion to trend) OR touches S3 (opposite level)
-            if (close[i] <= ema_34_1d_aligned[i] or 
-                close[i] < s3[i]):
+            # EXIT LONG: Price retests 20-period EMA (mean reversion) OR touches lower Donchian (opposite level)
+            if (close[i] <= ema_20_1d[i] or 
+                close[i] < lowest_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price retests 1d EMA34 (mean reversion to trend) OR touches R3 (opposite level)
-            if (close[i] >= ema_34_1d_aligned[i] or 
-                close[i] > r3[i]):
+            # EXIT SHORT: Price retests 20-period EMA (mean reversion) OR touches upper Donchian (opposite level)
+            if (close[i] >= ema_20_1d[i] or 
+                close[i] > highest_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
