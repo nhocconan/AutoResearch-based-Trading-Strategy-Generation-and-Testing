@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and 1d volume confirmation (>1.5x 20-period average).
-# Long when close breaks above Donchian upper band AND close > 1w EMA50 AND volume > 1.5x MA20.
-# Short when close breaks below Donchian lower band AND close < 1w EMA50 AND volume > 1.5x MA20.
-# Exit when price crosses 1w EMA50 in opposite direction OR Donchian middle band touch.
-# Uses 1w HTF for trend to reduce noise and overtrading. Volume confirmation (>1.5x) reduces false signals.
-# Target: 30-100 total trades over 4 years (7-25/year) to stay within fee drag limits for 1d timeframe.
-# Donchian breakouts capture momentum; EMA50 filter ensures alignment with weekly trend; volume confirms conviction.
+# Hypothesis: 6h Bollinger Band Squeeze Breakout with 1d ATR regime filter and volume confirmation.
+# Long when price breaks above upper BB(20,2) AND 1d ATR(14) > 1d ATR(50) (high volatility regime) AND volume > 1.5x 20-period average.
+# Short when price breaks below lower BB(20,2) AND 1d ATR(14) > 1d ATR(50) AND volume > 1.5x 20-period average.
+# Exit when price returns to middle BB(20) OR volatility collapses (1d ATR(14) < 1d ATR(50)).
+# Bollinger Squeeze identifies low volatility periods; breakout in high volatility regime captures strong moves.
+# Works in both bull and bear markets by trading expansion phases after contraction.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits for 6h timeframe.
 
-name = "1d_Donchian20_Breakout_1wEMA50_1dVolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_BollingerSqueeze_Breakout_1dATR_Regime_VolumeConfirm_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     open_ = prices['open'].values
@@ -26,65 +26,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Indicators (LTF) ---
-    # Donchian Channel (20)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    mid_20 = (high_20 + low_20) / 2.0
-    # 1d volume confirmation: > 1.5x 20-period average
+    # --- 6h Indicators (LTF) ---
+    # Bollinger Bands (20, 2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + (2 * std_20)
+    lower_bb = sma_20 - (2 * std_20)
+    middle_bb = sma_20
+    
+    # 6h volume confirmation: > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = volume > (1.5 * vol_ma_20)
+    volume_confirm_6h = volume > (1.5 * vol_ma_20)
     
-    # --- 1w Indicators (HTF) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # --- 1d Indicators (HTF) ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 100:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1w EMA(50) - trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d ATR(14) and ATR(50) for volatility regime filter
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, tr2)
+    tr = np.concatenate([[np.nan], tr])  # first TR is undefined
+    
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    
+    # High volatility regime: ATR(14) > ATR(50)
+    high_vol_regime = atr_14 > atr_50
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_50_aligned = align_htf_to_ltf(prices, df_1d, atr_50)
+    high_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, high_vol_regime.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(50, n):  # warmup for 50-period ATR
         # Skip if missing data
-        if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(high_20[i]) or
-            np.isnan(low_20[i]) or
-            np.isnan(mid_20[i]) or
-            np.isnan(volume_confirm_1d[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or
+            np.isnan(atr_14_aligned[i]) or np.isnan(atr_50_aligned[i]) or
+            np.isnan(high_vol_regime_aligned[i]) or
+            np.isnan(volume_confirm_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Close breaks above Donchian upper band AND close > 1w EMA50 AND volume confirm
-            if (close[i] > high_20[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume_confirm_1d[i]):
+            # LONG: Price breaks above upper BB AND high vol regime AND volume confirm
+            if (close[i] > upper_bb[i] and 
+                high_vol_regime_aligned[i] > 0.5 and 
+                volume_confirm_6h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Close breaks below Donchian lower band AND close < 1w EMA50 AND volume confirm
-            elif (close[i] < low_20[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume_confirm_1d[i]):
+            # SHORT: Price breaks below lower BB AND high vol regime AND volume confirm
+            elif (close[i] < lower_bb[i] and 
+                  high_vol_regime_aligned[i] > 0.5 and 
+                  volume_confirm_6h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Close crosses below 1w EMA50 OR touches Donchian middle band
-            if (close[i] < ema_50_1w_aligned[i] or 
-                close[i] <= mid_20[i]):
+            # EXIT LONG: Price returns to middle BB OR volatility collapses
+            if (close[i] < middle_bb[i] or 
+                high_vol_regime_aligned[i] <= 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Close crosses above 1w EMA50 OR touches Donchian middle band
-            if (close[i] > ema_50_1w_aligned[i] or 
-                close[i] >= mid_20[i]):
+            # EXIT SHORT: Price returns to middle BB OR volatility collapses
+            if (close[i] > middle_bb[i] or 
+                high_vol_regime_aligned[i] <= 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
