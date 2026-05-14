@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter, volume confirmation (>1.5x 20-period average), and ADX regime filter (ADX > 25 for trending, < 20 for ranging). Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Designed to work in both bull and bear markets by combining price structure (Donchian), trend (1w EMA34), volume strength, and regime awareness.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (>2.0x 20-period average), and choppiness regime filter (CHOP > 61.8 for mean reversion, < 38.2 for trend following). Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Designed to work in both bull and bear markets by combining price structure (Camarilla), trend (1d EMA34), volume strength, and regime awareness.
 
-name = "1d_Donchian20_Breakout_1wEMA34_VolumeADX_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeChop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,109 +20,94 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Indicators (LTF) ---
-    # Volume confirmation: > 1.5x 20-period average (moderate threshold to reduce trades)
+    # --- 12h Indicators (LTF) ---
+    # Volume confirmation: > 2.0x 20-period average (higher threshold to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_ma_20)
+    volume_confirm = volume > (2.0 * vol_ma_20)
     
-    # ADX (14) - regime filter
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
-            minus_dm[i] = max(low[i-1] - low[i], 0) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(high)
-        plus_dm_smooth = np.zeros_like(high)
-        minus_dm_smooth = np.zeros_like(high)
-        
-        atr[period] = np.mean(tr[1:period+1])
-        plus_dm_smooth[period] = np.mean(plus_dm[1:period+1])
-        minus_dm_smooth[period] = np.mean(minus_dm[1:period+1])
-        
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        plus_di = 100 * plus_dm_smooth / atr
-        minus_di = 100 * minus_dm_smooth / atr
-        dx = np.zeros_like(high)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = np.zeros_like(high)
-        adx[2*period] = np.mean(dx[period+1:2*period+1])
-        for i in range(2*period+1, len(high)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Choppiness Index (CHOP) - regime filter
+    atr_period = 14
+    chop_period = 14
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    max_high = pd.Series(high).rolling(window=chop_period, min_periods=chop_period).max().values
+    min_low = pd.Series(low).rolling(window=chop_period, min_periods=chop_period).min().values
+    chop = 100 * np.log10((atr * np.sqrt(chop_period)) / (max_high - min_low)) / np.log10(chop_period)
+    chop = np.where((max_high - min_low) == 0, 50, chop)  # avoid division by zero
     
-    adx = calculate_adx(high, low, close, 14)
-    adx_trending = adx > 25   # trending market (breakout follow)
-    adx_ranging = adx < 20    # ranging market (mean reversion)
+    chop_range = chop > 61.8   # ranging market (mean reversion)
+    chop_trend = chop < 38.2   # trending market (trend following)
     
-    # --- 1w Indicators (HTF) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # --- 1d Indicators (HTF) ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # 1w EMA(34) - trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d EMA(34) - trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_34_1w_aligned[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(volume_confirm[i]) or
-            np.isnan(adx[i])):
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # Calculate Donchian levels for today (using previous 20 days)
-        if i >= 20:
-            donchian_high = np.max(high[i-20:i])
-            donchian_low = np.min(low[i-20:i])
+        # Calculate Camarilla levels for today (using previous bar's OHLC)
+        if i >= 1:
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_close = close[i-1]
+            range_ = prev_high - prev_low
+            
+            # Camarilla levels (R3/S3 = standard levels)
+            R3 = prev_close + range_ * 1.1 / 4
+            S3 = prev_close - range_ * 1.1 / 4
         else:
-            donchian_high = np.nan
-            donchian_low = np.nan
+            R3 = np.nan
+            S3 = np.nan
         
         if position == 0:
-            # LONG: Price breaks above Donchian high AND close > 1w EMA34 (bullish trend) AND volume confirm AND (ranging: mean reversion OR trending: momentum)
-            if (not np.isnan(donchian_high) and 
-                close[i] > donchian_high and 
-                close[i] > ema_34_1w_aligned[i] and 
+            # LONG: Price breaks above R3 AND close > 1d EMA34 (bullish trend) AND volume confirm AND (choppy: mean reversion OR trending: momentum)
+            if (not np.isnan(R3) and 
+                close[i] > R3 and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_confirm[i] and
-                (adx_ranging[i] or adx_trending[i])):  # allow both regimes but with different logic implicit in entry
+                (chop_range[i] or chop_trend[i])):  # allow both regimes but with different logic implicit in entry
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low AND close < 1w EMA34 (bearish trend) AND volume confirm AND (ranging: mean reversion OR trending: momentum)
-            elif (not np.isnan(donchian_low) and 
-                  close[i] < donchian_low and 
-                  close[i] < ema_34_1w_aligned[i] and 
+            # SHORT: Price breaks below S3 AND close < 1d EMA34 (bearish trend) AND volume confirm AND (choppy: mean reversion OR trending: momentum)
+            elif (not np.isnan(S3) and 
+                  close[i] < S3 and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_confirm[i] and
-                  (adx_ranging[i] or adx_trending[i])):
+                  (chop_range[i] or chop_trend[i])):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below Donchian low (breakdown) OR touches Donchian high (mean reversion in ranging)
-            if close[i] < donchian_low or (adx_ranging[i] and close[i] < donchian_high):
+            # EXIT LONG: Price crosses below 1d EMA34 (trend change) OR touches S3 (mean reversion in chop)
+            if close[i] < ema_34_1d_aligned[i] or (chop_range[i] and close[i] < S3):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above Donchian high (breakout) OR touches Donchian low (mean reversion in ranging)
-            if close[i] > donchian_high or (adx_ranging[i] and close[i] > donchian_low):
+            # EXIT SHORT: Price crosses above 1d EMA34 (trend change) OR touches R3 (mean reversion in chop)
+            if close[i] > ema_34_1d_aligned[i] or (chop_range[i] and close[i] > R3):
                 signals[i] = 0.0
                 position = 0
             else:
