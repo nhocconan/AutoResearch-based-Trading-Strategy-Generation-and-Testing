@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and 12h volume confirmation.
-# Long when price breaks above Donchian(20) upper band AND price > 1w EMA50 (bullish trend) AND 12h volume > 1.8x 20-period average.
-# Short when price breaks below Donchian(20) lower band AND price < 1w EMA50 (bearish trend) AND 12h volume > 1.8x 20-period average.
-# Exit on opposite Donchian breakout (long exit on lower band break, short exit on upper band break).
-# Uses 1w HTF for trend to reduce noise and overtrading vs shorter trends. Volume confirmation (1.8x) reduces false signals.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits for 12h timeframe.
-# Donchian breakouts capture momentum, effective in both bull and bear markets when combined with HTF trend filter.
+# Hypothesis: 4h Williams %R extreme reversal with 1d EMA34 trend filter and 4h volume spike confirmation.
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 (bullish trend) AND 4h volume > 2.5x 20-period average.
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 (bearish trend) AND 4h volume > 2.5x 20-period average.
+# Exit on opposite Williams %R condition (Williams %R > -50 for longs, < -50 for shorts).
+# Uses 1d HTF for trend to reduce noise and overtrading vs shorter trends. Volume spike (2.5x) reduces false signals.
+# Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits for 4h timeframe.
+# Williams %R captures momentum reversals, effective in both bull and bear markets when combined with HTF trend filter.
 
-name = "12h_Donchian20_Breakout_1wEMA50_12hVolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_WilliamsR_Extreme_1dEMA34_4hVolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,67 +20,66 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
-    # Donchian(20) channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    # 12h volume confirmation: > 1.8x 20-period average (tight filter to reduce trades)
+    # --- 4h Indicators (LTF) ---
+    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # 4h volume confirmation: > 2.5x 20-period average (tight filter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_12h = volume > (1.8 * vol_ma_20)
+    volume_spike_4h = volume > (2.5 * vol_ma_20)
     
-    # --- 1w Indicators (HTF) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # --- 1d Indicators (HTF) ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # 1w EMA(50) - trend filter (smooth for 12h trading)
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA(34) - trend filter (smooth for 4h trading)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i]) or
-            np.isnan(volume_confirm_12h[i])):
+        if (np.isnan(williams_r[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(volume_spike_4h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above Donchian upper band AND price > 1w EMA50 (bullish) AND 12h volume confirm
-            if (close[i] > highest_20[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume_confirm_12h[i]):
+            # LONG: Williams %R < -80 (oversold) AND price > 1d EMA34 (bullish) AND 4h volume spike
+            if (williams_r[i] < -80 and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_spike_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below Donchian lower band AND price < 1w EMA50 (bearish) AND 12h volume confirm
-            elif (close[i] < lowest_20[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume_confirm_12h[i]):
+            # SHORT: Williams %R > -20 (overbought) AND price < 1d EMA34 (bearish) AND 4h volume spike
+            elif (williams_r[i] > -20 and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_spike_4h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price breaks below Donchian lower band (trend reversal)
-            if close[i] < lowest_20[i]:
+            # EXIT LONG: Williams %R > -50 (momentum weakening)
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price breaks above Donchian upper band (trend reversal)
-            if close[i] > highest_20[i]:
+            # EXIT SHORT: Williams %R < -50 (momentum weakening)
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
