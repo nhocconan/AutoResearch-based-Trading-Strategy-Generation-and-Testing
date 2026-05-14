@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX trend filter and 4h volume spike confirmation.
-# Long when price breaks above R3 AND 1d ADX > 25 (trending market) AND 4h volume > 2.0 * 20-period average volume.
-# Short when price breaks below S3 AND 1d ADX > 25 AND 4h volume > 2.0 * 20-period average volume.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA trend filter and 4h volume spike confirmation.
+# Long when price breaks above R3 AND 1d EMA34 > EMA89 (bullish trend) AND 4h volume > 2.0 * 20-period average volume.
+# Short when price breaks below S3 AND 1d EMA34 < EMA89 (bearish trend) AND 4h volume > 2.0 * 20-period average volume.
 # Exit when price retraces to the prior day's close (Camarilla pivot point).
 # Uses discrete position sizing (0.25) to limit fee churn. Target: 75-200 total trades over 4 years (19-50/year) for 4h.
-# Works in both bull and bear markets: 1d ADX filter ensures we only trade in trending conditions,
+# Works in both bull and bear markets: 1d EMA crossover filter ensures we only trade in clear trending conditions,
 # while volume confirmation avoids breakouts in low-participation environments.
 
-name = "4h_Camarilla_R3S3_Breakout_1dADXTrend_4hVolumeConfirm_v1"
+name = "4h_Camarilla_R3S3_Breakout_1dEMATrend_4hVolumeConfirm_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     open_ = prices['open'].values
@@ -26,53 +26,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ADX for trend filter (HTF)
+    # Calculate 1d EMA trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 90:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate EMA34 and EMA89 on 1d timeframe
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # Bullish trend: EMA34 > EMA89, Bearish trend: EMA34 < EMA89
+    ema_trend_bullish = ema34_1d > ema89_1d
+    ema_trend_bearish = ema34_1d < ema89_1d
     
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(values, period):
-        result = np.full_like(values, np.nan)
-        if len(values) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(values[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(values)):
-            result[i] = (result[i-1] * (period-1) + values[i]) / period
-        return result
-    
-    tr_period = 14
-    tr_smoothed = wilders_smoothing(tr, tr_period)
-    plus_dm_smoothed = wilders_smoothing(plus_dm, tr_period)
-    minus_dm_smoothed = wilders_smoothing(minus_dm, tr_period)
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm_smoothed / tr_smoothed
-    minus_di = 100 * minus_dm_smoothed / tr_smoothed
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, tr_period)
-    
-    adx_above_25 = adx > 25
-    adx_above_25_aligned = align_htf_to_ltf(prices, df_1d, adx_above_25.astype(float))
+    # Align to 4h timeframe
+    ema_trend_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_trend_bullish.astype(float))
+    ema_trend_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_trend_bearish.astype(float))
     
     # Calculate 4h volume confirmation filter (primary TF)
     vol_ma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -111,7 +81,8 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_above_25_aligned[i]) or 
+        if (np.isnan(ema_trend_bullish_aligned[i]) or 
+            np.isnan(ema_trend_bearish_aligned[i]) or
             np.isnan(volume_confirm_4h[i]) or
             np.isnan(camarilla_r3[i]) or
             np.isnan(camarilla_s3[i]) or
@@ -120,15 +91,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: price breaks above R3 AND 1d ADX > 25 AND volume confirmation
+            # LONG: price breaks above R3 AND bullish 1d EMA trend AND volume confirmation
             if (open_[i] <= camarilla_r3[i] and close[i] > camarilla_r3[i] and 
-                adx_above_25_aligned[i] > 0.5 and 
+                ema_trend_bullish_aligned[i] > 0.5 and 
                 volume_confirm_4h[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S3 AND 1d ADX > 25 AND volume confirmation
+            # SHORT: price breaks below S3 AND bearish 1d EMA trend AND volume confirmation
             elif (open_[i] >= camarilla_s3[i] and close[i] < camarilla_s3[i] and 
-                  adx_above_25_aligned[i] > 0.5 and 
+                  ema_trend_bearish_aligned[i] > 0.5 and 
                   volume_confirm_4h[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
