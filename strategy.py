@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ATR regime filter and 1w volume confirmation.
-# Uses 1d ATR ratio (short/long) to detect low-volatility breakouts with expansion potential.
-# Long when price breaks above R3 AND ATR(7)/ATR(30) > 1.2 (vol expansion) AND 1w volume > 1.5 * 20-period average.
-# Short when price breaks below S3 AND ATR(7)/ATR(30) > 1.2 AND 1w volume > 1.5 * 20-period average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and 4h volume spike confirmation.
+# Long when price breaks above R3 AND 12h EMA50 is rising AND 4h volume > 2.0 * 20-period average volume.
+# Short when price breaks below S3 AND 12h EMA50 is falling AND 4h volume > 2.0 * 20-period average volume.
 # Exit when price retraces to the prior day's close (Camarilla pivot point).
-# Uses discrete position sizing (0.25) to limit fee churn. Target: 50-150 total trades over 4 years (12-37/year) for 12h.
-# Works in both bull and bear markets: ATR regime filter ensures we trade volatility expansions,
-# while volume confirmation avoids false breakouts in low-participation environments.
+# Uses discrete position sizing (0.25) to limit fee churn. Target: 75-200 total trades over 4 years (19-50/year) for 4h.
+# Works in both bull and bear markets: 12h EMA filter ensures we only trade with the intermediate-term trend,
+# while volume confirmation avoids breakouts in low-participation environments.
 
-name = "12h_Camarilla_R3S3_Breakout_1dATRRegime_1wVolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_Trend_4hVolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,48 +26,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1w volume confirmation filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate 12h EMA50 for trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    volume_1w = df_1w['volume'].values
-    vol_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1w = volume_1w > (1.5 * vol_ma_20_1w)
-    volume_confirm_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_confirm_1w.astype(float))
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_rising_12h = np.zeros_like(close_12h, dtype=bool)
+    ema_rising_12h[1:] = ema_50_12h[1:] > ema_50_12h[:-1]
+    ema_rising_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_rising_12h.astype(float))
     
-    # Calculate 1d ATR regime filter (HTF) - ATR(7)/ATR(30) > 1.2 for volatility expansion
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # ATR(7) and ATR(30)
-    atr_7 = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
-    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
-    atr_ratio = np.where(atr_30 > 0, atr_7 / atr_30, 0)
-    atr_regime = atr_ratio > 1.2
-    atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime.astype(float))
+    # Calculate 4h volume confirmation filter (primary TF)
+    vol_ma_20_4h = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_4h = volume > (2.0 * vol_ma_20_4h)
     
     # Calculate Camarilla pivot points (based on previous day's OHLC)
     camarilla_r3 = np.full(n, np.nan)
     camarilla_s3 = np.full(n, np.nan)
     camarilla_cp = np.full(n, np.nan)  # Pivot point (close of prior day)
     
-    # For each 12h bar, use prior completed day's OHLC
+    # For each 4h bar, use prior completed day's OHLC
     for i in range(n):
         current_time = prices.iloc[i]['open_time']
         prior_day_start = current_time.normalize() - pd.Timedelta(days=1)
         prior_day_end = prior_day_start + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
         
+        df_1d = get_htf_data(prices, '1d')
         day_mask = (df_1d['open_time'] >= prior_day_start) & (df_1d['open_time'] <= prior_day_end)
         if day_mask.any():
             prior_day = df_1d.loc[day_mask].iloc[0]
@@ -90,8 +73,8 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if any required data is NaN
-        if (np.isnan(volume_confirm_1w_aligned[i]) or 
-            np.isnan(atr_regime_aligned[i]) or
+        if (np.isnan(ema_rising_12h_aligned[i]) or 
+            np.isnan(volume_confirm_4h[i]) or
             np.isnan(camarilla_r3[i]) or
             np.isnan(camarilla_s3[i]) or
             np.isnan(camarilla_cp[i])):
@@ -99,16 +82,16 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: price breaks above R3 AND ATR regime (vol expansion) AND volume confirmation
+            # LONG: price breaks above R3 AND 12h EMA50 rising AND volume confirmation
             if (open_[i] <= camarilla_r3[i] and close[i] > camarilla_r3[i] and 
-                atr_regime_aligned[i] > 0.5 and 
-                volume_confirm_1w_aligned[i] > 0.5):
+                ema_rising_12h_aligned[i] > 0.5 and 
+                volume_confirm_4h[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S3 AND ATR regime (vol expansion) AND volume confirmation
+            # SHORT: price breaks below S3 AND 12h EMA50 falling AND volume confirmation
             elif (open_[i] >= camarilla_s3[i] and close[i] < camarilla_s3[i] and 
-                  atr_regime_aligned[i] > 0.5 and 
-                  volume_confirm_1w_aligned[i] > 0.5):
+                  ema_rising_12h_aligned[i] < 0.5 and 
+                  volume_confirm_4h[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
             else:
