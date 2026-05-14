@@ -2,12 +2,13 @@
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation.
 # Long when price breaks above 4h Donchian upper channel with 1d EMA34 uptrend and 4h volume > 1.8x 20-period average.
 # Short when price breaks below 4h Donchian lower channel with 1d EMA34 downtrend and 4h volume > 1.8x 20-period average.
-# Exit on opposite Donchian channel touch or at 1d close level.
-# Uses discrete position sizing (0.25) to limit fee churn and strict volume confirmation to reduce false breakouts.
-# Target: 75-200 trades over 4 years (19-50/year) for 4h timeframe.
+# Exit on opposite Donchian channel touch (lower for longs, upper for shorts).
+# Uses 08-20 UTC session filter to avoid low-volume periods. Position size fixed at 0.25 to limit fee churn.
+# Target: 100-180 trades over 4 years (25-45/year) for 4h timeframe.
 # Works in bull/bear: 1d EMA34 ensures trend alignment, Donchian provides structure within trend.
+# Uses discrete position sizing to minimize fee churn and strict volume confirmation to reduce false breakouts.
 
-name = "4h_Donchian20_Breakout_1dEMA34_Trend_Volume"
+name = "4h_Donchian20_Breakout_1dEMA34_Trend_Volume_Session"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,12 +27,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Precompute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     # --- 4h Indicators (LTF) ---
     # 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_roll
-    donchian_lower = low_roll
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # 4h Volume confirmation: > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -39,7 +42,7 @@ def generate_signals(prices):
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
@@ -52,20 +55,17 @@ def generate_signals(prices):
     ema_34_bullish_aligned = align_htf_to_ltf(prices, df_1d, ema_34_bullish.astype(float))
     ema_34_bearish_aligned = align_htf_to_ltf(prices, df_1d, ema_34_bearish.astype(float))
     
-    # 1d close for exit level (prior day close)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        # Skip if missing data
-        if (np.isnan(ema_34_bullish_aligned[i]) or 
-            np.isnan(ema_34_bearish_aligned[i]) or
-            np.isnan(volume_confirm[i]) or
-            np.isnan(donchian_upper[i]) or
+        # Skip if outside session or missing data
+        if (not in_session[i] or
+            np.isnan(donchian_upper[i]) or 
             np.isnan(donchian_lower[i]) or
-            np.isnan(close_1d_aligned[i])):
+            np.isnan(ema_34_bullish_aligned[i]) or 
+            np.isnan(ema_34_bearish_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
         
@@ -85,15 +85,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price touches Donchian lower OR price <= 1d close
-            if close[i] <= donchian_lower[i] or close[i] <= close_1d_aligned[i]:
+            # EXIT LONG: Price touches or breaks below Donchian lower
+            if close[i] <= donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price touches Donchian upper OR price >= 1d close
-            if close[i] >= donchian_upper[i] or close[i] >= close_1d_aligned[i]:
+            # EXIT SHORT: Price touches or breaks above Donchian upper
+            if close[i] >= donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
