@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and ATR-based volume spike.
-# Uses Donchian channel (20-period high/low) for breakout structure, 1d EMA34 for primary trend direction,
-# and ATR-normalized volume spike (>1.8x 20-bar ATR-scaled avg volume) for conviction.
-# Discrete position sizing (0.0, ±0.30) minimizes fee churn. Designed to capture strong breakouts
-# in trending markets while avoiding false signals in ranging conditions. Targets 20-40 trades/year per symbol.
+# Hypothesis: 12h Donchian(20) breakout with 1d ATR-based volume spike and EMA trend filter.
+# Uses Donchian channel (20-period high/low) from prior 12h for breakout structure,
+# ATR-normalized volume spike (>1.8x 20-bar ATR-scaled avg volume) for conviction,
+# and EMA(50) > EMA(200) on 1d for bullish trend bias (long only) or EMA(50) < EMA(200) for bearish bias (short only).
+# Discrete position sizing (0.0, ±0.25) minimizes fee churn. Designed to capture strong breakouts
+# in trending markets while avoiding false signals in ranging conditions. Targets 15-30 trades/year per symbol.
 
-name = "4h_Donchian20_Breakout_1dEMA34_ATRVolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dATRVolumeSpike_EMATrend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,13 +19,14 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h Indicators (LTF) ---
-    # ATR(14) for volatility normalization and stoploss reference
+    # --- 12h Indicators (LTF) ---
+    # ATR(14) for volatility normalization
     high_shift = np.roll(high, 1)
     low_shift = np.roll(low, 1)
     close_shift = np.roll(close, 1)
@@ -40,58 +42,69 @@ def generate_signals(prices):
     vol_atr_ma_20 = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values
     volume_spike = vol_atr_ratio > (1.8 * vol_atr_ma_20)
     
-    # Donchian(20) breakout levels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channel (20) on 12h
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # EMA(50) and EMA(200) on 1d for trend bias
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Align to 12h (wait for completed 1d bar)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema34_1d_aligned[i]) or
+        if (np.isnan(atr_14[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i])):
+            np.isnan(highest_20[i]) or
+            np.isnan(lowest_20[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(ema_200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend direction from 1d EMA34
-        is_uptrend = close[i] > ema34_1d_aligned[i]
+        # Determine trend bias from 1d EMA crossover
+        bullish_bias = ema_50_1d_aligned[i] > ema_200_1d_aligned[i]
+        bearish_bias = ema_50_1d_aligned[i] < ema_200_1d_aligned[i]
         
         if position == 0:
-            # Look for breakout entries with volume confirmation
-            if is_uptrend and close[i] > donchian_high[i] and volume_spike[i]:
-                signals[i] = 0.30
+            # Look for breakout entries with volume confirmation and trend bias
+            if bullish_bias and close[i] > highest_20[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            elif not is_uptrend and close[i] < donchian_low[i] and volume_spike[i]:
-                signals[i] = -0.30
+            elif bearish_bias and close[i] < lowest_20[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: price closes below Donchian low OR trend reverses
-            if close[i] < donchian_low[i] or close[i] < ema34_1d_aligned[i]:
+            # EXIT LONG: Price crosses below midpoint of Donchian channel
+            midpoint = (highest_20[i] + lowest_20[i]) / 2.0
+            if close[i] < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Donchian high OR trend reverses
-            if close[i] > donchian_high[i] or close[i] > ema34_1d_aligned[i]:
+            # EXIT SHORT: Price crosses above midpoint of Donchian channel
+            midpoint = (highest_20[i] + lowest_20[i]) / 2.0
+            if close[i] > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
