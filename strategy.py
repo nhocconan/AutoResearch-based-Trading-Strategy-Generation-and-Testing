@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and 4h volume confirmation (>1.5x 20-period average).
-# Long when price breaks above Camarilla R3 AND close > 1d EMA34 (bullish trend) AND volume > 1.5x MA20.
-# Short when price breaks below Camarilla S3 AND close < 1d EMA34 (bearish trend) AND volume > 1.5x MA20.
-# Exit when price returns to Camarilla Pivot Point (PP) OR trend reverses (close crosses 1d EMA34 opposite).
-# Uses 1d HTF for trend to reduce noise and overtrading. Volume confirmation (>1.5x) reduces false signals.
-# Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits for 4h timeframe.
-# Camarilla pivot levels provide intraday support/resistance; breakouts with volume and trend filter capture strong moves.
+# Hypothesis: 6h Williams %R Extreme with 1d ADX trend filter and 6h volume spike (>2.5x 20-period average).
+# Williams %R measures overbought/oversold levels. Long when %R < -80 (oversold) AND 1d ADX > 25 (strong trend) AND volume spike.
+# Short when %R > -20 (overbought) AND 1d ADX > 25 (strong trend) AND volume spike.
+# Exit when %R crosses above -50 (for long) or below -50 (for short) OR ADX < 20 (weak trend).
+# Uses 1d HTF for trend strength to avoid whipsaws in ranging markets. Volume spike filters for institutional participation.
+# Target: 80-180 total trades over 4 years (20-45/year) to balance opportunity and fee drag for 6h timeframe.
+# Williams %R is effective in both bull and bear markets when combined with trend confirmation, as it identifies exhaustion points.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_4hVolumeConfirm_v1"
-timeframe = "4h"
+name = "6h_WilliamsR_Extreme_1dADX25_6hVolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,77 +25,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h Indicators (LTF) ---
-    # 4h volume confirmation: > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_4h = volume > (1.5 * vol_ma_20)
+    # --- 6h Indicators (LTF) ---
+    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high - close) / (highest_high - lowest_low)) * -100
+    # Replace division by zero or near-zero with -50 (neutral)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
     
-    # --- Camarilla Pivot Levels (from previous day) ---
-    # Need daily high, low, close from 1d data
+    # 6h volume spike: > 2.5x 20-period average (tight filter to reduce trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike_6h = volume > (2.5 * vol_ma_20)
+    
+    # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    # Use previous day's OHLC to calculate today's Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels: PP = (H+L+C)/3
-    # R4 = PP + (H-L)*1.1/2, R3 = PP + (H-L)*1.1/4, R2 = PP + (H-L)*1.1/6, R1 = PP + (H-L)*1.1/12
-    # S1 = PP - (H-L)*1.1/12, S2 = PP - (H-L)*1.1/6, S3 = PP - (H-L)*1.1/4, S4 = PP - (H-L)*1.1/2
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    rang = high_1d - low_1d
-    r3 = pivot + (rang * 1.1 / 4.0)
-    s3 = pivot - (rang * 1.1 / 4.0)
-    pp = pivot  # Pivot Point for exit
+    # 1d ADX(14) - trend strength filter
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d).abs()
+    tr2 = pd.Series(high_1d - pd.Series(close_1d).shift(1)).abs()
+    tr3 = pd.Series(low_1d - pd.Series(close_1d).shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 4h timeframe (using previous day's values)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    # Directional Movement
+    dm_plus = pd.Series(high_1d - pd.Series(high_1d).shift(1)).clip(lower=0).values
+    dm_minus = pd.Series(pd.Series(low_1d).shift(1) - low_1d).clip(lower=0).values
+    dm_plus = np.where(tr == 0, 0, dm_plus)
+    dm_minus = np.where(tr == 0, 0, dm_minus)
     
-    # --- 1d Indicators (HTF) ---
-    # 1d EMA(34) - trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Smoothed DM and TR
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / atr_14
+    di_minus = 100 * dm_minus_14 / atr_14
+    # Avoid division by zero
+    dx = np.where((di_plus + di_minus) == 0, 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus))
+    adx_1d = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align 1d ADX to 6h timeframe (waits for completed 1d bar)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(pp_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_confirm_4h[i])):
+        if (np.isnan(williams_r[i]) or
+            np.isnan(adx_1d_aligned[i]) or
+            np.isnan(volume_spike_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 AND close > 1d EMA34 (bullish trend) AND volume confirm
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_confirm_4h[i]):
+            # LONG: Williams %R < -80 (oversold) AND ADX > 25 (strong trend) AND volume spike
+            if (williams_r[i] < -80 and 
+                adx_1d_aligned[i] > 25 and 
+                volume_spike_6h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 AND close < 1d EMA34 (bearish trend) AND volume confirm
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_confirm_4h[i]):
+            # SHORT: Williams %R > -20 (overbought) AND ADX > 25 (strong trend) AND volume spike
+            elif (williams_r[i] > -20 and 
+                  adx_1d_aligned[i] > 25 and 
+                  volume_spike_6h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price returns to Pivot Point OR trend reverses (close < 1d EMA34)
-            if (close[i] <= pp_aligned[i] or 
-                close[i] < ema_34_1d_aligned[i]):
+            # EXIT LONG: Williams %R > -50 (recovering from oversold) OR ADX < 20 (weak trend)
+            if (williams_r[i] > -50 or 
+                adx_1d_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price returns to Pivot Point OR trend reverses (close > 1d EMA34)
-            if (close[i] >= pp_aligned[i] or 
-                close[i] > ema_34_1d_aligned[i]):
+            # EXIT SHORT: Williams %R < -50 (declining from overbought) OR ADX < 20 (weak trend)
+            if (williams_r[i] < -50 or 
+                adx_1d_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
