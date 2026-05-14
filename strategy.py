@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike (>2.0x 20-period average). Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Designed to capture medium-term trends in both bull and bear markets by combining price structure (Donchian), trend (1d EMA34), and volume strength. Targets 75-200 total trades over 4 years.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike (>2.0x 20-period average). Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Designed to capture medium-term trends in both bull and bear markets by combining price structure (Camarilla pivot), trend (1d EMA34), and volume strength. Targets 50-150 total trades over 4 years on 12h timeframe.
 
-name = "4h_Donchian20_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,14 +20,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h Indicators (LTF) ---
+    # --- 12h Indicators (LTF) ---
     # Volume spike: > 2.0x 20-period average (strict threshold to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (2.0 * vol_ma_20)
     
-    # Donchian(20) - price channel breakout
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from previous 12h bar
+    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
+    # Using previous bar's high/low/close to avoid look-ahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2.0
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2.0
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
@@ -46,20 +55,20 @@ def generate_signals(prices):
         # Skip if missing data
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i])):
+            np.isnan(camarilla_r3[i]) or
+            np.isnan(camarilla_s3[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian high AND close > 1d EMA34 (bullish trend) AND volume spike
-            if (close[i] > donchian_high[i-1] and 
+            # LONG: Price breaks above Camarilla R3 AND close > 1d EMA34 (bullish trend) AND volume spike
+            if (close[i] > camarilla_r3[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian low AND close < 1d EMA34 (bearish trend) AND volume spike
-            elif (close[i] < donchian_low[i-1] and 
+            # SHORT: Price breaks below Camarilla S3 AND close < 1d EMA34 (bearish trend) AND volume spike
+            elif (close[i] < camarilla_s3[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -67,15 +76,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below 1d EMA34 (trend change) OR touches Donchian low (mean reversion)
-            if close[i] < ema_34_1d_aligned[i] or close[i] < donchian_low[i]:
+            # EXIT LONG: Price crosses below 1d EMA34 (trend change) OR touches Camarilla S3 (mean reversion)
+            if close[i] < ema_34_1d_aligned[i] or close[i] < camarilla_s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above 1d EMA34 (trend change) OR touches Donchian high (mean reversion)
-            if close[i] > ema_34_1d_aligned[i] or close[i] > donchian_high[i]:
+            # EXIT SHORT: Price crosses above 1d EMA34 (trend change) OR touches Camarilla R3 (mean reversion)
+            if close[i] > ema_34_1d_aligned[i] or close[i] > camarilla_r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
