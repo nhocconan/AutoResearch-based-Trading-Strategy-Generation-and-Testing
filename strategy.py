@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and 1d volume spike confirmation.
-# Long when price breaks above upper Donchian channel AND 1w EMA50 is bullish AND 1d volume > 1.5 * 20-period average volume.
-# Short when price breaks below lower Donchian channel AND 1w EMA50 is bearish AND 1d volume > 1.5 * 20-period average volume.
-# Exit when price retraces to the midpoint of the Donchian channel.
-# Uses discrete position sizing (0.25) to limit fee churn. Designed for BTC/ETH robustness by capturing institutional breakouts with volume confirmation in trending markets.
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA trend filter and 1d volume confirmation.
+# Long when Bull Power > 0 AND price > 12h EMA50 AND 1d volume > 1.5 * 20-period average volume.
+# Short when Bear Power < 0 AND price < 12h EMA50 AND 1d volume > 1.5 * 20-period average volume.
+# Exit when Elder Power reverses sign (Bull Power <= 0 for long exit, Bear Power >= 0 for short exit).
+# Uses discrete position sizing (0.25) to balance return and drawdown. Designed for 6h timeframe to avoid fee drag while capturing institutional momentum with trend and volume confirmation.
 
-name = "1d_Donchian20_Breakout_1wEMA50_VolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_TrendFilter_VolumeConfirm_v4"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,19 +18,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    open_ = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate 1w EMA50 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate 12h EMA50 for trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
     # Calculate 1d volume spike filter (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -39,41 +36,37 @@ def generate_signals(prices):
         return np.zeros(n)
     volume_1d = df_1d['volume'].values
     vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume_1d > (1.5 * vol_ma_20)  # Volume > 1.5x 20-period average
+    volume_spike = volume_1d > (1.5 * vol_ma_20)  # Volume above 1.5x average
     volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
-    # Calculate Donchian channels (20-period) on 1d timeframe
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_upper = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
+    # Calculate Elder Ray (Bull Power and Bear Power) on 6h data
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(13, n):  # Start after EMA13 warmup
         # Skip if any required data is NaN
         if (np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_spike_aligned[i]) or
-            np.isnan(donchian_upper_aligned[i]) or
-            np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i])):
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above upper Donchian AND 1w EMA50 bullish AND volume spike
-            if (close[i] > donchian_upper_aligned[i] and 
+            # LONG: Bull Power > 0 AND price > 12h EMA50 AND volume spike
+            if (bull_power[i] > 0 and 
                 close[i] > ema_50_aligned[i] and 
                 volume_spike_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below lower Donchian AND 1w EMA50 bearish AND volume spike
-            elif (close[i] < donchian_lower_aligned[i] and 
+            # SHORT: Bear Power < 0 AND price < 12h EMA50 AND volume spike
+            elif (bear_power[i] < 0 and 
                   close[i] < ema_50_aligned[i] and 
                   volume_spike_aligned[i] > 0.5):
                 signals[i] = -0.25
@@ -81,15 +74,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price retraces to Donchian midpoint
-            if close[i] <= donchian_mid_aligned[i]:
+            # EXIT LONG: Bull Power <= 0 (momentum weakening)
+            if bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price retraces to Donchian midpoint
-            if close[i] >= donchian_mid_aligned[i]:
+            # EXIT SHORT: Bear Power >= 0 (momentum weakening)
+            if bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
