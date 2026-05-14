@@ -1,0 +1,127 @@
+# Strategy: 4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | 0.087 | +24.0% | -10.3% | 172 | PASS |
+| ETHUSDT | 0.045 | +21.2% | -13.1% | 161 | PASS |
+| SOLUSDT | 1.012 | +149.7% | -12.0% | 135 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.687 | -0.8% | -7.1% | 62 | FAIL |
+| ETHUSDT | 1.319 | +29.6% | -9.5% | 50 | PASS |
+| SOLUSDT | -0.116 | +3.4% | -12.3% | 44 | FAIL |
+
+## Code
+```python
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
+# Camarilla pivot levels (R3/S3) from daily chart act as strong breakout levels - breaks often lead to sustained moves
+# 1d EMA34 ensures alignment with higher-timeframe trend to avoid counter-trend trades in both bull/bear markets
+# Volume spike (>2.0 x 30-period EMA) confirms breakout validity and reduces false signals
+# Discrete position sizing (0.25) controls fee drag while allowing meaningful exposure
+# Target: 75-200 total trades over 4 years (19-50/year) for optimal risk-adjusted returns
+# Works in bull markets by catching breakouts with trend, works in bear by only taking trend-aligned breaks
+
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Volume confirmation (volume spike > 2.0 x 30-period EMA)
+    vol_ema_30 = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
+    volume_confirmation = volume > (2.0 * vol_ema_30)
+    
+    # 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 1d data for Camarilla pivot calculation
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # Based on previous day's high, low, close
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Camarilla levels: R3/S3 are the outer levels for significant breakouts
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_ = prev_high - prev_low
+    camarilla_r3 = pivot + (range_ * 1.1 / 4.0)   # R3 level
+    camarilla_s3 = pivot - (range_ * 1.1 / 4.0)   # S3 level
+    
+    # Align Camarilla levels to 4h timeframe (wait for completed 1d bar)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    # Start after warmup (need enough data for calculations)
+    start_idx = 50
+    
+    for i in range(start_idx, n):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_confirmation[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Determine trend bias from 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
+        
+        if position == 0:  # Flat - look for new entries
+            # Long: Close breaks above Camarilla R3 with volume confirmation and uptrend
+            if close[i] > camarilla_r3_aligned[i] and volume_confirmation[i] and uptrend:
+                signals[i] = 0.25
+                position = 1
+            # Short: Close breaks below Camarilla S3 with volume confirmation and downtrend
+            elif close[i] < camarilla_s3_aligned[i] and volume_confirmation[i] and downtrend:
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = 0.0
+        
+        elif position == 1:  # Long position
+            # Exit: Close drops below Camarilla S3 (reversal to downside) OR trend changes to downtrend
+            if close[i] < camarilla_s3_aligned[i] or not uptrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:  # Short position
+            # Exit: Close rises above Camarilla R3 (reversal to upside) OR trend changes to uptrend
+            if close[i] > camarilla_r3_aligned[i] or not downtrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    return signals
+```
+
+## Last Updated
+2026-05-02 04:44

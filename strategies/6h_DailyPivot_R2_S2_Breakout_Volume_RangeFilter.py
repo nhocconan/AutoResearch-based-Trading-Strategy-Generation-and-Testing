@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get daily data for 6h context
+    daily = get_htf_data(prices, '1d')
+    daily_high = daily['high'].values
+    daily_low = daily['low'].values
+    daily_close = daily['close'].values
+    daily_volume = daily['volume'].values
+    
+    # Calculate daily pivot levels (standard pivot point)
+    daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+    daily_r1 = 2 * daily_pivot - daily_low
+    daily_s1 = 2 * daily_pivot - daily_high
+    daily_r2 = daily_pivot + (daily_high - daily_low)
+    daily_s2 = daily_pivot - (daily_high - daily_low)
+    
+    # Align daily pivot levels to 6h timeframe
+    daily_pivot_6h = align_htf_to_ltf(prices, daily, daily_pivot)
+    daily_r1_6h = align_htf_to_ltf(prices, daily, daily_r1)
+    daily_s1_6h = align_htf_to_ltf(prices, daily, daily_s1)
+    daily_r2_6h = align_htf_to_ltf(prices, daily, daily_r2)
+    daily_s2_6h = align_htf_to_ltf(prices, daily, daily_s2)
+    
+    # Volume filter: current 6h volume > 1.5x 20-period average volume
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
+    
+    # Range filter: avoid trading when price is within 0.3% of daily pivot
+    price_to_pivot = np.abs(close - daily_pivot_6h) / daily_pivot_6h
+    range_filter = price_to_pivot > 0.003
+    
+    signals = np.zeros(n)
+    
+    for i in range(100, n):
+        # Skip if any required data is NaN
+        if (np.isnan(daily_pivot_6h[i]) or np.isnan(daily_r1_6h[i]) or 
+            np.isnan(daily_s1_6h[i]) or np.isnan(daily_r2_6h[i]) or 
+            np.isnan(daily_s2_6h[i]) or np.isnan(vol_ma[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Only trade when both filters pass
+        if volume_filter[i] and range_filter[i]:
+            # Long conditions: price breaks above daily R2 with volume
+            if close[i] > daily_r2_6h[i]:
+                signals[i] = 0.25
+            # Short conditions: price breaks below daily S2 with volume
+            elif close[i] < daily_s2_6h[i]:
+                signals[i] = -0.25
+            else:
+                signals[i] = signals[i-1]
+        else:
+            signals[i] = signals[i-1]
+    
+    return signals
+
+name = "6h_DailyPivot_R2_S2_Breakout_Volume_RangeFilter"
+timeframe = "6h"
+leverage = 1.0

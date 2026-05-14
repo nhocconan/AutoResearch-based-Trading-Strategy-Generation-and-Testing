@@ -1,0 +1,131 @@
+# Strategy: 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | 0.452 | +47.1% | -12.2% | 166 | PASS |
+| ETHUSDT | 0.175 | +29.6% | -13.7% | 160 | PASS |
+| SOLUSDT | 1.097 | +207.7% | -20.5% | 141 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -1.067 | -6.2% | -12.3% | 61 | FAIL |
+| ETHUSDT | 1.345 | +33.4% | -9.1% | 47 | PASS |
+| SOLUSDT | 0.172 | +8.2% | -11.6% | 53 | PASS |
+
+## Code
+```python
+#!/usr/bin/env python3
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm
+# Hypothesis: Breakout of 1-day Camarilla R3/S3 levels on 4h chart with confirmation from 1-day EMA34 trend and volume spike. 
+# Targets 20-35 trades/year to minimize fee drag. Uses momentum to avoid false breakouts. 
+# Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation.
+
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm"
+timeframe = "4h"
+leverage = 1.0
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 60:
+        return np.zeros(n)
+    
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # === 1d Data (loaded ONCE) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # === 1d Camarilla Pivot Levels (R3, S3) ===
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 2)
+    
+    # Align 1d levels to 4h
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === 1d EMA34 Trend Filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Spike Filter (20-period EMA) ===
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
+    
+    # === Signal Parameters ===
+    position_size = 0.25  # 25% of capital per trade
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    holding_bars = 0
+    
+    # Start after warmup (covers EMA34)
+    start_idx = 60
+    
+    for i in range(start_idx, n):
+        # Skip if any required data is invalid
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_ok[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+                holding_bars = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if position == 0:
+            # Long: Break above R3 + above 1d EMA34 + volume spike
+            if (close[i] > r3_4h[i] and 
+                close[i] > ema34_1d_4h[i] and 
+                volume_ok[i]):
+                signals[i] = position_size
+                position = 1
+                holding_bars = 0
+            # Short: Break below S3 + below 1d EMA34 + volume spike
+            elif (close[i] < s3_4h[i] and 
+                  close[i] < ema34_1d_4h[i] and 
+                  volume_ok[i]):
+                signals[i] = -position_size
+                position = -1
+                holding_bars = 0
+        else:
+            # Enforce minimum holding period (10 bars)
+            holding_bars += 1
+            if holding_bars < 10:
+                signals[i] = position_size if position == 1 else -position_size
+                continue
+            
+            # Exit: Price closes below/above opposite level
+            if position == 1:
+                if close[i] < s3_4h[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    holding_bars = 0
+                else:
+                    signals[i] = position_size
+            elif position == -1:
+                if close[i] > r3_4h[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    holding_bars = 0
+                else:
+                    signals[i] = -position_size
+    
+    return signals
+```
+
+## Last Updated
+2026-05-11 10:22

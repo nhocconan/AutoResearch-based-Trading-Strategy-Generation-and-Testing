@@ -17,6 +17,7 @@ Usage:
 """
 
 import ast
+import importlib.util
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -106,6 +107,11 @@ EXECUTION_MODEL_PATTERNS = [
 ]
 
 
+def _source_segment(code: str, node: ast.AST) -> str:
+    segment = ast.get_source_segment(code, node)
+    return segment or ""
+
+
 @dataclass
 class ValidationResult:
     valid: bool = True
@@ -186,6 +192,9 @@ def validate_strategy(code: str) -> ValidationResult:
     # --- 3f. Undefined bare variables that cause NameError at runtime ---
     _check_undefined_bare_names(code, result)
 
+    # --- 3g. Lagging HTF indicators must declare extra confirmation delay ---
+    _check_mtf_lagging_indicator_delay(code, tree, result)
+
     # --- 4. AST: extract metadata values ---
     leverage_found = None
     timeframe_found = None
@@ -248,6 +257,16 @@ def validate_strategy(code: str) -> ValidationResult:
         if "generate_signals" in code:
             pass  # might be defined but not as a def (edge case)
 
+    if name_found is None:
+        result.errors.append("Missing required assignment: name = '...'")
+        result.valid = False
+    if timeframe_found is None:
+        result.errors.append("Missing required assignment: timeframe = '...'")
+        result.valid = False
+    if leverage_found is None:
+        result.errors.append("Missing required assignment: leverage = ...")
+        result.valid = False
+
     # --- 6. T+1 fill and costs — enforced by engine ---
     result.info.append("Signal fill delay (t+1): enforced by backtest engine")
     result.info.append("Costs (fee 0.04% + slippage 0.01% + funding): enforced by backtest engine")
@@ -307,6 +326,44 @@ def _check_undefined_bare_names(code: str, result: ValidationResult):
         break
 
 
+def _check_mtf_lagging_indicator_delay(code: str, tree: ast.AST, result: ValidationResult):
+    """Require explicit confirmation delay for HTF fractal alignment."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "align_htf_to_ltf":
+            continue
+
+        call_src = _source_segment(code, node).lower()
+        value_src = _source_segment(code, node.args[2]).lower() if len(node.args) >= 3 else ""
+
+        if "fractal" not in call_src and "fractal" not in value_src:
+            continue
+
+        delay_ok = False
+        for kw in node.keywords:
+            if kw.arg != "additional_delay_bars":
+                continue
+            if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, (int, float)):
+                delay_ok = int(kw.value.value) >= 2
+
+        if not delay_ok and (
+            "confirmed" in value_src
+            or "shift(2" in value_src
+            or "shift(3" in value_src
+            or "delay" in value_src
+        ):
+            delay_ok = True
+
+        if not delay_ok:
+            result.errors.append(
+                "HTF fractal alignment without explicit confirmation delay detected — "
+                "use align_htf_to_ltf(..., additional_delay_bars=2) or pre-shift the fractal by 2 HTF bars"
+            )
+            result.valid = False
+            return
+
+
 def validate_file(path: str) -> ValidationResult:
     """Validate a strategy file."""
     try:
@@ -326,6 +383,56 @@ def validate_file(path: str) -> ValidationResult:
         r = ValidationResult(valid=False)
         r.errors.append(f"File not found: {path}")
         return r
+
+
+def run_prefix_lookahead_check(
+    strategy_path: str,
+    symbol: str = "BTCUSDT",
+    tolerance: float = 1e-9,
+) -> tuple[bool, str]:
+    """
+    Recompute signals on increasing prefixes and require prefix stability.
+
+    This catches dynamic look-ahead that static regex/AST checks can miss.
+    """
+    from prepare import load_klines
+    import numpy as np
+
+    path_obj = Path(strategy_path)
+    spec = importlib.util.spec_from_file_location(f"_prefix_{path_obj.stem}", str(path_obj))
+    if spec is None or spec.loader is None:
+        return False, f"Could not load strategy module from {strategy_path}"
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    if not hasattr(module, "generate_signals"):
+        return False, "generate_signals() missing"
+    if not hasattr(module, "timeframe"):
+        return False, "timeframe missing"
+
+    prices = load_klines(symbol, module.timeframe)
+    signals_full = np.asarray(module.generate_signals(prices), dtype=np.float64)
+    if len(signals_full) != len(prices):
+        return False, f"generate_signals length mismatch: {len(signals_full)} vs {len(prices)}"
+
+    checkpoints = sorted({500, 1000, 2000, 5000, len(prices) // 4, len(prices) // 2})
+    for checkpoint in checkpoints:
+        if checkpoint <= 64 or checkpoint >= len(prices):
+            continue
+        prefix_prices = prices.iloc[:checkpoint].reset_index(drop=True)
+        prefix_signals = np.asarray(module.generate_signals(prefix_prices), dtype=np.float64)
+        if len(prefix_signals) != checkpoint:
+            return False, f"prefix length mismatch at checkpoint {checkpoint}"
+        diff = np.where(np.abs(prefix_signals - signals_full[:checkpoint]) > tolerance)[0]
+        if len(diff):
+            return (
+                False,
+                f"Prefix look-ahead fail on {symbol} at checkpoint {checkpoint}: "
+                f"first_mismatch={int(diff[0])} last_mismatch={int(diff[-1])}",
+            )
+
+    return True, f"Prefix look-ahead test passed on {symbol}"
 
 
 def summarize_validation_errors(result: ValidationResult, limit: int = 5) -> str:

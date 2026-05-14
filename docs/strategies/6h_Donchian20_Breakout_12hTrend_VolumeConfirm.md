@@ -1,0 +1,123 @@
+# Strategy: 6h_Donchian20_Breakout_12hTrend_VolumeConfirm
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.231 | +5.2% | -18.3% | 108 | FAIL |
+| ETHUSDT | 0.302 | +40.8% | -13.5% | 106 | PASS |
+| SOLUSDT | 1.204 | +255.1% | -19.2% | 89 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| ETHUSDT | 0.405 | +13.2% | -10.3% | 32 | PASS |
+| SOLUSDT | -0.029 | +3.6% | -16.3% | 32 | FAIL |
+
+## Code
+```python
+#!/usr/bin/env python3
+"""
+6h_Donchian20_Breakout_12hTrend_VolumeConfirm
+Hypothesis: Donchian(20) breakouts on 6h with 12h EMA50 trend filter and volume confirmation (>1.5x average volume). 
+In bull markets: price breaks above 20-bar high with 12h uptrend and high volume → long. 
+In bear markets: price breaks below 20-bar low with 12h downtrend and high volume → short. 
+Uses discrete position sizing (0.25) to reduce fee churn. Target: 50-150 trades over 4 years (12-37/year) on 6h timeframe.
+Requires BTC/ETH edge via 12h trend and volume filters; avoids SOL-only bias by requiring trend alignment.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:  # Need warmup for Donchian and EMA
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Load 12h data for HTF trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
+        return np.zeros(n)
+    
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate average volume for confirmation (20-period SMA)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    base_size = 0.25
+    
+    # Start after warmup (need 20 for Donchian, 50 for EMA)
+    start_idx = max(20, 50)
+    
+    for i in range(start_idx, n):
+        # Donchian levels: 20-bar high/low (excluding current bar)
+        highest_high = np.max(high[i-20:i]) if i >= 20 else np.nan
+        lowest_low = np.min(low[i-20:i]) if i >= 20 else np.nan
+        
+        close_val = close[i]
+        vol = volume[i]
+        avg_vol = avg_volume[i]
+        ema_val = ema_50_12h_aligned[i]
+        
+        # Skip if any data not ready
+        if np.isnan(highest_high) or np.isnan(lowest_low) or np.isnan(ema_val) or np.isnan(avg_vol):
+            # Hold current position
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = base_size
+            else:
+                signals[i] = -base_size
+            continue
+        
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = vol > 1.5 * avg_vol
+        
+        # Long logic: price breaks above 20-bar high with 12h uptrend and volume confirmation
+        long_condition = (close_val > highest_high) and (close_val > ema_val) and volume_confirmed
+        # Short logic: price breaks below 20-bar low with 12h downtrend and volume confirmation
+        short_condition = (close_val < lowest_low) and (close_val < ema_val) and volume_confirmed
+        
+        # Exit logic: trend reversal or opposite breakout
+        exit_long = (close_val < ema_val) or (close_val < lowest_low)
+        exit_short = (close_val > ema_val) or (close_val > highest_high)
+        
+        if long_condition and position != 1:
+            signals[i] = base_size
+            position = 1
+        elif short_condition and position != -1:
+            signals[i] = -base_size
+            position = -1
+        elif position == 1 and exit_long:
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and exit_short:
+            signals[i] = 0.0
+            position = 0
+        else:
+            # Hold current position
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                signals[i] = base_size
+            else:
+                signals[i] = -base_size
+    
+    return signals
+
+name = "6h_Donchian20_Breakout_12hTrend_VolumeConfirm"
+timeframe = "6h"
+leverage = 1.0
+```
+
+## Last Updated
+2026-04-26 17:32

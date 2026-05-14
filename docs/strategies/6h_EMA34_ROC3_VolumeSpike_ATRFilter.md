@@ -1,0 +1,127 @@
+# Strategy: 6h_EMA34_ROC3_VolumeSpike_ATRFilter
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.047 | +19.4% | -8.5% | 189 | FAIL |
+| ETHUSDT | 0.215 | +29.3% | -7.5% | 171 | PASS |
+| SOLUSDT | 0.812 | +86.6% | -14.2% | 159 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| ETHUSDT | 1.381 | +23.4% | -5.5% | 68 | PASS |
+| SOLUSDT | -0.393 | +1.3% | -6.2% | 59 | FAIL |
+
+## Code
+```python
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # === 12h ATR for volatility filter ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range calculation
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    
+    atr_12h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    
+    # === 12h EMA Trend Filter (34-period) ===
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # === 6h Price Momentum (ROC 3-period) ===
+    roc_3 = ((pd.Series(close).pct_change(3) * 100)).values
+    
+    # === Volume Spike Detection (20-period volume MA) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma)  # Strong volume spike
+    
+    signals = np.zeros(n)
+    
+    # Warmup: ensure all indicators have valid data
+    warmup = 50  # Need ROC(3), EMA34, ATR14
+    
+    # Track position state
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    for i in range(warmup, n):
+        # Skip if any required data is NaN
+        if (np.isnan(roc_3[i]) or np.isnan(ema_34_12h_aligned[i]) or
+            np.isnan(atr_12h_aligned[i]) or np.isnan(volume_spike[i])):
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        price = close[i]
+        roc = roc_3[i]
+        ema34 = ema_34_12h_aligned[i]
+        atr = atr_12h_aligned[i]
+        vol_spike = volume_spike[i]
+        
+        # === EXIT LOGIC: Exit when momentum fades or volatility drops ===
+        if position == 1:  # Long position
+            # Exit when momentum turns negative OR volatility drops significantly
+            if roc < 0 or atr < (atr_12h_aligned[i-1] * 0.7 if i > 0 else atr):
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        elif position == -1:  # Short position
+            # Exit when momentum turns positive OR volatility drops significantly
+            if roc > 0 or atr < (atr_12h_aligned[i-1] * 0.7 if i > 0 else atr):
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # === ENTRY LOGIC (only when flat) ===
+        if position == 0:
+            # LONG: Strong positive momentum + price above EMA34 + volume spike
+            if roc > 1.5 and price > ema34 and vol_spike:
+                signals[i] = 0.25
+                position = 1
+                continue
+            
+            # SHORT: Strong negative momentum + price below EMA34 + volume spike
+            elif roc < -1.5 and price < ema34 and vol_spike:
+                signals[i] = -0.25
+                position = -1
+                continue
+        
+        # Hold current position
+        if position == 1:
+            signals[i] = 0.25
+        elif position == -1:
+            signals[i] = -0.25
+        else:
+            signals[i] = 0.0
+    
+    return signals
+
+name = "6h_EMA34_ROC3_VolumeSpike_ATRFilter"
+timeframe = "6h"
+leverage = 1.0
+```
+
+## Last Updated
+2026-04-16 15:35

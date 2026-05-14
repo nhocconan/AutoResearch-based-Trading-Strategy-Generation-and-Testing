@@ -17,6 +17,18 @@ import pandas as pd
 
 DB_FILE = Path("results.db")
 
+TIMEFRAME_TOKENS = {
+    "1m", "3m", "5m", "15m", "30m", "45m",
+    "1h", "2h", "3h", "4h", "6h", "8h", "12h",
+    "1d", "2d", "3d", "4d", "1w", "1mo",
+}
+FAMILY_SKIP_TOKENS = TIMEFRAME_TOKENS | {"mtf", "gen", "v", "strategy"}
+SYMBOL_FOCUS_WEIGHTS = {
+    "BTCUSDT": 1.35,
+    "ETHUSDT": 1.00,
+    "SOLUSDT": 0.35,
+}
+
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS results (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +96,10 @@ def init_db():
 
 
 def append_results(results: list[dict], status: str, description: str, period: str = "train"):
-    """Insert experiment results into SQLite. Skips duplicates (strategy, symbol, period).
+    """Insert experiment results into SQLite.
+
+    Rows are upserted by (strategy, symbol, period). This prevents stale train
+    rows from older runs surviving when the same strategy name is reused later.
 
     Each dict in results should contain the backtest metrics with keys:
     sharpe_ratio, total_return_pct, annual_return_pct, max_drawdown_pct,
@@ -122,10 +137,23 @@ def append_results(results: list[dict], status: str, description: str, period: s
         return
 
     sql = """
-        INSERT OR IGNORE INTO results
+        INSERT INTO results
             (git_commit, strategy, symbol, sharpe, return_pct, cagr_pct, max_dd_pct,
              win_rate, profit_factor, trades, sortino, calmar, status, description, period)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(strategy, symbol, period) DO UPDATE SET
+            git_commit=excluded.git_commit,
+            sharpe=excluded.sharpe,
+            return_pct=excluded.return_pct,
+            cagr_pct=excluded.cagr_pct,
+            max_dd_pct=excluded.max_dd_pct,
+            win_rate=excluded.win_rate,
+            profit_factor=excluded.profit_factor,
+            trades=excluded.trades,
+            sortino=excluded.sortino,
+            calmar=excluded.calmar,
+            status=excluded.status,
+            description=excluded.description
     """
     with get_conn() as conn:
         conn.executemany(sql, rows)
@@ -251,6 +279,199 @@ def query_best_kept_sharpe() -> float:
     return float(row[0] or 0.0)
 
 
+def strategy_family_key(strategy_name: str) -> str:
+    """Collapse version/timeframe-heavy names into a reusable family key."""
+    raw = (strategy_name or "").strip().lower()
+    if not raw:
+        return "unknown"
+    raw = re.sub(r"_v\d+$", "", raw)
+    tokens = []
+    for token in raw.split("_"):
+        if not token or token in FAMILY_SKIP_TOKENS:
+            continue
+        if re.fullmatch(r"v\d+", token):
+            continue
+        tokens.append(token)
+    return "_".join(tokens[:8]) if tokens else raw
+
+
+def compute_focus_score(rows: list[dict]) -> float:
+    """Reward BTC/ETH test keeps much more than SOL-only wins."""
+    if not rows:
+        return 0.0
+
+    best_by_symbol: dict[str, float] = {}
+    for row in rows:
+        symbol = row.get("symbol", "")
+        sharpe = float(row.get("sharpe", 0) or 0)
+        prev = best_by_symbol.get(symbol)
+        if prev is None or sharpe > prev:
+            best_by_symbol[symbol] = sharpe
+
+    score = 0.0
+    kept_symbols = {
+        symbol for symbol, sharpe in best_by_symbol.items()
+        if sharpe > 0
+    }
+    for symbol, sharpe in best_by_symbol.items():
+        score += SYMBOL_FOCUS_WEIGHTS.get(symbol, 0.25) * max(0.0, sharpe)
+
+    if "BTCUSDT" in kept_symbols and "ETHUSDT" in kept_symbols:
+        score += 0.75
+    elif "BTCUSDT" in kept_symbols:
+        score += 0.35
+    elif "ETHUSDT" in kept_symbols:
+        score += 0.20
+    elif kept_symbols == {"SOLUSDT"}:
+        score -= 0.60
+
+    if len(kept_symbols) >= 2:
+        score += 0.20 * (len(kept_symbols) - 1)
+
+    return round(score, 4)
+
+
+def query_best_focus_score() -> float:
+    """Best BTC/ETH-weighted score among historically kept strategies."""
+    if not DB_FILE.exists():
+        return 0.0
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT strategy, symbol, sharpe
+            FROM results
+            WHERE period='test' AND status='keep'
+            """
+        ).fetchall()
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row["strategy"], []).append(dict(row))
+    if not grouped:
+        return 0.0
+    return max(compute_focus_score(items) for items in grouped.values())
+
+
+def query_strategy_family_stats(strategy_name: str | None = None, family: str | None = None) -> dict:
+    """Summarize existing kept test performance for a strategy family."""
+    family_key = family or strategy_family_key(strategy_name or "")
+    if not DB_FILE.exists():
+        return {
+            "family": family_key,
+            "distinct_strategies": 0,
+            "btc_eth_variants": 0,
+            "best_btc_eth_sharpe": 0.0,
+            "best_sol_sharpe": 0.0,
+            "best_focus_score": 0.0,
+        }
+
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT strategy, symbol, sharpe
+            FROM results
+            WHERE period='test' AND status='keep'
+            """
+        ).fetchall()
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        name = row["strategy"]
+        if strategy_family_key(name) != family_key:
+            continue
+        if strategy_name and name == strategy_name:
+            continue
+        grouped.setdefault(name, []).append(dict(row))
+
+    best_btc_eth = 0.0
+    best_sol = 0.0
+    btc_eth_variants = 0
+    best_focus = 0.0
+    for items in grouped.values():
+        symbols = {row["symbol"] for row in items if float(row.get("sharpe", 0) or 0) > 0}
+        if {"BTCUSDT", "ETHUSDT"} & symbols:
+            btc_eth_variants += 1
+        for row in items:
+            sharpe = float(row.get("sharpe", 0) or 0)
+            if row.get("symbol") in ("BTCUSDT", "ETHUSDT"):
+                best_btc_eth = max(best_btc_eth, sharpe)
+            elif row.get("symbol") == "SOLUSDT":
+                best_sol = max(best_sol, sharpe)
+        best_focus = max(best_focus, compute_focus_score(items))
+
+    return {
+        "family": family_key,
+        "distinct_strategies": len(grouped),
+        "btc_eth_variants": btc_eth_variants,
+        "best_btc_eth_sharpe": round(best_btc_eth, 4),
+        "best_sol_sharpe": round(best_sol, 4),
+        "best_focus_score": round(best_focus, 4),
+    }
+
+
+def query_exhausted_families(limit: int = 15, min_variants: int = 4) -> list[dict]:
+    """Families with lots of variants, useful for duplicate-avoidance prompts."""
+    if not DB_FILE.exists():
+        return []
+    with get_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT strategy, symbol, status, period, sharpe
+            FROM results
+            """
+        ).fetchall()
+
+    families: dict[str, dict] = {}
+    for row in rows:
+        family = strategy_family_key(row["strategy"])
+        info = families.setdefault(
+            family,
+            {
+                "family": family,
+                "strategies": set(),
+                "kept_strategies": set(),
+                "best_btc_eth_sharpe": 0.0,
+                "best_sol_sharpe": 0.0,
+            },
+        )
+        info["strategies"].add(row["strategy"])
+        if row["period"] == "test" and row["status"] == "keep":
+            info["kept_strategies"].add(row["strategy"])
+            sharpe = float(row["sharpe"] or 0.0)
+            if row["symbol"] in ("BTCUSDT", "ETHUSDT"):
+                info["best_btc_eth_sharpe"] = max(info["best_btc_eth_sharpe"], sharpe)
+            elif row["symbol"] == "SOLUSDT":
+                info["best_sol_sharpe"] = max(info["best_sol_sharpe"], sharpe)
+
+    ranked = []
+    for info in families.values():
+        total_variants = len(info["strategies"])
+        if total_variants < min_variants:
+            continue
+        ranked.append(
+            {
+                "family": info["family"],
+                "total_variants": total_variants,
+                "kept_variants": len(info["kept_strategies"]),
+                "best_btc_eth_sharpe": round(info["best_btc_eth_sharpe"], 4),
+                "best_sol_sharpe": round(info["best_sol_sharpe"], 4),
+            }
+        )
+
+    ranked.sort(
+        key=lambda item: (
+            item["total_variants"],
+            item["kept_variants"],
+            item["best_sol_sharpe"],
+        ),
+        reverse=True,
+    )
+    return ranked[:limit]
+
+
 def query_recent_experiments(n: int = 12) -> pd.DataFrame:
     """Return last n active distinct strategies (train period), ordered newest first."""
     if not DB_FILE.exists():
@@ -348,6 +569,20 @@ def delete_strategy(strategy_name: str):
     """Remove all rows for a given strategy (used by revalidate --strategy)."""
     with get_conn() as conn:
         conn.execute("DELETE FROM results WHERE strategy = ?", (strategy_name,))
+
+
+def delete_test_result(strategy_name: str, symbol: str):
+    """Remove a stale test row for one strategy/symbol pair.
+
+    Used when a later rerun with the same strategy name fails before producing
+    fresh test-period output, which would otherwise leave old kept test rows in
+    the dashboard.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM results WHERE strategy = ? AND symbol = ? AND period = 'test'",
+            (strategy_name, symbol),
+        )
 
 
 def metrics_to_db_dict(

@@ -28,6 +28,7 @@ if _env_file.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 from llm_client import LLMClient
+from results_db import query_exhausted_families
 
 LOG_FILE = Path("auto_concept_research.log")
 PROGRAM_MD = Path("program.md")
@@ -49,7 +50,7 @@ def resolve_analysis_model() -> str:
     return (
         os.environ.get("OLLAMA_ANALYSIS_MODEL")
         or os.environ.get("OLLAMA_MODEL")
-        or "glm-5"
+        or "glm-5.1:cloud"
     )
 
 
@@ -78,19 +79,16 @@ def get_indicator_stats() -> dict:
 
 def get_exhausted_combinations() -> list[str]:
     """Get most-tested strategy patterns to avoid repeating."""
-    if not DB_FILE.exists():
-        return []
-    conn = sqlite3.connect(DB_FILE)
-    rows = conn.execute("""
-        SELECT substr(strategy, 1, 40) as prefix, COUNT(*) as cnt,
-               SUM(CASE WHEN status='keep' THEN 1 ELSE 0 END) as kept
-        FROM results WHERE period='train'
-        GROUP BY prefix
-        HAVING cnt > 50
-        ORDER BY cnt DESC LIMIT 15
-    """).fetchall()
-    conn.close()
-    return [f"{r[0]} ({r[1]} tested, {r[2]} kept)" for r in rows]
+    families = query_exhausted_families(limit=15, min_variants=4)
+    exhausted = []
+    for item in families:
+        exhausted.append(
+            f"{item['family']} "
+            f"({item['total_variants']} variants, {item['kept_variants']} kept, "
+            f"best BTC/ETH test Sharpe={item['best_btc_eth_sharpe']:.2f}, "
+            f"best SOL test Sharpe={item['best_sol_sharpe']:.2f})"
+        )
+    return exhausted
 
 
 def already_in_program(text: str, program_content: str) -> bool:
@@ -145,6 +143,8 @@ TASK: Generate 4-6 SPECIFIC, NOVEL trading strategy concepts NOT already listed 
 4. Include SPECIFIC parameters and formulas (not vague descriptions)
 5. Prioritize: market microstructure, order flow proxies, cross-timeframe divergence, volatility regime, seasonality patterns
 6. Prefer combinations that are fresh in the web digest but still consistent with repo evidence from results.db
+7. BTC and ETH are the primary targets. Do NOT suggest families that mainly produce SOL-only wins unless you add a clear BTC/ETH-specific edge.
+8. Avoid overused families listed above unless the concept changes the core edge materially, not just the timeframe or version suffix.
 
 FORMAT: For each strategy, use this exact format (markdown):
 **N. Strategy Name** *(best timeframe(s))*

@@ -1,0 +1,133 @@
+# Strategy: 6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_HTF
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.034 | +19.8% | -6.3% | 168 | FAIL |
+| ETHUSDT | 0.013 | +20.8% | -13.6% | 142 | PASS |
+| SOLUSDT | 0.364 | +44.3% | -13.0% | 120 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| ETHUSDT | 1.405 | +25.7% | -6.7% | 51 | PASS |
+| SOLUSDT | 0.253 | +8.8% | -5.8% | 47 | PASS |
+
+## Code
+```python
+#!/usr/bin/env python3
+"""
+6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_HTF
+Hypothesis: Camarilla R4/S4 breakout on 6h with 1d EMA34 trend filter and volume confirmation.
+R4/S4 levels represent stronger breakout points than R3/S3, reducing false breakouts.
+Trading only in direction of 1d trend avoids counter-trend whipsaws in both bull and bear markets.
+Volume spike confirms breakout authenticity. Designed for 6h timeframe with target 50-150 trades over 4 years.
+Uses discrete position sizing (0.25) to minimize fee churn while maintaining adequate exposure.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Calculate ATR for Camarilla levels (20-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Camarilla levels from previous 6h bar's OHLC
+    prev_close = np.concatenate([[close[0]], close[:-1]])
+    prev_high = np.concatenate([[high[0]], high[:-1]])
+    prev_low = np.concatenate([[low[0]], low[:-1]])
+    
+    camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume spike: current volume > 2.0 * 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_avg)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    # Warmup: need enough for ATR, EMA34, volume average
+    start_idx = max(100, 34, 20, 20)
+    
+    for i in range(start_idx, n):
+        # Skip if any data not ready
+        if (np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_spike[i]) or 
+            np.isnan(atr[i])):
+            signals[i] = 0.0
+            continue
+        
+        close_val = close[i]
+        ema_trend = ema_34_aligned[i]
+        vol_spike = volume_spike[i]
+        atr_val = atr[i]
+        size = 0.25  # 25% position size
+        
+        if position == 0:
+            # Flat - look for entry: breakout in direction of 1d trend with volume spike
+            # Long: price breaks above Camarilla R4 AND 1d trend is up (close > EMA34) AND volume spike
+            # Short: price breaks below Camarilla S4 AND 1d trend is down (close < EMA34) AND volume spike
+            long_breakout = close_val > camarilla_r4[i]
+            short_breakout = close_val < camarilla_s4[i]
+            trend_up = close_val > ema_trend
+            trend_down = close_val < ema_trend
+            
+            if long_breakout and trend_up and vol_spike:
+                signals[i] = size
+                position = 1
+                entry_price = close_val
+            elif short_breakout and trend_down and vol_spike:
+                signals[i] = -size
+                position = -1
+                entry_price = close_val
+        elif position == 1:
+            # Long - exit when price breaks below Camarilla S4 (failed breakout) or ATR stoploss hit
+            if close_val < camarilla_s4[i] or close_val < entry_price - 2.5 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            else:
+                signals[i] = size
+        elif position == -1:
+            # Short - exit when price breaks above Camarilla R4 (failed breakout) or ATR stoploss hit
+            if close_val > camarilla_r4[i] or close_val > entry_price + 2.5 * atr_val:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            else:
+                signals[i] = -size
+    
+    return signals
+
+name = "6h_Camarilla_R4_S4_Breakout_1dTrend_VolumeSpike_HTF"
+timeframe = "6h"
+leverage = 1.0
+```
+
+## Last Updated
+2026-04-27 00:35

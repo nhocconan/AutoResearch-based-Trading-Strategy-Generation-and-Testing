@@ -1,61 +1,32 @@
 # Auto Research Review
 
-Generated: 2026-04-08 00:02:13 UTC
+Generated: 2026-05-14 02:32:48 UTC
 
-# Research Loop Operational Review
+# Research-Ops Review: Crypto Strategy Autoresearch Loop
 
 ## 1. Executive Summary
-
-The system exhibits a **78.8% attrition rate** with critical inefficiencies in the generation-to-validation pipeline. The dominant failure modes—`too_few_trades` (90) and `negative_sharpe` (93)—account for 76% of all train failures, indicating the generator produces strategies with entry conditions that are either too restrictive or fundamentally misaligned with market dynamics. The 21.2% keep rate represents significant compute waste that can be addressed through structural changes to the research loop.
+The research loop is suffering a severe sample efficiency crisis. 90 out of 240 recent candidates failed for `too_few_trades` and 85 for `negative_sharpe`, while only 4 failed for `overtrading`. The system is generating structurally broken or overly restrictive code 73% of the time, resulting in a dismal 25.4% keep rate. The top test winners (e.g., `1h_SwingReversal_4hTrend_Filter` with Sharpe >9) prove viable alpha exists, but the generator lacks the failure-feedback mechanisms to navigate the parameter space efficiently. We must pivot from blind generation to targeted refinement.
 
 ## 2. Structural Weaknesses
-
-**A. No Feedback Loop from Failures to Generator**
-`agent_research.py` appears to generate strategies without ingesting failure pattern data. The `too_few_trades: 90` count suggests repeated generation of over-filtered entries that could be pre-emptively caught.
-
-**B. Asymmetric Failure Distribution**
-- Overtrading: 5 failures (generator too conservative on trade frequency)
-- Too few trades: 90 failures (entry filters too restrictive)
-This 18:1 ratio indicates the generator over-corrects for overtrading warnings in `program.md`.
-
-**C. Static Knowledge Base Staleness**
-`program.md` contains hard-coded timeframe keep rates from "16,000+ experiments" but no mechanism exists to update these priors from recent results. The "unknown" category in keep rates suggests tracking metadata gaps.
-
-**D. Invalid Code Generation**
-The "other" bucket (50 failures) likely contains syntax errors, invalid MTF patterns, or constraint violations that static checks should catch pre-backtest.
+- **Failure Asymmetry:** The `too_few_trades` bucket (90) massively outweighs `overtrading` (4). `agent_research.py` is over-indexing on the "fee drag is #1 killer" heuristic, producing hyper-conservative strategies that never trigger entries.
+- **Invalid Code / Negative Sharpe:** 85 `negative_sharpe` failures imply `auto_concept_research.py` is proposing concepts, or `agent_research.py` is implementing them, with fundamentally flawed logic or look-ahead bias that slips past static checks.
+- **Lookahead Leakage:** The top `1h` winners have suspiciously high Sharpes (>9) and trade counts (241-305) on a timeframe with a historical 17% keep rate. The prefix look-ahead test is likely passing, but intrabar SL/TP simulation or data-leakage in `generate_signals()` may be artificially inflating results.
+- **Flat Feedback Loop:** `agent_research.py` currently operates open-loop. It logs to `results.tsv` but doesn't programmatically parse its own failure modes to adjust the next prompt.
 
 ## 3. Highest-Impact Changes
-
-| Priority | Change | Expected Impact |
-|----------|--------|-----------------|
-| 1 | Pre-backtest trade count estimator | Reduce `too_few_trades` by 60%+ |
-| 2 | Failure pattern injection into prompts | Reduce `negative_sharpe` by 40% |
-| 3 | Two-stage validation (syntax → semantic → backtest) | Eliminate "other" bucket |
-| 4 | Dynamic `program.md` updates from results | Improve keep rate to 35%+ |
+- **Dynamic Trade-Count Targeting:** Hardcode `research_rules.py` thresholds into the `agent_research.py` prompt dynamically. If the last 5 runs failed for `too_few_trades`, force the model to loosen entry filters (e.g., drop a volume spike requirement).
+- **Prefix-Test Bootstrapping:** Move the prefix look-ahead test *before* the full backtest in the evaluation flow. Running a 100-bar prefix check costs milliseconds; running a 4-year backtest costs minutes. Discard 85% of `negative_sharpe` / look-ahead-biased strategies before paying the compute cost of a full backtest.
+- **Overtrading Circuit Breaker:** Add a post-generation static check in `agent_research.py`: if the strategy logic contains more than 3 independent entry conditions on a 1h/4h timeframe, reject the code block *before* backtesting.
 
 ## 4. Model Split Recommendation
-
-| Role | Model | Justification |
-|------|-------|---------------|
-| **Generation** | `deepseek-v3.2` | Strong code synthesis, follows structured constraints well, cost-effective for high-volume iteration |
-| **Analysis/Review** | `kimi-k2-thinking` | Explicit reasoning chain for failure pattern recognition, better at identifying *why* strategies fail |
+**Maintain `glm-5.1:cloud` as the single model for both generation and review.** 
+Splitting models (e.g., a smaller model for review, larger for generation) introduces serialization latency and context-format fragility that degrades autonomous loops. `glm-5.1:cloud` offers the necessary instruction-following rigor for structured code generation and the analytical capacity for self-review. Instead of splitting the model, split the *prompt context*: use `glm-5.1:cloud` with a strict two-pass profile (Generator mode vs. Critic mode) within `agent_research.py` to evaluate its own code before submitting to the backtest engine.
 
 ## 5. Next 7 Concrete Actions
-
-1. **Add trade-count pre-filter in `agent_research.py`**: Before backtest, estimate expected trades using signal frequency on sample data. Reject if <5 trades/year estimated.
-
-2. **Create `failure_patterns.md`**: Auto-generate weekly from `results.tsv` failures. Inject into generator prompt as "strategies that failed with reasons."
-
-3. **Implement entry-condition relaxation heuristic**: When `too_few_trades` detected, auto-generate variant with one filter removed. Run as parallel experiment.
-
-4. **Add per-symbol trade count validation**: Current rules allow 5 total trades; enforce minimum per-symbol (e.g., ≥2 per symbol) to avoid concentration risk.
-
-5. **Fix "unknown" timeframe tracking**: Audit `auto_concept_research.py` to ensure TF metadata propagates to results logging.
-
-6. **Create `validate_syntax.py` pre-check**: Run AST-based validation for MTF rules, lookahead patterns, and forbidden constructs before backtest dispatch.
-
-7. **Weekly `program.md` prior update**: Script to recalculate timeframe keep rates from last 500 experiments and update the markdown table automatically.
-
----
-
-**Word count: 498**
+1. **Patch `agent_research.py` failure injection:** Parse `results.tsv` at runtime. Inject the exact failure bucket (e.g., "Last 3 runs failed: too_few_trades. Reduce entry filters by 1") into the next LLM prompt.
+2. **Add trade-count guard in `agent_research.py`:** Pre-parse the generated `strategy.py`. If it uses >3 entry filters for `<4h` timeframes, force a retry to combat `too_few_trades`.
+3. **Reorder `evaluate.py` flow:** Execute the prefix look-ahead test *first*. Skip the full 4-year backtest if the prefix fails, saving ~80% of compute on `negative_sharpe` candidates.
+4. **Audit `1h` winners:** Run the top 3 `1h_SwingReversal` strategies through a manual intrabar fill simulation. A 9.4 Sharpe on 1h is a statistical red flag for implicit look-ahead.
+5. **Update `program.md` trade targets:** Explicitly map `too_few_trades` to the prompt: "If trades < 5, your entry condition is too strict. Remove one filter."
+6. **Constrain `auto_concept_research.py`:** Limit concept generation to 4h, 12h, and 1d timeframes only. 1h and below are wasting compute given current keep rates.
+7. **Implement Critic Pass in `agent_research.py`:** Before writing `strategy.py` to disk, ask `glm-5.1:cloud` to critique the generated code: "Does this strategy contain look-ahead bias? Will it generate >5 trades on 4h data?" Reject if confidence is low.

@@ -3,22 +3,25 @@
 ## Train Results
 | Symbol | Sharpe | Return | Max DD | Trades | Status |
 |--------|--------|--------|--------|--------|--------|
-| BTCUSDT | -0.166 | +10.9% | -14.4% | 77 | FAIL |
-| ETHUSDT | -0.027 | +17.4% | -20.1% | 59 | FAIL |
-| SOLUSDT | 0.979 | +135.8% | -19.5% | 37 | PASS |
+| BTCUSDT | -0.269 | +8.5% | -16.8% | 42 | FAIL |
+| ETHUSDT | -0.619 | -5.4% | -16.9% | 33 | FAIL |
+| SOLUSDT | 1.370 | +361.4% | -18.7% | 13 | PASS |
 
 ## Test Results (2025+)
 | Symbol | Sharpe | Return | Max DD | Trades | Status |
 |--------|--------|--------|--------|--------|--------|
-| SOLUSDT | 0.126 | +7.3% | -11.5% | 14 | PASS |
+| SOLUSDT | 0.249 | +9.4% | -13.3% | 11 | PASS |
 
 ## Code
 ```python
 #!/usr/bin/env python3
-"""
-4h ATR Breakout + 12h Trend + Volume Confirmation v1
-Hypothesis: ATR-based breakouts from Donchian-like channels combined with 12h trend filter and volume confirmation work across bull/bear markets. The 4h timeframe targets 20-50 trades/year, avoiding excessive turnover while capturing significant moves. Volume ensures breakout validity, and 12h trend avoids counter-trend whipsaws.
-"""
+# 4h_atr_breakout_12h_trend_volume_v1
+# Hypothesis: On 4h timeframe, use ATR-based volatility breakout with 12h trend filter and volume confirmation.
+# Long when price breaks above ATR(14) upper band with volume > 1.5x average and 12h uptrend.
+# Short when price breaks below ATR(14) lower band with volume > 1.5x average and 12h downtrend.
+# Exit when price reverses by 1x ATR from breakout level or opposite signal triggers.
+# Uses volatility breakout to capture momentum moves with volatility-adjusted position sizing.
+# Target: 25-35 trades/year to avoid excessive fee drag while capturing significant moves.
 
 import numpy as np
 import pandas as pd
@@ -30,7 +33,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -39,68 +42,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
+    # Calculate ATR(14) for volatility bands
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.zeros(n)
+    atr[13] = np.mean(tr[:14])
+    for i in range(14, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Calculate volatility bands: midpoint ± ATR
+    midpoint = (high + low) / 2
+    upper_band = midpoint + atr
+    lower_band = midpoint - atr
+    
+    # Get 12h trend data (HTF)
     df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # 12h EMA(34) for trend filter
-    ema_34_12h = df_12h['close'].ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    # Calculate 12h EMA25 for trend filter
+    close_12h = df_12h['close'].values
+    ema25_12h = pd.Series(close_12h).ewm(span=25, min_periods=25, adjust=False).mean().values
+    ema25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema25_12h)
     
-    # 4h ATR(14) for volatility and breakout bands
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First bar TR
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # 4h Donchian-like channels using ATR
-    upper_band = np.roll(close, 1) + (2.0 * atr)  # Previous close + 2*ATR
-    lower_band = np.roll(close, 1) - (2.0 * atr)  # Previous close - 2*ATR
-    
-    # Volume filter (>1.3x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma * 1.3)
+    # Volume confirmation: 20-period average on 4h
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 1=long, -1=short, 0=flat
+    breakout_level = 0  # Track breakout level for exit
     
-    for i in range(14, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(vol_filter[i])):
-            signals[i] = 0.0
+    # Start after warmup
+    start_idx = 25
+    
+    for i in range(start_idx, n):
+        # Skip if data not available
+        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or \
+           np.isnan(ema25_12h_aligned[i]) or np.isnan(avg_volume[i]):
+            if position != 0:
+                # Hold position until exit conditions met
+                pass
+            else:
+                signals[i] = 0.0
             continue
         
         if position == 1:  # Long position
-            # Exit: price closes below lower band or trend reverses
-            if close[i] <= lower_band[i] or close[i] < ema_34_12h_aligned[i]:
+            # Exit: price reverses by 1x ATR from breakout level OR opposite signal
+            if close[i] <= breakout_level - atr[i] or \
+               (close[i] < lower_band[i] and volume[i] > 1.5 * avg_volume[i] and close[i] < ema25_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = 0.25
                 
         elif position == -1:  # Short position
-            # Exit: price closes above upper band or trend reverses
-            if close[i] >= upper_band[i] or close[i] > ema_34_12h_aligned[i]:
+            # Exit: price reverses by 1x ATR from breakout level OR opposite signal
+            if close[i] >= breakout_level + atr[i] or \
+               (close[i] > upper_band[i] and volume[i] > 1.5 * avg_volume[i] and close[i] > ema25_12h_aligned[i]):
                 position = 0
                 signals[i] = 0.0
             else:
                 signals[i] = -0.25
         else:  # Flat, look for entry
-            # Long breakout with trend alignment and volume
-            if (close[i] >= upper_band[i] and 
-                close[i] > ema_34_12h_aligned[i] and 
-                vol_filter[i]):
+            # Volume confirmation: current volume > 1.5x average volume
+            volume_ok = volume[i] > 1.5 * avg_volume[i]
+            
+            # 12h trend filter
+            uptrend_12h = close[i] > ema25_12h_aligned[i]
+            downtrend_12h = close[i] < ema25_12h_aligned[i]
+            
+            # Long entry: price breaks above upper band with volume and uptrend
+            if close[i] > upper_band[i] and volume_ok and uptrend_12h:
                 position = 1
+                breakout_level = close[i]  # Record breakout level
                 signals[i] = 0.25
-            # Short breakdown with trend alignment and volume
-            elif (close[i] <= lower_band[i] and 
-                  close[i] < ema_34_12h_aligned[i] and 
-                  vol_filter[i]):
+            # Short entry: price breaks below lower band with volume and downtrend
+            elif close[i] < lower_band[i] and volume_ok and downtrend_12h:
                 position = -1
+                breakout_level = close[i]  # Record breakout level
                 signals[i] = -0.25
     
     return signals
 ```
 
 ## Last Updated
-2026-04-08 00:22
+2026-04-08 15:15

@@ -1,0 +1,155 @@
+# Strategy: 4h_Camarilla_R1S1_Breakout_VolumeATRStop_v3
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.052 | +15.3% | -10.6% | 254 | DISCARD |
+| ETHUSDT | 0.309 | +41.2% | -14.1% | 243 | KEEP |
+| SOLUSDT | 0.846 | +143.4% | -20.5% | 234 | KEEP |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| ETHUSDT | 0.626 | +17.4% | -8.3% | 83 | KEEP |
+| SOLUSDT | 0.664 | +19.1% | -12.6% | 80 | KEEP |
+
+## Code
+```python
+#!/usr/bin/env python3
+"""
+4h_Camarilla_R1S1_Breakout_VolumeATRStop_v3
+Hypothesis: Breakout at Camarilla R1/S1 levels with volume confirmation and ATR-based trailing stop.
+Uses 4h timeframe with 12h HTF trend filter to reduce false breakouts. Works in bull/bear: 
+In uptrend (12h close > 12h EMA34), buy R1 breakouts; in downtrend (12h close < 12h EMA34), sell S1 breakdowns.
+Volume confirmation and ATR trailing stop reduce whipsaws. Target: 20-40 trades/year per symbol (80-160 over 4 years).
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load 1d data once for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Load 12h data once for HTF trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 35:
+        return np.zeros(n)
+    
+    # Previous day's OHLC for Camarilla calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla levels: R1, S1
+    rang = prev_high - prev_low
+    r1 = prev_close + rang * 1.0 / 12
+    s1 = prev_close - rang * 1.0 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 12h EMA34 for trend filter
+    close_12h = df_12h['close'].values
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Volume filter: 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for stoploss and position sizing
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
+    
+    for i in range(100, n):
+        # Skip if indicators not ready
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        price = close[i]
+        volume = prices['volume'].iloc[i]
+        
+        # Update trailing extremes
+        if position == 1:
+            highest_since_entry = max(highest_since_entry, price)
+        elif position == -1:
+            lowest_since_entry = min(lowest_since_entry, price)
+        
+        # Volume confirmation
+        volume_ok = volume > 1.5 * vol_ma[i]
+        
+        # 12h trend filter: uptrend if close > EMA34, downtrend if close < EMA34
+        uptrend = price > ema_34_12h_aligned[i]
+        downtrend = price < ema_34_12h_aligned[i]
+        
+        if position == 0:
+            # Long: price breaks above R1 with volume in uptrend
+            if price > r1_aligned[i] and volume_ok and uptrend:
+                signals[i] = 0.25
+                position = 1
+                entry_price = price
+                highest_since_entry = price
+            # Short: price breaks below S1 with volume in downtrend
+            elif price < s1_aligned[i] and volume_ok and downtrend:
+                signals[i] = -0.25
+                position = -1
+                entry_price = price
+                lowest_since_entry = price
+        
+        elif position == 1:
+            # Trailing stop: exit if price drops 2.0 * ATR from highest
+            if price < highest_since_entry - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Trailing stop: exit if price rises 2.0 * ATR from lowest
+            if price > lowest_since_entry + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+    
+    return signals
+
+name = "4h_Camarilla_R1S1_Breakout_VolumeATRStop_v3"
+timeframe = "4h"
+leverage = 1.0
+```
+
+## Last Updated
+2026-04-21 07:52

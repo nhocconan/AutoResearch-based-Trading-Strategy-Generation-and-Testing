@@ -4,6 +4,7 @@
 #   ./run.sh                    # Run research loop (200 experiments)
 #   ./run.sh --max 50           # Run 50 experiments
 #   ./run.sh --dashboard        # Start dashboard only
+#   ./run.sh --maintenance      # Start self-improvement watchdog only
 #   ./run.sh --prepare          # Download/update data only
 #   ./run.sh --all              # Prepare data + start dashboard + run research
 #   ./run.sh --status           # Check status of running processes
@@ -83,8 +84,22 @@ case "${1:-run}" in
         echo "=== Starting dashboard ==="
         pkill -f "python.*dashboard.py" 2>/dev/null || true
         sleep 0.5
-        $PYTHON dashboard.py &
+        nohup $PYTHON dashboard.py >> dashboard.log 2>&1 &
         echo "Dashboard running at http://127.0.0.1:8888"
+        echo "Log: tail -f dashboard.log"
+        ;;
+
+    --maintenance|-m)
+        echo "=== Starting self-improvement watchdog ==="
+        SESSION="research_maintenance"
+        DIR="$(pwd)"
+        ACTIVATE="source $DIR/.venv/bin/activate && export \$(grep -v '^#' $DIR/.env | grep '=' | xargs)"
+        tmux kill-session -t "$SESSION" 2>/dev/null || true
+        sleep 0.5
+        tmux new-session -d -s "$SESSION" -n maintenance -x 200 -y 50
+        tmux send-keys -t "$SESSION:0" "cd $DIR && $ACTIVATE && exec python3 -u self_improvement_watchdog.py" Enter
+        echo "Maintenance watchdog running in tmux session '$SESSION'"
+        echo "Attach: tmux attach -t $SESSION"
         ;;
 
     --status|-s)
@@ -98,11 +113,18 @@ case "${1:-run}" in
             else
                 echo "  Binary: not installed"
             fi
-            if curl -fsS "${OLLAMA_API_ROOT}/api/tags" >/dev/null 2>&1; then
-                echo "  Ollama API: up (${OLLAMA_API_ROOT})"
-            else
-                echo "  Ollama API: down (${OLLAMA_API_ROOT})"
-            fi
+            case "${OLLAMA_API_ROOT:-}" in
+                https://ollama.com|http://ollama.com)
+                    echo "  Ollama API: cloud endpoint configured (${OLLAMA_URL})"
+                    ;;
+                *)
+                    if curl -fsS "${OLLAMA_API_ROOT}/api/tags" >/dev/null 2>&1; then
+                        echo "  Ollama API: up (${OLLAMA_API_ROOT})"
+                    else
+                        echo "  Ollama API: down (${OLLAMA_API_ROOT})"
+                    fi
+                    ;;
+            esac
         fi
         echo ""
         echo "Research loop:"
@@ -110,6 +132,8 @@ case "${1:-run}" in
         echo ""
         echo "Dashboard:"
         ps aux | grep "dashboard.py" | grep -v grep || echo "  Not running"
+        echo ""
+        $PYTHON self_improvement_watchdog.py --status 2>/dev/null || echo "Self-improvement: status unavailable"
         echo ""
         echo "Results (SQLite):"
         if [ -f results.db ]; then
@@ -140,8 +164,10 @@ case "${1:-run}" in
     --stop)
         echo "=== Stopping all processes ==="
         tmux kill-session -t research 2>/dev/null && echo "Killed tmux session 'research'" || true
+        tmux kill-session -t research_maintenance 2>/dev/null && echo "Killed tmux session 'research_maintenance'" || true
         pkill -f "agent_research.py" 2>/dev/null && echo "Stopped research loop" || echo "Research loop not running"
         pkill -f "dashboard.py" 2>/dev/null && echo "Stopped dashboard" || echo "Dashboard not running"
+        pkill -f "self_improvement_watchdog.py" 2>/dev/null && echo "Stopped self-improvement watchdog" || echo "Self-improvement watchdog not running"
         ;;
 
     --watchdog|-w)
@@ -165,18 +191,23 @@ case "${1:-run}" in
         tmux new-window -t "$SESSION:1" -n dashboard
         tmux send-keys -t "$SESSION:1" "cd $DIR && $ACTIVATE && while true; do echo \"[\$(date '+%H:%M:%S')] Starting dashboard...\"; python3 dashboard.py 2>&1 | tee dashboard.log; EXIT=\$?; echo \"[\$(date '+%H:%M:%S')] Dashboard exited (\$EXIT), restarting in 3s...\"; sleep 3; done" Enter
 
-        # Watchdog in window 2 (monitors stuck processes)
-        tmux new-window -t "$SESSION:2" -n watchdog
-        tmux send-keys -t "$SESSION:2" "cd $DIR && $ACTIVATE && echo 'Watchdog started — checks every 5min for stuck processes'; while true; do sleep 300; if [ -f research_loop.log ]; then LAST_MOD=\$(stat -c %Y research_loop.log 2>/dev/null); NOW=\$(date +%s); SILENT=\$((NOW - LAST_MOD)); if [ \"\$SILENT\" -gt 600 ]; then echo \"[\$(date '+%H:%M:%S')] Research STUCK (\${SILENT}s silent) — killing...\"; pkill -9 -f 'agent_research.py' 2>/dev/null; fi; echo \"[\$(date '+%H:%M:%S')] OK (last output \${SILENT}s ago)\"; fi; done" Enter
+        # Self-improvement in window 2 (refreshes web discovery / review / concepts)
+        tmux new-window -t "$SESSION:2" -n maintenance
+        tmux send-keys -t "$SESSION:2" "cd $DIR && $ACTIVATE && exec python3 -u self_improvement_watchdog.py" Enter
+
+        # Watchdog in window 3 (monitors stuck processes)
+        tmux new-window -t "$SESSION:3" -n watchdog
+        tmux send-keys -t "$SESSION:3" "cd $DIR && $ACTIVATE && echo 'Watchdog started — checks every 5min for stuck processes'; while true; do sleep 300; if [ -f research_loop.log ]; then LAST_MOD=\$(stat -c %Y research_loop.log 2>/dev/null); NOW=\$(date +%s); SILENT=\$((NOW - LAST_MOD)); if [ \"\$SILENT\" -gt 600 ]; then echo \"[\$(date '+%H:%M:%S')] Research STUCK (\${SILENT}s silent) — killing...\"; pkill -9 -f 'agent_research.py' 2>/dev/null; fi; echo \"[\$(date '+%H:%M:%S')] OK (last output \${SILENT}s ago)\"; fi; done" Enter
 
         # Focus on research window
         tmux select-window -t "$SESSION:0"
 
         echo ""
-        echo "tmux session '$SESSION' created with 3 windows:"
+        echo "tmux session '$SESSION' created with 4 windows:"
         echo "  0:research  - auto-restart research loop"
         echo "  1:dashboard - auto-restart dashboard (http://0.0.0.0:8888)"
-        echo "  2:watchdog  - kills stuck processes (>10min silent)"
+        echo "  2:maintenance - refreshes discovery/review/concepts automatically"
+        echo "  3:watchdog  - kills stuck processes (>10min silent)"
         echo ""
         echo "Attach:  tmux attach -t $SESSION"
         echo "Stop:    ./run.sh --stop"
@@ -195,7 +226,7 @@ case "${1:-run}" in
         # Dashboard
         pkill -f "python.*dashboard.py" 2>/dev/null || true
         sleep 0.5
-        $PYTHON dashboard.py &
+        nohup $PYTHON dashboard.py >> dashboard.log 2>&1 &
         echo "Dashboard: http://127.0.0.1:8888"
         # Research
         MAX="${2:-999999}"
@@ -210,7 +241,7 @@ case "${1:-run}" in
         ensure_local_ollama
         # Start dashboard if not running
         if ! pgrep -f "dashboard.py" > /dev/null 2>&1; then
-            $PYTHON dashboard.py &
+            nohup $PYTHON dashboard.py >> dashboard.log 2>&1 &
             echo "Dashboard: http://127.0.0.1:8888"
         fi
         echo "=== Starting research loop (max=$MAX experiments) ==="
@@ -231,6 +262,7 @@ case "${1:-run}" in
         echo "  (default)       Start research loop"
         echo "  --all, -a       Full setup: prepare data + dashboard + research"
         echo "  --watchdog, -w  Start with auto-restart watchdog (recommended)"
+        echo "  --maintenance, -m Start self-improvement watchdog in tmux"
         echo "  --prepare, -p   Download/update market data"
         echo "  --dashboard, -d Start web dashboard only"
         echo "  --status, -s    Check running processes and results"
