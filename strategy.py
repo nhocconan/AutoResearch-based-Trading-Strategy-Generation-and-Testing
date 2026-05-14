@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA50 trend filter and volume confirmation (>1.5x 20-period average).
-# Long when price breaks above R3 AND close > 1w EMA50 AND volume > 1.5x MA20.
-# Short when price breaks below S3 AND close < 1w EMA50 AND volume > 1.5x MA20.
-# Exit when price crosses the 1w EMA50 in opposite direction.
-# Uses 1w HTF for trend to reduce noise and overtrading. Volume confirmation reduces false signals.
+# Hypothesis: 1d Camarilla R3/S3 breakout with 1w EMA200 trend filter and volume confirmation (>1.5x 20-period average).
+# Long when price breaks above R3 AND close > 1w EMA200 (bullish trend) AND volume > 1.5x MA20.
+# Short when price breaks below S3 AND close < 1w EMA200 (bearish trend) AND volume > 1.5x MA20.
+# Exit when price crosses the 1w EMA200 in opposite direction.
+# Uses 1w HTF EMA200 for strong trend filter to avoid whipsaws and reduce trade frequency.
+# Volume confirmation reduces false breakouts.
 # Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
-# Camarilla levels provide structured support/resistance; 1w EMA50 filters for primary trend.
 
-name = "1d_Camarilla_R3S3_Breakout_1wEMA50_VolumeConfirm_v1"
+name = "1d_Camarilla_R3S3_Breakout_1wEMA200_VolumeConfirm_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -37,16 +37,16 @@ def generate_signals(prices):
         return np.zeros(n)
     close_1w = df_1w['close'].values
     
-    # 1w EMA(50) - trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1w EMA(200) - strong trend filter
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_50_1w_aligned[i]) or
+        if (np.isnan(ema_200_1w_aligned[i]) or
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
@@ -66,32 +66,32 @@ def generate_signals(prices):
             S3 = np.nan
         
         if position == 0:
-            # LONG: Price breaks above R3 AND close > 1w EMA50 (bullish trend) AND volume confirm
+            # LONG: Price breaks above R3 AND close > 1w EMA200 (bullish trend) AND volume confirm
             if (not np.isnan(R3) and 
                 close[i] > R3 and 
-                close[i] > ema_50_1w_aligned[i] and 
+                close[i] > ema_200_1w_aligned[i] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 AND close < 1w EMA50 (bearish trend) AND volume confirm
+            # SHORT: Price breaks below S3 AND close < 1w EMA200 (bearish trend) AND volume confirm
             elif (not np.isnan(S3) and 
                   close[i] < S3 and 
-                  close[i] < ema_50_1w_aligned[i] and 
+                  close[i] < ema_200_1w_aligned[i] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below 1w EMA50 (trend change)
-            if close[i] < ema_50_1w_aligned[i]:
+            # EXIT LONG: Price crosses below 1w EMA200 (trend change)
+            if close[i] < ema_200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above 1w EMA50 (trend change)
-            if close[i] > ema_50_1w_aligned[i]:
+            # EXIT SHORT: Price crosses above 1w EMA200 (trend change)
+            if close[i] > ema_200_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
