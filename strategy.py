@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R extreme with 1d ADX regime filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions; ADX > 25 ensures trending market to avoid false reversals in ranging conditions;
-# Volume spike (>1.5x 20-bar average) confirms conviction. Discrete sizing (0.0, ±0.25) minimizes fee churn.
-# Designed to capture reversal extremes in trending 6h markets while filtering low-conviction signals. Targets 15-30 trades/year per symbol.
+# Hypothesis: 12h Williams %R extreme with 1d ADX regime filter and volume confirmation.
+# Williams %R < -80 indicates oversold (long), > -20 indicates overbought (short).
+# Only trade when 1d ADX > 25 (trending market) to avoid whipsaws in ranging conditions.
+# Volume confirmation requires current volume > 1.5x 20-bar average volume.
+# Discrete position sizing (0.0, ±0.25) minimizes fee churn.
+# Designed to capture mean reversion in strong trends while avoiding false signals.
+# Targets 15-30 trades/year per symbol.
 
-name = "6h_WilliamsR_Extreme_1dADX_Regime_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsR_Extreme_1dADX_VolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,12 +25,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14) on 6h
+    # --- 12h Indicators (LTF) ---
+    # Williams %R (14)
     highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
     lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
     williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14 + 1e-10)
     
-    # Volume confirmation: volume > 1.5x 20-bar average
+    # Volume confirmation: current volume > 1.5x 20-bar average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (1.5 * vol_ma_20)
     
@@ -39,7 +43,7 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # ADX (14) on 1d for regime filter
+    # ADX (14) for trend strength on 1d
     high_shift = np.roll(high_1d, 1)
     low_shift = np.roll(low_1d, 1)
     close_shift = np.roll(close_1d, 1)
@@ -58,13 +62,13 @@ def generate_signals(prices):
     dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
     adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Align ADX to 6h (wait for completed 1d bar)
+    # Align ADX to 12h (wait for completed 1d bar)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after Williams %R warmup
+    for i in range(1, n):
         # Skip if missing data
         if (np.isnan(williams_r[i]) or
             np.isnan(volume_spike[i]) or
@@ -72,7 +76,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Regime filter: only trade when ADX > 25 (trending market)
+        # Regime filter: only trade when 1d ADX > 25 (trending market)
         if adx_aligned[i] <= 25:
             # In ranging/weak trend, stay flat
             signals[i] = 0.0
@@ -92,15 +96,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R > -50 (moving out of oversold territory)
-            if williams_r[i] > -50:
+            # EXIT LONG: Williams %R > -50 (exit oversold) OR volume spike fails
+            if williams_r[i] > -50 or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R < -50 (moving out of overbought territory)
-            if williams_r[i] < -50:
+            # EXIT SHORT: Williams %R < -50 (exit overbought) OR volume spike fails
+            if williams_r[i] < -50 or not volume_spike[i]:
                 signals[i] = 0.0
                 position = 0
             else:
