@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation (>1.5x 20-period average).
-# Long when price breaks above R3 AND close > 12h EMA50 AND volume > 1.5x MA20.
-# Short when price breaks below S3 AND close < 12h EMA50 AND volume > 1.5x MA20.
-# Exit when price crosses the 12h EMA50 in opposite direction.
-# Uses 12h HTF for trend to reduce noise and overtrading. Volume confirmation reduces false signals.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-# Camarilla levels provide structured support/resistance; 12h EMA50 filters for primary trend.
+# Hypothesis: 1d Camarilla R1/S1 breakout with 1w EMA34 trend filter and volume confirmation (>1.5x 20-period average).
+# Long when price breaks above R1 AND close > 1w EMA34 AND volume > 1.5x MA20.
+# Short when price breaks below S1 AND close < 1w EMA34 AND volume > 1.5x MA20.
+# Exit when price crosses the 1w EMA34 in opposite direction.
+# Uses 1w HTF for trend to reduce noise and overtrading. Volume confirmation reduces false signals.
+# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+# Camarilla levels provide structured support/resistance; 1w EMA34 filters for primary trend.
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeConfirm_v1"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wEMA34_VolumeConfirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -26,27 +26,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h Indicators (LTF) ---
+    # --- 1d Indicators (LTF) ---
     # Volume confirmation: > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (1.5 * vol_ma_20)
     
-    # --- 12h Indicators (HTF) ---
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # --- 1w Indicators (HTF) ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # 12h EMA(50) - trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1w EMA(34) - trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_50_12h_aligned[i]) or
+        if (np.isnan(ema_34_1w_aligned[i]) or
             np.isnan(volume_confirm[i])):
             signals[i] = 0.0
             continue
@@ -59,39 +59,39 @@ def generate_signals(prices):
             range_ = prev_high - prev_low
             
             # Camarilla levels
-            R3 = prev_close + range_ * 1.1 / 2
-            S3 = prev_close - range_ * 1.1 / 2
+            R1 = prev_close + range_ * 1.1 / 4
+            S1 = prev_close - range_ * 1.1 / 4
         else:
-            R3 = np.nan
-            S3 = np.nan
+            R1 = np.nan
+            S1 = np.nan
         
         if position == 0:
-            # LONG: Price breaks above R3 AND close > 12h EMA50 (bullish trend) AND volume confirm
-            if (not np.isnan(R3) and 
-                close[i] > R3 and 
-                close[i] > ema_50_12h_aligned[i] and 
+            # LONG: Price breaks above R1 AND close > 1w EMA34 (bullish trend) AND volume confirm
+            if (not np.isnan(R1) and 
+                close[i] > R1 and 
+                close[i] > ema_34_1w_aligned[i] and 
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 AND close < 12h EMA50 (bearish trend) AND volume confirm
-            elif (not np.isnan(S3) and 
-                  close[i] < S3 and 
-                  close[i] < ema_50_12h_aligned[i] and 
+            # SHORT: Price breaks below S1 AND close < 1w EMA34 (bearish trend) AND volume confirm
+            elif (not np.isnan(S1) and 
+                  close[i] < S1 and 
+                  close[i] < ema_34_1w_aligned[i] and 
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below 12h EMA50 (trend change)
-            if close[i] < ema_50_12h_aligned[i]:
+            # EXIT LONG: Price crosses below 1w EMA34 (trend change)
+            if close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above 12h EMA50 (trend change)
-            if close[i] > ema_50_12h_aligned[i]:
+            # EXIT SHORT: Price crosses above 1w EMA34 (trend change)
+            if close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
