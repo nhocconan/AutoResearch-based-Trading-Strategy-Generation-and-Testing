@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d ATR-based volume spike and EMA trend filter.
-# Uses Donchian channel (20-period high/low) from prior 12h for breakout structure,
-# ATR-normalized volume spike (>1.8x 20-bar ATR-scaled avg volume) for conviction,
-# and EMA(50) > EMA(200) on 1d for bullish trend bias (long only) or EMA(50) < EMA(200) for bearish bias (short only).
-# Discrete position sizing (0.0, ±0.25) minimizes fee churn. Designed to capture strong breakouts
-# in trending markets while avoiding false signals in ranging conditions. Targets 15-30 trades/year per symbol.
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume spike filter and EMA trend.
+# Uses Donchian channel (20-period) for breakout structure, ATR-normalized volume spike (>1.5x 20-bar ATR-scaled avg volume) for conviction,
+# and EMA(50) on 1d to filter trend direction. Only long in 1d uptrend (price > EMA50), only short in 1d downtrend (price < EMA50).
+# Discrete position sizing (0.0, ±0.25) minimizes fee churn. Designed to capture strong breakouts with volume confirmation in trending markets.
+# Targets 20-50 trades/year per symbol to avoid fee drag while maintaining edge in both bull and bear regimes.
 
-name = "12h_Donchian20_Breakout_1dATRVolumeSpike_EMATrend_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dATRVolumeSpike_EMATrend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
+    # --- 4h Indicators (LTF) ---
     # ATR(14) for volatility normalization
     high_shift = np.roll(high, 1)
     low_shift = np.roll(low, 1)
@@ -40,71 +39,66 @@ def generate_signals(prices):
     # ATR-scaled volume MA: 20-period average of volume / ATR
     vol_atr_ratio = volume / (atr_14 + 1e-10)
     vol_atr_ma_20 = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values
-    volume_spike = vol_atr_ratio > (1.8 * vol_atr_ma_20)
+    volume_spike = vol_atr_ratio > (1.5 * vol_atr_ma_20)
     
-    # Donchian channel (20) on 12h
+    # Donchian Channel (20)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA(50) and EMA(200) on 1d for trend bias
+    # EMA(50) on 1d for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align to 12h (wait for completed 1d bar)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if missing data
-        if (np.isnan(atr_14[i]) or
-            np.isnan(volume_spike[i]) or
+        if (np.isnan(volume_spike[i]) or
             np.isnan(highest_20[i]) or
             np.isnan(lowest_20[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(ema_200_1d_aligned[i])):
+            np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend bias from 1d EMA crossover
-        bullish_bias = ema_50_1d_aligned[i] > ema_200_1d_aligned[i]
-        bearish_bias = ema_50_1d_aligned[i] < ema_200_1d_aligned[i]
-        
-        if position == 0:
-            # Look for breakout entries with volume confirmation and trend bias
-            if bullish_bias and close[i] > highest_20[i] and volume_spike[i]:
+        # Trend filter: only long in 1d uptrend, only short in 1d downtrend
+        if close[i] > ema_50_1d_aligned[i]:  # 1d uptrend
+            # LONG: Price breaks above Donchian upper AND volume spike
+            if position == 0 and close[i] > highest_20[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            elif bearish_bias and close[i] < lowest_20[i] and volume_spike[i]:
+            # EXIT LONG: Price crosses below Donchian lower
+            elif position == 1 and close[i] < lowest_20[i]:
+                signals[i] = 0.0
+                position = 0
+            # HOLD LONG
+            elif position == 1:
+                signals[i] = 0.25
+            # FLAT or REVERSE
+            else:
+                signals[i] = 0.0
+        else:  # 1d downtrend (close[i] <= ema_50_1d_aligned[i])
+            # SHORT: Price breaks below Donchian lower AND volume spike
+            if position == 0 and close[i] < lowest_20[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # EXIT LONG: Price crosses below midpoint of Donchian channel
-            midpoint = (highest_20[i] + lowest_20[i]) / 2.0
-            if close[i] < midpoint:
+            # EXIT SHORT: Price crosses above Donchian upper
+            elif position == -1 and close[i] > highest_20[i]:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # EXIT SHORT: Price crosses above midpoint of Donchian channel
-            midpoint = (highest_20[i] + lowest_20[i]) / 2.0
-            if close[i] > midpoint:
-                signals[i] = 0.0
-                position = 0
-            else:
+            # HOLD SHORT
+            elif position == -1:
                 signals[i] = -0.25
+            # FLAT or REVERSE
+            else:
+                signals[i] = 0.0
     
     return signals
