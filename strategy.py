@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Williams %R extreme reversal with 1d EMA34 trend filter and 4h volume spike confirmation.
-# Long when Williams %R < -80 (oversold) AND price > 1d EMA34 (bullish trend) AND 4h volume > 2.5x 20-period average.
-# Short when Williams %R > -20 (overbought) AND price < 1d EMA34 (bearish trend) AND 4h volume > 2.5x 20-period average.
-# Exit on opposite Williams %R condition (Williams %R > -50 for longs, < -50 for shorts).
-# Uses 1d HTF for trend to reduce noise and overtrading vs shorter trends. Volume spike (2.5x) reduces false signals.
-# Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits for 4h timeframe.
-# Williams %R captures momentum reversals, effective in both bull and bear markets when combined with HTF trend filter.
+# Hypothesis: 1d KAMA trend direction + RSI(14) mean reversion + 1w volume spike filter.
+# Long when KAMA rising (bullish trend) AND RSI < 30 (oversold) AND 1w volume > 1.5x 20-period average.
+# Short when KAMA falling (bearish trend) AND RSI > 70 (overbought) AND 1w volume > 1.5x 20-period average.
+# Exit on opposite RSI condition (RSI > 50 for longs, RSI < 50 for shorts).
+# Uses 1w HTF for volume confirmation to reduce noise and overtrading vs shorter timeframes.
+# KAMA adapts to market efficiency, effective in both bull and bear markets.
+# Target: 30-100 total trades over 4 years (7-25/year) to stay within fee drag limits for 1d timeframe.
 
-name = "4h_WilliamsR_Extreme_1dEMA34_4hVolumeSpike_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_1wVolumeFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,66 +20,80 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h Indicators (LTF) ---
-    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # 4h volume confirmation: > 2.5x 20-period average (tight filter to reduce trades)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike_4h = volume > (2.5 * vol_ma_20)
+    # --- 1d Indicators (LTF) ---
+    # 1d KAMA(10) - adaptive trend
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(1))
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama_dir = np.diff(kama, prepend=kama[0])  # >0 rising, <0 falling
     
-    # --- 1d Indicators (HTF) ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1d RSI(14)
+    delta = close_s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    
+    # --- 1w Indicators (HTF) ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # 1d EMA(34) - trend filter (smooth for 4h trading)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1w volume confirmation: > 1.5x 20-period average
+    vol_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_1w = volume_1w > (1.5 * vol_ma_20_1w)
+    volume_confirm_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_confirm_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(williams_r[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(volume_spike_4h[i])):
+        if (np.isnan(kama_dir[i]) or
+            np.isnan(rsi[i]) or
+            np.isnan(volume_confirm_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) AND price > 1d EMA34 (bullish) AND 4h volume spike
-            if (williams_r[i] < -80 and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_spike_4h[i]):
+            # LONG: KAMA rising AND RSI < 30 AND 1w volume confirm
+            if (kama_dir[i] > 0 and 
+                rsi[i] < 30 and 
+                volume_confirm_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R > -20 (overbought) AND price < 1d EMA34 (bearish) AND 4h volume spike
-            elif (williams_r[i] > -20 and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_spike_4h[i]):
+            # SHORT: KAMA falling AND RSI > 70 AND 1w volume confirm
+            elif (kama_dir[i] < 0 and 
+                  rsi[i] > 70 and 
+                  volume_confirm_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R > -50 (momentum weakening)
-            if williams_r[i] > -50:
+            # EXIT LONG: RSI > 50 (mean reversion complete)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R < -50 (momentum weakening)
-            if williams_r[i] < -50:
+            # EXIT SHORT: RSI < 50 (mean reversion complete)
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
