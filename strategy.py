@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and 12h volume confirmation (>1.6x 20-period average).
-# Long when price breaks above Donchian upper band AND close > 1d EMA50 (bullish trend) AND volume > 1.6x 20-period average.
-# Short when price breaks below Donchian lower band AND close < 1d EMA50 (bearish trend) AND volume > 1.6x 20-period average.
-# Exit when price retests the 12h Donchian midpoint (mean reversion) or opposite band touched.
-# Uses 1d HTF for trend to reduce noise and overtrading vs shorter trends. Volume confirmation (1.6x) reduces false signals.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits for 12h timeframe.
-# Donchian channels provide clear breakout levels, effective in both bull and bear markets when combined with HTF trend filter.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and 4h volume confirmation (>2.0x 20-period average).
+# Long when price breaks above Donchian upper band AND close > 1d EMA34 (bullish trend) AND volume > 2.0x 20-period average.
+# Short when price breaks below Donchian lower band AND close < 1d EMA34 (bearish trend) AND volume > 2.0x 20-period average.
+# Exit when price retests the 1d EMA34 level (mean reversion to trend) or opposite Donchian band touched.
+# Uses 1d HTF for trend to reduce noise and overtrading vs shorter trends. Volume confirmation (2.0x) reduces false signals.
+# Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits for 4h timeframe.
+# Donchian channels provide clear structure, effective in both bull and bear markets when combined with HTF trend filter and volume spike.
 
-name = "12h_Donchian20_Breakout_1dEMA50_12hVolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA34_4hVolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,15 +26,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
-    # 12h volume confirmation: > 1.6x 20-period average (tight filter to reduce trades)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_12h = volume > (1.6 * vol_ma_20)
+    # --- 4h Indicators (LTF) ---
+    # 4h Donchian(20) - price channel
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # --- 12h Donchian Channel (20) ---
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # 4h volume confirmation: > 2.0x 20-period average (tight filter to reduce trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_4h = volume > (2.0 * vol_ma_20)
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
@@ -42,50 +41,49 @@ def generate_signals(prices):
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
-    # 1d EMA(50) - trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA(34) - trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if missing data
-        if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(donchian_upper[i]) or
-            np.isnan(donchian_lower[i]) or
-            np.isnan(donchian_mid[i]) or
-            np.isnan(volume_confirm_12h[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(high_20[i]) or
+            np.isnan(low_20[i]) or
+            np.isnan(volume_confirm_4h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Donchian upper AND close > 1d EMA50 (bullish trend) AND volume confirm
-            if (close[i] > donchian_upper[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_confirm_12h[i]):
+            # LONG: Price breaks above Donchian upper band AND close > 1d EMA34 (bullish trend) AND volume confirm
+            if (close[i] > high_20[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_confirm_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Donchian lower AND close < 1d EMA50 (bearish trend) AND volume confirm
-            elif (close[i] < donchian_lower[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_confirm_12h[i]):
+            # SHORT: Price breaks below Donchian lower band AND close < 1d EMA34 (bearish trend) AND volume confirm
+            elif (close[i] < low_20[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_confirm_4h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price retests Donchian midpoint (mean reversion) OR touches lower band (opposite level)
-            if (close[i] <= donchian_mid[i] or 
-                close[i] < donchian_lower[i]):
+            # EXIT LONG: Price retests 1d EMA34 (mean reversion to trend) OR touches lower Donchian band (opposite level)
+            if (close[i] <= ema_34_1d_aligned[i] or 
+                close[i] < low_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price retests Donchian midpoint (mean reversion) OR touches upper band (opposite level)
-            if (close[i] >= donchian_mid[i] or 
-                close[i] > donchian_upper[i]):
+            # EXIT SHORT: Price retests 1d EMA34 (mean reversion to trend) OR touches upper Donchian band (opposite level)
+            if (close[i] >= ema_34_1d_aligned[i] or 
+                close[i] > high_20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
