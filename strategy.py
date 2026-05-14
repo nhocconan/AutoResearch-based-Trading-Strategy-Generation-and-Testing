@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Camarilla R3/S3 breakout with 12h EMA trend filter and 1d volume spike confirmation.
-# Long when price breaks above R3 AND 12h EMA50 > EMA200 (bullish trend) AND 1d volume > 1.8 * 20-period average volume.
-# Short when price breaks below S3 AND 12h EMA50 < EMA200 (bearish trend) AND 1d volume > 1.8 * 20-period average volume.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter (EMA34 > EMA200) and 1d volume spike confirmation.
+# Long when price breaks above R3 AND 1d EMA34 > EMA200 (bullish trend) AND 1d volume > 2.0 * 20-period average volume.
+# Short when price breaks below S3 AND 1d EMA34 < EMA200 (bearish trend) AND 1d volume > 2.0 * 20-period average volume.
 # Exit when price retraces to the prior day's close (Camarilla pivot point).
-# Uses discrete position sizing (0.25) to limit fee churn. Designed for 6h timeframe with strict entry conditions.
-# Target: 50-150 total trades over 4 years (12-37/year) for 6h.
+# Uses discrete position sizing (0.30) to limit fee churn. Designed for 4h timeframe with strict entry conditions.
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h.
 
-name = "6h_Camarilla_R3S3_Breakout_12hEMA_Trend_1dVolumeConfirm_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_1dVolumeConfirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,22 +25,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA50 and EMA200 for trend filter (HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 200:
+    # Calculate 1d EMA34 and EMA200 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200 = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_trend = align_htf_to_ltf(prices, df_12h, ema_50 > ema_200)  # Boolean: True for bullish, False for bearish
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_trend = align_htf_to_ltf(prices, df_1d, ema_34 > ema_200)  # Boolean: True for bullish, False for bearish
     
     # Calculate 1d volume confirmation filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
     volume_1d = df_1d['volume'].values
     vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = volume_1d > (1.8 * vol_ma_20_1d)
+    volume_confirm_1d = volume_1d > (2.0 * vol_ma_20_1d)
     volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d.astype(float))
     
     # Calculate Camarilla pivot points (based on previous day's OHLC)
@@ -48,7 +45,7 @@ def generate_signals(prices):
     camarilla_s3 = np.full(n, np.nan)
     camarilla_cp = np.full(n, np.nan)  # Pivot point (close of prior day)
     
-    # For each 6h bar, use prior completed day's OHLC
+    # For each 4h bar, use prior completed day's OHLC
     for i in range(n):
         current_time = prices.iloc[i]['open_time']
         prior_day_start = current_time.normalize() - pd.Timedelta(days=1)
@@ -84,17 +81,17 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: price breaks above R3 AND 12h EMA50 > EMA200 (bullish trend) AND volume confirmation
+            # LONG: price breaks above R3 AND 1d EMA34 > EMA200 (bullish trend) AND volume confirmation
             if (open_[i] <= camarilla_r3[i] and close[i] > camarilla_r3[i] and 
                 ema_trend[i] and 
                 volume_confirm_1d_aligned[i] > 0.5):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # SHORT: price breaks below S3 AND 12h EMA50 < EMA200 (bearish trend) AND volume confirmation
+            # SHORT: price breaks below S3 AND 1d EMA34 < EMA200 (bearish trend) AND volume confirmation
             elif (open_[i] >= camarilla_s3[i] and close[i] < camarilla_s3[i] and 
                   not ema_trend[i] and 
                   volume_confirm_1d_aligned[i] > 0.5):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
@@ -104,13 +101,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # EXIT SHORT: price retraces to Camarilla pivot point (CP)
             if close[i] >= camarilla_cp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
