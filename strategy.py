@@ -1,43 +1,18 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter (HMA21) and volume confirmation.
-# Long when price breaks above Donchian upper band AND 1w HMA21 is rising (uptrend) AND 1w volume > 1.5 * 20-period average volume.
-# Short when price breaks below Donchian lower band AND 1w HMA21 is falling (downtrend) AND 1w volume > 1.5 * 20-period average volume.
-# Exit when price retraces to the midpoint of the Donchian channel.
-# Uses discrete position sizing (0.25) to limit fee churn. Designed for 1d timeframe with strict entry conditions to avoid overtrading.
-# Target: 30-100 total trades over 4 years (7-25/year) for 1d timeframe.
+# Hypothesis: 6h Camarilla R3/S3 breakout with 1d ADX trend filter and 1h volume spike confirmation.
+# Long when price breaks above R3 AND 1d ADX > 25 (trending market) AND 1h volume > 2.0 * 20-period average volume.
+# Short when price breaks below S3 AND 1d ADX > 25 (trending market) AND 1h volume > 2.0 * 20-period average volume.
+# Exit when price retraces to the Camarilla pivot point (prior day's close) or when ADX drops below 20 (trend weakens).
+# Uses discrete position sizing (0.25) to limit fee churn. Designed for 6h timeframe with strict entry conditions to avoid overtrading.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 
-name = "1d_Donchian20_Breakout_1wHMA21_1wVolumeConfirm_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dADX_1hVolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_hma(arr, period):
-    """Hull Moving Average"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    def wma(data, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(data, weights, mode='valid') / weights.sum()
-    
-    wma_half = np.array([wma(arr[i:i+half_period], half_period) if i+half_period <= len(arr) else np.nan 
-                         for i in range(len(arr) - half_period + 1)])
-    wma_full = np.array([wma(arr[i:i+period], period) if i+period <= len(arr) else np.nan 
-                         for i in range(len(arr) - period + 1)])
-    
-    raw_hma = 2 * wma_half - wma_full
-    hma = np.array([wma(raw_hma[i:i+sqrt_period], sqrt_period) if i+sqrt_period <= len(raw_hma) else np.nan 
-                    for i in range(len(raw_hma) - sqrt_period + 1)])
-    
-    # Pad to original length
-    result = np.full_like(arr, np.nan)
-    result[period-1:len(hma)+period-1] = hma
-    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -50,71 +25,123 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1w HMA21 for trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # Calculate 1d ADX for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:  # Need enough data for ADX calculation
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    hma_21_1w = calculate_hma(close_1w, 21)
-    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w volume confirmation filter (HTF)
-    volume_1w = df_1w['volume'].values
-    vol_ma_20_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1w = volume_1w > (1.5 * vol_ma_20_1w)  # Volume > 1.5x 20-period MA
-    volume_confirm_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_confirm_1w.astype(float))
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     
-    # Calculate Donchian(20) channels (based on prior 20 periods)
-    donchian_upper = np.full(n, np.nan)
-    donchian_lower = np.full(n, np.nan)
-    donchian_mid = np.full(n, np.nan)
+    # Directional Movement
+    up_move = pd.Series(high_1d - np.roll(high_1d, 1))
+    down_move = pd.Series(np.roll(low_1d, 1) - low_1d)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    for i in range(20, n):
-        period_high = np.max(high[i-20:i])
-        period_low = np.min(low[i-20:i])
-        donchian_upper[i] = period_high
-        donchian_lower[i] = period_low
-        donchian_mid[i] = (period_high + period_low) / 2
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    adx_values = adx.values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # Calculate 1h volume confirmation filter (MTF)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
+        return np.zeros(n)
+    volume_1h = df_1h['volume'].values
+    vol_ma_20_1h = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1h = volume_1h > (2.0 * vol_ma_20_1h)  # Volume > 2.0x 20-period MA
+    volume_spike_1h_aligned = align_htf_to_ltf(prices, df_1h, volume_spike_1h.astype(float))
+    
+    # Calculate Camarilla pivot points (based on previous day's OHLC)
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    camarilla_cp = np.full(n, np.nan)  # Pivot point (close of prior day)
+    
+    # For each 6h bar, use prior completed day's OHLC
+    for i in range(n):
+        current_time = prices.iloc[i]['open_time']
+        prior_day_start = current_time.normalize() - pd.Timedelta(days=1)
+        prior_day_end = prior_day_start + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        
+        day_mask = (df_1d['open_time'] >= prior_day_start) & (df_1d['open_time'] <= prior_day_end)
+        if day_mask.any():
+            prior_day = df_1d.loc[day_mask].iloc[0]
+            high_prior = prior_day['high']
+            low_prior = prior_day['low']
+            close_prior = prior_day['close']
+            
+            range_prior = high_prior - low_prior
+            camarilla_r3[i] = close_prior + range_prior * 1.1 / 4  # R3 level
+            camarilla_s3[i] = close_prior - range_prior * 1.1 / 4  # S3 level
+            camarilla_cp[i] = close_prior  # Camarilla pivot point is the prior day's close
+        else:
+            camarilla_r3[i] = np.nan
+            camarilla_s3[i] = np.nan
+            camarilla_cp[i] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(1, n):
         # Skip if any required data is NaN
-        if (np.isnan(hma_21_1w_aligned[i]) or 
-            np.isnan(volume_confirm_1w_aligned[i]) or
-            np.isnan(donchian_upper[i]) or
-            np.isnan(donchian_lower[i]) or
-            np.isnan(donchian_mid[i])):
+        if (np.isnan(adx_1d_aligned[i]) or 
+            np.isnan(volume_spike_1h_aligned[i]) or
+            np.isnan(camarilla_r3[i]) or
+            np.isnan(camarilla_s3[i]) or
+            np.isnan(camarilla_cp[i])):
+            signals[i] = 0.0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = prices.index[i].hour
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above Donchian upper AND 1w HMA21 rising AND volume confirmation
-            hma_rising = hma_21_1w_aligned[i] > hma_21_1w_aligned[i-1]
-            if (open_[i] <= donchian_upper[i] and close[i] > donchian_upper[i] and 
-                hma_rising and 
-                volume_confirm_1w_aligned[i] > 0.5):
+            # LONG: price breaks above R3 AND 1d ADX > 25 (trending market) AND volume spike
+            if (open_[i] <= camarilla_r3[i] and close[i] > camarilla_r3[i] and 
+                adx_1d_aligned[i] > 25 and 
+                volume_spike_1h_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below Donchian lower AND 1w HMA21 falling AND volume confirmation
-            elif (open_[i] >= donchian_lower[i] and close[i] < donchian_lower[i] and 
-                  not hma_rising and 
-                  volume_confirm_1w_aligned[i] > 0.5):
+            # SHORT: price breaks below S3 AND 1d ADX > 25 (trending market) AND volume spike
+            elif (open_[i] >= camarilla_s3[i] and close[i] < camarilla_s3[i] and 
+                  adx_1d_aligned[i] > 25 and 
+                  volume_spike_1h_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price retraces to Donchian midpoint
-            if close[i] <= donchian_mid[i]:
+            # EXIT LONG: price retraces to Camarilla pivot point (CP) OR ADX drops below 20 (trend weakens)
+            if close[i] <= camarilla_cp[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price retraces to Donchian midpoint
-            if close[i] >= donchian_mid[i]:
+            # EXIT SHORT: price retraces to Camarilla pivot point (CP) OR ADX drops below 20 (trend weakens)
+            if close[i] >= camarilla_cp[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
