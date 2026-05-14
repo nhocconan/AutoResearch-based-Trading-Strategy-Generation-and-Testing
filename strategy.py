@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA50 trend filter and volume confirmation (>2.0x 30-period average).
-# Long when price breaks above R3 AND close > 1d EMA50 AND volume > 2.0x MA30.
-# Short when price breaks below S3 AND close < 1d EMA50 AND volume > 2.0x MA30.
-# Exit when price crosses the 1d EMA50 in opposite direction.
-# Uses 1d HTF for primary trend to reduce noise and overtrading. Higher volume threshold reduces false signals.
-# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
-# Camarilla R3/S3 levels provide strong support/resistance with proven edge in ranging and trending markets.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume spike (>2.0x 20-period average).
+# Long when price breaks above R3 AND close > 12h EMA50 AND volume > 2.0x MA20.
+# Short when price breaks below S3 AND close < 12h EMA50 AND volume > 2.0x MA20.
+# Exit when price crosses the 12h EMA50 in opposite direction.
+# Uses 12h HTF for stronger trend filter to reduce whipsaw and overtrading. Higher volume threshold (2.0x) reduces false signals.
+# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
+# Camarilla R3/S3 levels provide good support/resistance with sufficient breakout significance.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA50_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,28 +26,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
-    # Volume confirmation: > 2.0x 30-period average (strict threshold to minimize trades)
-    vol_ma_30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (2.0 * vol_ma_30)
+    # --- 4h Indicators (LTF) ---
+    # Volume spike: > 2.0x 20-period average (high threshold to reduce trades)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (2.0 * vol_ma_20)
     
-    # --- 1d Indicators (HTF) ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # --- 12h Indicators (HTF) ---
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # 1d EMA(50) - trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h EMA(50) - trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
@@ -58,7 +58,7 @@ def generate_signals(prices):
             prev_close = close[i-1]
             range_ = prev_high - prev_low
             
-            # Camarilla levels (R3/S3 = strong levels)
+            # Camarilla levels (R3/S3 = standard strong levels)
             R3 = prev_close + range_ * 1.1/4
             S3 = prev_close - range_ * 1.1/4
         else:
@@ -66,32 +66,32 @@ def generate_signals(prices):
             S3 = np.nan
         
         if position == 0:
-            # LONG: Price breaks above R3 AND close > 1d EMA50 (bullish trend) AND volume confirm
+            # LONG: Price breaks above R3 AND close > 12h EMA50 (bullish trend) AND volume spike
             if (not np.isnan(R3) and 
                 close[i] > R3 and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_confirm[i]):
+                close[i] > ema_50_12h_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 AND close < 1d EMA50 (bearish trend) AND volume confirm
+            # SHORT: Price breaks below S3 AND close < 12h EMA50 (bearish trend) AND volume spike
             elif (not np.isnan(S3) and 
                   close[i] < S3 and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_confirm[i]):
+                  close[i] < ema_50_12h_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below 1d EMA50 (trend change)
-            if close[i] < ema_50_1d_aligned[i]:
+            # EXIT LONG: Price crosses below 12h EMA50 (trend change)
+            if close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above 1d EMA50 (trend change)
-            if close[i] > ema_50_1d_aligned[i]:
+            # EXIT SHORT: Price crosses above 12h EMA50 (trend change)
+            if close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
