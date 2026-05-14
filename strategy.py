@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and 4h volume spike confirmation.
-# Long when price breaks above R3 with price > 1d EMA34 (bullish trend) and 4h volume > 2.0x 20-period average.
-# Short when price breaks below S3 with price < 1d EMA34 (bearish trend) and 4h volume > 2.0x 20-period average.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA50 trend filter and 4h volume spike confirmation.
+# Long when price breaks above R3 with price > 1d EMA50 (bullish trend) and 4h volume > 2.0x 20-period average.
+# Short when price breaks below S3 with price < 1d EMA50 (bearish trend) and 4h volume > 2.0x 20-period average.
 # Exit on opposite Camarilla level (S3 for longs, R3 for shorts).
-# Uses 4h timeframe for balance of trade frequency and cost, 1d EMA34 for smooth trend, volume spike for confirmation.
+# Uses 4h timeframe for balance of trade frequency and cost, 1d EMA50 for smooth trend, volume spike for confirmation.
 # Target: 75-200 total trades over 4 years (19-50/year).
+# EMA50 provides stronger trend filter than EMA34, reducing whipsaws in sideways markets.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_4hVolumeSpike"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_4hVolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,13 +33,13 @@ def generate_signals(prices):
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
-    # 1d EMA(34) - trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # 1d EMA(50) - trend filter (stronger than EMA34)
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # --- 4h Camarilla Pivot Points (Prior Day OHLC) ---
     camarilla_r3 = np.full(n, np.nan)
@@ -80,7 +81,7 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_34_aligned[i]) or
+        if (np.isnan(ema_50_aligned[i]) or
             np.isnan(volume_spike_4h[i]) or
             np.isnan(camarilla_r3[i]) or
             np.isnan(camarilla_s3[i])):
@@ -88,15 +89,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 + price > 1d EMA34 (bullish) + 4h volume spike
+            # LONG: Price breaks above R3 + price > 1d EMA50 (bullish) + 4h volume spike
             if (close[i] > camarilla_r3[i] and 
-                close[i] > ema_34_aligned[i] and 
+                close[i] > ema_50_aligned[i] and 
                 volume_spike_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S3 + price < 1d EMA34 (bearish) + 4h volume spike
+            # SHORT: Price breaks below S3 + price < 1d EMA50 (bearish) + 4h volume spike
             elif (close[i] < camarilla_s3[i] and 
-                  close[i] < ema_34_aligned[i] and 
+                  close[i] < ema_50_aligned[i] and 
                   volume_spike_4h[i]):
                 signals[i] = -0.25
                 position = -1
