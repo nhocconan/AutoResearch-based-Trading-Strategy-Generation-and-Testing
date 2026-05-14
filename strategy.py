@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and 1d volume spike confirmation.
-# Long when price breaks above upper Donchian channel AND 1d ATR(14)/ATR(50) > 0.8 (low volatility regime) AND 1d volume > 1.5 * 20-period average volume.
-# Short when price breaks below lower Donchian channel AND same filters.
-# Exit when price retraces to the midpoint of the Donchian channel.
-# Uses discrete position sizing (0.25) to limit fee churn. Target: 50-150 total trades over 4 years (12-37/year) for 12h.
-# Works in both bull and bear markets: ATR regime filter ensures we only trade in low-volatility environments where breakouts are more likely to sustain,
-# while volume confirmation avoids false breakouts in low-participation environments.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and 12h volume spike confirmation.
+# Long when price breaks above R1 AND 12h EMA50 is rising (bullish trend) AND 12h volume > 2.0 * 20-period average volume.
+# Short when price breaks below S1 AND 12h EMA50 is falling (bearish trend) AND 12h volume > 2.0 * 20-period average volume.
+# Exit when price retraces to the prior day's close (Camarilla pivot point).
+# Uses discrete position sizing (0.25) to limit fee churn. Target: 75-200 total trades over 4 years (19-50/year) for 4h.
+# Works in both bull and bear markets: 12h EMA50 slope filter ensures we only trade in clear trending conditions,
+# while volume confirmation avoids breakouts in low-participation environments.
 
-name = "12h_Donchian20_Breakout_1dATRRegime_1dVolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,103 +20,103 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ATR regime filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    # Calculate 12h EMA50 trend filter (HTF)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # True Range for ATR
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
+    # EMA50
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # EMA50 slope: bullish if current > previous, bearish if current < previous
+    ema_50_slope = np.diff(ema_50, prepend=ema_50[0])
+    ema_50_bullish = ema_50_slope > 0
+    ema_50_bearish = ema_50_slope < 0
     
-    # ATR(14) and ATR(50) using Wilder's smoothing
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan, dtype=float)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Volume confirmation: volume > 2.0 * 20-period average
+    vol_ma_20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_12h = volume_12h > (2.0 * vol_ma_20_12h)
     
-    tr_smooth_14 = wilder_smooth(tr, 14)
-    tr_smooth_50 = wilder_smooth(tr, 50)
-    atr_14 = tr_smooth_14
-    atr_50 = tr_smooth_50
+    # Align to 4h timeframe
+    ema_50_bullish_aligned = align_htf_to_ltf(prices, df_12h, ema_50_bullish.astype(float))
+    ema_50_bearish_aligned = align_htf_to_ltf(prices, df_12h, ema_50_bearish.astype(float))
+    volume_confirm_aligned = align_htf_to_ltf(prices, df_12h, volume_confirm_12h.astype(float))
     
-    # Low volatility regime: ATR(14)/ATR(50) > 0.8 (meaning recent volatility not too compressed)
-    atr_ratio = atr_14 / atr_50
-    low_vol_regime = atr_ratio > 0.8
+    # Calculate Camarilla pivot points (based on previous day's OHLC)
+    camarilla_r1 = np.full(n, np.nan)
+    camarilla_s1 = np.full(n, np.nan)
+    camarilla_cp = np.full(n, np.nan)  # Pivot point (close of prior day)
     
-    # 1d volume confirmation filter
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = vol_1d > (1.5 * vol_ma_20_1d)
-    
-    # Align to 12h timeframe
-    low_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, low_vol_regime.astype(float))
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d.astype(float))
-    
-    # Calculate Donchian channels (20-period) on 12h timeframe
-    def donchian_channel(high, low, period):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
-    
-    upper_dc, lower_dc = donchian_channel(high, low, 20)
-    mid_dc = (upper_dc + lower_dc) / 2.0
+    # For each 4h bar, use prior completed day's OHLC
+    for i in range(n):
+        current_time = prices.iloc[i]['open_time']
+        prior_day_start = current_time.normalize() - pd.Timedelta(days=1)
+        prior_day_end = prior_day_start + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        
+        # Get HTF 1d data for pivot calculation
+        df_1d = get_htf_data(prices, '1d')
+        day_mask = (df_1d['open_time'] >= prior_day_start) & (df_1d['open_time'] <= prior_day_end)
+        if day_mask.any():
+            prior_day = df_1d.loc[day_mask].iloc[0]
+            high_prior = prior_day['high']
+            low_prior = prior_day['low']
+            close_prior = prior_day['close']
+            
+            range_prior = high_prior - low_prior
+            camarilla_r1[i] = close_prior + range_prior * 1.1 / 2  # R1 level
+            camarilla_s1[i] = close_prior - range_prior * 1.1 / 2  # S1 level
+            camarilla_cp[i] = close_prior  # Camarilla pivot point is the prior day's close
+        else:
+            camarilla_r1[i] = np.nan
+            camarilla_s1[i] = np.nan
+            camarilla_cp[i] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if any required data is NaN
-        if (np.isnan(low_vol_regime_aligned[i]) or 
+        if (np.isnan(ema_50_bullish_aligned[i]) or 
+            np.isnan(ema_50_bearish_aligned[i]) or
             np.isnan(volume_confirm_aligned[i]) or
-            np.isnan(upper_dc[i]) or
-            np.isnan(lower_dc[i]) or
-            np.isnan(mid_dc[i])):
+            np.isnan(camarilla_r1[i]) or
+            np.isnan(camarilla_s1[i]) or
+            np.isnan(camarilla_cp[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: price breaks above upper Donchian AND low vol regime AND volume confirmation
-            if (low[i] <= upper_dc[i] and close[i] > upper_dc[i] and 
-                low_vol_regime_aligned[i] > 0.5 and 
+            # LONG: price breaks above R1 AND bullish 12h EMA50 trend AND volume confirmation
+            if (open_[i] <= camarilla_r1[i] and close[i] > camarilla_r1[i] and 
+                ema_50_bullish_aligned[i] > 0.5 and 
                 volume_confirm_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below lower Donchian AND low vol regime AND volume confirmation
-            elif (high[i] >= lower_dc[i] and close[i] < lower_dc[i] and 
-                  low_vol_regime_aligned[i] > 0.5 and 
+            # SHORT: price breaks below S1 AND bearish 12h EMA50 trend AND volume confirmation
+            elif (open_[i] >= camarilla_s1[i] and close[i] < camarilla_s1[i] and 
+                  ema_50_bearish_aligned[i] > 0.5 and 
                   volume_confirm_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: price retraces to midpoint of Donchian channel
-            if close[i] <= mid_dc[i]:
+            # EXIT LONG: price retraces to Camarilla pivot point (CP)
+            if close[i] <= camarilla_cp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: price retraces to midpoint of Donchian channel
-            if close[i] >= mid_dc[i]:
+            # EXIT SHORT: price retraces to Camarilla pivot point (CP)
+            if close[i] >= camarilla_cp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
