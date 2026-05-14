@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R3/S3 breakout with 4h EMA50 trend filter and 1d volume spike confirmation.
-# Long when price breaks above R3 AND 4h EMA50 > EMA200 (bullish trend) AND 1d volume > 2.0 * 20-period average volume.
-# Short when price breaks below S3 AND 4h EMA50 < EMA200 (bearish trend) AND 1d volume > 2.0 * 20-period average volume.
+# Hypothesis: 1h Camarilla R3/S3 breakout with 4h Supertrend trend filter and 1d volume spike confirmation.
+# Uses Supertrend for robust trend detection (works in both bull and bear markets by adapting to volatility).
+# Long when price breaks above R3 AND Supertrend gives bullish signal AND 1d volume > 2.0 * 20-period average volume.
+# Short when price breaks below S3 AND Supertrend gives bearish signal AND 1d volume > 2.0 * 20-period average volume.
 # Exit when price retraces to the prior day's close (Camarilla pivot point).
-# Uses discrete position sizing (0.20) to limit fee churn. Designed for 1h timeframe with strict entry conditions.
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h.
+# Uses discrete position sizing (0.20) to limit fee churn. Target: 60-150 total trades over 4 years (15-37/year) for 1h.
 
-name = "1h_Camarilla_R3S3_Breakout_4hEMA50_Trend_1dVolumeConfirm_v1"
+name = "1h_Camarilla_R3S3_Breakout_4hSupertrend_Trend_1dVolumeConfirm_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -25,14 +25,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA50 and EMA200 for trend filter (HTF)
+    # Calculate 4h Supertrend for trend filter (HTF)
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 200:
+    if len(df_4h) < 10:
         return np.zeros(n)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
-    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_200 = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_trend = align_htf_to_ltf(prices, df_4h, ema_50 > ema_200)  # Boolean: True for bullish, False for bearish
+    
+    # Supertrend parameters
+    atr_period = 10
+    multiplier = 3.0
+    
+    # Calculate ATR
+    tr1 = pd.Series(high_4h - low_4h)
+    tr2 = pd.Series(np.abs(high_4h - np.roll(close_4h, 1)))
+    tr3 = pd.Series(np.abs(low_4h - np.roll(close_4h, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    
+    # Calculate basic upper and lower bands
+    hl2 = (high_4h + low_4h) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    # Initialize Supertrend
+    supertrend = np.full_like(close_4h, np.nan)
+    direction = np.full_like(close_4h, np.nan)  # 1 for uptrend, -1 for downtrend
+    
+    # Set first valid value
+    start_idx = atr_period
+    if start_idx < len(close_4h):
+        supertrend[start_idx] = upper_band[start_idx]
+        direction[start_idx] = 1  # start with uptrend assumption
+    
+    # Calculate Supertrend iteratively
+    for i in range(start_idx + 1, len(close_4h)):
+        if close_4h[i-1] > supertrend[i-1]:
+            supertrend[i] = max(upper_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(lower_band[i], supertrend[i-1])
+        
+        # Update direction
+        if close_4h[i] > supertrend[i]:
+            direction[i] = 1
+        else:
+            direction[i] = -1
+    
+    # Align Supertrend direction to 1h timeframe
+    supertrend_direction_aligned = align_htf_to_ltf(prices, df_4h, direction.astype(float))
     
     # Calculate 1d volume confirmation filter (HTF)
     df_1d = get_htf_data(prices, '1d')
@@ -75,7 +116,7 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_trend[i]) or 
+        if (np.isnan(supertrend_direction_aligned[i]) or 
             np.isnan(volume_confirm_1d_aligned[i]) or
             np.isnan(camarilla_r3[i]) or
             np.isnan(camarilla_s3[i]) or
@@ -84,15 +125,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: price breaks above R3 AND 4h EMA50 > EMA200 (bullish trend) AND volume confirmation
+            # LONG: price breaks above R3 AND Supertrend bullish (direction=1) AND volume confirmation
             if (open_[i] <= camarilla_r3[i] and close[i] > camarilla_r3[i] and 
-                ema_trend[i] and 
+                supertrend_direction_aligned[i] > 0.5 and 
                 volume_confirm_1d_aligned[i] > 0.5):
                 signals[i] = 0.20
                 position = 1
-            # SHORT: price breaks below S3 AND 4h EMA50 < EMA200 (bearish trend) AND volume confirmation
+            # SHORT: price breaks below S3 AND Supertrend bearish (direction=-1) AND volume confirmation
             elif (open_[i] >= camarilla_s3[i] and close[i] < camarilla_s3[i] and 
-                  not ema_trend[i] and 
+                  supertrend_direction_aligned[i] < -0.5 and 
                   volume_confirm_1d_aligned[i] > 0.5):
                 signals[i] = -0.20
                 position = -1
