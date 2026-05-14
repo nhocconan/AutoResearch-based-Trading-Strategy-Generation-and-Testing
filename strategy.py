@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (>2.0x 20-period average), and choppiness regime filter (CHOP > 61.8 for mean reversion, < 38.2 for trend following). Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Designed to work in both bull and bear markets by combining price structure (Camarilla), trend (1d EMA34), volume strength, and regime awareness. Target timeframe 12h to reduce trade frequency and fee drag while capturing multi-day momentum.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation (>2.0x 20-period average), and choppiness regime filter (CHOP > 61.8 for mean reversion, < 38.2 for trend following). Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Designed to work in both bull and bear markets by combining price structure (Camarilla), trend (1d EMA34), volume strength, and regime awareness.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeChop_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeChop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,7 +20,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
+    # --- 4h Indicators (LTF) ---
     # Volume confirmation: > 2.0x 20-period average (higher threshold to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (2.0 * vol_ma_20)
