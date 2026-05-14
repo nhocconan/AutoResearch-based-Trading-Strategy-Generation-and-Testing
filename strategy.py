@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and session timing.
-# Long when: RSI(14) < 30 (oversold) AND 4h close > 4h EMA50 (uptrend) AND hour in 08-20 UTC.
-# Short when: RSI(14) > 70 (overbought) AND 4h close < 4h EMA50 (downtrend) AND hour in 08-20 UTC.
-# Exit when: RSI returns to neutral zone (40-60) or opposite extreme reached.
-# Uses discrete position sizing (0.20) to limit fee churn. Designed for 1h timeframe.
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
-# Works in bull markets by buying oversold dips in uptrends, in bear markets by selling overbought rallies in downtrends.
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter (price > weekly EMA200) and 1d volume spike confirmation.
+# Long when price breaks above Donchian upper band AND weekly close > weekly EMA200 (bullish regime) AND 1d volume > 2.0 * 20-period average volume.
+# Short when price breaks below Donchian lower band AND weekly close < weekly EMA200 (bearish regime) AND 1d volume > 2.0 * 20-period average volume.
+# Exit when price retraces to the midpoint of the Donchian channel (mean of upper and lower bands).
+# Uses discrete position sizing (0.25) to limit fee churn. Designed for 6h timeframe with strict entry conditions to avoid overtrading.
+# Target: 50-150 total trades over 4 years (12-37/year) for 6h timeframe.
 
-name = "1h_RSI_MeanReversion_4hEMA50_SessionFilter_v1"
-timeframe = "1h"
+name = "6h_Donchian20_Breakout_WeeklyEMA200_1dVolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,72 +19,88 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    open_ = prices['open'].values
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 4h EMA50 for trend filter (HTF)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Calculate weekly EMA200 for trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Calculate RSI(14) on 1h close
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate 1d volume confirmation filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_confirm_1d = volume_1d > (2.0 * vol_ma_20_1d)  # Volume > 2.0x 20-period MA
+    volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d.astype(float))
     
-    # Pre-compute session hours
-    hours = prices.index.hour
+    # Calculate Donchian(20) channels on primary timeframe (6h)
+    # Upper band: highest high over past 20 periods
+    # Lower band: lowest low over past 20 periods
+    # Middle band: (upper + lower) / 2 (exit level)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after RSI warmup
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(rsi_values[i])):
+        if (np.isnan(ema_200_1w_aligned[i]) or 
+            np.isnan(volume_confirm_1d_aligned[i]) or
+            np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i]) or
+            np.isnan(donchian_middle[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC
-        in_session = 8 <= hours[i] <= 20
+        # Session filter: 00-23 UTC (6h bars less sensitive to session, but avoid quiet periods)
+        hour = prices.index[i].hour
+        in_session = (0 <= hour <= 23)  # Always in session for 6h
         
         if not in_session:
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: RSI < 30 (oversold) AND 4h close > 4h EMA50 (uptrend)
-            if (rsi_values[i] < 30 and 
-                close[i] > ema_50_4h_aligned[i]):
-                signals[i] = 0.20
+            # LONG: price breaks above Donchian upper band AND weekly close > weekly EMA200 (bullish regime) AND volume confirmation
+            if (open_[i] <= donchian_upper[i] and close[i] > donchian_upper[i] and 
+                close[i] > ema_200_1w_aligned[i] and 
+                volume_confirm_1d_aligned[i] > 0.5):
+                signals[i] = 0.25
                 position = 1
-            # SHORT: RSI > 70 (overbought) AND 4h close < 4h EMA50 (downtrend)
-            elif (rsi_values[i] > 70 and 
-                  close[i] < ema_50_4h_aligned[i]):
-                signals[i] = -0.20
+            # SHORT: price breaks below Donchian lower band AND weekly close < weekly EMA200 (bearish regime) AND volume confirmation
+            elif (open_[i] >= donchian_lower[i] and close[i] < donchian_lower[i] and 
+                  close[i] < ema_200_1w_aligned[i] and 
+                  volume_confirm_1d_aligned[i] > 0.5):
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: RSI returns to neutral (>=40) or becomes overbought (>70)
-            if rsi_values[i] >= 40:
+            # EXIT LONG: price retraces to Donchian middle band (mean reversion)
+            if close[i] <= donchian_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: RSI returns to neutral (<=60) or becomes oversold (<30)
-            if rsi_values[i] <= 60:
+            # EXIT SHORT: price retraces to Donchian middle band (mean reversion)
+            if close[i] >= donchian_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
