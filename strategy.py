@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Williams %R extreme reversal with 1d EMA34 trend filter and 4h volume spike confirmation.
-# Long when Williams %R crosses above -80 from below (oversold bounce) with price > 1d EMA34 (bullish trend) and 4h volume > 1.8x 20-period average.
-# Short when Williams %R crosses below -20 from above (overbought rejection) with price < 1d EMA34 (bearish trend) and 4h volume > 1.8x 20-period average.
-# Exit on opposite Williams %R level (-20 for longs, -80 for shorts) or trend reversal.
-# Uses Williams %R for mean reversion in ranging markets, 1d EMA34 for strong trend filter (reduces whipsaw), and volume spike for conviction.
-# Target: 80-180 total trades over 4 years (20-45/year) to balance opportunity and fee drag.
+# Hypothesis: 12h Donchian(20) breakout with 1d ATR regime filter and 12h volume confirmation.
+# Long when price breaks above 20-period high with 1d ATR ratio < 0.8 (low volatility regime) and 12h volume > 1.8x 20-period average.
+# Short when price breaks below 20-period low with 1d ATR ratio < 0.8 and 12h volume > 1.8x 20-period average.
+# Exit on opposite Donchian level (20-period low for longs, 20-period high for shorts).
+# Uses ATR regime to avoid whipsaw in high volatility, volume confirmation for breakout validity.
+# Target: 60-120 total trades over 4 years (15-30/year) to balance opportunity and fee drag.
 
-name = "4h_WilliamsR_Extreme_1dEMA34_4hVolumeSpike"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dATRRegime_12hVolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,65 +24,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h Indicators (LTF) ---
-    # Williams %R(14)
-    period = 14
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # --- 12h Indicators (LTF) ---
+    # 12h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h volume confirmation: > 1.8x 20-period average
+    # 12h volume confirmation: > 1.8x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike_4h = volume > (1.8 * vol_ma_20)
+    volume_confirm_12h = volume > (1.8 * vol_ma_20)
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA(34) - trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # 1d ATR(14) for volatility regime
+    tr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr_1d = np.concatenate([[np.nan], tr_1d])  # align with 1d index
+    atr_14 = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # 1d ATR ratio: current ATR / 50-period average ATR (regime filter)
+    atr_ma_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / atr_ma_50
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    
+    # Low volatility regime: ATR ratio < 0.8 (below average volatility)
+    low_vol_regime = atr_ratio_aligned < 0.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):
+    for i in range(20, n):  # start after Donchian warmup
         # Skip if missing data
-        if (np.isnan(williams_r[i]) or 
-            np.isnan(ema_34_aligned[i]) or 
-            np.isnan(volume_spike_4h[i])):
+        if (np.isnan(high_20[i]) or
+            np.isnan(low_20[i]) or
+            np.isnan(volume_confirm_12h[i]) or
+            np.isnan(low_vol_regime[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R crosses above -80 from below + price > 1d EMA34 + 4h volume spike
-            if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
-                close[i] > ema_34_aligned[i] and 
-                volume_spike_4h[i]):
+            # LONG: Price breaks above 20-period high + low vol regime + volume confirmation
+            if (close[i] > high_20[i] and 
+                low_vol_regime[i] and 
+                volume_confirm_12h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R crosses below -20 from above + price < 1d EMA34 + 4h volume spike
-            elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
-                  close[i] < ema_34_aligned[i] and 
-                  volume_spike_4h[i]):
+            # SHORT: Price breaks below 20-period low + low vol regime + volume confirmation
+            elif (close[i] < low_20[i] and 
+                  low_vol_regime[i] and 
+                  volume_confirm_12h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R crosses above -20 (overbought) or trend turns bearish
-            if williams_r[i] >= -20 or close[i] < ema_34_aligned[i]:
+            # EXIT LONG: Price breaks below 20-period low
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R crosses below -80 (oversold) or trend turns bullish
-            if williams_r[i] <= -80 or close[i] > ema_34_aligned[i]:
+            # EXIT SHORT: Price breaks above 20-period high
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
