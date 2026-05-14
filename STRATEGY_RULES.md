@@ -10,7 +10,7 @@ def generate_signals(prices):
     # Load HTF data ONCE, BEFORE the loop
     df_4h = get_htf_data(prices, '4h')
     hma_4h = calculate_hma(df_4h['close'].values, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto shift(1)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)  # auto delay until 4h close
 
     signals = np.zeros(len(prices))
     for i in range(100, len(prices)):
@@ -36,7 +36,7 @@ idx_4h = i // 16  # uses unclosed 4h bar = look-ahead!
 price_4h = close_4h[idx_4h]
 
 # CORRECT ✅
-# align_htf_to_ltf() handles this properly with shift(1)
+# align_htf_to_ltf() handles this properly by waiting for the completed HTF bar
 trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_values)
 # Inside loop:
 trend = trend_4h_aligned[i]  # already aligned + shifted
@@ -44,7 +44,36 @@ trend = trend_4h_aligned[i]  # already aligned + shifted
 
 **Why**: At 15m bar index 5 (01:15 UTC), `i // 16 = 0` gives the 4h bar at 00:00
 which is STILL FORMING until 04:00. This is look-ahead. `align_htf_to_ltf` uses
-`shift(1)` to only use the PREVIOUS completed 4h bar.
+completed-bar timing to only use the PREVIOUS completed 4h bar.
+
+## Rule 2b: Lagging HTF Indicators Need Extra Delay
+
+Some HTF indicators are confirmed only after later HTF candles close. Those need
+more than the default one-bar completed-candle delay.
+
+```python
+# CORRECT ✅ — daily EMA only needs the completed 1d candle
+ema_34_1d = pd.Series(df_1d["close"]).ewm(span=34, adjust=False, min_periods=34).mean().values
+ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+
+# CORRECT ✅ — Williams fractal needs 2 extra 1d bars after the center bar
+from mtf_data import compute_williams_fractals
+
+bearish_fractal, bullish_fractal = compute_williams_fractals(
+    df_1d["high"].values,
+    df_1d["low"].values,
+)
+bearish_fractal_aligned = align_htf_to_ltf(
+    prices, df_1d, bearish_fractal, additional_delay_bars=2
+)
+
+# WRONG ❌ — raw fractal aligned with no extra confirmation delay
+bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal)
+```
+
+**Why**: `align_htf_to_ltf()` already waits for the HTF bar to close. That is
+enough for EMA/SMA/ATR on the HTF bar itself, but NOT enough for indicators like
+fractals/swing highs that require future HTF candles for confirmation.
 
 ## Rule 3: No Manual Resampling
 
@@ -153,6 +182,7 @@ Common causes of 0 trades:
 Before submitting strategy.py, verify:
 - [ ] `get_htf_data()` called ONCE before loop, not inside
 - [ ] No `i // N` manual MTF mapping
+- [ ] Any lagging HTF indicator (fractals/swing highs/confirmed pivots) uses explicit extra delay
 - [ ] No `.resample()` or `pd.date_range()`
 - [ ] Signal values discrete: 0.0, ±0.15, ±0.30 (max 0.40)
 - [ ] Stoploss logic present (signal → 0)

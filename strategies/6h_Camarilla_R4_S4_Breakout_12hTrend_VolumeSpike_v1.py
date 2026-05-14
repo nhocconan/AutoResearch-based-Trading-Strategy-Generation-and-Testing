@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""
+6h_Camarilla_R4_S4_Breakout_12hTrend_VolumeSpike_v1
+Hypothesis: Trade 6h timeframe with daily CAMARILLA R4/S4 breakouts filtered by 12h EMA50 trend and volume spikes.
+Breakouts at R4/S4 indicate strong momentum continuation, filtered by 12h trend and volume confirmation.
+Designed for 12-30 trades/year to minimize fee drag. Works in bull via breakouts and bear via breakdowns.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Calculate CAMARILLA levels from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Previous day's OHLC for CAMARILLA calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # CAMARILLA R4 and S4 levels (breakout levels)
+    camarilla_r4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s4 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align CAMARILLA levels to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    
+    # Volume confirmation: current volume > 2.0 * 24-period average (on 6h data, ~6 days)
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_confirm = volume > (2.0 * vol_avg)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    bars_since_exit = 0
+    size = 0.25   # Position size: 25% of capital
+    
+    # Warmup: need enough data for volume average and EMA
+    start_idx = max(24, 50)
+    
+    for i in range(start_idx, n):
+        bars_since_exit += 1
+        
+        # Skip if any data not ready
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_confirm[i])):
+            signals[i] = 0.0
+            continue
+        
+        camarilla_r4_val = camarilla_r4_aligned[i]
+        camarilla_s4_val = camarilla_s4_aligned[i]
+        ema_50_val = ema_50_aligned[i]
+        vol_conf = volume_confirm[i]
+        
+        if position == 0:
+            # Require minimum 12 bars since last exit to avoid churn (~3 days on 6h)
+            if bars_since_exit >= 12:
+                # Long: price breaks above R4 with volume confirmation AND above 12h EMA50 (uptrend)
+                if close[i] > camarilla_r4_val and vol_conf and close[i] > ema_50_val:
+                    signals[i] = size
+                    position = 1
+                    bars_since_exit = 0
+                # Short: price breaks below S4 with volume confirmation AND below 12h EMA50 (downtrend)
+                elif close[i] < camarilla_s4_val and vol_conf and close[i] < ema_50_val:
+                    signals[i] = -size
+                    position = -1
+                    bars_since_exit = 0
+        elif position == 1:
+            # Exit long: price breaks below S4 (opposite level)
+            if close[i] < camarilla_s4_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = size
+        elif position == -1:
+            # Exit short: price breaks above R4 (opposite level)
+            if close[i] > camarilla_r4_val:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -size
+    
+    return signals
+
+name = "6h_Camarilla_R4_S4_Breakout_12hTrend_VolumeSpike_v1"
+timeframe = "6h"
+leverage = 1.0

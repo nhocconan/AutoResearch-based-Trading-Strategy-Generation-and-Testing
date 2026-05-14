@@ -69,13 +69,21 @@ But ALWAYS try all 3 symbols — don't stop at first failure.
 - NEVER call `get_htf_data()` inside a for/while loop (loads Parquet file each call)
 - NEVER use `i // N` manual index mapping (uses unclosed HTF bars = look-ahead)
 - NEVER use `pd.date_range()` or `.resample()` to create HTF data
-- `align_htf_to_ltf()` auto-shifts by 1 HTF bar to only use COMPLETED bars
+- `align_htf_to_ltf()` only exposes COMPLETED HTF bars
+- Lagging HTF indicators need extra delay beyond completed-bar alignment
+- Williams fractals must use `align_htf_to_ltf(..., additional_delay_bars=2)`
 
 ### No Look-Ahead Bias
 - At bar index i, only use `prices.iloc[:i+1]`
 - No `.shift(-n)` (negative shift)
 - No future index access
+- No raw HTF fractal/swing signal alignment without explicit confirmation delay
 - Prefix look-ahead test: signals on N bars must match signals on N+M bars at index N-1
+
+## Model Rule
+
+- Auto-research generation and review must use Ollama Cloud model `glm-5.1:cloud`
+- Do not silently fall back to a different model for auto-research tasks
 
 ### Must Generate Trades
 - Train: ≥ 5 trades per symbol (≥ 10 average)

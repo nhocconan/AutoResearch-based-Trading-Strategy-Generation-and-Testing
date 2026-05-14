@@ -47,7 +47,7 @@ def resolve_analysis_model() -> str:
     return (
         os.environ.get("OLLAMA_ANALYSIS_MODEL")
         or os.environ.get("OLLAMA_MODEL")
-        or "glm-5"
+        or "glm-5.1:cloud"
     )
 
 
@@ -200,9 +200,8 @@ Write a concise markdown memo with these sections:
 Requirements:
 - Focus on sample efficiency, invalid-code reduction, overtrading control, better failure feedback, and model-role separation.
 - Be implementation-specific and reference the existing scripts by filename when relevant.
-- Recommend one Ollama Cloud model for generation and one for analysis/review, with short justification.
-- Only choose models from this exact candidate set:
-  `nemotron-3-super`, `glm-5`, `gpt-oss:120b`, `qwen3-next:80b`, `deepseek-v3.2`, `kimi-k2-thinking`
+- Assume the required Ollama Cloud model for both generation and analysis/review is `glm-5.1:cloud`.
+- If you mention model choice, justify why `glm-5.1:cloud` should remain the single auto-research model.
 - Keep it under 900 words.
 - Output markdown only.
 """
