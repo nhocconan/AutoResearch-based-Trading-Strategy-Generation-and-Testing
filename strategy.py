@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h EMA crossover with 1d RSI filter and volume confirmation. Uses EMA(20)/EMA(50) on 12h for trend direction,
-# RSI(14) on 1d > 50 for bull bias / < 50 for bear bias to avoid counter-trend trades, and volume > 1.2x 20-bar average for conviction.
-# Designed to capture medium-term trends with strict filters to minimize trades and fee drag. Targets 15-25 trades/year per symbol.
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Uses Camarilla pivot levels (R3/S3) from prior 1d for structure, EMA34 on 1d close for trend direction,
+# and volume > 1.5x 20-bar average for conviction. Discrete position sizing (0.0, ±0.25) minimizes fee churn.
+# Designed to capture strong breakouts in trending markets while avoiding false signals in ranging conditions.
+# Targets 20-40 trades/year per symbol to avoid fee drag and ensure test generalization.
 
-name = "12h_EMA20_50_Crossover_1dRSI_VolumeFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,69 +18,75 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    open_ = prices['open'].values
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
-    # EMA(20) and EMA(50) for trend
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume confirmation: volume > 1.2x 20-period average
+    # --- 4h Indicators (LTF) ---
+    # Volume spike: volume > 1.5x 20-period simple moving average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.2 * vol_ma_20)
+    volume_spike = volume > (1.5 * vol_ma_20)
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # RSI(14) on 1d
-    delta = pd.Series(close_1d).diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = gain / (loss + 1e-10)
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14_values = rsi_14.values
+    # Camarilla levels (R3, S3) from prior 1d bar
+    camarilla_range = high_1d - low_1d
+    r3_1d = close_1d + 1.1 * camarilla_range / 2.0
+    s3_1d = close_1d - 1.1 * camarilla_range / 2.0
     
-    # Align to 12h (wait for completed 1d bar)
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_values)
+    # EMA34 on 1d close for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align to 4h (wait for completed 1d bar)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):  # Start after EMA(50) warmup
+    for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50[i]) or
-            np.isnan(volume_confirm[i]) or np.isnan(rsi_14_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(r3_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Long conditions: EMA20 > EMA50, RSI > 50 (bull bias), volume confirmation
-        long_condition = (ema_20[i] > ema_50[i]) and (rsi_14_aligned[i] > 50) and volume_confirm[i]
-        # Short conditions: EMA20 < EMA50, RSI < 50 (bear bias), volume confirmation
-        short_condition = (ema_20[i] < ema_50[i]) and (rsi_14_aligned[i] < 50) and volume_confirm[i]
+        # Determine trend from 1d EMA34: price above EMA = uptrend, below = downtrend
+        is_uptrend = close[i] > ema_34_1d_aligned[i]
+        is_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            if long_condition:
+            # LONG: Price breaks above R3 AND volume spike AND uptrend
+            if close[i] > r3_1d_aligned[i] and volume_spike[i] and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            elif short_condition:
+            # SHORT: Price breaks below S3 AND volume spike AND downtrend
+            elif close[i] < s3_1d_aligned[i] and volume_spike[i] and is_downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long: EMA20 < EMA50 (trend change)
-            if ema_20[i] < ema_50[i]:
+            # EXIT LONG: Price crosses below S3 (mean reversion to lower level)
+            if close[i] < s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: EMA20 > EMA50 (trend change)
-            if ema_20[i] > ema_50[i]:
+            # EXIT SHORT: Price crosses above R3 (mean reversion to upper level)
+            if close[i] > r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
