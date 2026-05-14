@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams %R extreme reversal with 1d ADX regime filter and volume spike confirmation.
-# Williams %R identifies overbought/oversold conditions; extreme readings (< -80 or > -20) signal potential reversals.
-# In strong trends (ADX > 25 on 1d), we fade extremes expecting continuation; in weak trends (ADX <= 25), we fade for mean reversion.
-# Volume spike (>1.5x 20-bar average) confirms conviction. Discrete sizing (0.0, ±0.25) minimizes fee churn.
-# Designed to work in both bull (trend continuation) and bear (mean reversion in ranges) markets. Targets 12-30 trades/year.
+# Hypothesis: 12h Williams Alligator (Jaw/Teeth/Lips) with 1d EMA34 trend filter and ATR-based volume spike.
+# Uses Alligator crossover for entry timing, 1d EMA34 for primary trend direction, and volume spike for conviction.
+# Designed to catch trending moves with low frequency (target 12-30 trades/year) to minimize fee drag.
+# Works in bull/bear via trend filter and mean-reversion exits on Alligator re-cross.
 
-name = "6h_WilliamsR_Extreme_1dADX_Regime_VolumeSpike_v1"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1dEMA34_ATRVolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,116 +17,89 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 6h Indicators ---
-    # Williams %R (14)
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high_14 - close) / (highest_high_14 - lowest_low_14 + 1e-10)
+    # --- 12h Indicators (LTF) ---
+    # Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMAs of median price
+    median_price = (high + low) / 2.0
     
-    # Volume spike: >1.5x 20-bar average
-    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * volume_ma_20)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    
+    # ATR(14) for volatility and volume normalization
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    close_shift = np.roll(close, 1)
+    high_shift[0] = high[0]
+    low_shift[0] = low[0]
+    close_shift[0] = close[0]
+    
+    tr = np.maximum(high - low, np.maximum(np.abs(high - close_shift), np.abs(low - close_shift)))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # ATR-scaled volume MA: 20-period average of volume / ATR
+    vol_atr_ratio = volume / (atr_14 + 1e-10)
+    vol_atr_ma_20 = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values
+    volume_spike = vol_atr_ratio > (2.0 * vol_atr_ma_20)  # stricter spike for lower frequency
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # ADX (14) for trend strength
-    high_shift_1d = np.roll(high_1d, 1)
-    low_shift_1d = np.roll(low_1d, 1)
-    close_shift_1d = np.roll(close_1d, 1)
-    high_shift_1d[0] = high_1d[0]
-    low_shift_1d[0] = low_1d[0]
-    close_shift_1d[0] = close_1d[0]
-    
-    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - close_shift_1d), np.abs(low_1d - close_shift_1d)))
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    plus_dm_1d = np.where((high_1d - high_shift_1d) > (low_shift_1d - low_1d), np.maximum(high_1d - high_shift_1d, 0), 0)
-    minus_dm_1d = np.where((low_shift_1d - low_1d) > (high_1d - high_shift_1d), np.maximum(low_shift_1d - low_1d, 0), 0)
-    
-    plus_di_14_1d = 100 * pd.Series(plus_dm_1d).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di_14_1d = 100 * pd.Series(minus_dm_1d).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1d
-    dx_1d = 100 * np.abs(plus_di_14_1d - minus_di_14_1d) / (plus_di_14_1d + minus_di_14_1d + 1e-10)
-    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align ADX to 6h (wait for completed 1d bar)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # EMA34 on 1d close for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):  # Start after Williams %R warmup
+    for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(williams_r[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
-        # Regime filter based on 1d ADX
-        if adx_1d_aligned[i] > 25:
-            # Strong trend: fade extremes for continuation
-            if position == 0:
-                # LONG: Extreme oversold AND volume spike
-                if williams_r[i] < -80 and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # SHORT: Extreme overbought AND volume spike
-                elif williams_r[i] > -20 and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
-                # EXIT LONG: Extreme overbought (continuation exhausted)
-                if williams_r[i] > -20:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # EXIT SHORT: Extreme oversold (continuation exhausted)
-                if williams_r[i] < -80:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+        # Trend filter: only trade when price is above/below 1d EMA34
+        if close[i] > ema34_1d_aligned[i]:
+            trend = 1  # bullish bias
+        elif close[i] < ema34_1d_aligned[i]:
+            trend = -1  # bearish bias
         else:
-            # Weak trend/ranging: mean reversion from extremes
-            if position == 0:
-                # LONG: Extreme oversold AND volume spike
-                if williams_r[i] < -80 and volume_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # SHORT: Extreme overbought AND volume spike
-                elif williams_r[i] > -20 and volume_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
-                # EXIT LONG: Price returns to neutral (mean reversion complete)
-                if williams_r[i] > -50:  # Return to midpoint
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # EXIT SHORT: Price returns to neutral (mean reversion complete)
-                if williams_r[i] < -50:  # Return to midpoint
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            trend = 0
+        
+        if position == 0:
+            # Wait for Alligator alignment with trend and volume spike
+            if trend == 1 and lips[i] > teeth[i] > jaw[i] and volume_spike[i]:
+                # Bullish alignment: Lips > Teeth > Jaw
+                signals[i] = 0.25
+                position = 1
+            elif trend == -1 and lips[i] < teeth[i] < jaw[i] and volume_spike[i]:
+                # Bearish alignment: Lips < Teeth < Jaw
+                signals[i] = -0.25
+                position = -1
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # Exit long: Alligator re-cross (Teeth crosses below Jaw) or loss of bullish alignment
+            if teeth[i] < jaw[i] or lips[i] < teeth[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit short: Alligator re-cross (Teeth crosses above Jaw) or loss of bearish alignment
+            if teeth[i] > jaw[i] or lips[i] > teeth[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
