@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume spike filter and EMA trend.
-# Uses Donchian channel (20-period) for breakout structure, ATR-normalized volume spike (>1.5x 20-bar ATR-scaled avg volume) for conviction,
-# and EMA(50) on 1d to filter trend direction. Only long in 1d uptrend (price > EMA50), only short in 1d downtrend (price < EMA50).
-# Discrete position sizing (0.0, ±0.25) minimizes fee churn. Designed to capture strong breakouts with volume confirmation in trending markets.
-# Targets 20-50 trades/year per symbol to avoid fee drag while maintaining edge in both bull and bear regimes.
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and ATR-based volume spike.
+# Elder Ray measures bull/bear power relative to EMA13: Bull Power = High - EMA13, Bear Power = Low - EMA13.
+# Long when Bull Power > 0 AND Bear Power rising (less negative) AND price > 1d EMA34 (uptrend) AND volume spike.
+# Short when Bear Power < 0 AND Bull Power falling (less positive) AND price < 1d EMA34 (downtrend) AND volume spike.
+# Uses discrete sizing (0.0, ±0.25) to minimize fee churn. Targets 12-30 trades/year per symbol.
+# Works in bull via trend continuation, in bear via mean reversion from extreme power readings.
 
-name = "4h_Donchian20_Breakout_1dATRVolumeSpike_EMATrend_v2"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_1dEMA34_ATRVolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,8 +25,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h Indicators (LTF) ---
-    # ATR(14) for volatility normalization
+    # --- 6h Indicators (LTF) ---
+    # EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema13  # Bull Power: High - EMA13
+    bear_power = low - ema13   # Bear Power: Low - EMA13
+    
+    # Smoothed Elder Ray for trend confirmation (2-period smoothing)
+    bull_power_smooth = pd.Series(bull_power).ewm(span=2, adjust=False, min_periods=2).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=2, adjust=False, min_periods=2).mean().values
+    
+    # ATR(14) for volatility and volume spike calculation
     high_shift = np.roll(high, 1)
     low_shift = np.roll(low, 1)
     close_shift = np.roll(close, 1)
@@ -41,64 +53,62 @@ def generate_signals(prices):
     vol_atr_ma_20 = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values
     volume_spike = vol_atr_ratio > (1.5 * vol_atr_ma_20)
     
-    # Donchian Channel (20)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA(50) on 1d for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # EMA34 on 1d for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(volume_spike[i]) or
-            np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(bull_power_smooth[i]) or
+            np.isnan(bear_power_smooth[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(ema34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only long in 1d uptrend, only short in 1d downtrend
-        if close[i] > ema_50_1d_aligned[i]:  # 1d uptrend
-            # LONG: Price breaks above Donchian upper AND volume spike
-            if position == 0 and close[i] > highest_20[i] and volume_spike[i]:
+        # Determine trend from 1d EMA34
+        uptrend = close[i] > ema34_1d_aligned[i]
+        downtrend = close[i] < ema34_1d_aligned[i]
+        
+        if position == 0:
+            # LONG: Bull Power positive AND rising AND uptrend AND volume spike
+            if (bull_power[i] > 0 and 
+                bull_power_smooth[i] > bull_power_smooth[i-1] and 
+                uptrend and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # EXIT LONG: Price crosses below Donchian lower
-            elif position == 1 and close[i] < lowest_20[i]:
-                signals[i] = 0.0
-                position = 0
-            # HOLD LONG
-            elif position == 1:
-                signals[i] = 0.25
-            # FLAT or REVERSE
-            else:
-                signals[i] = 0.0
-        else:  # 1d downtrend (close[i] <= ema_50_1d_aligned[i])
-            # SHORT: Price breaks below Donchian lower AND volume spike
-            if position == 0 and close[i] < lowest_20[i] and volume_spike[i]:
+            # SHORT: Bear Power negative AND falling (more negative) AND downtrend AND volume spike
+            elif (bear_power[i] < 0 and 
+                  bear_power_smooth[i] < bear_power_smooth[i-1] and 
+                  downtrend and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
-            # EXIT SHORT: Price crosses above Donchian upper
-            elif position == -1 and close[i] > highest_20[i]:
-                signals[i] = 0.0
-                position = 0
-            # HOLD SHORT
-            elif position == -1:
-                signals[i] = -0.25
-            # FLAT or REVERSE
             else:
                 signals[i] = 0.0
+        elif position == 1:
+            # EXIT LONG: Bull Power turns negative OR power deteriorates
+            if bull_power[i] <= 0 or bull_power_smooth[i] < bull_power_smooth[i-1]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: Bear Power turns positive OR power deteriorates
+            if bear_power[i] >= 0 or bear_power_smooth[i] > bear_power_smooth[i-1]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
