@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d KAMA trend direction with 1w EMA34 filter and RSI(14) mean reversion entries.
-# Uses Kaufman Adaptive Moving Average (KAMA) on 1d to determine primary trend,
-# 1-week EMA34 as higher-timeframe trend confirmation,
-# and RSI(14) < 30 for longs / > 70 for shorts as mean-reversion entries in the direction of trend.
-# Discrete position sizing (0.0, ±0.25) minimizes fee churn.
-# Designed to capture trend-following mean-reversion pulls in both bull and bear markets.
-# Targets 15-25 trades/year per symbol.
+# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and ATR-based volume spike.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low. Long when Bull Power > 0 AND volume spike AND 1d EMA34 uptrend.
+# Short when Bear Power > 0 AND volume spike AND 1d EMA34 downtrend. Uses discrete sizing (0.0, ±0.25) to minimize fee churn.
+# Designed to capture institutional buying/selling pressure in trending markets with volume confirmation. Targets 12-30 trades/year per symbol.
 
-name = "1d_KAMA_Trend_1wEMA34_RSI_MR_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dEMA34_ATRVolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,111 +14,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    open_ = prices['open'].values
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # --- 1d Indicators (LTF) ---
-    # KAMA(10, 2, 30) - adaptive trend
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else np.abs(np.diff(close, prepend=close[0]))
-    # Correct volatility calculation: sum of absolute changes over lookback
-    volatility = pd.Series(close).rolling(window=10, min_periods=10).apply(lambda x: np.sum(np.abs(np.diff(x))), raw=True).values
-    volatility[0:10] = np.nan  # not enough data
-    er = np.where(volatility > 0, np.abs(np.diff(close, prepend=close[0])) / volatility, 0)
-    er[0] = 0  # first value
-    # Smooth ER
-    er_smoothed = pd.Series(er).ewm(span=10, adjust=False, min_periods=10).mean().values
-    sc = (er_smoothed * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # --- 6h Indicators (LTF) ---
+    # EMA13 for Elder Ray calculation
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # RSI(14) for mean reversion entries
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Elder Ray components
+    bull_power = high - ema13  # Buying pressure: High - EMA13
+    bear_power = ema13 - low   # Selling pressure: EMA13 - Low
     
-    # --- 1w Indicators (HTF) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # ATR(14) for volatility normalization and volume spike calculation
+    high_shift = np.roll(high, 1)
+    low_shift = np.roll(low, 1)
+    close_shift = np.roll(close, 1)
+    high_shift[0] = high[0]
+    low_shift[0] = low[0]
+    close_shift[0] = close[0]
+    
+    tr = np.maximum(high - low, np.maximum(np.abs(high - close_shift), np.abs(low - close_shift)))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # ATR-scaled volume MA: 20-period average of volume / ATR
+    vol_atr_ratio = volume / (atr_14 + 1e-10)
+    vol_atr_ma_20 = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values
+    volume_spike = vol_atr_ratio > (1.5 * vol_atr_ma_20)
+    
+    # --- 1d Indicators (HTF) ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    # EMA34 on 1w
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    close_1d = df_1d['close'].values
+    
+    # EMA34 on 1d for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(10, n):  # start after KAMA warmup
+    for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(kama[i]) or
-            np.isnan(rsi[i]) or
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(ema13[i]) or
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(ema34_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine trend: price > KAMA = uptrend, price < KAMA = downtrend
-        uptrend = close[i] > kama[i]
-        downtrend = close[i] < kama[i]
+        # Determine 1d trend: uptrend if close > EMA34, downtrend if close < EMA34
+        is_uptrend = close[i] > ema34_1d_aligned[i]
+        is_downtrend = close[i] < ema34_1d_aligned[i]
         
-        # HTF trend filter: only trade if 1w EMA34 agrees with 1d KAMA trend
-        if uptrend and close[i] > ema_34_1w_aligned[i]:
-            # Uptrend confirmed: look for RSI oversold longs
-            if position == 0 and rsi[i] < 30:
+        if position == 0:
+            # LONG: Bull Power > 0 (buying pressure) AND volume spike AND 1d uptrend
+            if bull_power[i] > 0 and volume_spike[i] and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            elif position == 1:
-                # Exit long on RSI overbought or trend change
-                if rsi[i] > 70 or close[i] < kama[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # Exit short if uptrend confirmed
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-        elif downtrend and close[i] < ema_34_1w_aligned[i]:
-            # Downtrend confirmed: look for RSI overbought shorts
-            if position == 0 and rsi[i] > 70:
+            # SHORT: Bear Power > 0 (selling pressure) AND volume spike AND 1d downtrend
+            elif bear_power[i] > 0 and volume_spike[i] and is_downtrend:
                 signals[i] = -0.25
                 position = -1
-            elif position == -1:
-                # Exit short on RSI oversold or trend change
-                if rsi[i] < 30 or close[i] > kama[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            elif position == 1:
-                # Exit long if downtrend confirmed
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            # EXIT LONG: Bull Power <= 0 (buying pressure faded) OR 1d trend turns down
+            if bull_power[i] <= 0 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.0
-        else:
-            # No clear trend or HTF disagreement: stay flat
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                # Exit long if trend broken
-                signals[i] = 0.0
-                position = 0
-            elif position == -1:
-                # Exit short if trend broken
+                signals[i] = 0.25
+        elif position == -1:
+            # EXIT SHORT: Bear Power <= 0 (selling pressure faded) OR 1d trend turns up
+            if bear_power[i] <= 0 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.0
+                signals[i] = -0.25
     
     return signals
