@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and 1d volume spike confirmation.
-# Uses Camarilla pivot levels (R1/S1) from prior 1h for structure, EMA50 on 4h for trend direction,
-# and volume > 1.5x 20-bar average on 1d for conviction. Discrete position sizing (0.0, ±0.20) to minimize fee churn.
-# Designed to capture breakouts in trending markets with institutional volume, avoiding false signals in ranging conditions.
-# Targets 15-35 trades/year per symbol by using 4h/1d for signal direction and 1h only for entry timing.
+# Hypothesis: 6h Williams %R Extreme Reversal with 1d ADX Regime Filter and Volume Spike Confirmation.
+# Uses Williams %R(14) for overbought/oversold conditions (<-80 for long, >-20 for short),
+# 1d ADX > 25 to ensure trending markets (avoids false reversals in ranging conditions),
+# and ATR-normalized volume spike (>2.0x 20-bar average) for conviction.
+# Designed to capture mean-reversion moves within strong trends, working in both bull (buy pullbacks) and bear (sell rallies).
+# Targets 12-30 trades/year per symbol with discrete sizing (0.0, ±0.25) to minimize fee churn.
 
-name = "1h_Camarilla_R1S1_Breakout_4hEMA50_1dVolumeSpike_v1"
-timeframe = "1h"
+name = "6h_WilliamsR_Extreme_1dADX_Regime_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,18 +19,18 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Precompute session filter (08-20 UTC) once before loop
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # --- 6h Indicators (LTF) ---
+    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
     
-    # --- 1h Indicators (LTF) ---
-    # ATR(14) for stoploss/reference
+    # ATR(14) for volume normalization and stop reference
     high_shift = np.roll(high, 1)
     low_shift = np.roll(low, 1)
     close_shift = np.roll(close, 1)
@@ -40,77 +41,83 @@ def generate_signals(prices):
     tr = np.maximum(high - low, np.maximum(np.abs(high - close_shift), np.abs(low - close_shift)))
     atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # --- 4h Indicators (HTF) ---
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
-    
-    # EMA50 on 4h for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # ATR-scaled volume: volume / ATR
+    vol_atr_ratio = volume / (atr_14 + 1e-10)
+    vol_atr_ma_20 = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values
+    volume_spike = vol_atr_ratio > (2.0 * vol_atr_ma_20)
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume spike: >1.5x 20-bar average volume on 1d
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (1.5 * vol_ma_20_1d)
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # ADX(14) for trend strength
+    high_shift_1d = np.roll(high_1d, 1)
+    low_shift_1d = np.roll(low_1d, 1)
+    close_shift_1d = np.roll(close_1d, 1)
+    high_shift_1d[0] = high_1d[0]
+    low_shift_1d[0] = low_1d[0]
+    close_shift_1d[0] = close_1d[0]
     
-    # --- 1h Camarilla Levels (from prior 1h bar) ---
-    high_shift_1h = np.roll(high, 1)
-    low_shift_1h = np.roll(low, 1)
-    close_shift_1h = np.roll(close, 1)
-    high_shift_1h[0] = high[0]
-    low_shift_1h[0] = low[0]
-    close_shift_1h[0] = close[0]
+    tr_1d = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - close_shift_1d), np.abs(low_1d - close_shift_1d)))
+    plus_dm = np.where((high_1d - high_shift_1d) > (low_shift_1d - low_1d), np.maximum(high_1d - high_shift_1d, 0), 0)
+    minus_dm = np.where((low_shift_1d - low_1d) > (high_1d - high_shift_1d), np.maximum(low_shift_1d - low_1d, 0), 0)
     
-    camarilla_range = high_shift_1h - low_shift_1h
-    r1_1h = close_shift_1h + 1.1 * camarilla_range / 4.0
-    s1_1h = close_shift_1h - 1.1 * camarilla_range / 4.0
+    atr_14_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14_1d
+    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14_1d
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align ADX to 6h (wait for completed 1d bar)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        # Skip if missing data or outside session
-        if (np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(volume_spike_1d_aligned[i]) or
-            np.isnan(r1_1h[i]) or
-            np.isnan(s1_1h[i]) or
-            not in_session[i]):
+        # Skip if missing data
+        if (np.isnan(williams_r[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Trend filter: only trade when price is above/below 4h EMA50
+        # Regime filter: only trade when ADX > 25 (strong trend)
+        if adx_aligned[i] <= 25:
+            # In weak trend/ranging, stay flat
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Strong trend regime: look for Williams %R extremes with volume confirmation
         if position == 0:
-            # LONG: Price breaks above R1 AND price > 4h EMA50 AND 1d volume spike
-            if close[i] > r1_1h[i] and close[i] > ema_50_4h_aligned[i] and volume_spike_1d_aligned[i]:
-                signals[i] = 0.20
+            # LONG: Williams %R < -80 (oversold) AND volume spike
+            if williams_r[i] < -80 and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below S1 AND price < 4h EMA50 AND 1d volume spike
-            elif close[i] < s1_1h[i] and close[i] < ema_50_4h_aligned[i] and volume_spike_1d_aligned[i]:
-                signals[i] = -0.20
+            # SHORT: Williams %R > -20 (overbought) AND volume spike
+            elif williams_r[i] > -20 and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S1 (mean reversion to lower level)
-            if close[i] < s1_1h[i]:
+            # EXIT LONG: Williams %R > -50 (momentum shift) OR stop loss via time
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above R1 (mean reversion to upper level)
-            if close[i] > r1_1h[i]:
+            # EXIT SHORT: Williams %R < -50 (momentum shift) OR stop loss via time
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
