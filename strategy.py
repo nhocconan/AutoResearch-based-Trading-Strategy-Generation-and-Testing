@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray Bull/Bear Power with 1d EMA34 trend filter and ATR-based volume spike.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low. Long when Bull Power > 0 AND volume spike AND 1d EMA34 uptrend.
-# Short when Bear Power > 0 AND volume spike AND 1d EMA34 downtrend. Uses discrete sizing (0.0, ±0.25) to minimize fee churn.
-# Designed to capture institutional buying/selling pressure in trending markets with volume confirmation. Targets 12-30 trades/year per symbol.
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR-based volume spike and ADX trend filter.
+# Uses Donchian channel (20-period high/low) for structure, ATR-normalized volume spike (>1.5x 20-bar ATR-scaled avg volume) for conviction,
+# and ADX > 25 on 4h to ensure trending markets. Discrete position sizing (0.0, ±0.25) minimizes fee churn.
+# Designed to capture strong breakouts in trending markets while avoiding false signals in ranging conditions. Targets 20-50 trades/year per symbol.
 
-name = "6h_ElderRay_BullBearPower_1dEMA34_ATRVolumeSpike_v1"
-timeframe = "6h"
+name = "4h_Donchian20_Breakout_1dATRVolumeSpike_ADXFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     open_ = prices['open'].values
@@ -23,15 +23,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 6h Indicators (LTF) ---
-    # EMA13 for Elder Ray calculation
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema13  # Buying pressure: High - EMA13
-    bear_power = ema13 - low   # Selling pressure: EMA13 - Low
-    
-    # ATR(14) for volatility normalization and volume spike calculation
+    # --- 4h Indicators (LTF) ---
+    # ATR(14) for volatility normalization
     high_shift = np.roll(high, 1)
     low_shift = np.roll(low, 1)
     close_shift = np.roll(close, 1)
@@ -47,54 +40,86 @@ def generate_signals(prices):
     vol_atr_ma_20 = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values
     volume_spike = vol_atr_ratio > (1.5 * vol_atr_ma_20)
     
+    # ADX (14) for trend strength on 4h
+    plus_dm = np.where((high - high_shift) > (low_shift - low), np.maximum(high - high_shift, 0), 0)
+    minus_dm = np.where((low_shift - low) > (high - high_shift), np.maximum(low_shift - low, 0), 0)
+    
+    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14
+    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA34 on 1d for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Donchian levels (20) from prior 1d bar
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 4h (wait for completed 1d bar)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema13[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
+        if (np.isnan(adx[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(ema34_1d_aligned[i])):
+            np.isnan(upper_20_aligned[i]) or
+            np.isnan(lower_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # Determine 1d trend: uptrend if close > EMA34, downtrend if close < EMA34
-        is_uptrend = close[i] > ema34_1d_aligned[i]
-        is_downtrend = close[i] < ema34_1d_aligned[i]
+        # Trend filter: only trade when ADX > 25 (trending market)
+        if adx[i] <= 25:
+            # In ranging/weak trend, stay flat
+            if position == 0:
+                signals[i] = 0.0
+            elif position == 1:
+                # Exit long if price touches lower Donchian (mean reversion)
+                if close[i] <= lower_20_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Exit short if price touches upper Donchian (mean reversion)
+                if close[i] >= upper_20_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+            continue
         
+        # Trending regime: look for breakouts with volume confirmation
         if position == 0:
-            # LONG: Bull Power > 0 (buying pressure) AND volume spike AND 1d uptrend
-            if bull_power[i] > 0 and volume_spike[i] and is_uptrend:
+            # LONG: Price breaks above upper Donchian AND volume spike
+            if close[i] > upper_20_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Bear Power > 0 (selling pressure) AND volume spike AND 1d downtrend
-            elif bear_power[i] > 0 and volume_spike[i] and is_downtrend:
+            # SHORT: Price breaks below lower Donchian AND volume spike
+            elif close[i] < lower_20_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Bull Power <= 0 (buying pressure faded) OR 1d trend turns down
-            if bull_power[i] <= 0 or not is_uptrend:
+            # EXIT LONG: Price crosses below lower Donchian (mean reversion)
+            if close[i] < lower_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Bear Power <= 0 (selling pressure faded) OR 1d trend turns up
-            if bear_power[i] <= 0 or not is_downtrend:
+            # EXIT SHORT: Price crosses above upper Donchian (mean reversion)
+            if close[i] > upper_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
