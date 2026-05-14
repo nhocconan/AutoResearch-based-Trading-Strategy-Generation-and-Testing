@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams %R extreme reversal with 1d EMA34 trend filter and 12h volume spike confirmation.
-# Long when Williams %R < -80 (oversold) + price > 1d EMA34 (bullish trend) + 12h volume > 1.8x 20-period average.
-# Short when Williams %R > -20 (overbought) + price < 1d EMA34 (bearish trend) + 12h volume > 1.8x 20-period average.
-# Exit when Williams %R crosses above -50 (for longs) or below -50 (for shorts).
-# Uses 1d HTF for trend to reduce noise and overtrading vs shorter trends. Volume spike confirmation (1.8x) reduces false signals.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits for 12h timeframe.
+# Hypothesis: 4h Camarilla R4/S4 breakout with 1d EMA34 trend filter and 4h volume spike confirmation.
+# Long when price breaks above R4 with price > 1d EMA34 (bullish trend) and 4h volume > 1.8x 24-period average.
+# Short when price breaks below S4 with price < 1d EMA34 (bearish trend) and 4h volume > 1.8x 24-period average.
+# Exit on opposite Camarilla level (S4 for longs, R4 for shorts).
+# Uses 1d HTF for trend to reduce noise and overtrading vs shorter trends. Volume spike confirmation (1.8x) reduces false breakouts.
+# Target: 75-200 total trades over 4 years (19-50/year) to stay within fee drag limits for 4h timeframe.
+# Camarilla R4/S4 levels are stronger breakout levels than R3/S3, leading to fewer but higher quality trades.
+# EMA34 on 1d provides smooth trend filter responsive enough for 4h breaks but resistant to whipsaw.
 
-name = "12h_WilliamsR_Extreme_1dEMA34_12hVolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R4S4_Breakout_1dEMA34_4hVolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,21 +21,16 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
-    # 12h Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    
-    # 12h volume confirmation: > 1.8x 20-period average (tight filter to reduce trades)
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike_12h = volume > (1.8 * vol_ma_20)
+    # --- 4h Indicators (LTF) ---
+    # 4h volume confirmation: > 1.8x 24-period average (tight filter to reduce trades)
+    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike_4h = volume > (1.8 * vol_ma_24)
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
@@ -41,46 +38,78 @@ def generate_signals(prices):
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
-    # 1d EMA(34) - trend filter (responsive to trend changes)
+    # 1d EMA(34) - trend filter (responsive yet smooth for 4h trading)
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # --- 4h Camarilla Pivot Points (Prior Day OHLC) ---
+    camarilla_r4 = np.full(n, np.nan)
+    camarilla_s4 = np.full(n, np.nan)
+    df_1d_pivot = get_htf_data(prices, '1d')
+    if len(df_1d_pivot) == 0:
+        return np.zeros(n)
+    
+    # Vectorized prior day OHLC mapping for each 4h bar
+    open_time = prices['open_time']
+    prior_day_start = open_time - pd.Timedelta(days=1)
+    prior_day_start = prior_day_start.dt.normalize()  # Start of prior day
+    
+    # Precompute OHLC by date
+    df_1d_pivot = df_1d_pivot.copy()
+    df_1d_pivot['date'] = df_1d_pivot['open_time'].dt.date
+    ohlc_map = df_1d_pivot.groupby('date').agg({
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    })
+    
+    prior_day_dates = prior_day_start.dt.date
+    high_vals = prior_day_dates.map(ohlc_map['high'])
+    low_vals = prior_day_dates.map(ohlc_map['low'])
+    close_vals = prior_day_dates.map(ohlc_map['close'])
+    
+    # Calculate Camarilla levels
+    range_vals = high_vals - low_vals
+    camarilla_r4 = close_vals + (range_vals * 1.1 / 2)  # R4
+    camarilla_s4 = close_vals - (range_vals * 1.1 / 2)  # S4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(williams_r[i]) or
-            np.isnan(ema_34_aligned[i]) or
-            np.isnan(volume_spike_12h[i])):
+        if (np.isnan(ema_34_aligned[i]) or
+            np.isnan(volume_spike_4h[i]) or
+            np.isnan(camarilla_r4[i]) or
+            np.isnan(camarilla_s4[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Williams %R < -80 (oversold) + price > 1d EMA34 (bullish) + 12h volume spike
-            if (williams_r[i] < -80 and 
+            # LONG: Price breaks above R4 + price > 1d EMA34 (bullish) + 4h volume spike
+            if (close[i] > camarilla_r4[i] and 
                 close[i] > ema_34_aligned[i] and 
-                volume_spike_12h[i]):
+                volume_spike_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Williams %R > -20 (overbought) + price < 1d EMA34 (bearish) + 12h volume spike
-            elif (williams_r[i] > -20 and 
+            # SHORT: Price breaks below S4 + price < 1d EMA34 (bearish) + 4h volume spike
+            elif (close[i] < camarilla_s4[i] and 
                   close[i] < ema_34_aligned[i] and 
-                  volume_spike_12h[i]):
+                  volume_spike_4h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Williams %R crosses above -50 (exiting oversold)
-            if williams_r[i] > -50:
+            # EXIT LONG: Price breaks below S4
+            if close[i] < camarilla_s4[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Williams %R crosses below -50 (exiting overbought)
-            if williams_r[i] < -50:
+            # EXIT SHORT: Price breaks above R4
+            if close[i] > camarilla_r4[i]:
                 signals[i] = 0.0
                 position = 0
             else:
