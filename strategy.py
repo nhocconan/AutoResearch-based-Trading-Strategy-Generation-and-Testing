@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and 12h volume spike confirmation.
-# Long when price breaks above R3 with price > 1d EMA34 (bullish trend) and 12h volume > 2.0x 20-period average.
-# Short when price breaks below S3 with price < 1d EMA34 (bearish trend) and 12h volume > 2.0x 20-period average.
-# Exit on opposite Camarilla level (S3 for longs, R3 for shorts).
-# Uses 12h timeframe for lower trade frequency (target: 50-150 total trades over 4 years).
-# EMA34 provides stronger trend filter than shorter EMAs, reducing whipsaws in sideways markets.
-# Volume spike confirms institutional participation in breakouts.
-# Works in bull markets via trend-following breakouts and in bear markets via short breakdowns.
+# Hypothesis: 1h Camarilla R1/S1 breakout with 4h EMA50 trend filter and 1h volume spike confirmation.
+# Long when price breaks above R1 with price > 4h EMA50 (bullish trend) and 1h volume > 2.0x 20-period average.
+# Short when price breaks below S1 with price < 4h EMA50 (bearish trend) and 1h volume > 2.0x 20-period average.
+# Exit on opposite Camarilla level (S1 for longs, R1 for shorts).
+# Uses 1h timeframe with 4h trend filter to reduce whipsaws, volume spike for confirmation, and session filter (08-20 UTC) to avoid low-liquidity hours.
+# Target: 60-150 total trades over 4 years (15-37/year) to stay within fee drag limits.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_12hVolumeSpike"
-timeframe = "12h"
+name = "1h_Camarilla_R1S1_Breakout_4hEMA50_1hVolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -27,29 +25,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
-    # 12h volume confirmation: > 2.0x 20-period average (stricter filter)
+    # Session filter: 08-20 UTC (precomputed for performance)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # --- 1h Indicators (LTF) ---
+    # 1h volume confirmation: > 2.0x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike_12h = volume > (2.0 * vol_ma_20)
+    volume_spike_1h = volume > (2.0 * vol_ma_20)
     
-    # --- 1d Indicators (HTF) ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # --- 4h Indicators (HTF) ---
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
+    close_4h = df_4h['close'].values
     
-    # 1d EMA(34) - trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # 4h EMA(50) - trend filter
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
     
-    # --- 12h Camarilla Pivot Points (Prior Day OHLC) ---
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
+    # --- 1h Camarilla Pivot Points (Prior Day OHLC) ---
+    camarilla_r1 = np.full(n, np.nan)
+    camarilla_s1 = np.full(n, np.nan)
     df_1d_pivot = get_htf_data(prices, '1d')
     if len(df_1d_pivot) == 0:
         return np.zeros(n)
     
-    # Precompute prior day's OHLC for each 12h bar using vectorized approach
+    # Precompute prior day's OHLC for each 1h bar using vectorized approach
     open_time = prices['open_time']
     prior_day_start = open_time - pd.Timedelta(days=1)
     prior_day_start = prior_day_start.dt.normalize()  # Start of prior day
@@ -74,49 +76,50 @@ def generate_signals(prices):
             low_val = day_data['low']
             close_val = day_data['close']
             range_val = high_val - low_val
-            camarilla_r3[i] = close_val + (range_val * 1.1 / 2)  # R3
-            camarilla_s3[i] = close_val - (range_val * 1.1 / 2)  # S3
+            camarilla_r1[i] = close_val + (range_val * 1.1 / 4)  # R1
+            camarilla_s1[i] = close_val - (range_val * 1.1 / 4)  # S1
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
-        # Skip if missing data
-        if (np.isnan(ema_34_aligned[i]) or
-            np.isnan(volume_spike_12h[i]) or
-            np.isnan(camarilla_r3[i]) or
-            np.isnan(camarilla_s3[i])):
+        # Skip if missing data or outside session
+        if (np.isnan(ema_50_aligned[i]) or
+            np.isnan(volume_spike_1h[i]) or
+            np.isnan(camarilla_r1[i]) or
+            np.isnan(camarilla_s1[i]) or
+            not in_session[i]):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above R3 + price > 1d EMA34 (bullish) + 12h volume spike
-            if (close[i] > camarilla_r3[i] and 
-                close[i] > ema_34_aligned[i] and 
-                volume_spike_12h[i]):
-                signals[i] = 0.25
+            # LONG: Price breaks above R1 + price > 4h EMA50 (bullish) + 1h volume spike
+            if (close[i] > camarilla_r1[i] and 
+                close[i] > ema_50_aligned[i] and 
+                volume_spike_1h[i]):
+                signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below S3 + price < 1d EMA34 (bearish) + 12h volume spike
-            elif (close[i] < camarilla_s3[i] and 
-                  close[i] < ema_34_aligned[i] and 
-                  volume_spike_12h[i]):
-                signals[i] = -0.25
+            # SHORT: Price breaks below S1 + price < 4h EMA50 (bearish) + 1h volume spike
+            elif (close[i] < camarilla_s1[i] and 
+                  close[i] < ema_50_aligned[i] and 
+                  volume_spike_1h[i]):
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S3
-            if close[i] < camarilla_s3[i]:
+            # EXIT LONG: Price breaks below S1
+            if close[i] < camarilla_s1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above R3
-            if close[i] > camarilla_r3[i]:
+            # EXIT SHORT: Price breaks above R1
+            if close[i] > camarilla_r1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
