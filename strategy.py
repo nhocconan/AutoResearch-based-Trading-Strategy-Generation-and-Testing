@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h Camarilla R1/S1 breakout with 4h Supertrend filter and 1d volume spike confirmation.
-# Long when price breaks above R1 with 4h Supertrend uptrend and 1d volume > 2.0x 20-period average.
-# Short when price breaks below S1 with 4h Supertrend downtrend and 1d volume > 2.0x 20-period average.
-# Exit on opposite Camarilla level (S1 for longs, R1 for shorts).
-# Session filter: only trade 08-20 UTC to avoid low-liquidity periods.
-# Uses discrete position sizing (0.20) to minimize fee churn and strict volume confirmation to reduce false breakouts.
+# Hypothesis: 1h KAMA trend filter with 4h RSI mean reversion and volume confirmation.
+# Long when 1h price > KAMA(ER=10, FAST=2, SLOW=30) AND 4h RSI(14) < 30 AND 1h volume > 1.5x 20-period average.
+# Short when 1h price < KAMA(ER=10, FAST=2, SLOW=30) AND 4h RSI(14) > 70 AND 1h volume > 1.5x 20-period average.
+# Exit when price crosses KAMA in opposite direction.
+# Session filter: 08-20 UTC to avoid low-liquidity periods.
+# Uses discrete position sizing (0.20) to minimize fee churn.
+# Works in bull/bear: KAMA adapts to trend strength and volatility, 4h RSI identifies overextended conditions for mean reversion within the trend, volume confirms participation.
 # Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe.
-# Works in bull/bear: 4h Supertrend ensures strong trend alignment, Camarilla R1/S1 provides tight structure within trend, volume spike confirms institutional participation.
-# Supertrend is effective in both bull and bear markets as it adapts to volatility and trend direction.
 
-name = "1h_Camarilla_R1S1_Breakout_4hSupertrend_1dVolumeSpike_Session"
+name = "1h_KAMA_Trend_4hRSI_MeanReversion_Volume_Session"
 timeframe = "1h"
 leverage = 1.0
 
@@ -19,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     open_ = prices['open'].values
@@ -29,93 +28,45 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # --- 1h Indicators (LTF) ---
-    # 1h volume confirmation: > 2.0x 20-period average (stricter to reduce trades)
+    # 1h KAMA (ER=10, FAST=2, SLOW=30)
+    close_s = pd.Series(close)
+    change = abs(close_s.diff(10))
+    volatility = close_s.diff().abs().rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0).clip(0, 1)
+    sc = (er * (2/2 - 30/30) + 30/30) ** 2  # FAST=2, SLOW=30
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # 1h volume confirmation: > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1h = volume > (2.0 * vol_ma_20)
+    volume_confirm_1h = volume > (1.5 * vol_ma_20)
     
     # --- 4h Indicators (HTF) ---
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    if len(df_4h) < 30:
         return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # 4h Supertrend (ATR=10, multiplier=3.0)
-    atr_period = 10
-    multiplier = 3.0
+    # 4h RSI(14)
+    delta = pd.Series(close_4h).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, np.nan, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.nan_to_num(rsi, nan=50.0)  # Fill NaN with neutral 50
     
-    # True Range
-    tr1 = pd.Series(high_4h).shift(1) - pd.Series(low_4h).shift(1)
-    tr2 = abs(pd.Series(high_4h) - pd.Series(close_4h).shift(1))
-    tr3 = abs(pd.Series(low_4h) - pd.Series(close_4h).shift(1))
-    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1).fillna(0).values
-    
-    # ATR
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Supertrend calculation
-    hl2 = (high_4h + low_4h) / 2
-    upperband = hl2 + (multiplier * atr)
-    lowerband = hl2 - (multiplier * atr)
-    
-    supertrend = np.zeros_like(close_4h)
-    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upperband[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close_4h)):
-        if close_4h[i] > supertrend[i-1]:
-            supertrend[i] = max(upperband[i], supertrend[i-1])
-            direction[i] = 1
-        else:
-            supertrend[i] = min(lowerband[i], supertrend[i-1])
-            direction[i] = -1
-    
-    # Supertrend uptrend/downtrend signals
-    supertrend_uptrend = direction == 1
-    supertrend_downtrend = direction == -1
+    # 4h RSI oversold/overbought
+    rsi_oversold = rsi < 30
+    rsi_overbought = rsi > 70
     
     # Align 4h indicators to 1h
-    supertrend_uptrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend_uptrend.astype(float))
-    supertrend_downtrend_aligned = align_htf_to_ltf(prices, df_4h, supertrend_downtrend.astype(float))
-    
-    # --- 1d Indicators (HTF) ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    volume_1d = df_1d['volume'].values
-    
-    # 1d volume confirmation: > 2.0x 20-period average (volume spike)
-    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_confirm_1d = volume_1d > (2.0 * vol_ma_20_1d)
-    
-    # Align 1d volume confirmation to 1h
-    volume_confirm_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm_1d.astype(float))
-    
-    # --- 1h Camarilla Pivot Points (Prior Day OHLC) ---
-    camarilla_r1 = np.full(n, np.nan)
-    camarilla_s1 = np.full(n, np.nan)
-    df_1d_pivot = get_htf_data(prices, '1d')
-    if len(df_1d_pivot) > 0:
-        # Map each 1h bar to prior day's OHLC
-        open_time = prices['open_time']
-        prior_day_start = open_time - pd.Timedelta(days=1)
-        prior_day_start = prior_day_start.dt.normalize()  # Start of prior day
-        
-        # Create series of prior day data aligned to 1h bars
-        for i in range(n):
-            pd_ts = prior_day_start.iloc[i]
-            day_mask = (df_1d_pivot['open_time'] >= pd_ts) & (df_1d_pivot['open_time'] < pd_ts + pd.Timedelta(days=1))
-            if day_mask.any():
-                day_data = df_1d_pivot.loc[day_mask]
-                high_val = day_data['high'].iloc[0]
-                low_val = day_data['low'].iloc[0]
-                close_val = day_data['close'].iloc[0]
-                range_val = high_val - low_val
-                camarilla_r1[i] = close_val + (range_val * 1.1 / 12)  # R1
-                camarilla_s1[i] = close_val - (range_val * 1.1 / 12)  # S1
+    rsi_oversold_aligned = align_htf_to_ltf(prices, df_4h, rsi_oversold.astype(float))
+    rsi_overbought_aligned = align_htf_to_ltf(prices, df_4h, rsi_overbought.astype(float))
     
     # Session filter: 08-20 UTC
     hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
@@ -125,12 +76,10 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(supertrend_uptrend_aligned[i]) or 
-            np.isnan(supertrend_downtrend_aligned[i]) or
-            np.isnan(volume_confirm_1d_aligned[i]) or
-            np.isnan(volume_confirm_1h[i]) or
-            np.isnan(camarilla_r1[i]) or
-            np.isnan(camarilla_s1[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi_oversold_aligned[i]) or
+            np.isnan(rsi_overbought_aligned[i]) or
+            np.isnan(volume_confirm_1h[i])):
             signals[i] = 0.0
             continue
         
@@ -142,32 +91,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: Price breaks above R1 + 4h Supertrend uptrend + 1d volume spike + 1h volume confirmation
-            if (close[i] > camarilla_r1[i] and 
-                supertrend_uptrend_aligned[i] > 0.5 and 
-                volume_confirm_1d_aligned[i] > 0.5 and
+            # LONG: Price > KAMA + 4h RSI oversold + 1h volume confirmation
+            if (close[i] > kama[i] and 
+                rsi_oversold_aligned[i] > 0.5 and 
                 volume_confirm_1h[i] > 0.5):
                 signals[i] = 0.20
                 position = 1
-            # SHORT: Price breaks below S1 + 4h Supertrend downtrend + 1d volume spike + 1h volume confirmation
-            elif (close[i] < camarilla_s1[i] and 
-                  supertrend_downtrend_aligned[i] > 0.5 and 
-                  volume_confirm_1d_aligned[i] > 0.5 and
+            # SHORT: Price < KAMA + 4h RSI overbought + 1h volume confirmation
+            elif (close[i] < kama[i] and 
+                  rsi_overbought_aligned[i] > 0.5 and
                   volume_confirm_1h[i] > 0.5):
                 signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below S1
-            if close[i] < camarilla_s1[i]:
+            # EXIT LONG: Price crosses below KAMA
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:
-            # EXIT SHORT: Price breaks above R1
-            if close[i] > camarilla_r1[i]:
+            # EXIT SHORT: Price crosses above KAMA
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
