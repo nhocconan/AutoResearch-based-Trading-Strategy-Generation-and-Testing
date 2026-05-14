@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and 1d volume spike confirmation.
-# Long when price breaks above upper Donchian channel with price > 1w HMA21 (bullish trend) and 1d volume > 2.0x 20-period average.
-# Short when price breaks below lower Donchian channel with price < 1w HMA21 (bearish trend) and 1d volume > 2.0x 20-period average.
-# Exit on opposite Donchian level (lower for longs, upper for shorts).
-# Uses 1w HTF for trend to reduce noise and overtrading vs lower TFs. Volume spike confirmation (2.0x) reduces false breakouts.
-# Target: 30-100 total trades over 4 years (7-25/year) to stay within fee drag limits.
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h EMA34 trend filter and 6h volume spike confirmation.
+# Long when Bull Power > 0 (close > EMA13) AND price > 12h EMA34 (bullish trend) AND 6h volume > 2.0x 20-period average.
+# Short when Bear Power < 0 (close < EMA13) AND price < 12h EMA34 (bearish trend) AND 6h volume > 2.0x 20-period average.
+# Exit on opposite signal (Bear Power >= 0 for longs, Bull Power <= 0 for shorts).
+# Uses 12h HTF for trend to reduce noise and overtrading. Volume spike confirmation (2.0x) reduces false signals.
+# Elder Ray captures underlying bull/bear strength via EMA13, effective in both bull and bear markets via trend filter.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits.
 
-name = "1d_Donchian20_Breakout_1wHMA21_1dVolumeSpike_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_12hEMA34_6hVolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,68 +26,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Indicators (LTF) ---
-    # 1d volume confirmation: > 2.0x 20-period average (tight filter to reduce trades)
+    # --- 6h Indicators (LTF) ---
+    # 6h EMA(13) for Elder Ray calculation
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Bull Power = close - EMA13, Bear Power = close - EMA13 (same calculation, interpreted by sign)
+    bull_power = close - ema_13  # >0 = bullish strength
+    bear_power = close - ema_13  # <0 = bearish strength
+    
+    # 6h volume confirmation: > 2.0x 20-period average (tight filter to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume > (2.0 * vol_ma_20)
+    volume_spike_6h = volume > (2.0 * vol_ma_20)
     
-    # --- 1w Indicators (HTF) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # --- 12h Indicators (HTF) ---
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # 1w HMA(21) - trend filter (Hull Moving Average for smooth trend)
-    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    half_n = 21 // 2
-    sqrt_n = int(np.sqrt(21))
-    wma_half = pd.Series(close_1w).rolling(window=half_n, min_periods=half_n).mean().values
-    wma_full = pd.Series(close_1w).rolling(window=21, min_periods=21).mean().values
-    raw_hma = 2 * wma_half - wma_full
-    hma_21 = pd.Series(raw_hma).rolling(window=sqrt_n, min_periods=sqrt_n).mean().values
-    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
-    
-    # --- 1d Donchian Channel (20-period) ---
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 12h EMA(34) - trend filter (standard period for strong trend signal)
+    ema_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_12h, ema_34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(hma_21_aligned[i]) or
-            np.isnan(volume_spike_1d[i]) or
-            np.isnan(donchian_upper[i]) or
-            np.isnan(donchian_lower[i])):
+        if (np.isnan(ema_34_aligned[i]) or
+            np.isnan(bull_power[i]) or
+            np.isnan(bear_power[i]) or
+            np.isnan(volume_spike_6h[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above upper Donchian + price > 1w HMA21 (bullish) + 1d volume spike
-            if (close[i] > donchian_upper[i] and 
-                close[i] > hma_21_aligned[i] and 
-                volume_spike_1d[i]):
+            # LONG: Bull Power > 0 (close > EMA13) + price > 12h EMA34 (bullish) + 6h volume spike
+            if (bull_power[i] > 0 and 
+                close[i] > ema_34_aligned[i] and 
+                volume_spike_6h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below lower Donchian + price < 1w HMA21 (bearish) + 1d volume spike
-            elif (close[i] < donchian_lower[i] and 
-                  close[i] < hma_21_aligned[i] and 
-                  volume_spike_1d[i]):
+            # SHORT: Bear Power < 0 (close < EMA13) + price < 12h EMA34 (bearish) + 6h volume spike
+            elif (bear_power[i] < 0 and 
+                  close[i] < ema_34_aligned[i] and 
+                  volume_spike_6h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below lower Donchian
-            if close[i] < donchian_lower[i]:
+            # EXIT LONG: Bear Power >= 0 (close >= EMA13) - loss of bullish strength
+            if bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above upper Donchian
-            if close[i] > donchian_upper[i]:
+            # EXIT SHORT: Bull Power <= 0 (close <= EMA13) - loss of bearish strength
+            if bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
