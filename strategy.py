@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d ATR-based volume spike and ADX trend filter.
-# Uses Camarilla pivot levels (R3/S3) from prior 1d for structure, ATR-normalized volume spike (>1.5x 20-bar ATR-scaled avg volume) for conviction,
-# and ADX > 25 on 12h to ensure trending markets. Discrete position sizing (0.0, ±0.25) minimizes fee churn.
-# Designed to capture strong breakouts in trending markets while avoiding false signals in ranging conditions. Targets 12-25 trades/year per symbol.
+# Hypothesis: 4h Donchian(20) breakout with 1d ATR-normalized volume spike and ADX(14) trend filter on 4h.
+# Uses Donchian channel (20-period high/low) for structure, ATR-scaled volume spike (>2.0x 20-bar mean) for conviction,
+# and ADX > 25 on 4h to ensure trending markets. Discrete position sizing (0.0, ±0.30) to minimize fee churn.
+# Designed to capture strong breakouts in trending markets while avoiding false signals in ranging conditions.
+# Targets 20-50 trades/year per symbol.
 
-name = "12h_Camarilla_R3S3_Breakout_1dATRVolumeSpike_ADXFilter_v1"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dATRVolumeSpike_ADXFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
+    # --- 4h Indicators (LTF) ---
     # ATR(14) for volatility normalization
     high_shift = np.roll(high, 1)
     low_shift = np.roll(low, 1)
@@ -38,9 +39,9 @@ def generate_signals(prices):
     # ATR-scaled volume MA: 20-period average of volume / ATR
     vol_atr_ratio = volume / (atr_14 + 1e-10)
     vol_atr_ma_20 = pd.Series(vol_atr_ratio).rolling(window=20, min_periods=20).mean().values
-    volume_spike = vol_atr_ratio > (1.5 * vol_atr_ma_20)
+    volume_spike = vol_atr_ratio > (2.0 * vol_atr_ma_20)
     
-    # ADX (14) for trend strength on 12h
+    # ADX (14) for trend strength on 4h
     plus_dm = np.where((high - high_shift) > (low_shift - low), np.maximum(high - high_shift, 0), 0)
     minus_dm = np.where((low_shift - low) > (high - high_shift), np.maximum(low_shift - low, 0), 0)
     
@@ -57,14 +58,13 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels (R3, S3) from prior 1d bar
-    camarilla_range = high_1d - low_1d
-    r3_1d = close_1d + 1.1 * camarilla_range / 2.0
-    s3_1d = close_1d - 1.1 * camarilla_range / 2.0
+    # Donchian channel (20) from prior 1d bar
+    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align to 12h (wait for completed 1d bar)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align to 4h (wait for completed 1d bar)
+    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
+    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,57 +73,43 @@ def generate_signals(prices):
         # Skip if missing data
         if (np.isnan(adx[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i])):
+            np.isnan(donchian_high_20_aligned[i]) or
+            np.isnan(donchian_low_20_aligned[i])):
             signals[i] = 0.0
             continue
         
         # Trend filter: only trade when ADX > 25 (trending market)
         if adx[i] <= 25:
             # In ranging/weak trend, stay flat
-            if position == 0:
-                signals[i] = 0.0
-            elif position == 1:
-                # Exit long if price touches S3 (mean reversion to lower level)
-                if close[i] <= s3_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # Exit short if price touches R3 (mean reversion to upper level)
-                if close[i] >= r3_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            signals[i] = 0.0
+            position = 0
             continue
         
         # Trending regime: look for breakouts with volume confirmation
         if position == 0:
-            # LONG: Price breaks above R3 AND volume spike
-            if close[i] > r3_1d_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
+            # LONG: Price breaks above Donchian high AND volume spike
+            if close[i] > donchian_high_20_aligned[i] and volume_spike[i]:
+                signals[i] = 0.30
                 position = 1
-            # SHORT: Price breaks below S3 AND volume spike
-            elif close[i] < s3_1d_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
+            # SHORT: Price breaks below Donchian low AND volume spike
+            elif close[i] < donchian_low_20_aligned[i] and volume_spike[i]:
+                signals[i] = -0.30
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below S3 (mean reversion)
-            if close[i] < s3_1d_aligned[i]:
+            # EXIT LONG: Price crosses below Donchian low (mean reversion)
+            if close[i] < donchian_low_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # EXIT SHORT: Price crosses above R3 (mean reversion)
-            if close[i] > r3_1d_aligned[i]:
+            # EXIT SHORT: Price crosses above Donchian high (mean reversion)
+            if close[i] > donchian_high_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
