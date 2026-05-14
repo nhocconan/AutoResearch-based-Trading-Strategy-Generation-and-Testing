@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d ADX trend filter and 1w volume confirmation.
-# Long when price breaks above R3 AND 1d ADX > 25 (trending) AND 1w volume > 1.5 * 20-period average volume.
-# Short when price breaks below S3 AND 1d ADX > 25 (trending) AND 1w volume > 1.5 * 20-period average volume.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and 1w volume confirmation.
+# Long when price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND 1w volume > 1.5 * 20-period average volume.
+# Short when price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND 1w volume > 1.5 * 20-period average volume.
 # Exit when price retraces to the Camarilla pivot point (prior day's close).
-# Uses discrete position sizing (0.25) to limit fee churn. Designed for 4h timeframe with strict entry conditions to avoid overtrading.
-# Target: 75-200 total trades over 4 years (19-50/year) for 4h timeframe.
-# ADX filter reduces false breakouts in ranging markets, improving performance in both bull and bear regimes.
+# Uses discrete position sizing (0.25) to limit fee churn. Designed for 12h timeframe with strict entry conditions to avoid overtrading.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
-name = "4h_Camarilla_R3S3_Breakout_1dADX_1wVolumeConfirm_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_1wVolumeConfirm_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,56 +25,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d ADX for trend filter (HTF)
+    # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough data for ADX calculation
+    if len(df_1d) < 34:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
-    
-    # Smoothed values (Wilder's smoothing)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(data[1:period])  # Skip first NaN
-        for i in range(period, len(data)):
-            if np.isnan(result[i-1]):
-                result[i] = np.nan
-            else:
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    atr_period = 14
-    atr = wilders_smoothing(tr, atr_period)
-    dm_plus_smooth = wilders_smoothing(dm_plus, atr_period)
-    dm_minus_smooth = wilders_smoothing(dm_minus, atr_period)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilders_smoothing(dx, atr_period)  # ADX is smoothed DX
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate 1w volume confirmation filter (HTF)
     df_1w = get_htf_data(prices, '1w')
@@ -91,7 +47,7 @@ def generate_signals(prices):
     camarilla_s3 = np.full(n, np.nan)
     camarilla_cp = np.full(n, np.nan)  # Pivot point (close of prior day)
     
-    # For each 4h bar, use prior completed day's OHLC
+    # For each 12h bar, use prior completed day's OHLC
     for i in range(n):
         current_time = prices.iloc[i]['open_time']
         prior_day_start = current_time.normalize() - pd.Timedelta(days=1)
@@ -118,7 +74,7 @@ def generate_signals(prices):
     
     for i in range(1, n):
         # Skip if any required data is NaN
-        if (np.isnan(adx_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_confirm_1w_aligned[i]) or
             np.isnan(camarilla_r3[i]) or
             np.isnan(camarilla_s3[i]) or
@@ -135,15 +91,15 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # LONG: price breaks above R3 AND 1d ADX > 25 (trending) AND volume confirmation
+            # LONG: price breaks above R3 AND 1d close > 1d EMA34 (uptrend) AND volume confirmation
             if (open_[i] <= camarilla_r3[i] and close[i] > camarilla_r3[i] and 
-                adx_aligned[i] > 25 and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_confirm_1w_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: price breaks below S3 AND 1d ADX > 25 (trending) AND volume confirmation
+            # SHORT: price breaks below S3 AND 1d close < 1d EMA34 (downtrend) AND volume confirmation
             elif (open_[i] >= camarilla_s3[i] and close[i] < camarilla_s3[i] and 
-                  adx_aligned[i] > 25 and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_confirm_1w_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
