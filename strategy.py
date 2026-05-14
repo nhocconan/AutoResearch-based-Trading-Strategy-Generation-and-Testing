@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation. Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Designed to capture medium-term reversals at key pivot levels in both bull and bear markets by combining Camarilla structure (wider bands for fewer, higher-quality signals), 1d trend filter, and volume strength. Targets 50-150 total trades over 4 years.
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike confirmation. Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Designed to capture medium-term reversals at key pivot levels in both bull and bear markets by combining Camarilla structure, daily trend filter, and volume strength. Targets 50-150 total trades over 4 years.
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeConfirm_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,20 +20,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h Indicators (LTF) ---
-    # Volume spike: > 1.8x 20-period average (balanced threshold)
+    # --- 4h Indicators (LTF) ---
+    # Volume spike: > 2.0x 20-period average (strict threshold to reduce trades)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.8 * vol_ma_20)
+    volume_spike = volume > (2.0 * vol_ma_20)
     
-    # Camarilla R3 and S3 levels from prior bar
-    # R3 = close + 1.1*(high-low)/4, S3 = close - 1.1*(high-low)/4
-    camarilla_r3 = close + 1.1 * (high - low) / 4
-    camarilla_s3 = close - 1.1 * (high - low) / 4
+    # Camarilla R1 and S1 levels from prior bar
+    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    camarilla_r1 = close + 1.1 * (high - low) / 12
+    camarilla_s1 = close - 1.1 * (high - low) / 12
     # Shift by 1 to use prior bar's levels (no look-ahead)
-    camarilla_r3 = np.roll(camarilla_r3, 1)
-    camarilla_s3 = np.roll(camarilla_s3, 1)
-    camarilla_r3[0] = np.nan
-    camarilla_s3[0] = np.nan
+    camarilla_r1 = np.roll(camarilla_r1, 1)
+    camarilla_s1 = np.roll(camarilla_s1, 1)
+    camarilla_r1[0] = np.nan
+    camarilla_s1[0] = np.nan
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
@@ -52,20 +52,20 @@ def generate_signals(prices):
         # Skip if missing data
         if (np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(volume_spike[i]) or
-            np.isnan(camarilla_r3[i]) or
-            np.isnan(camarilla_s3[i])):
+            np.isnan(camarilla_r1[i]) or
+            np.isnan(camarilla_s1[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above Camarilla R3 AND close > 1d EMA34 (bullish trend) AND volume spike
-            if (close[i] > camarilla_r3[i] and 
+            # LONG: Price breaks above Camarilla R1 AND close > 1d EMA34 (bullish trend) AND volume spike
+            if (close[i] > camarilla_r1[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below Camarilla S3 AND close < 1d EMA34 (bearish trend) AND volume spike
-            elif (close[i] < camarilla_s3[i] and 
+            # SHORT: Price breaks below Camarilla S1 AND close < 1d EMA34 (bearish trend) AND volume spike
+            elif (close[i] < camarilla_s1[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
@@ -73,15 +73,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price crosses below 1d EMA34 (trend change) OR touches Camarilla S3 (mean reversion)
-            if close[i] < ema_34_1d_aligned[i] or close[i] < camarilla_s3[i]:
+            # EXIT LONG: Price crosses below 1d EMA34 (trend change) OR touches Camarilla S1 (mean reversion)
+            if close[i] < ema_34_1d_aligned[i] or close[i] < camarilla_s1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price crosses above 1d EMA34 (trend change) OR touches Camarilla R3 (mean reversion)
-            if close[i] > ema_34_1d_aligned[i] or close[i] > camarilla_r3[i]:
+            # EXIT SHORT: Price crosses above 1d EMA34 (trend change) OR touches Camarilla R1 (mean reversion)
+            if close[i] > ema_34_1d_aligned[i] or close[i] > camarilla_r1[i]:
                 signals[i] = 0.0
                 position = 0
             else:
