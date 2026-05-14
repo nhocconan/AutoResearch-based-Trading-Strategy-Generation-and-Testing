@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h strategy using weekly pivot points (Camarilla) with daily trend filter and volume confirmation.
-# Long when price breaks above weekly R3 with price > 1d EMA50 (bullish trend) and 6h volume > 1.8x 24-period average.
-# Short when price breaks below weekly S3 with price < 1d EMA50 (bearish trend) and 6h volume > 1.8x 24-period average.
-# Exit on opposite weekly Camarilla level (S3 for longs, R3 for shorts).
-# Uses weekly Camarilla for structural levels (more significant than daily), 1d EMA50 for trend filter,
-# and volume spike to confirm participation. Target: 60-120 total trades over 4 years (15-30/year).
+# Hypothesis: 4h Camarilla H3/L3 breakout with 1d HMA21 trend filter and 4h volume spike confirmation.
+# Long when price breaks above H3 with price > 1d HMA21 (bullish trend) and 4h volume > 1.8x 20-period average.
+# Short when price breaks below L3 with price < 1d HMA21 (bearish trend) and 4h volume > 1.8x 20-period average.
+# Exit on opposite Camarilla level (L3 for longs, H3 for shorts).
+# Uses H3/L3 for wider structure than R3/S3 to reduce false breakouts, 1d HMA21 for smooth trend (lags less than EMA),
+# and volume spike to confirm institutional interest. Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "6h_Camarilla_Weekly_R3S3_Breakout_1dEMA50_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_H3L3_Breakout_1dHMA21_4hVolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_hma(arr, period):
+    """Hull Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    half = period // 2
+    sqrt = int(np.sqrt(period))
+    wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean()
+    wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
+    raw_hma = 2 * wma2 - wma1
+    hma = pd.Series(raw_hma).ewm(span=sqrt, adjust=False).mean()
+    return hma.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,75 +37,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 6h Indicators (LTF) ---
-    # 6h volume confirmation: > 1.8x 24-period average (4 days)
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike_6h = volume > (1.8 * vol_ma_24)
+    # --- 4h Indicators (LTF) ---
+    # 4h volume confirmation: > 1.8x 20-period average (tighter filter)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike_4h = volume > (1.8 * vol_ma_20)
     
     # --- 1d Indicators (HTF) ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 50:
         return np.zeros(n)
     close_1d = df_1d['close'].values
     
-    # 1d EMA(50) - trend filter
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # 1d HMA(21) - trend filter (more responsive than EMA with less lag)
+    hma_21 = calculate_hma(close_1d, 21)
+    hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21)
     
-    # --- Weekly Camarilla Pivot Points (Prior Week OHLC) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # --- 4h Camarilla Pivot Points (Prior Day OHLC) ---
+    camarilla_h3 = np.full(n, np.nan)
+    camarilla_l3 = np.full(n, np.nan)
+    df_1d_pivot = get_htf_data(prices, '1d')
+    if len(df_1d_pivot) == 0:
         return np.zeros(n)
     
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Precompute prior day's OHLC for each 4h bar using vectorized approach
+    open_time = prices['open_time']
+    prior_day_start = open_time - pd.Timedelta(days=1)
+    prior_day_start = prior_day_start.dt.normalize()  # Start of prior day
     
-    range_val = weekly_high - weekly_low
-    camarilla_r3_weekly = weekly_close + (range_val * 1.1 / 2)  # R3
-    camarilla_s3_weekly = weekly_close - (range_val * 1.1 / 2)  # S3
+    # Merge to get prior day's OHLC for each timestamp
+    df_1d_pivot = df_1d_pivot.copy()
+    df_1d_pivot['date'] = df_1d_pivot['open_time'].dt.date
+    prior_day_start_date = prior_day_start.dt.date
     
-    # Align weekly levels to 6h timeframe (wait for weekly close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_weekly)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_weekly)
+    # Create mapping from date to OHLC
+    ohlc_map = df_1d_pivot.groupby('date').agg({
+        'high': 'first',
+        'low': 'first',
+        'close': 'first'
+    })
+    
+    for i in range(n):
+        pd_date = prior_day_start_date.iloc[i]
+        if pd_date in ohlc_map.index:
+            day_data = ohlc_map.loc[pd_date]
+            high_val = day_data['high']
+            low_val = day_data['low']
+            close_val = day_data['close']
+            range_val = high_val - low_val
+            camarilla_h3[i] = close_val + (range_val * 1.1 / 4)  # H3
+            camarilla_l3[i] = close_val - (range_val * 1.1 / 4)  # L3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(1, n):
         # Skip if missing data
-        if (np.isnan(ema_50_aligned[i]) or
-            np.isnan(volume_spike_6h[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i])):
+        if (np.isnan(hma_21_aligned[i]) or
+            np.isnan(volume_spike_4h[i]) or
+            np.isnan(camarilla_h3[i]) or
+            np.isnan(camarilla_l3[i])):
             signals[i] = 0.0
             continue
         
         if position == 0:
-            # LONG: Price breaks above weekly R3 + price > 1d EMA50 (bullish) + 6h volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_50_aligned[i] and 
-                volume_spike_6h[i]):
+            # LONG: Price breaks above H3 + price > 1d HMA21 (bullish) + 4h volume spike
+            if (close[i] > camarilla_h3[i] and 
+                close[i] > hma_21_aligned[i] and 
+                volume_spike_4h[i]):
                 signals[i] = 0.25
                 position = 1
-            # SHORT: Price breaks below weekly S3 + price < 1d EMA50 (bearish) + 6h volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_50_aligned[i] and 
-                  volume_spike_6h[i]):
+            # SHORT: Price breaks below L3 + price < 1d HMA21 (bearish) + 4h volume spike
+            elif (close[i] < camarilla_l3[i] and 
+                  close[i] < hma_21_aligned[i] and 
+                  volume_spike_4h[i]):
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # EXIT LONG: Price breaks below weekly S3
-            if close[i] < camarilla_s3_aligned[i]:
+            # EXIT LONG: Price breaks below L3
+            if close[i] < camarilla_l3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # EXIT SHORT: Price breaks above weekly R3
-            if close[i] > camarilla_r3_aligned[i]:
+            # EXIT SHORT: Price breaks above H3
+            if close[i] > camarilla_h3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
