@@ -1,0 +1,52 @@
+name: CI
+
+# Continuous integration for the honest-simulation engine.
+# Runs with NO market data (data/processed is gitignored) — the test suite is
+# built entirely on synthetic OHLCV frames, so it is fully reproducible here.
+
+on:
+  push:
+    branches: [master, main, "phase*"]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint + test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install CI dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-ci.txt
+
+      - name: Lint (ruff)
+        run: ruff check tests/ scripts/
+
+      - name: Validate shipped strategy.py compliance
+        run: python validator.py strategy.py
+
+      - name: Run test suite
+        run: pytest -ra
+
+      - name: Results integrity (no duplicate strategy/symbol/period rows)
+        run: python scripts/check_results_integrity.py --warn-only
