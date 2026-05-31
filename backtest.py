@@ -245,11 +245,15 @@ def run_backtest(
         # Mark-to-market PnL for the bar (open to close)
         bar_return = (bar_close - bar_open) / bar_open * current_position * leverage if current_position != 0.0 else 0.0
 
-        # Funding cost (pre-computed per bar)
+        # Funding cost (pre-computed per bar). SIGNED by position direction:
+        # Binance funding_rate > 0 means longs PAY shorts. So a long position
+        # (current_position > 0) pays (positive cost), while a short position
+        # (current_position < 0) RECEIVES funding (negative cost = income).
+        # Using abs() here would wrongly charge funding to both sides.
         funding_cost = 0.0
         if current_position != 0.0 and funding_per_bar[i] != 0.0:
-            funding_cost = abs(current_position) * funding_per_bar[i] * leverage
-            cumulative_funding += abs(prev_equity * funding_cost)
+            funding_cost = current_position * funding_per_bar[i] * leverage
+            cumulative_funding += prev_equity * funding_cost
 
         # Update equity
         bar_pnl = bar_return - trade_cost - funding_cost
