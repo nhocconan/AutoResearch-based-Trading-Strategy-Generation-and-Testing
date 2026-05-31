@@ -1,6 +1,11 @@
 # LLM Trading Auto-Research
 
+[![CI](https://github.com/nhocconan/trading-llm-auto-research/actions/workflows/ci.yml/badge.svg)](https://github.com/nhocconan/trading-llm-auto-research/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Autonomous trading strategy discovery system** powered by LLM agents. Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) — but for crypto futures trading.
+
+> **CI / honest-simulation guarantee:** every push runs a [test suite](tests/) that proves the backtest engine cannot look ahead, applies the documented round-trip cost, and computes metrics correctly — all on synthetic data, so it is fully reproducible without any market-data download.
 
 ## What Makes This Different
 
