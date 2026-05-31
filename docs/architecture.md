@@ -4,7 +4,7 @@
 
 This system is an autonomous trading strategy research platform inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch). An LLM agent iteratively develops, backtests, and improves trading strategies for BTC/ETH/SOL USDT-M perpetual futures on Binance.
 
-The key difference from a typical script-based approach: **the LLM agent writes the strategies**, evaluates results, learns from failures, and runs 24/7 without human intervention. See [README.md](../README.md) for the full overview.
+The key difference from a typical script-based approach: **the LLM agent writes the strategies**, evaluates results, learns from failures, and runs 24/7 without human intervention. See [README.md](../README.md) for the full overview, [Karpathy Autoresearch Alignment](karpathy-autoresearch-alignment.md) for the conceptual mapping, and the [test suite](../tests/) for how the engine's guarantees are verified.
 
 ## Design Principles
 
@@ -95,15 +95,25 @@ strategy.py → generate_signals(prices) → signals array
 
 ## Cost Model
 
-See [Backtesting Rules](backtesting-rules.md) for full details.
+See [Backtesting Rules](backtesting-rules.md) for full details. These values are
+pinned by `tests/test_engine_integrity.py` so `config.yaml`, the engine, and the
+docs cannot drift apart.
 
 | Cost | Value | Source |
 |------|-------|--------|
 | Taker fee | 0.04% per side | Binance USDT-M futures |
 | Slippage | 0.01% per side | Conservative estimate |
 | Round trip | 0.10% total | Fee + slippage both sides |
-| Funding | Every 8h | Binance historical data |
+| Funding | Every 8h, **signed by position** | Binance historical data (longs pay shorts when rate > 0) |
 | Fill delay | 1 bar | Signal at t → fill at t+1 open |
 
+## Verification
+
+The simulation's guarantees are enforced by an automated [test suite](../tests/)
+that runs in [CI](../.github/workflows/ci.yml) on every push — no look-ahead,
+correct costs, signed funding, and completed-bar-only HTF alignment, all on
+synthetic data. See [CHANGELOG.md](../CHANGELOG.md) for engine-correctness
+history.
+
 ## Last Updated
-2026-04-03
+2026-05-31
