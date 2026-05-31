@@ -1,0 +1,113 @@
+//@version=5
+// Strategy: mtf_6h_camarilla_vol_trend_v1
+// 6h Camarilla Pivot + 12h Volume Spike + 1d Trend Filter
+// Converted from Python strategy
+
+strategy("MTF 6h Camarilla Vol Trend", shorttitle="Camarilla 6h", overlay=true,
+     initial_capital=10000, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=25, commission_value=0.04, slippage=1)
+
+// === INPUTS ===
+showLevels = input.bool(true, "Show Camarilla Levels", group="Display")
+
+// === HTF DATA REQUESTS ===
+// 12h volume data for volume spike
+[vol_12h, vol_12h_close] = request.security(syminfo.tickerid, "720", [volume, close], lookahead=barmerge.lookahead_on)
+// 1d data for trend filter
+[close_1d, high_1d, low_1d, open_1d] = request.security(syminfo.tickerid, "D", [close, high, low, open], lookahead=barmerge.lookahead_on)
+
+// === 1D EMA50 FOR TREND FILTER ===
+ema50_1d = ta.ema(close_1d, 50)
+
+// === 12H VOLUME RATIO ===
+vol_ma_20 = ta.sma(vol_12h, 20)
+vol_ratio_12h = vol_12h / vol_ma_20
+
+// === CAMARILLA PIVOT LEVELS (using prior day's 1d OHLC) ===
+// In Pine, we can access previous day's OHLC using the daily timeframe data
+prior_day_high = high_1d[1]
+prior_day_low = low_1d[1]
+prior_day_close = close_1d[1]
+
+range_1d = prior_day_high - prior_day_low
+
+// Camarilla formulas
+r3 = prior_day_close + range_1d * 1.1 / 4
+s3 = prior_day_close - range_1d * 1.1 / 4
+r4 = prior_day_close + range_1d * 1.1 / 2
+s4 = prior_day_close - range_1d * 1.1 / 2
+r3_s4_mid = (r3 + s4) / 2
+
+// === ATR(14) FOR STOPLOSS ===
+atr_14 = ta.atr(14)
+
+// === CONDITIONS ===
+// Trend filter
+price_above_1d_ema = close > ema50_1d
+price_below_1d_ema = close < ema50_1d
+
+// Volume spike
+volume_spike = vol_ratio_12h > 1.5
+
+// === ENTRY CONDITIONS ===
+// Long: S3 mean reversion in uptrend OR breakout with volume
+long_mean_reversion = close <= s3 * 1.001 and price_above_1d_ema
+long_breakout = close > r3_s4_mid and volume_spike and price_above_1d_ema
+long_condition = long_mean_reversion or long_breakout
+
+// Short: R3 mean reversion in downtrend OR breakdown with volume
+short_mean_reversion = close >= r3 * 0.999 and price_below_1d_ema
+short_breakout = close < r3_s4_mid and volume_spike and price_below_1d_ema
+short_condition = short_mean_reversion or short_breakout
+
+// === POSITION TRACKING FOR EXIT LOGIC ===
+var float entry_price = na
+var bool in_long = false
+var bool in_short = false
+
+// === EXIT LOGIC ===
+// ATR-based stoploss
+atr_stop_distance = 2.5 * atr_14
+
+// Long exits
+long_stop_triggered = in_long and low < (entry_price - atr_stop_distance)
+long_tp_triggered = in_long and (close >= r4 or close <= s4)
+long_exit = long_stop_triggered or long_tp_triggered
+
+// Short exits
+short_stop_triggered = in_short and high > (entry_price + atr_stop_distance)
+short_tp_triggered = in_short and (close >= r4 or close <= s4)
+short_exit = short_stop_triggered or short_tp_triggered
+
+// === EXECUTION ===
+// Exit first
+if long_exit
+    strategy.close("Long", comment="Exit Long")
+    in_long := false
+    entry_price := na
+
+if short_exit
+    strategy.close("Short", comment="Exit Short")
+    in_short := false
+    entry_price := na
+
+// Enter new positions
+if long_condition and not in_long and not in_short
+    strategy.entry("Long", strategy.long, comment="Long Entry")
+    in_long := true
+    entry_price := close
+
+if short_condition and not in_long and not in_short
+    strategy.entry("Short", strategy.short, comment="Short Entry")
+    in_short := true
+    entry_price := close
+
+// === PLOTTING ===
+plot(showLevels ? r3 : na, "R3", color=color.new(color.red, 50), linewidth=1, style=plot.style_linebr)
+plot(showLevels ? s3 : na, "S3", color=color.new(color.green, 50), linewidth=1, style=plot.style_linebr)
+plot(showLevels ? r4 : na, "R4", color=color.new(color.red, 30), linewidth=2, style=plot.style_linebr)
+plot(showLevels ? s4 : na, "S4", color=color.new(color.green, 30), linewidth=2, style=plot.style_linebr)
+plot(showLevels ? r3_s4_mid : na, "R3-S4 Mid", color=color.new(color.gray, 70), linewidth=1, style=plot.style_linebr)
+
+// Background color for 1d trend
+bgcolor(price_above_1d_ema ? color.new(color.green, 90) : price_below_1d_ema ? color.new(color.red, 90) : na, title="1d Trend")

@@ -1,0 +1,35 @@
+# Ruff configuration for CI linting.
+#
+# The legacy research code (LLM-generated strategies, large modules) is not the
+# target of this gate — we lint the engine + tests for real correctness issues
+# (undefined names, bad imports, syntax) while keeping stylistic noise low.
+
+line-length = 120
+target-version = "py311"
+
+# Generated / vendored / data-heavy trees are excluded from linting.
+extend-exclude = [
+    "strategies",
+    "docs",
+    "independent-verification",
+    "tradingview-strategies",
+    ".venv",
+    "tmpoa30fwld.py",
+    "analysis.ipynb",
+]
+
+[lint]
+# E/F = pycodestyle errors + pyflakes (undefined names, unused imports, real
+# bugs). Import-sorting (I) is intentionally NOT enforced so the immutable
+# engine files are not reformatted by the lint gate.
+select = ["E", "F"]
+ignore = [
+    "E501",  # line length handled by formatter, not enforced hard
+    "E741",  # ambiguous variable names (l, I) appear in legacy math code
+    "E722",  # bare except appears in legacy modules
+    "F841",  # unused locals are common in exploratory strategy code
+]
+
+[lint.per-file-ignores]
+# Tests reimport rule helpers and define fixtures before use.
+"tests/*" = ["E402", "F811"]

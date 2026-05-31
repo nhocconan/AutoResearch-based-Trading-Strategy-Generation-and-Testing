@@ -1,0 +1,13 @@
+# Minimal dependency set required to import the engine and run the test suite
+# in CI. Excludes optional/heavy runtime extras (numba, jupyter, matplotlib,
+# seaborn, ta, and the LLM provider SDKs) which the tests do not touch.
+numpy>=1.24.0
+pandas>=2.0.0
+pyarrow>=12.0.0
+pyyaml>=6.0.0
+requests>=2.31.0
+tqdm>=4.65.0
+
+# Test & lint tooling
+pytest>=8.0.0
+ruff>=0.6.0
