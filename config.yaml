@@ -31,13 +31,15 @@ data:
 
 # --- Backtesting Settings ---
 backtest:
-  # Trading costs
-  # Taker: 0.035%, Maker: 0.01%. No slippage (BTC/ETH/SOL liquid enough).
-  # Entry taker + Exit maker = 0.035% + 0.01% = 0.045% round trip
-  # Max 0.05% round trip for safety margin
-  taker_fee_pct: 0.025       # Average of taker(0.035) and maker(0.01) per side
-  slippage_pct: 0.00         # No slippage — liquid pairs
-  total_cost_pct: 0.025      # 0.025% per side = 0.05% round trip max
+  # Trading costs (honest simulation — see docs/backtesting-rules.md).
+  # The engine fills at the NEXT bar's open via an implicit market order, so it
+  # crosses the spread on BOTH sides → taker on entry AND exit. Assuming a maker
+  # fee on exit would be dishonestly optimistic (this engine never rests limit
+  # orders). We therefore charge the documented conservative taker + slippage:
+  #   0.04% taker + 0.01% slippage = 0.05% per side = 0.10% round trip.
+  taker_fee_pct: 0.04        # Binance USDT-M taker, per side
+  slippage_pct: 0.01         # Conservative slippage, per side
+  total_cost_pct: 0.05       # 0.05% per side = 0.10% round trip
   # Execution model
   fill_delay_bars: 1         # Signal at bar t, fill at bar t+1
   # Position sizing defaults

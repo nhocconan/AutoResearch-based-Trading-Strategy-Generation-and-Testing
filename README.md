@@ -1,6 +1,11 @@
 # LLM Trading Auto-Research
 
+[![CI](https://github.com/nhocconan/trading-llm-auto-research/actions/workflows/ci.yml/badge.svg)](https://github.com/nhocconan/trading-llm-auto-research/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Autonomous trading strategy discovery system** powered by LLM agents. Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) — but for crypto futures trading.
+
+> **CI / honest-simulation guarantee:** every push runs a [test suite](tests/) that proves the backtest engine cannot look ahead, applies the documented round-trip cost, and computes metrics correctly — all on synthetic data, so it is fully reproducible without any market-data download.
 
 ## What Makes This Different
 
@@ -28,29 +33,96 @@ The AI does NOT:
 - Access test period data during optimization
 - Skip cost calculations
 
+## The Autoresearch Loop
+
+The system is a direct adaptation of [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) idea — *an LLM that runs its own research program* — to quantitative trading. Karpathy's loop is **hypothesize → implement → measure → keep what works → learn → repeat**. Here, a "paper" is a trading strategy, the "experiment" is an honest backtest, and the "reviewer" is a fixed evaluation harness the model is not allowed to touch.
+
+```mermaid
+flowchart LR
+    KB["program.md<br/>knowledge base"] --> GEN
+    HIST[("results.db<br/>experiment history<br/>+ failure reasons")] --> GEN
+    GEN["①  LLM agent<br/>writes strategy.py"] --> VAL{"②  validator.py<br/>no look-ahead?<br/>compliant?"}
+    VAL -- reject --> GEN
+    VAL -- pass --> BT["③  backtest.py + evaluate.py<br/>honest simulation, per symbol<br/>(IMMUTABLE)"]
+    BT --> EVAL{"④  research_rules.py<br/>train and test pass?"}
+    EVAL -- discard --> LEARN["⑤  log failure reason"]
+    EVAL -- keep --> SAVE["⑤  save to strategies/ + docs/"]
+    LEARN --> HIST
+    SAVE --> HIST
+    HIST -. "⑥ learn & repeat 24/7" .-> GEN
+```
+
+| Karpathy autoresearch | This project |
+|-----------------------|--------------|
+| LLM proposes a research idea | LLM proposes a strategy hypothesis from `program.md` |
+| Writes code for the experiment | Writes `strategy.py` (vectorized numpy/pandas) |
+| Runs the experiment | Honest backtest on 4y × 3 assets with real costs & funding |
+| Fixed, un-gameable evaluation | `backtest.py` + `evaluate.py` + `research_rules.py` are **immutable** |
+| Keep results that advance the frontier | Keep only strategies passing per-symbol train **and** test |
+| Feed outcomes back into the next idea | Failures + reasons are fed to the next generation |
+| Run continuously | `watchdog.sh` keeps the loop alive 24/7 |
+
+The crucial discipline borrowed from autoresearch: **the researcher cannot grade its own homework.** The LLM writes strategies but never touches the engine, the metrics, or the test-period data — so a "discovery" is only as real as an out-of-sample, cost-aware, look-ahead-free backtest says it is.
+
 ## Architecture
 
-```
-program.md                    ← Research protocol & strategy knowledge base
-    ↓
-watchdog.sh                   ← Keeps the live research loop healthy and restartable
-    ↓
-agent_research.py             ← Main loop: LLM generates → validate → backtest → keep/discard
-    ↓                            Uses: llm_client.py, validator.py, results.db state
-strategy.py                   ← Current mutable strategy under test
-    ↓
-backtest.py + evaluate.py     ← Honest simulation engine (IMMUTABLE)
-    ↓
-results.db + results.tsv      ← Primary result store + legacy mirror
-    ↓
-verification_remediation.py   ← Independent verification, purge, rerun, restart request
-    ↓
-strategies/ + docs/strategies ← Saved strategy code and generated docs
-    ↓
-dashboard.py                  ← Live web dashboard with charts & trade detail
+```mermaid
+flowchart TD
+    KB["program.md<br/>knowledge base + protocol"]
+    WD["watchdog.sh<br/>supervisor / auto-restart"]
+    AR["agent_research.py<br/>main loop"]
+    LLM["llm_client.py<br/>Ollama Cloud (glm-5.1)"]
+    SP["strategy.py<br/>mutable strategy under test"]
+    VAL["validator.py<br/>AST + regex compliance"]
+    ENG["backtest.py + evaluate.py<br/>honest simulation (IMMUTABLE)"]
+    DB[("results.db + results.tsv<br/>experiment log")]
+    VER["verification_remediation.py<br/>independent re-audit / purge / rerun"]
+    OUT["strategies/ + docs/strategies/<br/>saved code + generated docs"]
+    DASH["dashboard.py<br/>live web UI :8888"]
+
+    WD --> AR
+    KB --> AR
+    AR <--> LLM
+    AR --> SP
+    SP --> VAL
+    VAL --> ENG
+    AR --> ENG
+    ENG --> DB
+    DB --> VER
+    VER -. "request restart" .-> WD
+    VER --> OUT
+    DB --> DASH
+    OUT --> DASH
+
+    classDef immutable fill:#fde,stroke:#c39,stroke-width:2px;
+    class ENG immutable;
 ```
 
-See [Architecture Details](docs/architecture.md) for the full breakdown and [Autoresearch Operations](docs/autoresearch-operations.md) for restart/remediation behavior.
+The pink node is **immutable** — the agent cannot modify the simulation that judges it. See [Architecture Details](docs/architecture.md) for the full breakdown, [Karpathy Alignment](docs/karpathy-autoresearch-alignment.md) for the deeper mapping, and [Autoresearch Operations](docs/autoresearch-operations.md) for restart/remediation behavior.
+
+## How Strategies Are Evaluated (per-symbol gate)
+
+A strategy is kept if it works on **any one** of BTC/ETH/SOL — each symbol is judged independently, because the three assets have genuinely different market characteristics. Test runs only for symbols whose own train pass already succeeded.
+
+```mermaid
+flowchart TD
+    S["strategy.py"] --> V["validator: no look-ahead, compliant"]
+    V --> L["for each symbol: BTC, ETH, SOL"]
+    L --> TR["TRAIN backtest 2021–2024"]
+    TR --> TRP{"Sharpe &gt; 0<br/>AND trades ≥ 5<br/>AND max DD &gt; -50%?"}
+    TRP -- no --> SKIP["skip test for this symbol"]
+    TRP -- yes --> TE["TEST backtest 2025+ (out-of-sample)"]
+    TE --> TEP{"Sharpe &gt; 0<br/>AND trades ≥ 3<br/>AND max DD &gt; -50%?"}
+    TEP -- no --> FAILSYM["symbol fails"]
+    TEP -- yes --> KEEPSYM["symbol kept"]
+    KEEPSYM --> DONE{"any symbol kept?"}
+    SKIP --> DONE
+    FAILSYM --> DONE
+    DONE -- yes --> KEEP["KEEP — run prefix look-ahead test, save"]
+    DONE -- no --> DISCARD["discard + log reason"]
+```
+
+Thresholds live in one place — [`research_rules.py`](research_rules.py) — so the rules above can never drift from what the code enforces. **0-trade strategies are always discarded.**
 
 ## Quick Start
 
@@ -215,6 +287,36 @@ Suggested model split:
 - `OLLAMA_MODEL=glm-5.1:cloud` for `agent_research.py`
 - `OLLAMA_ANALYSIS_MODEL=glm-5.1:cloud` for `auto_concept_research.py` and `auto_process_review.py`
 - Optional `OLLAMA_CONVERT_MODEL=qwen3-coder-next` for Pine-to-Python conversion tools
+
+## Testing & CI
+
+The engine's promise is *honest simulation* — so that promise is locked in by an
+automated [test suite](tests/) that runs on every push via [GitHub Actions](.github/workflows/ci.yml).
+
+```bash
+pip install -r requirements-ci.txt
+pytest                      # 47 tests, runs in < 1s, no market data needed
+ruff check tests/ scripts/  # lint
+python validator.py strategy.py            # compliance self-check
+python scripts/check_results_integrity.py  # no duplicate result rows
+```
+
+Every test is built from **synthetic OHLCV data**, so the suite is fully
+reproducible in CI without downloading any Binance data. It proves, among other
+things, that a signal at bar *t* can only fill at *t+1* (no look-ahead), that
+higher-timeframe values are invisible until their candle closes, that the
+documented round-trip cost is actually charged, and that funding is signed by
+position direction. See [tests/README.md](tests/README.md) for the full map and
+[CHANGELOG.md](CHANGELOG.md) for the engine-correctness history.
+
+## Contributing
+
+Contributions are welcome — new strategy ideas for `program.md`, engine/test
+improvements, docs, or tooling. Start with **[CONTRIBUTING.md](CONTRIBUTING.md)**,
+which explains the repo's one rule that matters most: *the agent (and you) cannot
+make the evaluation easier on itself.* The backtest engine, metrics, and rules
+are immutable; if you change engine behaviour, add a test that proves the new
+guarantee first.
 
 ## License
 
