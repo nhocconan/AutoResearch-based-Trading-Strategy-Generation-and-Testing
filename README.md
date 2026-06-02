@@ -208,6 +208,8 @@ All rules are enforced automatically. See [Backtesting Rules](docs/backtesting-r
 
 Data is downloaded from [Binance Public Data](https://data.binance.vision/) via `prepare.py` and stored as Parquet files in `data/processed/`. Funding rate data is also included.
 
+> **Optional — live market data (MCP).** You can connect the [Financial Datasets MCP](https://docs.financialdatasets.ai/mcp-server#claude-code) to Claude Code for *live* crypto/equity prices and fundamentals — handy for forward context and ad-hoc analysis. It is **strictly outside the backtest**: the reproducible research loop stays on offline Binance parquet, and live data must never reach `strategy.py`, the engine, or train/test data (it would break no-look-ahead and reproducibility). See [Live Market Data via MCP](docs/live-data-mcp-integration.md).
+
 ## Strategy Knowledge Base
 
 The LLM agent has access to a [comprehensive compendium](docs/strategies/strategy_research_compendium.md) of real quantitative trading strategies, organized into:
