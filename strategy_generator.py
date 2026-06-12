@@ -7,9 +7,7 @@ systematically combine ALL available indicators in a structured way.
 
 Generates strategy.py files from a template with different indicator combos.
 """
-import itertools
 import random
-from pathlib import Path
 
 # ALL available indicators with their code templates
 TREND_INDICATORS = {
@@ -672,7 +670,7 @@ if __name__ == "__main__":
     print(f"  Trend indicators: {len(TREND_INDICATORS)}")
     print(f"  Entry filters: {len(ENTRY_FILTERS)}")
     print(f"  Regime filters: {len(REGIME_FILTERS)}")
-    print(f"  Timeframes: 6 (15m, 30m, 1h, 4h, 12h, 1d)")
-    print(f"\nSample combos:")
+    print("  Timeframes: 6 (15m, 30m, 1h, 4h, 12h, 1d)")
+    print("\nSample combos:")
     for c in random.sample(combos, min(10, len(combos))):
         print(f"  {c[0]} + {c[1]} + {c[2]} on {c[3]}")

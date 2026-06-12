@@ -23,15 +23,12 @@ Usage:
 import argparse
 import importlib.util
 import json
-import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yaml
 
 from prepare import load_config, load_klines, load_funding_rate, get_train_test_split
 from validator import validate_file
