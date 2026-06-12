@@ -11,7 +11,6 @@ Usage:
 """
 
 import argparse
-import io
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path

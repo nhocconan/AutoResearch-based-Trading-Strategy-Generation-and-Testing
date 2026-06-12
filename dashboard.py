@@ -17,6 +17,7 @@ import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from socketserver import ThreadingMixIn
 
 import pandas as pd
 
@@ -2020,7 +2021,6 @@ def _cache_worker(interval: int = 30):
         time.sleep(interval)
 
 
-from socketserver import ThreadingMixIn
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """Handle each HTTP request in its own thread."""
     daemon_threads = True

@@ -11,7 +11,7 @@ Imports all rows from results.tsv into results.db, deduplicating on
 
 from pathlib import Path
 import pandas as pd
-from results_db import init_db, DB_FILE, get_conn
+from results_db import init_db, get_conn
 
 TSV = Path("results.tsv")
 

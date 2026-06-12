@@ -22,9 +22,6 @@ Usage:
 
 import argparse
 import hashlib
-import io
-import os
-import sys
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path

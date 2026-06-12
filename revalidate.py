@@ -14,7 +14,7 @@ import argparse
 from pathlib import Path
 
 from backtest import run_strategy_backtest
-from evaluate import compute_metrics, metrics_to_tsv_row
+from evaluate import compute_metrics
 from research_rules import test_symbol_pass, train_symbol_pass
 from results_db import upsert_results, delete_strategy, metrics_to_db_dict
 from validator import run_prefix_lookahead_check, validate_file
@@ -97,7 +97,7 @@ def main():
         return
 
     print(f"Revalidating {len(paths)} strategies on {SYMBOLS}")
-    print(f"Fee model: 0.04% taker + 0.01% slippage per side (both entry & exit)")
+    print("Fee model: 0.04% taker + 0.01% slippage per side (both entry & exit)")
     print(f"{'=' * 70}")
 
     all_rows = []
