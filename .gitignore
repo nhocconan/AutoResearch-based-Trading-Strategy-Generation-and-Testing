@@ -42,26 +42,23 @@ course.html
 # Jupyter
 .ipynb_checkpoints/
 
-# SQLite WAL temp files (results.db itself IS tracked)
+# Experiment results (generated, kept local only)
+results.tsv
+results.db
 results.db-wal
 results.db-shm
 
-# TradingView strategies - intermediate/generated files
+# Per-strategy generated reports (kept local only)
+docs/strategies/
+
+# TradingView strategies - scraped/intermediate/generated files (kept local only)
 tradingview-strategies/logs/
-tradingview-strategies/crawl/recent-open-strategies/raw-pages/
-tradingview-strategies/.stage2-lanes/*/tradingview-strategies/reports/
-tradingview-strategies/.stage2-lanes/*/tradingview-strategies/results/
-tradingview-strategies/.stage2-lanes/*/tradingview-strategies/raw-pine/
-tradingview-strategies/.stage2-lanes/*/tradingview-strategies/python-strategies/stage2-local/
-tradingview-strategies/.stage2-lanes/*/tradingview-strategies/python-strategies/stage2-local/failed/
-tradingview-strategies/.stage2-lanes/*/data/
+tradingview-strategies/raw-pine/
+tradingview-strategies/crawl/
+tradingview-strategies/.stage2-lanes/
+tradingview-strategies/reports/
+tradingview-strategies/results/
 tradingview-strategies/python-strategies/stage2-local/
-tradingview-strategies/reports/stage2-local/
-tradingview-strategies/results/stage2-local/
-tradingview-strategies/reports/stage3-local/
-tradingview-strategies/results/stage3-local-backtest-errors.json
-tradingview-strategies/results/stage3-local-backtest-state.json
-tradingview-strategies/results/stage3-local-backtests.json
 
 # Independent verification - generated outputs
 independent-verification/output/

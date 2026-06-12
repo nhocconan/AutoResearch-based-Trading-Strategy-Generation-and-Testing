@@ -381,16 +381,6 @@ def get_git_commit() -> str:
         return "unknown"
 
 
-def git_commit(message: str):
-    subprocess.run(["git", "add", "strategy.py"], check=True)
-    subprocess.run(["git", "commit", "-m", message], check=True)
-
-
-def git_revert_strategy():
-    """Revert strategy.py to last commit."""
-    subprocess.run(["git", "checkout", "HEAD", "--", "strategy.py"], check=True)
-
-
 def save_strategy(strategy_name: str):
     """Copy current strategy.py to strategies/ dir."""
     STRATEGIES_DIR.mkdir(exist_ok=True)
@@ -1120,12 +1110,9 @@ def main():
         strategy_name = extract_strategy_name(new_code, fallback=f"strategy_{experiment_num:03d}")
         print(f"  Strategy: {strategy_name}")
 
-        # Write and commit
+        # No per-experiment git commit: experiments are logged in results.tsv,
+        # kept strategies are saved to strategies/.
         write_strategy(new_code)
-        try:
-            git_commit(f"exp#{experiment_num:03d}: {strategy_name}")
-        except Exception:
-            pass  # git commit failure is non-fatal
 
         # --- Step 3: Per-symbol independent evaluation ---
         # Each symbol is evaluated independently: train → test
@@ -1248,7 +1235,6 @@ def main():
                 print(f"  [4/4] ✗ Rejected after quality gate: {quality_reason}")
             else:
                 print("  [4/4] ✗ No symbol passed both train+test")
-            git_revert_strategy()
             STRATEGY_FILE.write_text(best_strategy_code)
 
         bt_results = all_train_results  # for history tracking
@@ -1309,7 +1295,6 @@ def main():
 """)
         else:
             print(f"  [4/4] ✗ DISCARD (score {strategy_score:.3f} | best {best_score:.3f})")
-            git_revert_strategy()
             STRATEGY_FILE.write_text(best_strategy_code)
             test_results = []
 
