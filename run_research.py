@@ -14,14 +14,12 @@ Usage:
 
 import argparse
 import subprocess
-import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
-from backtest import run_strategy_backtest, print_result_summary
+from backtest import run_strategy_backtest
 from evaluate import compute_metrics, print_metrics
 from results_db import append_results as _db_append
 from prepare import load_config

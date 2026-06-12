@@ -33,3 +33,10 @@ ignore = [
 [lint.per-file-ignores]
 # Tests reimport rule helpers and define fixtures before use.
 "tests/*" = ["E402", "F811"]
+# These entrypoints load .env into os.environ before importing llm_client,
+# so the late imports are intentional.
+"auto_concept_research.py" = ["E402"]
+"auto_process_review.py" = ["E402"]
+# strategy.py is LLM-generated; its mandated format puts name/timeframe
+# metadata before imports.
+"strategy.py" = ["E402"]

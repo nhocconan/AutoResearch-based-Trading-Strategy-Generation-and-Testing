@@ -18,7 +18,6 @@ import json
 import re
 import shutil
 import subprocess
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -392,13 +391,6 @@ def git_revert_strategy():
     subprocess.run(["git", "checkout", "HEAD", "--", "strategy.py"], check=True)
 
 
-def append_results(results: list[dict], status: str, description: str, period: str = "train"):
-    """Append experiment results to results.db (SQLite). Deduplicates on (strategy, symbol, period).
-    SQLite WAL mode handles concurrent writers without explicit file locking."""
-    from results_db import append_results as _db_append
-    _db_append(results, status, description, period)
-
-
 def save_strategy(strategy_name: str):
     """Copy current strategy.py to strategies/ dir."""
     STRATEGIES_DIR.mkdir(exist_ok=True)
@@ -745,7 +737,7 @@ def load_recent_history_from_db(n: int = 20) -> list[dict]:
                 "avg_trades": avg_trades,
                 "fail_reason": fail_reason,
                 "tf": tf,
-                "description": f"loaded from db",
+                "description": "loaded from db",
             })
         return list(reversed(history))  # oldest first
     except Exception:
@@ -904,7 +896,7 @@ REMEMBER: call get_htf_data() ONCE before loop, use aligned arrays inside."""
         avoid_str = f"\n\nTHIS SESSION: {len(failed_approaches)} strategies tried and failed.\n"
         avoid_str += "RECENT FAILURES (last 10): " + ", ".join(list(sorted(failed_approaches))[-10:])
         if overtrading_patterns:
-            avoid_str += f"\nOVERTRADING examples (ENTRY CONDITIONS TOO LOOSE — fix by adding stricter filters):\n"
+            avoid_str += "\nOVERTRADING examples (ENTRY CONDITIONS TOO LOOSE — fix by adding stricter filters):\n"
             for p in overtrading_patterns[-5:]:
                 avoid_str += f"  {p}\n"
 
@@ -1091,10 +1083,10 @@ def main():
         except Exception as e:
             err_str = str(e).lower()
             if "insufficient_quota" in err_str or "quota exceeded" in err_str:
-                print(f"  [QUOTA] Monthly quota exhausted. Waiting 5 min before retry...")
+                print("  [QUOTA] Monthly quota exhausted. Waiting 5 min before retry...")
                 time.sleep(300)
             elif "429" in err_str or "rate limit" in err_str or "rate_limit" in err_str:
-                print(f"  [RATE_LIMIT] Rate limited. Waiting 60s...")
+                print("  [RATE_LIMIT] Rate limited. Waiting 60s...")
                 time.sleep(60)
             else:
                 print(f"  LLM error: {e}")
@@ -1209,7 +1201,7 @@ def main():
                 _la_ok, _la_msg = run_prefix_lookahead_check(str(STRATEGY_FILE), symbol=symbols[0])
                 if not _la_ok:
                     print(f"  [LOOKAHEAD FAIL] {_la_msg}")
-                    print(f"  [SKIP] Look-ahead FAIL — discarding all")
+                    print("  [SKIP] Look-ahead FAIL — discarding all")
                     any_kept = False
                 else:
                     print(f"  [OK] {_la_msg}")
@@ -1255,7 +1247,7 @@ def main():
             if any_kept and quality_reason:
                 print(f"  [4/4] ✗ Rejected after quality gate: {quality_reason}")
             else:
-                print(f"  [4/4] ✗ No symbol passed both train+test")
+                print("  [4/4] ✗ No symbol passed both train+test")
             git_revert_strategy()
             STRATEGY_FILE.write_text(best_strategy_code)
 

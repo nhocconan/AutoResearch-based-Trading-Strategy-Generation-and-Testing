@@ -40,7 +40,7 @@ jobs:
           pip install -r requirements-ci.txt
 
       - name: Lint (ruff)
-        run: ruff check tests/ scripts/
+        run: ruff check .
 
       - name: Validate shipped strategy.py compliance
         run: python validator.py strategy.py
